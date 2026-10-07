@@ -9,7 +9,9 @@ use busbar_contract::ids::{
 };
 use busbar_contract::plane::PlaneMeta;
 
-use crate::{claims, facts, ops, records, McpPlane};
+use crate::{
+    tool_claims as claims, tool_facts as facts, tool_ops as ops, tool_records as records, McpPlane,
+};
 
 /// The family the count-shaped class rolls up into.
 const COUNT_FAMILY: &str = "count";
@@ -121,8 +123,6 @@ const CONFIG_SCHEMA: &str = r#"{
           "resources_allow": { "type": "object" },
           "transport": { "type": "string" },
           "grants": { "type": "object" },
-          "roots": { "type": "array" },
-          "sampling": { "type": "object" },
           "allow_private": { "type": "boolean" },
           "upstream_credentials": { "type": "object" },
           "hooks": { "type": "array", "items": { "type": "string" } }
