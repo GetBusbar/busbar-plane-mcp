@@ -1468,7 +1468,7 @@ fn verify_on_call(
     ticket: Ticket,
     unit: &mut CallUnit,
     held: &Held,
-    server: &str,
+    (server, caller): (&str, &str),
 ) -> Looked {
     use crate::trust::Sighting;
     let Some(def) = held.section.servers.get(server) else {
@@ -1542,7 +1542,7 @@ fn verify_on_call(
                     instance,
                     plane,
                     unit,
-                    (base, server, timeout_ms),
+                    (base, server, caller, timeout_ms),
                     request,
                 );
                 let std::task::Poll::Ready(answer) = answer else {
@@ -1864,7 +1864,7 @@ fn answer_body(
             };
             if entitled(door::SCOPE, &server) && entitled(door::SCOPE_TOOL, &namespaced) {
                 if let Looked::Pending =
-                    verify_on_call(instance, plane, ticket, unit, &held, &server)
+                    verify_on_call(instance, plane, ticket, unit, &held, (&server, caller))
                 {
                     return Some(Step::Pending);
                 }
@@ -2130,7 +2130,10 @@ fn answer_body(
                     // always was, or, to an upstream busbar holds a session with, that request
                     // lowered into the session ([`door_sessions::Negotiating`]).
                     let original = door_sessions::original(&def.url, &outbound);
-                    let negotiating = door_sessions::Negotiating::begin(plane, &member, original);
+                    // The conversation is this CALLER's (row 159 finding 3): a session busbar
+                    // holds with the member for another caller is never this call's.
+                    let negotiating =
+                        door_sessions::Negotiating::begin(plane, &member, caller, original);
                     if let Some(first) = negotiating.first_request() {
                         outbound.fields.clone_from(&first.headers);
                         outbound.body.clone_from(&first.body);
@@ -2945,6 +2948,9 @@ slot!(
                                 // over the door's connector; one that answered is handed on as it
                                 // answered.
                                 let mut failed = None;
+                                // The id the call carried in its session, when it is not the
+                                // round's: the answer is correlated by it.
+                                let mut sent = None;
                                 if let (Some(n), Some(def)) = (unit.negotiating.as_mut(), def) {
                                     let base = NEGOTIATE_SEQ
                                         .saturating_add(unit.attempt.saturating_mul(ROUND_SEQ_SPAN));
@@ -2961,10 +2967,16 @@ slot!(
                                     };
                                     match done {
                                         None => {}
-                                        Some(door_sessions::Negotiated::Answer(status, raw, sse)) => {
+                                        Some(door_sessions::Negotiated::Answer(
+                                            status,
+                                            raw,
+                                            sse,
+                                            id,
+                                        )) => {
                                             relay.status = u32::from(status);
                                             relay.far = raw;
                                             relay.sse = sse;
+                                            sent = id;
                                         }
                                         Some(door_sessions::Negotiated::Failed(reason)) => {
                                             relay.status = 0;
@@ -2977,14 +2989,25 @@ slot!(
                                     Some(reason) => {
                                         crate::call::upstream_failed(&relay.admitted, &reason)
                                     }
-                                    None => crate::call::settle_call(
-                                        &relay.admitted,
-                                        def,
-                                        relay.status,
-                                        &relay.far,
-                                        relay.sse,
-                                        relay.round,
-                                    ),
+                                    None => match sent {
+                                        Some(id) => crate::call::settle_call_as(
+                                            &relay.admitted,
+                                            def,
+                                            relay.status,
+                                            &relay.far,
+                                            relay.sse,
+                                            relay.round,
+                                            id,
+                                        ),
+                                        None => crate::call::settle_call(
+                                            &relay.admitted,
+                                            def,
+                                            relay.status,
+                                            &relay.far,
+                                            relay.sse,
+                                            relay.round,
+                                        ),
+                                    },
                                 }
                             }
                         }
