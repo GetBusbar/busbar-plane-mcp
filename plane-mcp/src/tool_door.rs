@@ -218,6 +218,9 @@ pub struct McpDoor {
     /// WHAT BUSBAR REMEMBERS ABOUT EACH UPSTREAM as a client: the revision it negotiated and its
     /// session ([`crate::tool_sessions::UpstreamTable`]).
     upstreams: Keyed<(), crate::tool_sessions::UpstreamTable>,
+    /// THE HELD `2024-11-05` EVENT STREAMS busbar reaches legacy-only servers over, by member and
+    /// caller binding ([`door_legacy`]).
+    legacy: Keyed<String, door_legacy::Link>,
     /// Whether this instance said its ungoverned chain's sessions are unisolated (once).
     said_ungoverned: Keyed<(), ()>,
     /// The session revision each line-carrier session negotiated with `initialize`.
@@ -338,6 +341,7 @@ slot!(
             session_state: Keyed::new(),
             streams: Keyed::new(),
             upstreams: Keyed::new(),
+            legacy: Keyed::new(),
             said_ungoverned: Keyed::new(),
             line_revisions: Keyed::new(),
         };
@@ -408,7 +412,12 @@ slot!(
     /// `drive`: the subscriptions held as sessions whose step is due ([`door_listen::drive`]).
     Drive, PlaneDriveIn, PlaneDriveOut, |instance, input, mut out| {
         match instance.get() {
-            Some(plane) => door_listen::drive(plane, input, &mut out),
+            Some(plane) => {
+                // The held 2024-11-05 streams are read on this ticket first: what they hand on
+                // wakes the calls waiting for it.
+                door_legacy::drive(&instance, plane);
+                door_listen::drive(plane, input, &mut out)
+            }
             None => Outcome::Ready,
         }
     }
@@ -426,6 +435,7 @@ slot!(
             plane.units.with_all(|m| m.retain(|_, u| u.ticket != Some(ticket)));
             door_listen::cancelled(plane, ticket);
             door_sessions::cancelled(plane, ticket);
+            door_legacy::cancelled(plane, ticket);
         }
         // The rows ride the one cancel answer (it is never re-called): what fits is written.
         let (mut records, mut arena) = (input.records_buf(), input.arena_buf());
@@ -2805,6 +2815,9 @@ slot!(
                     let def = held
                         .as_ref()
                         .and_then(|h| h.section.servers.get(unit.member.as_deref()?));
+                    // Replies no call waited for on this caller's held stream: audited on this
+                    // answer, rejected (never delivered).
+                    let mut dropped_replies = 0_u32;
                     let settled = match () {
                         // A child's ask held while its work handle opened: taken up where it was.
                         () if relay.asked.is_some() => {
@@ -2968,6 +2981,7 @@ slot!(
                                     // The walk's own answer too: a call lowered into its session
                                     // carried that session's id.
                                     sent = n.sent_id();
+                                    dropped_replies = n.dropped();
                                     match done {
                                         None => {}
                                         Some(door_sessions::Negotiated::Answer(
@@ -3114,8 +3128,18 @@ slot!(
                     let answered = relay.status != 0;
                     let far_len = relay.far.len();
                     let ts = clock_s(plane.services, ticket, unit);
-                    let pending = Pending::answer(status, body, framing.as_ref(), &progress)
+                    let mut pending = Pending::answer(status, body, framing.as_ref(), &progress)
                         .logged(Some(&line), scope, generation, ts);
+                    for _ in 0..dropped_replies {
+                        pending = pending.audited(crate::call::AuditRow {
+                            action: door_legacy::ACTION_REPLY_DROPPED,
+                            resource: format!(
+                                "mcp_server:{}",
+                                unit.member.as_deref().unwrap_or_default()
+                            ),
+                            applied: false,
+                        });
+                    }
                     unit.pending = Some(if answered {
                         pending.counted(far_len)
                     } else {
@@ -4000,6 +4024,9 @@ busbar_contract::plugin_door! {
 /// so it reads the door's own unit and answer state.
 #[path = "door_listen.rs"]
 mod door_listen;
+
+#[path = "door_legacy.rs"]
+mod door_legacy;
 
 /// The line carrier's units: a process's own stdin/stdout, one carrier session, one unit per line.
 #[path = "door_line.rs"]
