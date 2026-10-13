@@ -1,0 +1,219 @@
+{
+  "settings": {
+    "fs": {
+      "url": "https://mcp.example/fs/rpc?v=1",
+      "pin": {
+        "mechanism": "pinned_pubkey",
+        "key": "sha256/K="
+      },
+      "grants": {
+        "roots": true
+      },
+      "tools_allow": {
+        "read_file": {
+          "schema_hash": "sha256:aa",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "x-mcp-header": "Path"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "plane": {
+    "bad_settings": [
+      {
+        "my_fs": {
+          "url": "https://mcp.example/fs",
+          "pin": {
+            "mechanism": "unpinned"
+          }
+        }
+      }
+    ],
+    "refresh_settings": {
+      "fs": {
+        "url": "https://mcp.example/fs/rpc?v=1",
+        "pin": {
+          "mechanism": "pinned_pubkey",
+          "key": "sha256/K="
+        },
+        "grants": {
+          "roots": true
+        },
+        "tools_allow": {
+          "read_file": {
+            "schema_hash": "sha256:aa",
+            "input_schema": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "x-mcp-header": "Path"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "public_url": "https://busbar.example",
+    "open_claims": [
+      [
+        "GET",
+        "/.well-known/oauth-protected-resource/mcp"
+      ],
+      [
+        "POST",
+        "/mcp"
+      ],
+      [
+        "GET",
+        "/mcp"
+      ],
+      [
+        "DELETE",
+        "/mcp"
+      ],
+      [
+        "POST",
+        "/mcp"
+      ],
+      [
+        "POST",
+        "/mcp/tasks/run"
+      ],
+      [
+        "POST",
+        "/mcp"
+      ]
+    ],
+    "refresh_claims": [
+      [
+        "GET",
+        "/.well-known/oauth-protected-resource/mcp"
+      ],
+      [
+        "POST",
+        "/mcp"
+      ],
+      [
+        "GET",
+        "/mcp"
+      ],
+      [
+        "DELETE",
+        "/mcp"
+      ],
+      [
+        "POST",
+        "/mcp"
+      ],
+      [
+        "POST",
+        "/mcp/tasks/run"
+      ],
+      [
+        "POST",
+        "/mcp"
+      ]
+    ],
+    "member": "fs",
+    "host": {
+      "entitled": [
+        {
+          "target": "mcp_server:fs"
+        },
+        {
+          "target": "mcp_tool:fs_read_file"
+        }
+      ],
+      "trusted": [
+        [
+          "fs",
+          "read_file",
+          "none"
+        ]
+      ]
+    },
+    "attempt": {
+      "to_far_end": false
+    },
+    "arrive_each": true,
+    "claimed": {
+      "unit": 7,
+      "method": "POST",
+      "target": "/mcp",
+      "claim": 1,
+      "fields": [
+        [
+          "mcp-protocol-version",
+          "2026-07-28"
+        ],
+        [
+          "mcp-method",
+          "tools/call"
+        ],
+        [
+          "mcp-name",
+          "fs_read_file"
+        ],
+        [
+          "mcp-param-path",
+          "/a"
+        ]
+      ]
+    },
+    "unclaimed": {
+      "unit": 8,
+      "method": "GET",
+      "target": "/mcp",
+      "claim": 2,
+      "status": 405
+    },
+    "request": "{\"jsonrpc\":\"2.0\",\"id\":30,\"method\":\"tools/call\",\"params\":{\"name\":\"fs_read_file\",\"arguments\":{\"path\":\"/a\"},\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{}}}}",
+    "request_out": "{\"id\":0,\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/clientCapabilities\":{},\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"progressToken\":null},\"arguments\":{\"path\":\"/a\"},\"name\":\"read_file\"}}",
+    "far_end": {
+      "status": 200,
+      "fields": [
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "answer": "{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"the file's contents, long enough that a buffer that holds the whole request takes the answer in several writes. the file's contents, long enough that a buffer that holds the whole request takes the answer in several writes. the file's contents, long enough that a buffer that holds the whole request takes the answer in several writes. \"}]}}",
+      "answer_out": "{\"id\":30,\"jsonrpc\":\"2.0\",\"result\":{\"resultType\":\"complete\",\"content\":[{\"type\":\"text\",\"text\":\"the file's contents, long enough that a buffer that holds the whole request takes the answer in several writes. the file's contents, long enough that a buffer that holds the whole request takes the answer in several writes. the file's contents, long enough that a buffer that holds the whole request takes the answer in several writes. \"}]}}",
+      "units": [
+        [
+          2,
+          1
+        ],
+        [
+          0,
+          1
+        ],
+        [
+          1,
+          409
+        ]
+      ]
+    },
+    "narrow": {
+      "unit": 9,
+      "reply_cap": 236,
+      "more": 1
+    },
+    "short": {
+      "unit": 11
+    },
+    "refusal": {
+      "status": 403,
+      "text": "denied"
+    }
+  }
+}
