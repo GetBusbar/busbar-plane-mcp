@@ -1563,7 +1563,7 @@ impl Negotiating {
                     let called = super::door_legacy::call(
                         instance,
                         plane,
-                        (&self.key, member),
+                        (member, member),
                         &original,
                         &mut self.legacy,
                         (at, timeout_ms),

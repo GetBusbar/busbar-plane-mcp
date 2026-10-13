@@ -624,10 +624,7 @@ impl Remembered {
 /// to answers within it.
 #[must_use]
 pub fn upstream_key(member: &str, binding: &str) -> String {
-    {
-        let _ = binding;
-        member.to_string()
-    }
+    format!("{member}\u{1f}{binding}")
 }
 
 /// The first JSON-RPC id a request lowered into a remembered session carries: above every id a
