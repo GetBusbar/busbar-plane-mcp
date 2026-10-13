@@ -7,9 +7,9 @@
 //! from `src/client/tests/{verb,peer}_tests.rs`, where they compiled the inventory in from busbar's
 //! tree; the plane's source performs no input or output (tests/purity.rs), so the read is here.
 //!
-//! * [`the_issued_set_is_exactly_the_inventory_column`]: [`UpstreamVerb::all`] is the inventory's
+//! * `the_issued_set_is_exactly_the_inventory_column`: `UpstreamVerb::all` is the inventory's
 //!   `mcp|stdio|client|client` column, in BOTH directions.
-//! * [`every_server_originated_method_in_the_inventory_is_classified`]: every
+//! * `every_server_originated_method_in_the_inventory_is_classified`: every
 //!   `mcp|stdio|client|server` method is recognised by the classifier in one of its shapes.
 
 use busbar_plane_mcp::client::peer::{classify, ServerMessage};
