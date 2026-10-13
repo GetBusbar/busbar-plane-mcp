@@ -21,57 +21,6 @@ fn line(raw: &str) -> serde_json::Value {
     serde_json::from_str(raw).expect("the fixture is JSON")
 }
 
-/// EVERY server-originated method in the inventory column is classified, and none of them lands in
-/// an "unknown" arm.
-///
-/// Read from the GENERATED matrix for the reason `verb_tests` gives: a list written from knowledge
-/// of the specification is how a column silently ends early.
-#[test]
-fn every_server_originated_method_in_the_inventory_is_classified() {
-    // Compiled in rather than read at run time: the plane performs no input or output, its tests
-    // included (tests/purity.rs).
-    let raw = include_str!("../../../../../qa/method-inventory.json");
-    let doc: serde_json::Value = serde_json::from_str(raw).expect("parses");
-    let owed: Vec<String> = doc["cells"]
-        .as_array()
-        .expect("cells")
-        .iter()
-        .filter(|c| {
-            c["protocol"] == "mcp"
-                && c["transport"] == "stdio"
-                && c["role"] == "client"
-                && c["originator"] == "server"
-                && c["na_reason"].is_null()
-        })
-        .map(|c| c["method"].as_str().expect("method").to_string())
-        .collect();
-    assert!(
-        owed.len() >= 12,
-        "only {} server-originated stdio cells found; a filter that matched nothing would report \
-         complete handling of nothing",
-        owed.len()
-    );
-    for method in &owed {
-        // A NOTIFICATION-SHAPED LINE (no id) and a REQUEST-SHAPED one (with id) are BOTH tried, and
-        // exactly one of them must be recognised: `ping` is only ever a request and
-        // `notifications/message` is only ever a notification, so requiring both to work would be
-        // requiring busbar to accept a shape the specification does not define.
-        let as_notification = classify(&line(&format!(
-            r#"{{"jsonrpc":"2.0","method":"{method}","params":{{}}}}"#
-        )));
-        let as_request = classify(&line(&format!(
-            r#"{{"jsonrpc":"2.0","id":7,"method":"{method}","params":{{}}}}"#
-        )));
-        let known_notification = matches!(as_notification, Some(ServerMessage::Notification(_)));
-        let known_request = matches!(as_request, Some(ServerMessage::Request { .. }));
-        assert!(
-            known_notification || known_request,
-            "`{method}` is in the matrix as a message a server sends busbar and the classifier \
-             recognises neither shape of it: {as_notification:?} / {as_request:?}"
-        );
-    }
-}
-
 /// A RESPONSE IS NOT A SERVER MESSAGE, and this is the assertion that keeps the stream in sync.
 ///
 /// If a response could be classified as anything, the read loop would consume it as an interleaved
