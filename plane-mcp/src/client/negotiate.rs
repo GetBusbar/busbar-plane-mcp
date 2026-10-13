@@ -148,6 +148,11 @@ pub struct Negotiator {
     remembered: Option<Remembered>,
     reinitialized: bool,
     link: Option<EventStreamLink>,
+    /// The id a request lowered into the REMEMBERED session carries ([`Self::with_session_id`]):
+    /// the session's own next id, so no id repeats within one session.
+    session_id: Option<u64>,
+    /// The id the request sent in a session actually carried, when it is not the original's.
+    sent_id: Option<u64>,
 }
 
 impl Negotiator {
@@ -171,7 +176,25 @@ impl Negotiator {
             remembered,
             reinitialized: false,
             link: None,
+            session_id: None,
+            sent_id: None,
         }
+    }
+
+    /// The id a request lowered into the remembered session carries: that session's next id
+    /// (`UpstreamTable::next_id`), never the stateless round's, which every call shares (row 159
+    /// finding 3). `None`: the original's id.
+    #[must_use]
+    pub fn with_session_id(mut self, id: Option<u64>) -> Self {
+        self.session_id = id;
+        self
+    }
+
+    /// The id the request this negotiation sent in a session carried, when it is not the
+    /// original's: the id its answer is correlated by.
+    #[must_use]
+    pub fn sent_id(&self) -> Option<u64> {
+        self.sent_id
     }
 
     /// What to keep for the next call to this upstream: the negotiated revision and, on a
@@ -203,7 +226,21 @@ impl Negotiator {
 
     fn in_session(&mut self, revision: Revision, session: Option<String>) -> Action {
         let url = self.original.url.clone();
-        let request = lower_request(&self.original, &url, revision, session.as_deref());
+        let mut request = lower_request(&self.original, &url, revision, session.as_deref());
+        // A REQUEST IN A SESSION CARRIES THAT SESSION'S OWN NEXT ID, never the stateless round's
+        // that every concurrent call carries: a session revision forbids reusing an id, and a server
+        // that maps ids to answers would hand one call's answer to another.
+        if let (Some(id), Some(_)) = (self.session_id, self.original_id.as_ref()) {
+            if let Ok(mut body) = serde_json::from_slice::<Value>(&request.body) {
+                if let Some(obj) = body.as_object_mut() {
+                    obj.insert("id".to_string(), Value::from(id));
+                    if let Ok(bytes) = serde_json::to_vec(&body) {
+                        request.body = bytes;
+                        self.sent_id = Some(id);
+                    }
+                }
+            }
+        }
         self.send(Phase::InSession { revision, session }, request)
     }
 
