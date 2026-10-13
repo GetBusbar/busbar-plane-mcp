@@ -1686,7 +1686,7 @@ pub(super) fn far_answer(
         let lends = plane.host.is_some_and(|h| h.lends_connector());
         match next {
             Action::Finish(_) => {
-                negotiating.keep(plane, member);
+                negotiating.keep(plane);
                 return Poll::Ready(None);
             }
             Action::Send { .. } if !lends => return Poll::Ready(None),
