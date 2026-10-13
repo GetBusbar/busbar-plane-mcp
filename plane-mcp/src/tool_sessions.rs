@@ -617,13 +617,31 @@ impl Remembered {
     }
 }
 
+/// The key of one remembered upstream conversation: the member AND the caller binding it was
+/// negotiated for (the caller reference the kernel lends; the ungoverned chain's is empty). Two
+/// callers of one member never share a session (row 159 finding 3): a session revision's server
+/// keeps per-session state, binds a session to the identity that opened it, and maps request ids
+/// to answers within it.
+#[must_use]
+pub fn upstream_key(member: &str, binding: &str) -> String {
+    format!("{member}\u{1f}{binding}")
+}
+
+/// The first JSON-RPC id a request lowered into a remembered session carries: above every id a
+/// stateless round carries (`dispatch_request_id`, the round) and below `initialize`'s.
+pub const SESSION_FIRST_ID: u64 = 1 << 32;
+
 /// The client's per-upstream memory, bounded in count and bytes with least-recently-used eviction.
-/// Forgetting an upstream costs one renegotiation and nothing else.
+/// Forgetting an upstream costs one renegotiation and nothing else. Each remembered session also
+/// numbers the requests busbar sends in it ([`UpstreamTable::next_id`]), so no id repeats within
+/// one session (the session revisions forbid it).
 #[derive(Debug)]
 pub struct UpstreamTable {
     max_entries: usize,
     max_bytes: usize,
     entries: BTreeMap<String, (Remembered, u64)>,
+    /// The next request id per remembered session, by key: kept while the session is.
+    ids: BTreeMap<String, u64>,
     bytes: usize,
     tick: u64,
 }
@@ -636,6 +654,7 @@ impl UpstreamTable {
             max_entries: max_entries.max(1),
             max_bytes,
             entries: BTreeMap::new(),
+            ids: BTreeMap::new(),
             bytes: 0,
             tick: 0,
         }
@@ -669,8 +688,33 @@ impl UpstreamTable {
         })
     }
 
-    /// Remembers `value` for `upstream`, evicting least-recently-used upstreams to fit.
+    /// THE NEXT REQUEST ID of `upstream`'s remembered session, taken: unique within that session
+    /// for as long as it is remembered. `None` when nothing with a session is remembered for it.
+    pub fn next_id(&mut self, upstream: &str) -> Option<u64> {
+        self.entries
+            .get(upstream)
+            .filter(|(r, _)| r.session.is_some())?;
+        let id = self
+            .ids
+            .entry(upstream.to_string())
+            .or_insert(SESSION_FIRST_ID);
+        let taken = *id;
+        *id = id.saturating_add(1);
+        Some(taken)
+    }
+
+    /// Remembers `value` for `upstream`, evicting least-recently-used upstreams to fit. The same
+    /// session remembered again keeps its id numbering; another session starts its own.
     pub fn put(&mut self, upstream: &str, value: Remembered) {
+        let same = self
+            .entries
+            .get(upstream)
+            .is_some_and(|(r, _)| r.session.is_some() && r.session == value.session);
+        let kept = if same {
+            self.ids.get(upstream).copied()
+        } else {
+            None
+        };
         self.forget(upstream);
         let cost = value.bytes(upstream);
         if cost > self.max_bytes {
@@ -691,6 +735,9 @@ impl UpstreamTable {
         self.bytes += cost;
         self.entries
             .insert(upstream.to_string(), (value, self.tick));
+        if let Some(id) = kept {
+            self.ids.insert(upstream.to_string(), id);
+        }
     }
 
     /// Forgets `upstream` (its session ended, or it answered 404 for it).
@@ -698,6 +745,7 @@ impl UpstreamTable {
         if let Some((r, _)) = self.entries.remove(upstream) {
             self.bytes -= r.bytes(upstream);
         }
+        self.ids.remove(upstream);
     }
 }
 
