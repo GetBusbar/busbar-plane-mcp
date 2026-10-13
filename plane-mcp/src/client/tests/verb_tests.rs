@@ -7,67 +7,11 @@
 //! The failure this file exists to catch is the one `tests/method_coverage.rs` was written for, one
 //! level down: a column of the matrix whose contents are a property of its call sites drifts from
 //! the specification silently, because an absent verb and a considered-and-inapplicable verb look
-//! identical in source. So [`UpstreamVerb::all`] is compared against `qa/method-inventory.json` —
-//! which is generated from rmcp's own model — in BOTH directions.
+//! identical in source. [`UpstreamVerb::all`] is compared against busbar's `qa/method-inventory.json`
+//! — which is generated from rmcp's own model — in BOTH directions by `tests/method_inventory.rs`
+//! (it reads busbar at the pin); this file holds the enum's own closure.
 
 use super::super::verb::UpstreamVerb;
-
-/// Every `mcp|stdio|client|client|<method>` cell the generated inventory owes an implementation.
-///
-/// Read from the file rather than restated, for the reason the coverage gate itself gives: a list
-/// written from knowledge of the specification is exactly how a list ends at J with nobody noticing.
-fn inventory_methods() -> std::collections::BTreeSet<String> {
-    // Compiled in rather than read at run time: the plane performs no input or output, its tests
-    // included (tests/purity.rs).
-    let raw = include_str!("../../../../../qa/method-inventory.json");
-    let doc: serde_json::Value = serde_json::from_str(raw).expect("method-inventory.json parses");
-    doc["cells"]
-        .as_array()
-        .expect("a `cells` array")
-        .iter()
-        .filter(|c| {
-            c["protocol"] == "mcp"
-                && c["transport"] == "stdio"
-                && c["role"] == "client"
-                && c["originator"] == "client"
-                && c["na_reason"].is_null()
-        })
-        .map(|c| c["method"].as_str().expect("a method").to_string())
-        .collect()
-}
-
-/// THE COLUMN IS COMPLETE, AND IT IS NOT WIDER THAN THE SPECIFICATION.
-///
-/// Both directions, because each catches a different mistake. A method in the inventory with no
-/// variant is a cell busbar cannot serve and would be claiming. A variant with no inventory row is
-/// busbar sending an upstream a method the specification does not define, which is not coverage —
-/// it is a made-up verb that an upstream will answer `-32601` to.
-#[test]
-fn the_issued_set_is_exactly_the_inventory_column() {
-    let owed = inventory_methods();
-    assert!(
-        owed.len() >= 20,
-        "only {} issuable stdio methods in the inventory. This test refuses to pass vacuously: a \
-         filter that matched nothing would report a complete column of nothing.",
-        owed.len()
-    );
-    let built: std::collections::BTreeSet<String> = UpstreamVerb::all()
-        .iter()
-        .map(|v| v.method().to_string())
-        .collect();
-    let missing: Vec<&String> = owed.difference(&built).collect();
-    let invented: Vec<&String> = built.difference(&owed).collect();
-    assert!(
-        missing.is_empty(),
-        "the inventory owes these methods on the stdio client leg and `UpstreamVerb` has no variant \
-         for them: {missing:#?}"
-    );
-    assert!(
-        invented.is_empty(),
-        "`UpstreamVerb` sends methods the generated matrix does not define: {invented:#?}\n\
-         Do not edit qa/method-inventory.json — it is generated from the SDKs and will come back."
-    );
-}
 
 /// `all()` IS ONE INSTANCE OF EVERY VARIANT, not most of them.
 ///

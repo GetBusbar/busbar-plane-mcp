@@ -1,4 +1,13 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2026 Busbar Inc and contributors
+
 //! The plane's vocabulary against the conformance battery, and the plane's door driven both ways.
+//!
+//! This is the door witness that moved here with the crate from busbar's
+//! `crates/busbar-plane-mcp/tests/conformance.rs` (`tests/conformance.rs` is now busbar's published
+//! `conformance_suite!`). The dropped-in door is this crate's own cdylib, and the battery is busbar's
+//! at the pin this repo names (`BUSBAR_CHECKOUT`, a checkout of GetBusbar/busbar at `.busbar-ref`,
+//! which plugin-ci exports).
 //!
 //! The judge of this work is the battery: the official suite and the in-house adversarial battery,
 //! both of which speak to a booted node over a socket. The vocabulary tests here read the
@@ -13,11 +22,16 @@
 
 use busbar_contract::plane::PlaneMeta;
 use busbar_plane_mcp::{jsonrpc, tool_facts as facts, tool_ops as ops, McpPlane};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-/// The battery's own source tree.
+/// The battery's own source tree: busbar's `testing/mcp-conformance` at the pin (`BUSBAR_CHECKOUT`).
+/// An unset variable is a failure, never a skip: these tests read the battery or prove nothing.
 fn battery() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testing/mcp-conformance")
+    let busbar = std::env::var_os("BUSBAR_CHECKOUT").expect(
+        "BUSBAR_CHECKOUT is unset: the battery is busbar's testing/mcp-conformance at .busbar-ref \
+         (plugin-ci exports it)",
+    );
+    PathBuf::from(busbar).join("testing/mcp-conformance")
 }
 
 /// Every method name the battery's suites and fake peers name.
@@ -213,8 +227,8 @@ fn the_metadata_keys_are_the_batterys_own() {
 /// THE MCP PLANE'S CONFORMANCE RIG, BOTH WAYS (BUSBAR-1.6.0.md, the plane driver's "Proven by":
 /// the plane conformance suite, compiled-in and dropped-in through one table).
 ///
-/// The linked door (`plane_door::door`) and this crate's dropped-in image (the `mcp_door` example,
-/// the same door behind `export_door!`) are each admitted through the one loader on one
+/// The linked door (`plane_door::door`) and this crate's dropped-in image (its built cdylib, the
+/// same door behind `export_door!`) are each admitted through the one loader on one
 /// dispatcher and run ONE script through every plane op, each answer read back. The two
 /// transcripts must be identical, step for step, and the linked one must say what the plane's
 /// own pure functions say the door answers: the snapshot is `door::endpoint_snapshot_spec`'s, a refused
@@ -779,20 +793,11 @@ mod both_ways {
         load_linked(&row, bind(d)).expect("the linked door loads")
     }
 
-    /// This crate's dropped-in image, the `mcp_door` example `cargo test` builds. A missing artifact
-    /// is a failure, never a skip: this test IS the dropped-in door's proof.
+    /// This crate's dropped-in image, the cdylib `cargo test` builds beside the test
+    /// (`conformance::cdylib_of`). A missing artifact is a failure, never a skip: this test IS the
+    /// dropped-in door's proof.
     fn dropped(d: &Dispatcher) -> Plugin<Plane> {
-        let exe = std::env::current_exe().expect("the test binary has a path");
-        let examples = exe
-            .parent()
-            .and_then(|d| d.parent())
-            .expect("target/<profile>")
-            .join("examples");
-        let file = busbar_plugin_loader::plugin_library_filename("mcp_door");
-        let path = [examples.join(&file), examples.join("deps").join(&file)]
-            .into_iter()
-            .find(|p| p.exists())
-            .unwrap_or_else(|| panic!("the mcp_door example ({file}) is not built"));
+        let path = busbar_plugin_loader::conformance::cdylib_of("busbar_plane_mcp_plugin");
         let stated = rendering_of(plane_door::door).expect("the door renders its Statement");
         load_dropped(&path, &stated, bind(d)).expect("the dropped door loads")
     }
@@ -2063,7 +2068,7 @@ mod bounds {
     /// read off the source at that site.
     #[test]
     fn an_upstreams_answer_is_gathered_only_under_the_reply_ceiling() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/tool_door.rs");
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../plane-mcp/src/tool_door.rs");
         let source = std::fs::read_to_string(path).expect("the door's source reads");
         let lines: Vec<&str> = source.lines().collect();
         let gather = lines

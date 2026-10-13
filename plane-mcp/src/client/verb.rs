@@ -10,7 +10,7 @@
 //! the column's contents a property of its call sites, so a method could be added by one caller and
 //! be invisible to every gate, every audit word and every test that enumerates the surface. The enum
 //! is what makes an enumeration of the whole column possible, and
-//! `tests/verb_tests.rs::the_issued_set_is_exactly_the_inventory_column` compares that enumeration
+//! `tests/method_inventory.rs::the_issued_set_is_exactly_the_inventory_column` compares that enumeration
 //! against the generated inventory IN BOTH DIRECTIONS — so a verb this file forgets is a RED TEST
 //! rather than an absent row, and a verb it invents is a red test rather than a `-32601` in
 //! production.
