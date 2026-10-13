@@ -186,8 +186,8 @@
           "application/json"
         ]
       ],
-      "answer": "{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"hi\"}]}}",
-      "answer_out": "{\"id\":30,\"jsonrpc\":\"2.0\",\"result\":{\"resultType\":\"complete\",\"content\":[{\"type\":\"text\",\"text\":\"hi\"}]}}",
+      "answer": "{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"the file's contents, long enough that a buffer that holds the whole request takes the answer in several writes. the file's contents, long enough that a buffer that holds the whole request takes the answer in several writes. the file's contents, long enough that a buffer that holds the whole request takes the answer in several writes. \"}]}}",
+      "answer_out": "{\"id\":30,\"jsonrpc\":\"2.0\",\"result\":{\"resultType\":\"complete\",\"content\":[{\"type\":\"text\",\"text\":\"the file's contents, long enough that a buffer that holds the whole request takes the answer in several writes. the file's contents, long enough that a buffer that holds the whole request takes the answer in several writes. the file's contents, long enough that a buffer that holds the whole request takes the answer in several writes. \"}]}}",
       "units": [
         [
           2,
@@ -199,14 +199,14 @@
         ],
         [
           1,
-          75
+          409
         ]
       ]
     },
     "narrow": {
       "unit": 9,
-      "reply_cap": 32,
-      "more": 3
+      "reply_cap": 236,
+      "more": 1
     },
     "short": {
       "unit": 11
