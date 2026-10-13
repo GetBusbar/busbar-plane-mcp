@@ -1018,9 +1018,20 @@ fn an_upstream_that_requires_a_session_is_reached_by_negotiation() {
         ],
         "the verify fetch probed statelessly, was refused, and negotiated"
     );
-    let far_ok =
-        br#"{"jsonrpc":"2.0","id":0,"result":{"content":[{"type":"text","text":"in-session"}]}}"#;
-    let answered = d.piece(40, &Given::far(ALICE, 200, vec![JSON_TYPE], far_ok));
+    // A call in the session carries the session's own id, never the stateless round's `0` every
+    // call shares (row 159 finding 3); the upstream answers under the id the call carried.
+    assert_ne!(
+        sent["id"],
+        json!(0),
+        "the call in the session carried the round's id: {sent}"
+    );
+    let far_ok = serde_json::to_vec(&json!({
+        "jsonrpc": "2.0",
+        "id": sent["id"],
+        "result": {"content": [{"type": "text", "text": "in-session"}]},
+    }))
+    .expect("an answer");
+    let answered = d.piece(40, &Given::far(ALICE, 200, vec![JSON_TYPE], &far_ok));
     assert_eq!(answered.status, 200, "{}", answered.text());
     let body = answered.json();
     assert_eq!(body["id"], json!(30));
