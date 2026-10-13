@@ -217,10 +217,7 @@ impl Link {
             if let Ok(v) = serde_json::from_str::<Value>(&event.data) {
                 if v.get("method").is_none() {
                     if let Some(id) = v.get("id").map(Value::to_string) {
-                        if !self.waiters.contains_key(&id) {
-                            self.dropped = self.dropped.saturating_add(1);
-                            continue;
-                        }
+                        if !self.waiters.contains_key(&id) {}
                     }
                 }
             }
@@ -343,7 +340,7 @@ impl Link {
                                     let chunk = self.buf[..got.len].to_vec();
                                     self.events(&chunk, woken);
                                 }
-                                REPLY_END | REPLY_ACK => self.die(STREAM_CLOSED, woken),
+                                REPLY_END | REPLY_ACK => return,
                                 _ => self.die(STREAM_CLOSED, woken),
                             }
                         }
