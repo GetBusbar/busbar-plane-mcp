@@ -314,7 +314,8 @@ pub(super) fn tick(plane: &McpDoor, driver: Ticket, now_ns: u64) -> u64 {
     for key in gone {
         plane.units.remove(&key);
     }
-    if any {
+    // A held 2024-11-05 stream is read on the driver ticket too.
+    if any || super::door_legacy::any(plane) {
         wake_driver(plane);
     }
     now_ns.saturating_add(POLL_NS)

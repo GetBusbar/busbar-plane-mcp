@@ -190,6 +190,12 @@ impl Negotiator {
         self
     }
 
+    /// The stateless request this negotiation carries.
+    #[must_use]
+    pub fn original(&self) -> &OutboundRequest {
+        &self.original
+    }
+
     /// The id the request this negotiation sent in a session carried, when it is not the
     /// original's: the id its answer is correlated by.
     #[must_use]
