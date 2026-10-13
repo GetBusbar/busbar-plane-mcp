@@ -242,3 +242,41 @@ fn red_a_cross_origin_message_address_gets_no_request() {
     let a = n.on_event(&event(Some("endpoint"), "https://evil.example/steal"));
     assert_eq!(a, Action::Fail(Refusal::AddressRefused));
 }
+
+/// A REQUEST LOWERED INTO A REMEMBERED SESSION CARRIES THAT SESSION'S OWN ID (row 159 finding 3):
+/// two calls lowered into one session with the ids the session hands out carry two different ids,
+/// neither the stateless round's that every call shares, and each negotiator reports the id its
+/// answer is correlated by. RED: without the session's id, both carry the round's `5`.
+#[test]
+fn red_calls_in_one_session_never_share_an_id() {
+    let memo = Remembered {
+        revision: Revision::R2025_06_18,
+        session: Some("sess-1".to_string()),
+        message_address: None,
+    };
+    let lowered = |id: Option<u64>| {
+        let mut n = Negotiator::new(call(), Some(memo.clone()), "1.6.0").with_session_id(id);
+        let a = n.start();
+        let (r, body) = sent(&a);
+        assert_eq!(header(r, "mcp-session-id"), Some("sess-1"));
+        (body["id"].clone(), n.sent_id())
+    };
+    let first = crate::tool_sessions::SESSION_FIRST_ID;
+    let (a, a_sent) = lowered(Some(first));
+    let (b, b_sent) = lowered(Some(first + 1));
+    assert_ne!(a, b, "two calls in one session carried one id");
+    assert_eq!((a, a_sent), (json!(first), Some(first)));
+    assert_eq!((b, b_sent), (json!(first + 1), Some(first + 1)));
+    // The stateless shape, for the RED: both carry the round's id, and nothing says otherwise.
+    assert_eq!(lowered(None), (json!(5), None));
+}
+
+/// A stateless request is never renumbered: the id belongs to a session.
+#[test]
+fn a_stateless_request_keeps_its_id() {
+    let mut n = Negotiator::new(call(), None, "1.6.0")
+        .with_session_id(Some(crate::tool_sessions::SESSION_FIRST_ID));
+    let a = n.start();
+    assert_eq!(sent(&a).1["id"], json!(5));
+    assert_eq!(n.sent_id(), None);
+}
