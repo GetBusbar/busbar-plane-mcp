@@ -2965,18 +2965,20 @@ slot!(
                                     let std::task::Poll::Ready(done) = polled else {
                                         return Some(Step::Pending);
                                     };
+                                    // The walk's own answer too: a call lowered into its session
+                                    // carried that session's id.
+                                    sent = n.sent_id();
                                     match done {
                                         None => {}
                                         Some(door_sessions::Negotiated::Answer(
                                             status,
                                             raw,
                                             sse,
-                                            id,
+                                            _,
                                         )) => {
                                             relay.status = u32::from(status);
                                             relay.far = raw;
                                             relay.sse = sse;
-                                            sent = id;
                                         }
                                         Some(door_sessions::Negotiated::Failed(reason)) => {
                                             relay.status = 0;
