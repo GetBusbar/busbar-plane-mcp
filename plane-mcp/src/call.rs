@@ -32,7 +32,9 @@ use crate::codec::{
 use crate::identity::{ServerId, ToolKey};
 use crate::jsonrpc::RESULT_TYPE_COMPLETE;
 use crate::tool_arrival::Refusal;
-use crate::tools_config::{McpServerDefCfg, TaskSupport, DEFAULT_MAX_INPUT_REQUIRED_ROUNDS};
+use crate::tools_config::{
+    McpServerDefCfg, SamplingBoundsCfg, TaskSupport, DEFAULT_MAX_INPUT_REQUIRED_ROUNDS,
+};
 use busbar_contract::abi::host::service::{
     DISTRUST_CHANGED, DISTRUST_NONE, DISTRUST_NOT_APPROVED, DISTRUST_QUARANTINED,
     DISTRUST_UNKNOWN_ITEM, DISTRUST_UNSIGHTED,
@@ -1076,6 +1078,18 @@ pub enum AskRefusal {
         /// Why.
         reason: String,
     },
+    /// A granted `sampling/createMessage` ask is larger than the operator's
+    /// `tools.<server>.sampling_bounds` allow (owner ruling Q22c): refused by name, never relayed.
+    SamplingBound {
+        /// The server.
+        server: String,
+        /// The `sampling_bounds` key that was exceeded.
+        key: &'static str,
+        /// The bound, as configured (a count, or the `min..=max` range for the temperature).
+        limit: String,
+        /// What the ask carried.
+        got: String,
+    },
 }
 
 impl std::fmt::Display for AskRefusal {
@@ -1107,6 +1121,33 @@ impl std::fmt::Display for AskRefusal {
                 "the ask MCP server `{server}` made could not be relayed to busbar's caller: \
                  {reason}"
             ),
+            AskRefusal::SamplingBound {
+                server,
+                key: "max_input_response_bytes",
+                limit,
+                got,
+            } => write!(
+                f,
+                "the reply to MCP server `{server}`'s ask carries {got}, over \
+                 `tools.{server}.sampling_bounds.max_input_response_bytes` ({limit}), so the \
+                 reply was not forwarded to the server. Raise \
+                 `tools.{server}.sampling_bounds.max_input_response_bytes` only if this server \
+                 legitimately needs a larger reply."
+            ),
+            AskRefusal::SamplingBound {
+                server,
+                key,
+                limit,
+                got,
+            } => write!(
+                f,
+                "MCP server `{server}` asked its caller for a `sampling/createMessage` completion \
+                 that exceeds `tools.{server}.sampling_bounds.{key}` (limit {limit}, the ask \
+                 carries {got}), so the ask was not relayed to you. The prompt an upstream sends is \
+                 spent against the caller's budget, so its size is bounded by the operator. Raise \
+                 `tools.{server}.sampling_bounds.{key}` only if this server legitimately needs a \
+                 larger ask."
+            ),
         }
     }
 }
@@ -1120,6 +1161,7 @@ impl AskRefusal {
             AskRefusal::RoundCapExceeded { .. } => "ask_round_cap",
             AskRefusal::NoSealer { .. } => "ask_no_sealer",
             AskRefusal::Unavailable { .. } => "ask_unavailable",
+            AskRefusal::SamplingBound { .. } => "sampling_bound_exceeded",
         }
     }
 }
@@ -1333,11 +1375,156 @@ fn judge_ask(
             kind: denied.to_string(),
         });
     }
+    judge_sampling_bounds(
+        &server,
+        &def.map(|d| d.sampling_bounds).unwrap_or_default(),
+        payload
+            .get("inputRequests")
+            .and_then(Value::as_object)
+            .into_iter()
+            .flat_map(|requests| requests.values()),
+    )?;
     Ok(Settled::Relay {
         result: payload.clone(),
         round,
         child: None,
     })
+}
+
+/// THE CALLER'S REPLY TO AN ASK, bounded (`sampling_bounds.max_input_response_bytes`): `forwarded` is
+/// the serialised byte length of exactly what would be sent upstream. Over the cap the reply is
+/// refused by name and never forwarded.
+pub fn judge_input_response(
+    server: &str,
+    bounds: &SamplingBoundsCfg,
+    forwarded: usize,
+) -> Result<(), AskRefusal> {
+    if forwarded as u64 > u64::from(bounds.max_input_response_bytes) {
+        return Err(AskRefusal::SamplingBound {
+            server: server.to_string(),
+            key: "max_input_response_bytes",
+            limit: bounds.max_input_response_bytes.to_string(),
+            got: format!("{forwarded} bytes"),
+        });
+    }
+    Ok(())
+}
+
+/// The http continuation (`inputResponses` and `requestState`) judged by [`judge_input_response`].
+pub fn judge_continuation(
+    server: &str,
+    bounds: &SamplingBoundsCfg,
+    continuation: &Value,
+) -> Result<(), AskRefusal> {
+    judge_input_response(server, bounds, continuation.to_string().len())
+}
+
+/// THE ONE JUDGEMENT of a relayed ask's size (owner ruling Q22c), shared by the http path
+/// ([`judge_ask`]) and the stdio relay (`tool_program::judge_child_asks`): every request whose
+/// `method` is `sampling/createMessage` is measured against the server's `sampling_bounds`, and the
+/// first bound it exceeds is returned as a named refusal. Other methods are not measured.
+///
+/// Measured as the ask arrived: the message count, the prompt bytes (`systemPrompt` plus the text
+/// parts of every message's content), the stop-sequence count and each one's bytes, and a present
+/// `temperature` against `min..=max` thousandths.
+pub fn judge_sampling_bounds<'a>(
+    server: &str,
+    bounds: &SamplingBoundsCfg,
+    requests: impl IntoIterator<Item = &'a Value>,
+) -> Result<(), AskRefusal> {
+    let refuse = |key: &'static str, limit: String, got: String| AskRefusal::SamplingBound {
+        server: server.to_string(),
+        key,
+        limit,
+        got,
+    };
+    for request in requests {
+        if request.get("method").and_then(Value::as_str) != Some("sampling/createMessage") {
+            continue;
+        }
+        let params = request.get("params");
+        let messages = params
+            .and_then(|p| p.get("messages"))
+            .and_then(Value::as_array);
+        let count = messages.map_or(0, Vec::len);
+        if count as u64 > u64::from(bounds.max_messages) {
+            return Err(refuse(
+                "max_messages",
+                bounds.max_messages.to_string(),
+                format!("{count} messages"),
+            ));
+        }
+        let mut prompt_bytes = params
+            .and_then(|p| p.get("systemPrompt"))
+            .and_then(Value::as_str)
+            .map_or(0usize, str::len);
+        for message in messages.into_iter().flatten() {
+            let content = message.get("content");
+            let parts: &[Value] = match content {
+                Some(Value::Array(parts)) => parts,
+                Some(one) => std::slice::from_ref(one),
+                None => &[],
+            };
+            for part in parts {
+                if part.get("type").and_then(Value::as_str) == Some("text") {
+                    prompt_bytes = prompt_bytes.saturating_add(
+                        part.get("text").and_then(Value::as_str).map_or(0, str::len),
+                    );
+                }
+            }
+        }
+        if prompt_bytes as u64 > u64::from(bounds.max_prompt_bytes) {
+            return Err(refuse(
+                "max_prompt_bytes",
+                bounds.max_prompt_bytes.to_string(),
+                format!("{prompt_bytes} prompt bytes"),
+            ));
+        }
+        if let Some(stops) = params
+            .and_then(|p| p.get("stopSequences"))
+            .and_then(Value::as_array)
+        {
+            if stops.len() as u64 > u64::from(bounds.max_stop_sequences) {
+                return Err(refuse(
+                    "max_stop_sequences",
+                    bounds.max_stop_sequences.to_string(),
+                    format!("{} stop sequences", stops.len()),
+                ));
+            }
+            if let Some(longest) = stops
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::len)
+                .filter(|n| *n as u64 > u64::from(bounds.max_stop_sequence_bytes))
+                .max()
+            {
+                return Err(refuse(
+                    "max_stop_sequence_bytes",
+                    bounds.max_stop_sequence_bytes.to_string(),
+                    format!("a {longest}-byte stop sequence"),
+                ));
+            }
+        }
+        if let Some(t) = params.and_then(|p| p.get("temperature")) {
+            let min = f64::from(bounds.temperature_min_milli) / 1000.0;
+            let max = f64::from(bounds.temperature_max_milli) / 1000.0;
+            if !t
+                .as_f64()
+                .is_some_and(|v| v.is_finite() && (min..=max).contains(&v))
+            {
+                let (key, limit) = match t.as_f64() {
+                    Some(v) if v > max => ("temperature_max_milli", bounds.temperature_max_milli),
+                    _ => ("temperature_min_milli", bounds.temperature_min_milli),
+                };
+                return Err(refuse(
+                    key,
+                    format!("{limit} thousandths ({min}..={max})"),
+                    format!("temperature {t}"),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The call-log line of a call whose upstream's ask was relayed to its caller: it went out and was
