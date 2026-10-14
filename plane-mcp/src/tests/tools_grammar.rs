@@ -220,6 +220,10 @@ fn sampling_bounds_grammar_defaults_round_trips_and_refuses() {
         ),
         (64, 65536, 8, 64, 0, 2000)
     );
+    assert_eq!(
+        d.max_input_response_bytes, 1_048_576,
+        "the reply cap defaults to 1 MiB when omitted"
+    );
 
     let written = grammar(server(
         json!({ "max_messages": 5, "temperature_max_milli": 900 }),
@@ -248,6 +252,10 @@ fn sampling_bounds_grammar_defaults_round_trips_and_refuses() {
     for (bounds, key) in [
         (json!({ "max_messages": 0 }), "max_messages"),
         (json!({ "max_prompt_bytes": 0 }), "max_prompt_bytes"),
+        (
+            json!({ "max_input_response_bytes": 0 }),
+            "max_input_response_bytes",
+        ),
         (
             json!({ "temperature_min_milli": 1500, "temperature_max_milli": 500 }),
             "temperature_min_milli",

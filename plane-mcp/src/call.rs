@@ -1123,6 +1123,19 @@ impl std::fmt::Display for AskRefusal {
             ),
             AskRefusal::SamplingBound {
                 server,
+                key: "max_input_response_bytes",
+                limit,
+                got,
+            } => write!(
+                f,
+                "the reply to MCP server `{server}`'s ask carries {got}, over \
+                 `tools.{server}.sampling_bounds.max_input_response_bytes` ({limit}), so the \
+                 reply was not forwarded to the server. Raise \
+                 `tools.{server}.sampling_bounds.max_input_response_bytes` only if this server \
+                 legitimately needs a larger reply."
+            ),
+            AskRefusal::SamplingBound {
+                server,
                 key,
                 limit,
                 got,
@@ -1376,6 +1389,34 @@ fn judge_ask(
         round,
         child: None,
     })
+}
+
+/// THE CALLER'S REPLY TO AN ASK, bounded (`sampling_bounds.max_input_response_bytes`): `forwarded` is
+/// the serialised byte length of exactly what would be sent upstream. Over the cap the reply is
+/// refused by name and never forwarded.
+pub fn judge_input_response(
+    server: &str,
+    bounds: &SamplingBoundsCfg,
+    forwarded: usize,
+) -> Result<(), AskRefusal> {
+    if forwarded as u64 > u64::from(bounds.max_input_response_bytes) {
+        return Err(AskRefusal::SamplingBound {
+            server: server.to_string(),
+            key: "max_input_response_bytes",
+            limit: bounds.max_input_response_bytes.to_string(),
+            got: format!("{forwarded} bytes"),
+        });
+    }
+    Ok(())
+}
+
+/// The http continuation (`inputResponses` and `requestState`) judged by [`judge_input_response`].
+pub fn judge_continuation(
+    server: &str,
+    bounds: &SamplingBoundsCfg,
+    continuation: &Value,
+) -> Result<(), AskRefusal> {
+    judge_input_response(server, bounds, continuation.to_string().len())
 }
 
 /// THE ONE JUDGEMENT of a relayed ask's size (owner ruling Q22c), shared by the http path

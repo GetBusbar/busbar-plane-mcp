@@ -637,6 +637,9 @@ pub const DEFAULT_MAX_STOP_SEQUENCE_BYTES: u32 = 64;
 pub const DEFAULT_TEMPERATURE_MIN_MILLI: u32 = 0;
 /// The DEFAULT ceiling of an ask's temperature, in thousandths (the protocol's own `0.0..=2.0`).
 pub const DEFAULT_TEMPERATURE_MAX_MILLI: u32 = 2000;
+/// The DEFAULT cap on the caller's reply to an ask (its `inputResponses` and the `requestState` it
+/// carries), in serialised bytes: 1 MiB.
+pub const DEFAULT_MAX_INPUT_RESPONSE_BYTES: u32 = 1024 * 1024;
 
 /// `tools.<server>.sampling_bounds` — the INPUT-SIDE bounds on a relayed `sampling/createMessage`
 /// ask (owner ruling Q22c).
@@ -662,6 +665,10 @@ pub struct SamplingBoundsCfg {
     pub temperature_min_milli: u32,
     /// The highest `temperature` an ask may name, in thousandths. Default 2000 (`2.0`).
     pub temperature_max_milli: u32,
+    /// The most serialised bytes the caller's reply to an ask (its `inputResponses`, with the
+    /// `requestState` it carries) may total before it is forwarded to the upstream. Default
+    /// 1048576; zero is refused.
+    pub max_input_response_bytes: u32,
 }
 
 impl Default for SamplingBoundsCfg {
@@ -673,6 +680,7 @@ impl Default for SamplingBoundsCfg {
             max_stop_sequence_bytes: DEFAULT_MAX_STOP_SEQUENCE_BYTES,
             temperature_min_milli: DEFAULT_TEMPERATURE_MIN_MILLI,
             temperature_max_milli: DEFAULT_TEMPERATURE_MAX_MILLI,
+            max_input_response_bytes: DEFAULT_MAX_INPUT_RESPONSE_BYTES,
         }
     }
 }
@@ -698,6 +706,15 @@ impl SamplingBoundsCfg {
                 "{at}: `sampling_bounds.max_prompt_bytes: 0` would refuse every sampling ask. Set \
                  a positive byte count (default {DEFAULT_MAX_SAMPLING_PROMPT_BYTES}), or leave \
                  `grants.sampling` unset to refuse the ask kind outright."
+            ));
+        }
+        if self.max_input_response_bytes == 0 {
+            return Err(format!(
+                "{at}: `sampling_bounds.max_input_response_bytes: 0` (the key \
+                 `tools.<server>.sampling_bounds.max_input_response_bytes`) would refuse every \
+                 reply to an ask, so no ask could be answered. Set a positive byte count (default \
+                 {DEFAULT_MAX_INPUT_RESPONSE_BYTES}), or leave the grants unset to refuse the ask \
+                 kinds outright."
             ));
         }
         if self.temperature_min_milli > self.temperature_max_milli {

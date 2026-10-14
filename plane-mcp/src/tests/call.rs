@@ -1135,3 +1135,49 @@ fn sampling_bounds_measure_only_sampling_asks() {
     let roots = r#"{"jsonrpc":"2.0","id":0,"result":{"resultType":"input_required","inputRequests":{"r":{"method":"roots/list","params":{"messages":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65]}}}}}"#;
     assert_relayed(settle_far(roots));
 }
+
+/// THE CALLER'S REPLY IS BOUNDED TOO (ARCHITECT 2026-10-14): the continuation sent upstream
+/// (`inputResponses` with the `requestState` it carries) is measured as serialised; one byte over
+/// `max_input_response_bytes` is refused by name (`sampling_bound_exceeded`, 403) and not forwarded,
+/// exactly at the cap it is forwarded.
+#[test]
+fn input_responses_over_the_cap_are_refused_and_not_forwarded_at_the_cap_forwarded() {
+    let continuation = json!({
+        "inputResponses": { "s": { "action": "accept", "content": { "text": "x".repeat(40) } } },
+        "requestState": "opaque"
+    });
+    let exact = continuation.to_string().len();
+    let at = sampling_def(|b| b.max_input_response_bytes = u32::try_from(exact).expect("small"));
+    crate::call::judge_continuation("fs", &at.sampling_bounds, &continuation)
+        .expect("exactly at the cap is forwarded");
+
+    let over =
+        sampling_def(|b| b.max_input_response_bytes = u32::try_from(exact - 1).expect("small"));
+    let refusal = crate::call::judge_continuation("fs", &over.sampling_bounds, &continuation)
+        .expect_err("one byte over is refused");
+    assert!(matches!(
+        &refusal,
+        crate::call::AskRefusal::SamplingBound {
+            key: "max_input_response_bytes",
+            ..
+        }
+    ));
+    assert_eq!(refusal.audit_reason(), "sampling_bound_exceeded");
+    assert!(refusal.to_string().contains(&format!("{exact} bytes")));
+    assert_bound_refused(
+        crate::call::ask_refused(&admitted(), &refusal),
+        "max_input_response_bytes",
+        &(exact - 1).to_string(),
+    );
+}
+
+/// The default cap is 1 MiB: a reply just over it is refused, with the key unwritten.
+#[test]
+fn input_responses_default_cap_is_one_mebibyte() {
+    let def = sampling_def(|_| {});
+    assert_eq!(def.sampling_bounds.max_input_response_bytes, 1_048_576);
+    let big = json!({ "inputResponses": { "s": "y".repeat(1_048_576) } });
+    crate::call::judge_continuation("fs", &def.sampling_bounds, &big).expect_err("over");
+    let small = json!({ "inputResponses": { "s": "y" }, "requestState": "z" });
+    crate::call::judge_continuation("fs", &def.sampling_bounds, &small).expect("under");
+}

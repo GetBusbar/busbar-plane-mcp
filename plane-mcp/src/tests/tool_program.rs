@@ -431,3 +431,43 @@ fn a_stdio_childs_sampling_ask_over_the_cap_is_refused_by_name() {
         .as_str()
         .is_some_and(|m| m.contains("tools.kid.sampling_bounds.max_messages")));
 }
+
+/// THE CALLER'S ANSWER TO A STDIO CHILD'S ASK is bounded by `sampling_bounds.max_input_response_bytes`
+/// (ARCHITECT 2026-10-14): the bytes that would be written to the child are measured, over the cap
+/// is the named refusal (nothing is written), exactly at the cap it is written.
+#[test]
+fn a_callers_answer_to_a_stdio_childs_ask_over_the_cap_is_refused() {
+    let mut def = crate::door::read_tools_section(
+        br#"{"kid": {"url": "https://mcp.example/kid", "pin": {"mechanism": "unpinned"},
+            "grants": {"sampling": true}}}"#,
+    )
+    .expect("reads")
+    .servers
+    .get("kid")
+    .expect("kid")
+    .clone();
+    let child = crate::ask::ChildLeg {
+        generation: 1,
+        wait: 1,
+        asks: vec![("s".to_string(), json!(9))],
+        work: None,
+    };
+    let responses = json!({ "s": { "text": "z".repeat(100) } });
+    let replies = child_replies(&child, Some(&responses));
+    let written: usize = replies.iter().map(Vec::len).sum();
+    def.sampling_bounds.max_input_response_bytes = u32::try_from(written).expect("small");
+    judge_child_replies("kid", &def, &replies).expect("exactly at the cap is written");
+    def.sampling_bounds.max_input_response_bytes -= 1;
+    let refusal = judge_child_replies("kid", &def, &replies).expect_err("one over is refused");
+    assert_eq!(refusal.audit_reason(), "sampling_bound_exceeded");
+    assert!(matches!(
+        &refusal,
+        crate::call::AskRefusal::SamplingBound {
+            key: "max_input_response_bytes",
+            ..
+        }
+    ));
+    assert!(refusal
+        .to_string()
+        .contains("tools.kid.sampling_bounds.max_input_response_bytes"));
+}

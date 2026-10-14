@@ -2092,6 +2092,38 @@ fn answer_body(
                 };
                 relay.round = round;
                 let child = relay.admitted.relay.as_ref().and_then(|r| r.child.clone());
+                // THE CALLER'S REPLY IS BOUNDED TOO (`sampling_bounds.max_input_response_bytes`):
+                // what would be forwarded, as it would be serialised, is measured before anything
+                // is sent, and a reply over the cap is refused by name and never forwarded.
+                let judged = match (&child, &continuation) {
+                    (Some(child), _) => crate::tool_program::judge_child_replies(
+                        &member,
+                        def,
+                        &crate::tool_program::child_replies(
+                            child,
+                            continuation.as_ref().and_then(|c| c.get("inputResponses")),
+                        ),
+                    ),
+                    (None, Some(continuation)) => {
+                        crate::call::judge_continuation(&member, &def.sampling_bounds, continuation)
+                    }
+                    (None, None) => Ok(()),
+                };
+                if let Err(refusal) = judged {
+                    if let crate::call::Settled::Answer { status, body, line } =
+                        crate::call::ask_refused(&relay.admitted, &refusal)
+                    {
+                        unit.pending = Some(
+                            Pending::answer(status, body, unit.framing.as_ref(), &[]).logged(
+                                Some(&line),
+                                principal,
+                                generation,
+                                clock_s(services, ticket, unit),
+                            ),
+                        );
+                        return Some(Step::Write);
+                    }
+                }
                 let mut outbound = if let Some(child) = child {
                     // A STDIO CHILD'S RELAYED ASK, ANSWERED: its work handle bound, the caller's
                     // answers written to the child under its own ids, and the call it still owes
