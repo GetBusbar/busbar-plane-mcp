@@ -26,13 +26,14 @@ const BYTE_FAMILY: &str = "byte";
 /// design's plane table names, and it is what makes a very large answer cost more than a small one
 /// on a deployment that wants it to.
 ///
-/// WHAT THE DOOR REPORTS (#71, THE DESIGN §7 "The plane reports; the kernel writes"): once a server
-/// has answered a relayed `tools/call`, one `tool_calls` and the byte length of the document it
-/// answered with (`tool_door.rs` `Pending::counted`), beside the fee unit a success earns. A call
-/// whose upstream never answered reports neither class, because nothing was measured (#62: what is
-/// billed is what was delivered); it went out, so it keeps the fee unit its caller's answer earns
-/// (Q35). A call that never left reports no fee unit either: one whose deadline passed in its
-/// queue (`call::never_sent`), or one whose server the live tool-list check could not reach.
+/// WHAT THE DOOR REPORTS (#71; the design's money section, "The plane reports; the kernel
+/// writes"): once a server has answered a relayed `tools/call`, one `tool_calls` and the byte length
+/// of the document it answered with (`tool_door.rs` `Pending::counted`), beside the fee unit a
+/// success earns. A call whose upstream never answered reports neither class, because nothing was
+/// measured (#62: what is billed is what was delivered); it went out, so it keeps the fee unit its
+/// caller's answer earns (Q35). A call that never left reports no fee unit either: one whose
+/// deadline passed in its queue (`call::never_sent`), or one whose server the live tool-list check
+/// could not reach.
 const METER_CLASSES: &[MeterClassDecl] = &[
     MeterClassDecl {
         key: MeterClassId::new("tool_calls"),

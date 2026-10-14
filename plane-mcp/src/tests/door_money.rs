@@ -2,8 +2,8 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! $ THE DOOR'S MONEY ANSWERS: what a unit reports beside the answer its caller is written. The
-//! plane reports its units and whether a fee unit was incurred; the kernel writes them (THE DESIGN
-//! §7, "The plane reports; the kernel writes").
+//! plane reports its units and whether a fee unit was incurred; the kernel writes them (the design's
+//! money section, "The plane reports; the kernel writes").
 
 use serde_json::{json, Value};
 
