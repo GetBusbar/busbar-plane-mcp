@@ -68,6 +68,10 @@ pub const REASON_ANSWER_UNDECLARED: &str = "caller_ask_answer_undeclared";
 pub const REASON_ASK_NOT_PROXIED: &str = "ask_not_proxied";
 /// The call-log reason of a call whose upstream asked its caller something, relayed to the caller.
 pub const REASON_ASK_RELAYED: &str = "ask_relayed";
+/// The call-log reason of a call that NEVER LEFT ITS QUEUE: it waited its turn on a stdio member's
+/// child (another call held it) and its deadline passed first. It rides `refused`, because the call
+/// did not go out ([`never_sent`]).
+pub const REASON_QUEUE_DEADLINE: &str = "queue_deadline";
 
 /// The tasks extension's identifier.
 pub const TASKS_EXTENSION_ID: &str = crate::answer::TASKS_EXTENSION_ID;
@@ -910,6 +914,29 @@ pub fn outbound_program(
         fields: Vec::new(),
         body: request.body,
     })
+}
+
+/// A relayed call that was NEVER SENT: it waited its turn on its member and its deadline passed first
+/// (`reason`, the sentence the caller reads). The caller is answered the same upstream-failure tool
+/// error, 200 `isError`, as a call whose upstream failed. The call log does not say `dispatched`:
+/// that word means the call went out (`busbar_contract::vocab`), and this one did not. It is
+/// `refused` under [`REASON_QUEUE_DEADLINE`], audited rejected. The door answers it with no fee unit
+/// (ARCHITECT/coordinator ruling 2026-10-14, after #62 "bill what was delivered" and Q35 "a hop
+/// refused before the socket is refunded", applied uniformly across planes).
+#[must_use]
+pub fn never_sent(admitted: &AdmittedCall, reason: &str) -> Settled {
+    Settled::Answer {
+        status: STATUS_OK,
+        body: result(
+            &admitted.id,
+            upstream_failure_result(&admitted.entry.server, reason),
+        ),
+        line: CallLine::resolved(
+            &admitted.entry,
+            vocab::OUTCOME_REFUSED,
+            REASON_QUEUE_DEADLINE,
+        ),
+    }
 }
 
 /// A relayed call whose upstream leg failed before an answer (`reason`, in the previous release's
