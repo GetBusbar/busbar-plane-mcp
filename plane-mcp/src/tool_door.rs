@@ -2909,6 +2909,21 @@ slot!(
                                             plane, ticket, member, def, program, &ids, &refusal,
                                         ));
                                     }
+                                    // An ask past the operator's `sampling_bounds` is refused by
+                                    // name on the child's input, as the round cap is.
+                                    if let Err(refusal) =
+                                        crate::tool_program::judge_child_asks(
+                                            &relay.admitted.entry.server,
+                                            def,
+                                            &asks,
+                                        )
+                                    {
+                                        let ids: Vec<Value> =
+                                            asks.into_iter().map(|a| a.id).collect();
+                                        return Some(refuse_child(
+                                            plane, ticket, member, def, program, &ids, &refusal,
+                                        ));
+                                    }
                                     // The child still serves the call: its place in the line
                                     // is held for the retry, until the ask's state lapses.
                                     if let Some(now) = plane

@@ -396,3 +396,38 @@ fn the_call_an_ask_belongs_to() {
     );
     assert_eq!(first_in_line([], 1), None, "no call");
 }
+
+/// A STDIO CHILD'S granted `sampling/createMessage` ask is judged against the same
+/// `tools.<server>.sampling_bounds` as the http path (owner ruling Q22c): over the cap is a named
+/// refusal (`sampling_bound_exceeded`) the door writes back on the child's input as `-32001`;
+/// exactly at the cap it goes to the caller.
+#[test]
+fn a_stdio_childs_sampling_ask_over_the_cap_is_refused_by_name() {
+    let mut def = crate::door::read_tools_section(
+        br#"{"kid": {"url": "https://mcp.example/kid", "pin": {"mechanism": "unpinned"},
+            "grants": {"sampling": true}}}"#,
+    )
+    .expect("reads")
+    .servers
+    .get("kid")
+    .expect("kid")
+    .clone();
+    def.sampling_bounds.max_messages = 2;
+    let ask = |n: usize| ChildAsk {
+        id: json!(9),
+        request: json!({ "method": "sampling/createMessage", "params": { "messages":
+            vec![json!({ "role": "user", "content": { "type": "text", "text": "hi" } }); n] } }),
+    };
+    judge_child_asks("kid", &def, &[ask(2)]).expect("exactly at the cap goes to the caller");
+    let refusal = judge_child_asks("kid", &def, &[ask(3)]).expect_err("one over is refused");
+    assert_eq!(refusal.audit_reason(), "sampling_bound_exceeded");
+    let reply =
+        crate::client::peer::refused(&json!(9), refusal.audit_reason(), refusal.to_string());
+    assert_eq!(
+        reply["error"]["data"]["reason"],
+        json!("sampling_bound_exceeded")
+    );
+    assert!(reply["error"]["message"]
+        .as_str()
+        .is_some_and(|m| m.contains("tools.kid.sampling_bounds.max_messages")));
+}

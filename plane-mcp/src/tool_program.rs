@@ -266,6 +266,21 @@ impl Correlator {
     }
 }
 
+/// A STDIO CHILD'S granted asks judged against the operator's `tools.<server>.sampling_bounds`
+/// (owner ruling Q22c), by the one judgement the http path uses ([`crate::call::judge_sampling_bounds`]).
+/// The first ask past a bound is the refusal; the door writes it on the child's input.
+pub fn judge_child_asks(
+    server: &str,
+    def: &crate::tools_config::McpServerDefCfg,
+    asks: &[ChildAsk],
+) -> Result<(), crate::call::AskRefusal> {
+    crate::call::judge_sampling_bounds(
+        server,
+        &def.sampling_bounds,
+        asks.iter().map(|a| &a.request),
+    )
+}
+
 /// THE CHILD'S ASKS AS THE CALLER IS HANDED THEM: an `input_required` result whose `inputRequests`
 /// carries each request verbatim, keyed by the child's own id (a string id as it is, any other as
 /// its JSON), and the keys paired with the ids the answers go back under.
