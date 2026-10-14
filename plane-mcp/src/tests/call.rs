@@ -1090,6 +1090,7 @@ fn sampling_bounds_default_when_the_keys_are_omitted() {
             max_stop_sequence_bytes: 64,
             temperature_min_milli: 0,
             temperature_max_milli: 2000,
+            max_input_response_bytes: 1_048_576,
         }
     );
     assert_bound_refused(
