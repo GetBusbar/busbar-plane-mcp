@@ -1,0 +1,27 @@
+{
+  "schema": "blackbox/1",
+  "case": "the_catalog_sections_are_not_required_when_no_linked_plane_requires_them",
+  "requires": {
+    "sections": [
+      "tools"
+    ]
+  },
+  "unless": [
+    "body-ingress"
+  ],
+  "files": {
+    "providers.yaml": "",
+    "config.yaml": "listen: \"127.0.0.1:0\"\nstore: {module: memory}\n"
+  },
+  "vars": {
+    "BUSBAR_CONFIG": "{dir}/config.yaml",
+    "BUSBAR_PROVIDERS": "{dir}/providers.yaml"
+  },
+  "steps": [
+    {
+      "validate": {
+        "exit": 0
+      }
+    }
+  ]
+}

@@ -22,7 +22,7 @@
   "steps": [
     {
       "boot": {
-        "expect": "exit",
+        "exit": "nonzero",
         "within_secs": 120,
         "output_contains": [
           "mcp:",
