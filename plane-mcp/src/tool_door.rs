@@ -712,6 +712,14 @@ impl Pending {
         self
     }
 
+    /// Answered with NO FEE UNIT: the answer of a call that was never sent, which delivered nothing
+    /// and so earns none ([`queue_deadline_answer`]). A unit that reports no fee unit has its
+    /// admission's fee given back (the kernel's `FeeRefund::PlaneFeeUnits`).
+    fn unbilled(mut self) -> Self {
+        self.units.retain(|u| u.class != door::CLASS_FEE_INDEX);
+        self
+    }
+
     /// With the admin audit row `row`.
     pub(super) fn audited(mut self, row: crate::call::AuditRow) -> Self {
         self.audits.push(row);
@@ -1739,21 +1747,39 @@ fn take_turn(
     }
     relay.queued = None;
     relay.program = None;
-    let Settled::Answer { status, body, line } =
-        crate::call::upstream_failed(&relay.admitted, door_program::BUSY)
-    else {
+    let settled = crate::call::never_sent(&relay.admitted, door_program::BUSY);
+    let ts = clock_s(plane.services, ticket, unit);
+    unit.pending = Some(queue_deadline_answer(
+        settled,
+        unit.framing.as_ref(),
+        principal,
+        generation,
+        ts,
+    )?);
+    Some(Step::Write)
+}
+
+/// THE ANSWER OF A CALL THAT NEVER LEFT ITS QUEUE ([`crate::call::never_sent`]), logged under
+/// `scope` and `generation` at `ts`: the upstream-failure tool error, the call log's `refused` line,
+/// and NO FEE UNIT. A call that was never sent delivered nothing, so it earns no fee and the kernel
+/// gives back the one its admission counted (ARCHITECT/coordinator ruling 2026-10-14: #62 "bill what
+/// was delivered", Q35 "a hop refused before the socket is refunded", applied uniformly across
+/// planes). `None` for a settlement that is not an answer.
+fn queue_deadline_answer(
+    settled: Settled,
+    framing: Option<&Framing>,
+    scope: &str,
+    generation: u64,
+    ts: Option<u64>,
+) -> Option<Pending> {
+    let Settled::Answer { status, body, line } = settled else {
         return None;
     };
-    let ts = clock_s(plane.services, ticket, unit);
-    unit.pending = Some(
-        Pending::answer(status, body, unit.framing.as_ref(), &[]).logged(
-            Some(&line),
-            principal,
-            generation,
-            ts,
-        ),
-    );
-    Some(Step::Write)
+    Some(
+        Pending::answer(status, body, framing, &[])
+            .logged(Some(&line), scope, generation, ts)
+            .unbilled(),
+    )
 }
 
 fn answer_body(
@@ -4043,3 +4069,8 @@ mod door_sessions;
 /// reads the door's own unit and answer state.
 #[path = "door_tasks.rs"]
 mod door_tasks;
+
+/// The door's money answers, pure: what a unit reports beside the answer its caller is written.
+#[cfg(test)]
+#[path = "tests/door_money.rs"]
+mod door_money;
