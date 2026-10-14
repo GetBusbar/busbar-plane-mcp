@@ -3,6 +3,9 @@
   "requires": {
     "sections": [
       "tools"
+    ],
+    "features": [
+      "auth-admin-tokens"
     ]
   },
   "credentials": {
