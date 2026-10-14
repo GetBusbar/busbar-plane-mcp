@@ -50,7 +50,7 @@
     "providers.yaml": "{}\n",
     "config.yaml": "listen: \"127.0.0.1:{data_port}\"\nadmin_listen: \"127.0.0.1:{admin_port}\"\nstore: {module: memory}\nproviders: {}\nmodels: {}\npools: {}\nidentity-providers:\n  admin-tokens: { module: admin-tokens, token: { env: BUSBAR_ADMIN_TOKEN } }\nauth:\n  chain: [keys]\n  admin_auth: [admin-tokens]\n  signing_key: { file: '{signing_key_file}' }\nmcp:\n  canonical_uri: \"http://127.0.0.1:{data_port}/mcp\"\n  authorization_servers:\n    - \"http://127.0.0.1:{admin_port}\"\n  scopes_supported: [\"mcp:tools:list\", \"mcp:tools:call\"]\ntools:\n  probe:\n    url: \"{upstream_url}\"\n    allow_private: true\n    verify_ttl: \"0s\"\n    pin:\n      mechanism: pinned_pubkey\n      key: \"sha256/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"\n    tools_allow:\n      ping:\n        schema_hash: \"sha256:7939d1408e8fc1ac98025ed864c53703091d173e733b1d5c6156f14732da75b0\"\n        description: \"Returns the label it was given.\"\n"
   },
-  "env": {
+  "vars": {
     "BUSBAR_CONFIG": "{dir}/config.yaml",
     "BUSBAR_PROVIDERS": "{dir}/providers.yaml",
     "BUSBAR_ADMIN_TOKEN": "{admin_token}",
@@ -86,17 +86,29 @@
       }
     },
     {
-      "http": {
+      "call": {
         "port": "data",
         "method": "POST",
         "path": "/mcp",
         "bearer": "{minted}",
-        "headers": {
-          "content-type": "application/json",
-          "mcp-method": "tools/call",
-          "mcp-protocol-version": "2026-07-28",
-          "Mcp-Name": "probe_ping"
-        },
+        "headers": [
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "mcp-method",
+            "tools/call"
+          ],
+          [
+            "mcp-protocol-version",
+            "2026-07-28"
+          ],
+          [
+            "Mcp-Name",
+            "probe_ping"
+          ]
+        ],
         "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"probe_ping\",\"arguments\":{\"label\":\"control\"},\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{}}}}",
         "status": 200,
         "body_contains": [
@@ -138,17 +150,29 @@
       }
     },
     {
-      "http": {
+      "call": {
         "port": "data",
         "method": "POST",
         "path": "/mcp",
         "bearer": "{minted}",
-        "headers": {
-          "content-type": "application/json",
-          "mcp-method": "tools/call",
-          "mcp-protocol-version": "2026-07-28",
-          "Mcp-Name": "probe_ping"
-        },
+        "headers": [
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "mcp-method",
+            "tools/call"
+          ],
+          [
+            "mcp-protocol-version",
+            "2026-07-28"
+          ],
+          [
+            "Mcp-Name",
+            "probe_ping"
+          ]
+        ],
         "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"probe_ping\",\"arguments\":{\"label\":\"after-the-change\"},\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{}}}}",
         "status": 403,
         "body_contains": [
