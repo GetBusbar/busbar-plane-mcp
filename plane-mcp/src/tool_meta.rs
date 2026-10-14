@@ -31,7 +31,8 @@ const BYTE_FAMILY: &str = "byte";
 /// answered with (`tool_door.rs` `Pending::counted`), beside the fee unit a success earns. A call
 /// whose upstream never answered reports neither class, because nothing was measured (#62: what is
 /// billed is what was delivered); it went out, so it keeps the fee unit its caller's answer earns
-/// (Q35). A call that never left its queue reports no fee unit either (`call::never_sent`).
+/// (Q35). A call that never left reports no fee unit either: one whose deadline passed in its
+/// queue (`call::never_sent`), or one whose server the live tool-list check could not reach.
 const METER_CLASSES: &[MeterClassDecl] = &[
     MeterClassDecl {
         key: MeterClassId::new("tool_calls"),
