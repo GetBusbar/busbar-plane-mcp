@@ -712,6 +712,14 @@ impl Pending {
         self
     }
 
+    /// Answered with NO FEE UNIT: the answer of a call that was never sent, which delivered nothing
+    /// and so earns none ([`never_sent_answer`]). A unit that reports no fee unit has its
+    /// admission's fee given back (the kernel's `FeeRefund::PlaneFeeUnits`).
+    fn unbilled(mut self) -> Self {
+        self.units.retain(|u| u.class != door::CLASS_FEE_INDEX);
+        self
+    }
+
     /// With the admin audit row `row`.
     pub(super) fn audited(mut self, row: crate::call::AuditRow) -> Self {
         self.audits.push(row);
@@ -1740,20 +1748,39 @@ fn take_turn(
     relay.queued = None;
     relay.program = None;
     let Settled::Answer { status, body, line } =
-        crate::call::upstream_failed(&relay.admitted, door_program::BUSY)
+        crate::call::never_sent(&relay.admitted, door_program::BUSY)
     else {
         return None;
     };
     let ts = clock_s(plane.services, ticket, unit);
-    unit.pending = Some(
-        Pending::answer(status, body, unit.framing.as_ref(), &[]).logged(
-            Some(&line),
-            principal,
-            generation,
-            ts,
-        ),
-    );
+    unit.pending = Some(never_sent_answer(
+        status,
+        body,
+        &line,
+        unit.framing.as_ref(),
+        (principal, generation, ts),
+    ));
     Some(Step::Write)
+}
+
+/// THE ANSWER OF A CALL THAT NEVER LEFT: one that never left its queue
+/// ([`crate::call::never_sent`]), or one whose server the door's live tool-list check could not
+/// reach ([`Admission::Unreached`]). It is `status` and `body` (the upstream-failure tool error), and
+/// `line` (the call log's `refused` line, under its fixed reason), logged under `(scope, generation,
+/// ts)`, with NO FEE UNIT. A call that was never sent delivered nothing, so it earns no fee and the
+/// kernel gives back the one its admission counted (ARCHITECT rulings 2026-10-14 on
+/// busbar-plane-mcp#14: #62 "bill what was delivered", Q35 "a hop refused before the socket is
+/// refunded", applied uniformly across planes).
+fn never_sent_answer(
+    status: u32,
+    body: Vec<u8>,
+    line: &crate::call::CallLine,
+    framing: Option<&Framing>,
+    (scope, generation, ts): (&str, u64, Option<u64>),
+) -> Pending {
+    Pending::answer(status, body, framing, &[])
+        .logged(Some(line), scope, generation, ts)
+        .unbilled()
 }
 
 fn answer_body(
@@ -2004,7 +2031,7 @@ fn answer_body(
             dest_verdict(services?, handle, &held, entry, dest)
         });
         return Some(match admission {
-            Admission::Asked(body, line) | Admission::Unreached(body, line) => {
+            Admission::Asked(body, line) => {
                 unit.pending = Some(
                     Pending::answer(200, body, unit.framing.as_ref(), &[]).logged(
                         Some(&line),
@@ -2013,6 +2040,19 @@ fn answer_body(
                         clock_s(services, ticket, unit),
                     ),
                 );
+                Step::Write
+            }
+            // NEVER SENT: the door's live tool-list check could not reach the server, so the call
+            // did not leave and earns no fee unit ([`never_sent_answer`]).
+            Admission::Unreached(body, line) => {
+                let ts = clock_s(services, ticket, unit);
+                unit.pending = Some(never_sent_answer(
+                    200,
+                    body,
+                    &line,
+                    unit.framing.as_ref(),
+                    (principal, generation, ts),
+                ));
                 Step::Write
             }
             Admission::Refused(refusal, line) => {
@@ -4043,3 +4083,8 @@ mod door_sessions;
 /// reads the door's own unit and answer state.
 #[path = "door_tasks.rs"]
 mod door_tasks;
+
+/// The door's money answers, pure: what a unit reports beside the answer its caller is written.
+#[cfg(test)]
+#[path = "tests/door_money.rs"]
+mod door_money;
