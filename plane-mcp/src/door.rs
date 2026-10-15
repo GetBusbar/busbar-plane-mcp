@@ -26,8 +26,9 @@ use busbar_contract::abi::mechanism::call::{AbiStr, Blob, BLOB_ABSENT};
 use busbar_contract::abi::mechanism::door::{KindTailHead, Section, SECTION_DECLARING};
 use busbar_contract::abi::plane::{
     AdminRoute, BillableClass, OpClass, PinMechanism, PlaneTail, RecordChain, TrustKey,
-    CHAIN_DIGESTS_SCOPE, CHAIN_LENGTH_PREFIXED, INGRESS_REQUEST_RESPONSE, INGRESS_RESPONSE_STREAM,
-    MECHANISM_ROOT, SHAPE_PIECEWISE, TRUST_PIN, TRUST_PRIVATE_REACH, TRUST_REVERIFY_TTL,
+    ANSWER_LAYOUT, CHAIN_DIGESTS_SCOPE, CHAIN_LENGTH_PREFIXED, INGRESS_REQUEST_RESPONSE,
+    INGRESS_RESPONSE_STREAM, MECHANISM_ROOT, SHAPE_PIECEWISE, TRUST_PIN, TRUST_PRIVATE_REACH,
+    TRUST_REVERIFY_TTL,
 };
 use busbar_contract::abi::sdk::door::abi_str;
 use busbar_contract::abi::sdk::publish::{
@@ -395,7 +396,7 @@ pub const TAIL: &PlaneTail = &PlaneTail {
     flags: busbar_contract::abi::plane::TAIL_HOOKS_GATED,
     ingress: INGRESS_REQUEST_RESPONSE | INGRESS_RESPONSE_STREAM,
     dispatch_shape: SHAPE_PIECEWISE,
-    _reserved: 0,
+    answer_layout: ANSWER_LAYOUT,
     scope: abi_str(SCOPE),
     label: abi_str(LABEL),
     subject_noun: abi_str(SUBJECT_NOUN),
