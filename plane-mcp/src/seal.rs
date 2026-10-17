@@ -54,6 +54,21 @@ pub fn unseal_state(
     serde_json::from_slice(&payload).map_err(|_| Rejected::Malformed)
 }
 
+/// THE PLANE'S SEAL OVER `data`: the host's signature of it, `base64url`, unpadded; `None` when it
+/// cannot be signed. What `data` is says what the seal binds (a task's resume, `door_tasks`).
+pub fn seal_bytes(data: &[u8], sign: &mut dyn FnMut(&[u8]) -> Option<Vec<u8>>) -> Option<String> {
+    Some(URL_SAFE_NO_PAD.encode(sign(data)?))
+}
+
+/// Whether `presented` is the seal over `data` ([`seal_bytes`]): the signature re-made by `sign` and
+/// compared in constant time.
+pub fn opens(data: &[u8], presented: &str, sign: &mut dyn FnMut(&[u8]) -> Option<Vec<u8>>) -> bool {
+    let (Some(presented), Some(made)) = (strict(presented), sign(data)) else {
+        return false;
+    };
+    presented.len() == SIGNATURE_LEN && same(&presented, &made)
+}
+
 /// `text` decoded as unpadded base64url, and only when it is that value's one spelling.
 fn strict(text: &str) -> Option<Vec<u8>> {
     let bytes = URL_SAFE_NO_PAD.decode(text).ok()?;

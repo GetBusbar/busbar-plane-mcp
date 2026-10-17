@@ -47,8 +47,8 @@ use busbar_contract::abi::mechanism::check::SPAN_ABSENT;
 use serde_json::{json, Map, Value};
 
 use super::{
-    clock_s, twin_of, CallUnit, CompletionHandle, DoorSeal, Held, McpDoor, Pending, Relay,
-    Services, Step, Ticket, Twin,
+    clock_s, twin_of, CallUnit, CompletionHandle, DoorSeal, Held, McpDoor, Pending, Services, Step,
+    Ticket, Twin,
 };
 use crate::call::{AdmittedCall, Leg, RelayedRetry};
 use crate::door::RECORD_TASK;
@@ -78,8 +78,14 @@ pub(super) enum Retry {
         /// The caller's answers.
         responses: Value,
     },
-    /// The round of the task's own asks it was parked on, answered: the run resumes there.
-    Asked(usize),
+    /// The round of the task's own asks it was parked on, answered: the run resumes there, under
+    /// the seal the `tasks/update` that nested it made ([`resume_seal`]).
+    Asked {
+        /// The round.
+        round: usize,
+        /// The plane's seal over the principal, the task, the round and the call.
+        seal: String,
+    },
 }
 
 impl TaskUnit {
@@ -326,7 +332,8 @@ pub(super) type RunArrival = (String, Value, Vec<u8>, Option<Retry>);
 /// THE CONTINUATION'S ARRIVAL on the task-run claim: its reference, the call it runs, and that call
 /// as the `tools/call` body the one dispatch decides (its head fields mirrored from it), and — the
 /// retry of a relayed ask — `relay: {requestState, inputResponses}`, or — the resume of an answered
-/// round of the task's own asks — `resume: <round>`. `None` for a body that is not one.
+/// round of the task's own asks — `resume: <round>` and its `seal`. `None` for a body that is not
+/// one (a resume with no seal included).
 pub(super) fn run_arrival(body: &[u8]) -> Option<RunArrival> {
     let value: Value = serde_json::from_slice(body).ok()?;
     let reference = value.get("taskId")?.as_str()?.to_string();
@@ -338,7 +345,10 @@ pub(super) fn run_arrival(body: &[u8]) -> Option<RunArrival> {
             state: relay.get("requestState")?.as_str()?.to_string(),
             responses: relay.get("inputResponses")?.clone(),
         }),
-        (None, Some(round)) => Some(Retry::Asked(usize::try_from(round.as_u64()?).ok()?)),
+        (None, Some(round)) => Some(Retry::Asked {
+            round: usize::try_from(round.as_u64()?).ok()?,
+            seal: value.get("seal")?.as_str()?.to_string(),
+        }),
     };
     let call = json!({
         "jsonrpc": "2.0",
@@ -424,8 +434,11 @@ fn owe(plane: &McpDoor, task: &Task) {
 /// THE TASK'S LIVE STATE AS ITS RECORDS (THE DESIGN, the mcp bullet: the task store is
 /// host records): its live chunks, any this instance wrote past them struck, and — `until` given — its caller's index row,
 /// its run's lease `until` (`0`: no run holds it).
-fn live_records(plane: &McpDoor, task: &Task, until: Option<u64>) -> Vec<(Vec<u8>, Vec<u8>)> {
-    let mut out = tasks::live_parts(&task.id, &task.live());
+///
+/// `Err` the state's length when the host's records do not keep it (row 159 mcp finding P-M6): the
+/// caller refuses what would make it, and nothing earlier is struck.
+fn live_records(plane: &McpDoor, task: &Task, until: Option<u64>) -> Result<tasks::Records, usize> {
+    let mut out = tasks::live_parts(&task.id, &task.live())?;
     let wrote = u32::try_from(out.len()).unwrap_or(u32::MAX);
     let before = plane.tasks.with(&task.id, |t| {
         t.map_or(0, |t| std::mem::replace(&mut t.live_chunks, wrote))
@@ -438,7 +451,26 @@ fn live_records(plane: &McpDoor, task: &Task, until: Option<u64>) -> Vec<(Vec<u8
         };
         out.push((task.index_key(), lease.bytes()));
     }
-    out
+    Ok(out)
+}
+
+/// The words of a task whose state the host's records do not keep (`bytes` long).
+fn not_kept(what: &str, bytes: usize) -> String {
+    format!(
+        "this task's {what} is {bytes} bytes, more than a task keeps in the host's records ({} \
+         bytes), so it is not kept",
+        tasks::kept_bytes()
+    )
+}
+
+/// ITS CALLER'S INDEX ROW alone, its run's lease `until`: what rides a request whose task's live
+/// state is already in the records.
+fn lease_record(task: &Task, until: u64) -> (Vec<u8>, Vec<u8>) {
+    let lease = tasks::TaskLease {
+        until_ms: until,
+        updated_ms: task.stamps().1,
+    };
+    (task.index_key(), lease.bytes())
 }
 
 /// THE RECORDS A SETTLED TASK LEAVES, struck: its live chunks and its caller's index row.
@@ -658,12 +690,13 @@ fn creating(
     // `work.open`. From a submit, never a read or a timer.
     if !st.indexed {
         let prefix = tasks::index_prefix(principal);
+        // Every page of them (row 159 mcp finding C-L10).
         if list_records(
             services,
             ticket,
             &mut unit.issued,
             &prefix,
-            true,
+            false,
             &mut st.index,
         )
         .is_pending()
@@ -848,10 +881,29 @@ pub(super) fn is_run(unit: &CallUnit) -> bool {
 /// THE CONTINUATION'S CALLER BODY has arrived (or arrived again, for another member of its walk):
 /// its phases run from where they are.
 pub(super) fn begin(plane: &McpDoor, ticket: Ticket, principal: &str, unit: &mut CallUnit) -> Step {
+    // A CALL WAITING ITS TURN on a stdio child whose asks are relayed, called again: sent once it
+    // is first in line, as the synchronous call's is; never sent once its deadline passed.
+    let far = matches!(unit.task.as_ref(), Some(TaskUnit::Run(r)) if r.phase == Phase::Far);
+    let turn = if far {
+        super::queued_turn(plane, ticket, unit)
+    } else {
+        None
+    };
+    let busy = match turn {
+        Some(Ok(step)) => return step,
+        Some(Err(())) => true,
+        None => false,
+    };
     if let Some(TaskUnit::Run(run)) = unit.task.as_mut() {
         run.begun = true;
-        // Another member of the walk: the call is sent again, to it.
-        if run.phase == Phase::Far {
+        if busy {
+            run.end = Some(End::Failed(format!(
+                "the MCP upstream call failed: {}",
+                super::door_program::BUSY
+            )));
+            run.phase = Phase::Settle;
+        } else if run.phase == Phase::Far {
+            // Another member of the walk: the call is sent again, to it.
             run.phase = Phase::Call;
         }
     }
@@ -985,10 +1037,16 @@ fn asking(
     // THE CONTINUATION ENDS with the handle live, its live state in the plane's records: the
     // caller's answer, on whichever node, runs the next one.
     match parked {
-        Ok(task) => {
-            let records = live_records(plane, &task, Some(0));
-            reply(unit, run, Status::InputRequired, records)
-        }
+        Ok(task) => match live_records(plane, &task, Some(0)) {
+            Ok(records) => reply(unit, run, Status::InputRequired, records),
+            // THE TASK STORE IS HOST RECORDS (P-M6): an ask the records cannot keep fails the
+            // task in words, never parks it in hand only.
+            Err(bytes) => {
+                run.end = Some(End::Failed(not_kept("upstream's ask", bytes)));
+                run.phase = Phase::Settle;
+                running(plane, ticket, principal, unit, run)
+            }
+        },
         Err(status) => reply(unit, run, status, Vec::new()),
     }
 }
@@ -1144,7 +1202,7 @@ fn running(
     let Some(held) = unit.held.clone() else {
         return not_run(unit, run);
     };
-    loop {
+    'phases: loop {
         match run.phase {
             Phase::Done | Phase::Far => return Step::Taken,
             Phase::Bind => {
@@ -1190,13 +1248,26 @@ fn running(
                             }
                         }
                         // THE RESUME of an answered round of the task's own asks: the update that
-                        // answered it nested it once, and the host's one-time claim of that round
-                        // takes it; it asks from that round on.
-                        Some(Retry::Asked(round)) => {
+                        // answered it nested it once under the plane's seal (row 159 mcp finding
+                        // P-M9: a resume its caller posted on the task-run claim itself carries
+                        // none), and the host's one-time claim of that round takes it; it asks
+                        // from that round on.
+                        Some(Retry::Asked { round, seal }) => {
                             let working = plane.tasks.get(&run.reference).is_some_and(|t| {
                                 t.owned_by(principal) && t.status() == Status::Working
                             });
-                            if !working {
+                            let data = resume_data(principal, &run.reference, round, &run.digest);
+                            let mut door_seal = DoorSeal {
+                                services,
+                                ticket,
+                                issued: &mut unit.issued,
+                                claim: &mut unit.claim,
+                                spent: &plane.spent,
+                                pending: false,
+                            };
+                            if !working
+                                || !crate::seal::opens(&data, &seal, &mut |d| door_seal.sign(d))
+                            {
                                 return not_run(unit, run);
                             }
                             run.round = round;
@@ -1219,7 +1290,9 @@ fn running(
                 if run.leg.is_none() {
                     let h = handle(ticket, &mut unit.issued, &mut run.claim);
                     let key = match run.retry {
-                        Some(Retry::Asked(round)) => format!("task-run:{}/{round}", run.reference),
+                        Some(Retry::Asked { round, .. }) => {
+                            format!("task-run:{}/{round}", run.reference)
+                        }
                         _ => format!("task-run:{}", run.reference),
                     };
                     match services.records_claim(
@@ -1295,10 +1368,17 @@ fn running(
                         // PARKED ON ITS CALLER: the continuation ends with the handle live and the
                         // task's live state in the plane's records; the `tasks/update` that answers
                         // the round, on whichever node, nests the resume.
-                        Then::Park(task) => {
-                            let records = live_records(plane, &task, Some(0));
-                            return reply(unit, run, Status::InputRequired, records);
-                        }
+                        Then::Park(task) => match live_records(plane, &task, Some(0)) {
+                            Ok(records) => {
+                                return reply(unit, run, Status::InputRequired, records);
+                            }
+                            // An ask the records cannot keep fails the task in words (P-M6).
+                            Err(bytes) => {
+                                run.end = Some(End::Failed(not_kept("round of asks", bytes)));
+                                run.phase = Phase::Settle;
+                                continue 'phases;
+                            }
+                        },
                         Then::Next => run.round += 1,
                     }
                 }
@@ -1324,7 +1404,7 @@ fn running(
                     .get(&run.reference)
                     .map(|t| t.answers().clone())
                     .unwrap_or_default();
-                match call(services, ticket, &held, unit, run, &answers) {
+                match call(plane, ticket, principal, &held, unit, run, &answers) {
                     // THE RUN'S LEASE, renewed as its call goes out: the task's live state and its
                     // index row ride the request.
                     Ok(Step::Write) => {
@@ -1338,7 +1418,8 @@ fn running(
                             let until = now
                                 .saturating_add(timeout)
                                 .saturating_add(tasks::RUN_LEASE_MS);
-                            let records = live_records(plane, &task, Some(until));
+                            let records = live_records(plane, &task, Some(until))
+                                .unwrap_or_else(|_| vec![lease_record(&task, until)]);
                             ride(unit, records);
                         }
                         return Step::Write;
@@ -1354,6 +1435,7 @@ fn running(
                 let Some(end) = run.end.clone() else {
                     return not_run(unit, run);
                 };
+                let end = kept_end(&run.reference, end);
                 let at = match run.at {
                     Some(at) => at,
                     None => {
@@ -1395,7 +1477,7 @@ fn running(
                             t.unsettled = won.is_none();
                             let chunks = match (won, t.terminal()) {
                                 (Some(true), Some(terminal)) => {
-                                    tasks::result_chunks(&reference, &terminal)
+                                    tasks::result_chunks(&reference, &terminal).unwrap_or_default()
                                 }
                                 _ => Vec::new(),
                             };
@@ -1417,19 +1499,50 @@ fn running(
     }
 }
 
+/// THE TERMINAL STATE AS THE HOST'S RECORDS KEEP IT (row 159 mcp finding P-M6; THE DESIGN, the mcp
+/// bullet: the task store is host records): a result longer than they keep settles the task
+/// `failed` in words, the same on every node, never held only in hand; a failure's words longer
+/// than they keep are cut to what they keep.
+fn kept_end(reference: &str, end: End) -> End {
+    let terminal = match &end {
+        End::Completed(value) => json!({ "result": value }),
+        End::Failed(message) => {
+            json!({ "error": { "code": TASK_PROTOCOL_ERROR_CODE, "message": message } })
+        }
+    };
+    match tasks::result_chunks(reference, &terminal) {
+        Ok(_) => end,
+        Err(bytes) => match end {
+            End::Completed(_) => End::Failed(not_kept("result", bytes)),
+            // Escaped, a character is at most six bytes, plus room for the envelope.
+            End::Failed(message) => {
+                End::Failed(message.chars().take(tasks::kept_bytes() / 8).collect())
+            }
+        },
+    }
+}
+
 /// THE CALL, sent to the member the continuation's walk picked: the arguments as admitted with the
-/// task's answers merged in (`answers`), judged again by the argument guard on what is actually
-/// about to be dispatched (the answers were never screened), a pool's twin taken as the synchronous
-/// path takes it. Every host the arguments name is asked of `dest.judge` on `ticket`. `Err` = the
-/// task ends here, in the engine's words.
+/// answers to the task's own rounds merged in (`answers`, never over an admitted argument), judged
+/// again by the argument guard on what is actually about to be dispatched (the answers were never
+/// screened), a pool's twin taken as the synchronous path takes it, and sent by THE ONE
+/// MEMBER-SEND the synchronous call uses ([`super::send_to_member`], row 159 mcp findings C-H2,
+/// C-H3, C-M4): the caller's down-scope to a `token_exchange:` member, the client ladder, a stdio
+/// member's child, the bound on the caller's reply to a relayed ask. Every host the arguments name
+/// is asked of `dest.judge` on `ticket`. `Err` = the task ends here, in the engine's words.
+#[allow(clippy::too_many_lines)]
 fn call(
-    services: Services,
+    plane: &McpDoor,
     ticket: Ticket,
+    principal: &str,
     held: &Held,
     unit: &mut CallUnit,
     run: &mut Run,
     answers: &Map<String, Value>,
 ) -> Result<Step, End> {
+    let Some(services) = plane.services else {
+        return Err(End::Failed("the host serves no services".to_string()));
+    };
     let name = run.params.get("name").and_then(Value::as_str).unwrap_or("");
     let Some(entry) = held.catalogue.tool(name).cloned() else {
         return Err(End::Failed(format!(
@@ -1470,9 +1583,14 @@ fn call(
             None => return Ok(Step::Decline),
         },
     };
-    let Some(def) = held.section.servers.get(&member) else {
+    if !held.section.servers.contains_key(&member) {
         return Ok(Step::Decline);
-    };
+    }
+    // A stdio member's child is greeted (once per generation) before the call, as the synchronous
+    // call's is.
+    if let super::Looked::Pending = super::door_program::ready(plane, ticket, unit, held, &member) {
+        return Ok(Step::Pending);
+    }
     // THE RETRY: the caller's answers and the upstream's own state, verbatim, on the next round.
     let relay = run.leg.as_ref().map(|leg| {
         let mut continuation = Map::new();
@@ -1489,7 +1607,6 @@ fn call(
             child: leg.child.clone(),
         })
     });
-    let round = relay.as_ref().map_or(0, |r| r.round);
     let admitted = AdmittedCall {
         sent_digest: crate::ask::digest_arguments(&arguments),
         entry,
@@ -1500,20 +1617,29 @@ fn call(
         capabilities: capabilities(Some(&run.params)),
         relay,
     };
-    let continuation = admitted.relay.as_ref().map(|r| r.continuation.clone());
-    let Some(outbound) =
-        crate::call::outbound(&admitted, &member, def, round, continuation.as_ref())
-    else {
-        return Err(End::Failed(format!(
-            "server `{member}` registers no `url:` this door can reach it at"
-        )));
+    // The binding the caller's upstream sessions are kept under: its reference, as the
+    // synchronous call's (an ungoverned caller's is the empty one).
+    let binding = if principal == crate::ask::UNGOVERNED {
+        ""
+    } else {
+        principal
     };
-    unit.pending = Some(Pending::far(outbound).laned(&admitted.entry.namespaced));
-    let mut relay = Relay::of(admitted);
-    relay.round = round;
-    unit.relay = Some(relay);
-    run.phase = Phase::Far;
-    Ok(Step::Write)
+    match super::send_to_member(plane, ticket, binding, unit, held, &member, admitted) {
+        Some(super::MemberSend::Step(step)) => {
+            if matches!(step, Step::Write | Step::Wait(_)) {
+                run.phase = Phase::Far;
+            }
+            Ok(step)
+        }
+        Some(super::MemberSend::Decline) => Ok(Step::Decline),
+        Some(super::MemberSend::Judged(_, refusal)) => Err(End::Failed(refusal.to_string())),
+        Some(super::MemberSend::Spent(_)) => Err(End::Failed(
+            crate::ask::AskRefusal::StateRejected(crate::ask::Rejected::AlreadySpent).to_string(),
+        )),
+        None => Err(End::Failed(format!(
+            "the call to server `{member}` could not be built for its transport"
+        ))),
+    }
 }
 
 // ── the verbs ─────────────────────────────────────────────────────────────────────────────────
@@ -1548,31 +1674,71 @@ fn nest_run(
         Poll::Pending
         | Poll::Ready(Ok(_))
         | Poll::Ready(Err(busbar_contract::abi::sdk::services::ServiceError::Short { .. })) => {
-            live_records(plane, task, Some(at.saturating_add(tasks::RUN_LEASE_MS)))
+            let until = at.saturating_add(tasks::RUN_LEASE_MS);
+            live_records(plane, task, Some(until))
+                .unwrap_or_else(|_| vec![lease_record(task, until)])
         }
-        Poll::Ready(Err(_)) => {
-            let failed = plane.tasks.with(&task.id, |t| {
-                t.and_then(|t| {
-                    t.fail(
-                        TASK_PROTOCOL_ERROR_CODE,
-                        "the host ran no continuation for the caller's answer".to_string(),
-                        at,
-                    )
-                    .then(|| t.clone())
-                })
-            });
-            match failed {
-                Some(t) if settled(services, ticket, &mut unit.issued, t.handle, &t.row()) => {
-                    struck_records(&t)
-                }
-                Some(t) => {
-                    owe(plane, &t);
-                    Vec::new()
-                }
-                None => Vec::new(),
-            }
-        }
+        Poll::Ready(Err(_)) => fail_unrun(
+            plane,
+            (services, ticket, &mut unit.issued),
+            task,
+            "the host ran no continuation for the caller's answer",
+            at,
+        ),
     }
+}
+
+/// A TASK NOTHING CAN CONTINUE, failed in `why` and its handle settled (owed until it lands): the
+/// records its settle leaves to strike.
+fn fail_unrun(
+    plane: &McpDoor,
+    (services, ticket, issued): (Services, Ticket, &mut u32),
+    task: &Task,
+    why: &str,
+    at: u64,
+) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let failed = plane.tasks.with(&task.id, |t| {
+        t.and_then(|t| {
+            t.fail(TASK_PROTOCOL_ERROR_CODE, why.to_string(), at)
+                .then(|| t.clone())
+        })
+    });
+    match failed {
+        Some(t) if settled(services, ticket, issued, t.handle, &t.row()) => struck_records(&t),
+        Some(t) => {
+            owe(plane, &t);
+            Vec::new()
+        }
+        None => Vec::new(),
+    }
+}
+
+/// What a resume's seal is made over: the principal, the task, the round and the call it runs.
+fn resume_data(principal: &str, reference: &str, round: usize, digest: &str) -> Vec<u8> {
+    format!("busbar-mcp task resume v1\0{principal}\0{reference}\0{round}\0{digest}").into_bytes()
+}
+
+/// THE SEAL OF A RESUME (row 159 mcp finding P-M9): the plane's own signature over `data`
+/// ([`resume_data`]), made by the `tasks/update` that nests the resume and opened by the resume;
+/// the task-run claim is an ordinary claim and the arrival says nothing of who nested it, so the
+/// seal is what tells the resume the update nested from one its caller posted itself. `None` when
+/// the deployment signs nothing.
+fn resume_seal(
+    plane: &McpDoor,
+    services: Services,
+    ticket: Ticket,
+    unit: &mut CallUnit,
+    data: &[u8],
+) -> Option<String> {
+    let mut seal = DoorSeal {
+        services,
+        ticket,
+        issued: &mut unit.issued,
+        claim: &mut unit.claim,
+        spent: &plane.spent,
+        pending: false,
+    };
+    crate::seal::seal_bytes(data, &mut |d| seal.sign(d))
 }
 
 /// What resolving a verb's `taskId` came to.
@@ -1674,6 +1840,7 @@ fn verbing(
             .unwrap_or_default();
         let delivered = plane.tasks.with(&task.id, |t| {
             t.map(|t| {
+                let before = t.clone();
                 let was = t.status();
                 let took = t.deliver(&responses, at);
                 let park = t.take_relay();
@@ -1686,10 +1853,24 @@ fn verbing(
                 } else {
                     None
                 };
-                (took, park, resume, t.clone())
+                // THE TASK STORE IS HOST RECORDS (row 159 mcp finding P-M6): answers that would
+                // make a state the records do not keep are refused whole, and nothing moves.
+                if !t.status().is_terminal() {
+                    if let Err(bytes) = tasks::live_parts(&t.id, &t.live()) {
+                        *t = before;
+                        return (took, Some(bytes), None, None, t.clone());
+                    }
+                }
+                (took, None, park, resume, t.clone())
             })
         });
         let (park, resume, t) = match delivered {
+            Some((true, Some(bytes), ..)) => {
+                return refuse(
+                    unit,
+                    &invalid(id, &not_kept("state with these answers", bytes)),
+                )
+            }
             Some((false, ..)) => {
                 return refuse(
                     unit,
@@ -1704,7 +1885,7 @@ fn verbing(
                     ),
                 )
             }
-            Some((true, park, resume, t)) => (park, resume, t),
+            Some((true, None, park, resume, t)) => (park, resume, t),
             None => return ack(unit),
         };
         let records = if t.status().is_terminal() {
@@ -1723,14 +1904,28 @@ fn verbing(
             });
             nest_run(plane, services, ticket, unit, &t, &body, at)
         } else if let Some((round, call)) = resume {
-            // THE ROUND OF ITS OWN ASKS, ANSWERED: the run resumes there, as a NEW unit.
-            let body = json!({ "taskId": t.id, "params": call, "resume": round });
-            nest_run(plane, services, ticket, unit, &t, &body, at)
+            // THE ROUND OF ITS OWN ASKS, ANSWERED: the run resumes there, as a NEW unit, under
+            // the plane's seal (P-M9).
+            let data = resume_data(principal, &t.id, round, &run_digest(&call));
+            match resume_seal(plane, services, ticket, unit, &data) {
+                Some(seal) => {
+                    let body =
+                        json!({ "taskId": t.id, "params": call, "resume": round, "seal": seal });
+                    nest_run(plane, services, ticket, unit, &t, &body, at)
+                }
+                None => fail_unrun(
+                    plane,
+                    (services, ticket, &mut unit.issued),
+                    &t,
+                    "the deployment signs nothing, so the resume of this task cannot be sealed",
+                    at,
+                ),
+            }
         } else if t.status() == Status::InputRequired {
-            live_records(plane, &t, Some(0))
+            live_records(plane, &t, Some(0)).unwrap_or_default()
         } else {
             // A run holds it: its state is written, its lease left as the run took it.
-            live_records(plane, &t, None)
+            live_records(plane, &t, None).unwrap_or_default()
         };
         let step = ack(unit);
         ride(unit, records);
