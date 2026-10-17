@@ -113,6 +113,9 @@ pub const RESULT_CHUNK_BYTES: usize = 480;
 /// longer than this is refused where it would be made; neither is held only in hand.
 pub const MAX_RESULT_CHUNKS: usize = 480;
 
+/// Plane records of the task kind, `(key, value)`, in key order.
+pub type Records = Vec<(Vec<u8>, Vec<u8>)>;
+
 /// The most bytes a task keeps in the host's records, its result or its live state.
 #[must_use]
 pub const fn kept_bytes() -> usize {
@@ -809,13 +812,13 @@ pub fn chunk_prefix(id: &str) -> Vec<u8> {
 /// # Errors
 ///
 /// The value's length, when the host's records do not keep it.
-pub fn result_chunks(id: &str, terminal: &Value) -> Result<Vec<(Vec<u8>, Vec<u8>)>, usize> {
+pub fn result_chunks(id: &str, terminal: &Value) -> Result<Records, usize> {
     chunked(|n| chunk_key(id, n), terminal)
 }
 
 /// `value`'s bytes cut into plane records of at most [`RESULT_CHUNK_BYTES`], keyed `key(n)`; `Err`
 /// its length in bytes when it would take more than [`MAX_RESULT_CHUNKS`].
-fn chunked(key: impl Fn(u32) -> Vec<u8>, value: &Value) -> Result<Vec<(Vec<u8>, Vec<u8>)>, usize> {
+fn chunked(key: impl Fn(u32) -> Vec<u8>, value: &Value) -> Result<Records, usize> {
     let bytes = serde_json::to_vec(value).unwrap_or_default();
     let chunks: Vec<&[u8]> = bytes.chunks(RESULT_CHUNK_BYTES).collect();
     if chunks.len() > MAX_RESULT_CHUNKS {
@@ -844,7 +847,7 @@ pub fn live_prefix(id: &str) -> Vec<u8> {
 /// # Errors
 ///
 /// The state's length, when the host's records do not keep it.
-pub fn live_parts(id: &str, live: &Value) -> Result<Vec<(Vec<u8>, Vec<u8>)>, usize> {
+pub fn live_parts(id: &str, live: &Value) -> Result<Records, usize> {
     chunked(|n| live_key(id, n), live)
 }
 
