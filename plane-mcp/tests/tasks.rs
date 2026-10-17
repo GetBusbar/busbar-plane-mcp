@@ -1324,7 +1324,7 @@ fn a_caller_cannot_drive_its_own_tasks_continuation() {
 // ── C-L10: every page of a caller's left-behind tasks ───────────────────────────────────────────
 
 /// C-L10 [LOW]: a create settles every live task of its caller a process that is gone left behind
-/// (BUSBAR-1.6.0.md §1: "Admission bounds live work; nothing evicts it"), past the first page of
+/// (BUSBAR-1.6.0.md, the design's first section: "Admission bounds live work; nothing evicts it"), past the first page of
 /// its index rows.
 #[test]
 fn a_create_settles_every_page_of_its_callers_left_behind_tasks() {
