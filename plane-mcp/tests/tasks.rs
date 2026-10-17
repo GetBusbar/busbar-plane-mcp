@@ -431,13 +431,16 @@ const SESSION_URL: &str = "https://up.example/sess";
 /// The session it names.
 const UPSTREAM_SESSION: &str = "up-session-1";
 
+/// One reply an upstream writes: its status, its head fields and its body.
+type Reply = (u32, Vec<(String, String)>, Vec<u8>);
+
 /// One open exchange: where it goes, what it sent so far, and its reply once the request ended.
 #[derive(Default)]
 struct Wire {
     url: String,
     head: Vec<(String, String)>,
     body: Vec<u8>,
-    reply: Option<(u32, Vec<(String, String)>, Vec<u8>)>,
+    reply: Option<Reply>,
     step: u8,
 }
 
@@ -472,11 +475,7 @@ fn json_head() -> Vec<(String, String)> {
 
 /// What an upstream answers one request over the connector (the door's own fetches): the session
 /// upstream requires `initialize` first; every other upstream speaks the stateless revision.
-fn upstream_answer(
-    url: &str,
-    fields: &[(String, String)],
-    body: &Value,
-) -> (u32, Vec<(String, String)>, Vec<u8>) {
+fn upstream_answer(url: &str, fields: &[(String, String)], body: &Value) -> Reply {
     let id = body.get("id").cloned().unwrap_or(Value::Null);
     let method = body.get("method").and_then(Value::as_str).unwrap_or("");
     let tools = json!({"tools": [{"name": "read_file", "inputSchema": {"type": "object"}}]});
@@ -849,7 +848,6 @@ impl<'a> Given<'a> {
 
 #[derive(Debug, Default)]
 struct Answered {
-    outcome: Option<Outcome>,
     status: u32,
     fields: Vec<(String, String)>,
     bytes: Vec<u8>,
@@ -977,7 +975,6 @@ impl Door {
                 std::ptr::from_mut(&mut o).cast(),
             );
             first = false;
-            got.outcome = Some(ret.outcome());
             if o.reply_status != 0 {
                 got.status = o.reply_status;
             }
