@@ -117,3 +117,37 @@ fn a_refusal_or_an_unreadable_body_goes_out_as_it_was() {
         (b"not json".to_vec(), false)
     );
 }
+
+/// The `data` of the stream's last event, its `data:` lines joined back with `\n` as a client
+/// joins them.
+fn last_data(bytes: &[u8]) -> String {
+    let text = String::from_utf8(bytes.to_vec()).expect("an event stream is text");
+    let last = text
+        .trim_end_matches('\n')
+        .rsplit("\n\n")
+        .next()
+        .expect("an event");
+    last.lines()
+        .filter_map(|l| l.strip_prefix("data: "))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// RED A-M2: THE STREAM CARRIES THE ANSWER'S OWN BYTES (Law 11): its members in the upstream's
+/// order, its numbers as the upstream spelled them (an integer past 64 bits, a float's exponent),
+/// and its line breaks as `data:` lines a client joins back. Never parsed and printed again.
+#[test]
+fn the_stream_carries_the_answers_own_bytes() {
+    let body = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "fs_read", "_meta": {"progressToken": "p"}}});
+    let framing = Framing::of(Some(EVENT_STREAM), "tools/call", &body).expect("framed");
+    let answer = b"{\"jsonrpc\":\"2.0\",\"id\":1,\n  \"result\":{\"zeta\":123456789012345678901234567890,\n  \"alpha\":1.0e0,\"content\":[]}}".to_vec();
+    let (bytes, framed) = framing.frame(200, answer.clone(), &[]);
+    assert!(framed);
+    assert_eq!(
+        last_data(&bytes),
+        String::from_utf8(answer).unwrap(),
+        "the answer's own bytes, line for line: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+}
