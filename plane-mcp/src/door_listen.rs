@@ -53,6 +53,9 @@ const STATUS_INVALID: u32 = 400;
 /// The status a `subscriptions/listen` is refused with when its caller is at its quota.
 const STATUS_QUOTA: u32 = 429;
 
+/// The status a `subscriptions/listen` is refused with when the host's clock cannot be read.
+const STATUS_CLOCK: u32 = 503;
+
 /// One held subscription, by its session's stream.
 #[derive(Debug, Clone)]
 pub(super) struct Listening {
@@ -192,10 +195,19 @@ fn open(plane: &McpDoor, ticket: Ticket, principal: &str, unit: &mut CallUnit) -
     let id = id.clone();
     let held = plane.current().or_else(|| unit.held.clone())?;
     entitled_afresh(plane, ticket, unit, &held);
-    // STOPPED (row 159 P-M4, owner ruling asked): a subscription is served on a host whose clock
-    // read fails (the plugin witness's host binds no services), so its open keeps the reading it
-    // always took there; the refusal the rule asks for would refuse every subscription on it.
-    let now = mono_ns(plane.services, ticket, unit).unwrap_or(0);
+    // A subscription opened at a clock read that failed is refused, never opened at the epoch
+    // (row 159 finding P-M4): its lifetime and keepalive are judged against this reading.
+    let Some(now) = mono_ns(plane.services, ticket, unit) else {
+        let refusal = crate::tool_arrival::Refusal {
+            status: STATUS_CLOCK,
+            id: Some(id),
+            code: crate::codec::CODE_REFUSED,
+            message: super::CLOCK_UNREAD.to_string(),
+            data: None,
+        };
+        unit.pending = Some(Pending::answer(refusal.status, refusal.body(), None, &[]));
+        return Some(true);
+    };
     let opened = {
         let entitled = &unit.entitled;
         let admit = |kind: &str, name: &str| {
@@ -259,8 +271,10 @@ fn open(plane: &McpDoor, ticket: Ticket, principal: &str, unit: &mut CallUnit) -
 fn step(plane: &McpDoor, ticket: Ticket, principal: &str, unit: &mut CallUnit) -> Option<bool> {
     let held = plane.current().or_else(|| unit.held.clone())?;
     entitled_afresh(plane, ticket, unit, &held);
-    // STOPPED (row 159 P-M4, owner ruling asked): as the open above.
-    let now = mono_ns(plane.services, ticket, unit).unwrap_or(0);
+    // A step whose clock read failed says nothing: the next one reads it again.
+    let Some(now) = mono_ns(plane.services, ticket, unit) else {
+        return Some(false);
+    };
     let standing = standing(plane, ticket, principal, unit);
     let entitled = &unit.entitled;
     let admit = |kind: &str, name: &str| {
