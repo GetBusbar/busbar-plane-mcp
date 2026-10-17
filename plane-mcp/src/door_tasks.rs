@@ -931,6 +931,7 @@ fn asking(
         state: result.get("requestState").cloned(),
         round: round.saturating_add(1),
         child,
+        answers: None,
     };
     let name = run
         .params

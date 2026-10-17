@@ -627,7 +627,7 @@ impl ServerRequestGrants {
 
 /// The DEFAULT ceiling on the messages of one sampling ask.
 pub const DEFAULT_MAX_SAMPLING_MESSAGES: u32 = 64;
-/// The DEFAULT ceiling on the prompt bytes (system prompt plus every message's text) of one ask.
+/// The DEFAULT ceiling on the prompt bytes (system prompt plus every message's content parts) of one ask.
 pub const DEFAULT_MAX_SAMPLING_PROMPT_BYTES: u32 = 64 * 1024;
 /// The DEFAULT ceiling on the stop sequences of one ask.
 pub const DEFAULT_MAX_STOP_SEQUENCES: u32 = 8;
@@ -654,8 +654,8 @@ pub const DEFAULT_MAX_INPUT_RESPONSE_BYTES: u32 = 1024 * 1024;
 pub struct SamplingBoundsCfg {
     /// The most `messages` one ask may carry. Default 64; zero is refused.
     pub max_messages: u32,
-    /// The most bytes the system prompt plus every message's text may total. Default 65536; zero is
-    /// refused.
+    /// The most bytes the system prompt plus every message's content (a text part's text, any other
+    /// part as serialised) may total. Default 65536; zero is refused.
     pub max_prompt_bytes: u32,
     /// The most `stopSequences` one ask may name. Default 8.
     pub max_stop_sequences: u32,
