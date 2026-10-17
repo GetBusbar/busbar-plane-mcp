@@ -218,6 +218,9 @@ pub struct McpDoor {
     /// WHAT BUSBAR REMEMBERS ABOUT EACH UPSTREAM as a client: the revision it negotiated and its
     /// session ([`crate::tool_sessions::UpstreamTable`]).
     upstreams: Keyed<(), crate::tool_sessions::UpstreamTable>,
+    /// THE HELD `2024-11-05` EVENT STREAMS busbar reaches legacy-only servers over, by member and
+    /// caller binding ([`door_legacy`]).
+    legacy: Keyed<String, door_legacy::Link>,
     /// Whether this instance said its ungoverned chain's sessions are unisolated (once).
     said_ungoverned: Keyed<(), ()>,
     /// The session revision each line-carrier session negotiated with `initialize`.
@@ -330,6 +333,7 @@ slot!(
             session_state: Keyed::new(),
             streams: Keyed::new(),
             upstreams: Keyed::new(),
+            legacy: Keyed::new(),
             said_ungoverned: Keyed::new(),
             line_revisions: Keyed::new(),
         };
@@ -400,7 +404,12 @@ slot!(
     /// `drive`: the subscriptions held as sessions whose step is due ([`door_listen::drive`]).
     Drive, PlaneDriveIn, PlaneDriveOut, |instance, input, mut out| {
         match instance.get() {
-            Some(plane) => door_listen::drive(plane, input, &mut out),
+            Some(plane) => {
+                // The held 2024-11-05 streams are read on this ticket first: what they hand on
+                // wakes the calls waiting for it.
+                door_legacy::drive(&instance, plane);
+                door_listen::drive(plane, input, &mut out)
+            }
             None => Outcome::Ready,
         }
     }
@@ -418,6 +427,7 @@ slot!(
             plane.units.with_all(|m| m.retain(|_, u| u.ticket != Some(ticket)));
             door_listen::cancelled(plane, ticket);
             door_sessions::cancelled(plane, ticket);
+            door_legacy::cancelled(plane, ticket);
         }
         // The rows ride the one cancel answer (it is never re-called): what fits is written.
         let (mut records, mut arena) = (input.records_buf(), input.arena_buf());
@@ -691,6 +701,14 @@ impl Pending {
                 self.lane = Some(line.tool.clone());
             }
         }
+        self
+    }
+
+    /// Answered with NO FEE UNIT: the answer of a call that was never sent, which delivered nothing
+    /// and so earns none ([`never_sent_answer`]). A unit that reports no fee unit has its
+    /// admission's fee given back (the kernel's `FeeRefund::PlaneFeeUnits`).
+    fn unbilled(mut self) -> Self {
+        self.units.retain(|u| u.class != door::CLASS_FEE_INDEX);
         self
     }
 
@@ -1460,7 +1478,7 @@ fn verify_on_call(
     ticket: Ticket,
     unit: &mut CallUnit,
     held: &Held,
-    server: &str,
+    (server, caller): (&str, &str),
 ) -> Looked {
     use crate::trust::Sighting;
     let Some(def) = held.section.servers.get(server) else {
@@ -1534,7 +1552,7 @@ fn verify_on_call(
                     instance,
                     plane,
                     unit,
-                    (base, server, timeout_ms),
+                    (base, server, caller, timeout_ms),
                     request,
                 );
                 let std::task::Poll::Ready(answer) = answer else {
@@ -1722,20 +1740,39 @@ fn take_turn(
     relay.queued = None;
     relay.program = None;
     let Settled::Answer { status, body, line } =
-        crate::call::upstream_failed(&relay.admitted, door_program::BUSY)
+        crate::call::never_sent(&relay.admitted, door_program::BUSY)
     else {
         return None;
     };
     let ts = clock_s(plane.services, ticket, unit);
-    unit.pending = Some(
-        Pending::answer(status, body, unit.framing.as_ref(), &[]).logged(
-            Some(&line),
-            principal,
-            generation,
-            ts,
-        ),
-    );
+    unit.pending = Some(never_sent_answer(
+        status,
+        body,
+        &line,
+        unit.framing.as_ref(),
+        (principal, generation, ts),
+    ));
     Some(Step::Write)
+}
+
+/// THE ANSWER OF A CALL THAT NEVER LEFT: one that never left its queue
+/// ([`crate::call::never_sent`]), or one whose server the door's live tool-list check could not
+/// reach ([`Admission::Unreached`]). It is `status` and `body` (the upstream-failure tool error), and
+/// `line` (the call log's `refused` line, under its fixed reason), logged under `(scope, generation,
+/// ts)`, with NO FEE UNIT. A call that was never sent delivered nothing, so it earns no fee and the
+/// kernel gives back the one its admission counted (ARCHITECT rulings 2026-10-14 on
+/// busbar-plane-mcp#14: #62 "bill what was delivered", Q35 "a hop refused before the socket is
+/// refunded", applied uniformly across planes).
+fn never_sent_answer(
+    status: u32,
+    body: Vec<u8>,
+    line: &crate::call::CallLine,
+    framing: Option<&Framing>,
+    (scope, generation, ts): (&str, u64, Option<u64>),
+) -> Pending {
+    Pending::answer(status, body, framing, &[])
+        .logged(Some(line), scope, generation, ts)
+        .unbilled()
 }
 
 fn answer_body(
@@ -1856,7 +1893,7 @@ fn answer_body(
             };
             if entitled(door::SCOPE, &server) && entitled(door::SCOPE_TOOL, &namespaced) {
                 if let Looked::Pending =
-                    verify_on_call(instance, plane, ticket, unit, &held, &server)
+                    verify_on_call(instance, plane, ticket, unit, &held, (&server, caller))
                 {
                     return Some(Step::Pending);
                 }
@@ -1986,7 +2023,7 @@ fn answer_body(
             dest_verdict(services?, handle, &held, entry, dest)
         });
         return Some(match admission {
-            Admission::Asked(body, line) | Admission::Unreached(body, line) => {
+            Admission::Asked(body, line) => {
                 unit.pending = Some(
                     Pending::answer(200, body, unit.framing.as_ref(), &[]).logged(
                         Some(&line),
@@ -1995,6 +2032,19 @@ fn answer_body(
                         clock_s(services, ticket, unit),
                     ),
                 );
+                Step::Write
+            }
+            // NEVER SENT: the door's live tool-list check could not reach the server, so the call
+            // did not leave and earns no fee unit ([`never_sent_answer`]).
+            Admission::Unreached(body, line) => {
+                let ts = clock_s(services, ticket, unit);
+                unit.pending = Some(never_sent_answer(
+                    200,
+                    body,
+                    &line,
+                    unit.framing.as_ref(),
+                    (principal, generation, ts),
+                ));
                 Step::Write
             }
             Admission::Refused(refusal, line) => {
@@ -2034,6 +2084,38 @@ fn answer_body(
                 };
                 relay.round = round;
                 let child = relay.admitted.relay.as_ref().and_then(|r| r.child.clone());
+                // THE CALLER'S REPLY IS BOUNDED TOO (`sampling_bounds.max_input_response_bytes`):
+                // what would be forwarded, as it would be serialised, is measured before anything
+                // is sent, and a reply over the cap is refused by name and never forwarded.
+                let judged = match (&child, &continuation) {
+                    (Some(child), _) => crate::tool_program::judge_child_replies(
+                        &member,
+                        def,
+                        &crate::tool_program::child_replies(
+                            child,
+                            continuation.as_ref().and_then(|c| c.get("inputResponses")),
+                        ),
+                    ),
+                    (None, Some(continuation)) => {
+                        crate::call::judge_continuation(&member, &def.sampling_bounds, continuation)
+                    }
+                    (None, None) => Ok(()),
+                };
+                if let Err(refusal) = judged {
+                    if let crate::call::Settled::Answer { status, body, line } =
+                        crate::call::ask_refused(&relay.admitted, &refusal)
+                    {
+                        unit.pending = Some(
+                            Pending::answer(status, body, unit.framing.as_ref(), &[]).logged(
+                                Some(&line),
+                                principal,
+                                generation,
+                                clock_s(services, ticket, unit),
+                            ),
+                        );
+                        return Some(Step::Write);
+                    }
+                }
                 let mut outbound = if let Some(child) = child {
                     // A STDIO CHILD'S RELAYED ASK, ANSWERED: its work handle bound, the caller's
                     // answers written to the child under its own ids, and the call it still owes
@@ -2122,7 +2204,10 @@ fn answer_body(
                     // always was, or, to an upstream busbar holds a session with, that request
                     // lowered into the session ([`door_sessions::Negotiating`]).
                     let original = door_sessions::original(&def.url, &outbound);
-                    let negotiating = door_sessions::Negotiating::begin(plane, &member, original);
+                    // The conversation is this CALLER's (row 159 finding 3): a session busbar
+                    // holds with the member for another caller is never this call's.
+                    let negotiating =
+                        door_sessions::Negotiating::begin(plane, &member, caller, original);
                     if let Some(first) = negotiating.first_request() {
                         outbound.fields.clone_from(&first.headers);
                         outbound.body.clone_from(&first.body);
@@ -2794,6 +2879,9 @@ slot!(
                     let def = held
                         .as_ref()
                         .and_then(|h| h.section.servers.get(unit.member.as_deref()?));
+                    // Replies no call waited for on this caller's held stream: audited on this
+                    // answer, rejected (never delivered).
+                    let mut dropped_replies = 0_u32;
                     let settled = match () {
                         // A child's ask held while its work handle opened: taken up where it was.
                         () if relay.asked.is_some() => {
@@ -2839,6 +2927,21 @@ slot!(
                                             server: relay.admitted.entry.server.clone(),
                                             cap,
                                         };
+                                        let ids: Vec<Value> =
+                                            asks.into_iter().map(|a| a.id).collect();
+                                        return Some(refuse_child(
+                                            plane, ticket, member, def, program, &ids, &refusal,
+                                        ));
+                                    }
+                                    // An ask past the operator's `sampling_bounds` is refused by
+                                    // name on the child's input, as the round cap is.
+                                    if let Err(refusal) =
+                                        crate::tool_program::judge_child_asks(
+                                            &relay.admitted.entry.server,
+                                            def,
+                                            &asks,
+                                        )
+                                    {
                                         let ids: Vec<Value> =
                                             asks.into_iter().map(|a| a.id).collect();
                                         return Some(refuse_child(
@@ -2937,6 +3040,9 @@ slot!(
                                 // over the door's connector; one that answered is handed on as it
                                 // answered.
                                 let mut failed = None;
+                                // The id the call carried in its session, when it is not the
+                                // round's: the answer is correlated by it.
+                                let mut sent = None;
                                 if let (Some(n), Some(def)) = (unit.negotiating.as_mut(), def) {
                                     let base = NEGOTIATE_SEQ
                                         .saturating_add(unit.attempt.saturating_mul(ROUND_SEQ_SPAN));
@@ -2951,9 +3057,18 @@ slot!(
                                     let std::task::Poll::Ready(done) = polled else {
                                         return Some(Step::Pending);
                                     };
+                                    // The walk's own answer too: a call lowered into its session
+                                    // carried that session's id.
+                                    sent = n.sent_id();
+                                    dropped_replies = n.dropped();
                                     match done {
                                         None => {}
-                                        Some(door_sessions::Negotiated::Answer(status, raw, sse)) => {
+                                        Some(door_sessions::Negotiated::Answer(
+                                            status,
+                                            raw,
+                                            sse,
+                                            _,
+                                        )) => {
                                             relay.status = u32::from(status);
                                             relay.far = raw;
                                             relay.sse = sse;
@@ -2969,14 +3084,25 @@ slot!(
                                     Some(reason) => {
                                         crate::call::upstream_failed(&relay.admitted, &reason)
                                     }
-                                    None => crate::call::settle_call(
-                                        &relay.admitted,
-                                        def,
-                                        relay.status,
-                                        &relay.far,
-                                        relay.sse,
-                                        relay.round,
-                                    ),
+                                    None => match sent {
+                                        Some(id) => crate::call::settle_call_as(
+                                            &relay.admitted,
+                                            def,
+                                            relay.status,
+                                            &relay.far,
+                                            relay.sse,
+                                            relay.round,
+                                            id,
+                                        ),
+                                        None => crate::call::settle_call(
+                                            &relay.admitted,
+                                            def,
+                                            relay.status,
+                                            &relay.far,
+                                            relay.sse,
+                                            relay.round,
+                                        ),
+                                    },
                                 }
                             }
                         }
@@ -3081,8 +3207,18 @@ slot!(
                     let answered = relay.status != 0;
                     let far_len = relay.far.len();
                     let ts = clock_s(plane.services, ticket, unit);
-                    let pending = Pending::answer(status, body, framing.as_ref(), &progress)
+                    let mut pending = Pending::answer(status, body, framing.as_ref(), &progress)
                         .logged(Some(&line), scope, generation, ts);
+                    for _ in 0..dropped_replies {
+                        pending = pending.audited(crate::call::AuditRow {
+                            action: door_legacy::ACTION_REPLY_DROPPED,
+                            resource: format!(
+                                "mcp_server:{}",
+                                unit.member.as_deref().unwrap_or_default()
+                            ),
+                            applied: false,
+                        });
+                    }
                     unit.pending = Some(if answered {
                         pending.counted(far_len)
                     } else {
@@ -3968,6 +4104,9 @@ busbar_contract::plugin_door! {
 #[path = "door_listen.rs"]
 mod door_listen;
 
+#[path = "door_legacy.rs"]
+mod door_legacy;
+
 /// The line carrier's units: a process's own stdin/stdout, one carrier session, one unit per line.
 #[path = "door_line.rs"]
 mod door_line;
@@ -3983,3 +4122,8 @@ mod door_sessions;
 /// reads the door's own unit and answer state.
 #[path = "door_tasks.rs"]
 mod door_tasks;
+
+/// The door's money answers, pure: what a unit reports beside the answer its caller is written.
+#[cfg(test)]
+#[path = "tests/door_money.rs"]
+mod door_money;

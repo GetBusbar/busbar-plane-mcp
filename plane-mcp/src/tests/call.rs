@@ -931,3 +931,254 @@ fn an_ask_of_the_caller_and_a_task_are_audited_in_the_engines_words() {
         Some(AuditRow::tool("fs_batch", false))
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// THE INPUT-SIDE SAMPLING BOUNDS (owner ruling Q22c, BUSBAR-1.6.0 l.3951): a granted
+// `sampling/createMessage` ask is relayed only while it is within `tools.<server>.sampling_bounds`.
+// Each bound: one over the cap is refused naming the exact key (RED before this change: it relayed),
+// exactly at the cap still relays, and the default applies when the key is omitted.
+// ---------------------------------------------------------------------------------------------
+
+/// The `fs` definition with the sampling grant held and `bounds` applied.
+fn sampling_def(
+    bounds: impl FnOnce(&mut crate::tools_config::SamplingBoundsCfg),
+) -> crate::tools_config::McpServerDefCfg {
+    let mut def = section().servers.get("fs").expect("fs").clone();
+    def.grants.sampling = true;
+    bounds(&mut def.sampling_bounds);
+    def
+}
+
+/// One far-end answer asking `params` as a `sampling/createMessage`, settled under `def`.
+fn sampling_settle(def: &crate::tools_config::McpServerDefCfg, params: Value) -> Settled {
+    let far = json!({ "jsonrpc": "2.0", "id": 0, "result": {
+        "resultType": "input_required",
+        "inputRequests": { "s": { "method": "sampling/createMessage", "params": params } },
+        "requestState": "opaque"
+    }});
+    settle_call(
+        &admitted(),
+        Some(def),
+        200,
+        far.to_string().as_bytes(),
+        false,
+        0,
+    )
+}
+
+fn text_messages(n: usize, text: &str) -> Value {
+    Value::Array(
+        (0..n)
+            .map(|_| json!({ "role": "user", "content": { "type": "text", "text": text } }))
+            .collect(),
+    )
+}
+
+/// Refused: 403, `sampling_bound_exceeded`, the message names `key` and the limit.
+fn assert_bound_refused(settled: Settled, key: &str, limit: &str) {
+    let (status, body, line) = answer_of(settled);
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(
+        body["error"]["data"]["reason"],
+        json!("sampling_bound_exceeded")
+    );
+    let message = body["error"]["message"].as_str().expect("message");
+    assert!(
+        message.contains(&format!("tools.fs.sampling_bounds.{key}")),
+        "the refusal names the exact key: {message}"
+    );
+    assert!(message.contains(limit), "and its limit {limit}: {message}");
+    assert_eq!(
+        (line.outcome, line.reason.as_str()),
+        ("refused", "sampling_bound_exceeded")
+    );
+}
+
+fn assert_relayed(settled: Settled) {
+    assert!(
+        matches!(settled, Settled::Relay { .. }),
+        "within the bound the ask is relayed: {settled:?}"
+    );
+}
+
+#[test]
+fn sampling_max_messages_over_the_cap_is_refused_at_the_cap_relays() {
+    let def = sampling_def(|b| b.max_messages = 3);
+    assert_bound_refused(
+        sampling_settle(&def, json!({ "messages": text_messages(4, "") })),
+        "max_messages",
+        "3",
+    );
+    assert_relayed(sampling_settle(
+        &def,
+        json!({ "messages": text_messages(3, "") }),
+    ));
+}
+
+#[test]
+fn sampling_max_prompt_bytes_counts_the_system_prompt_and_every_message() {
+    let def = sampling_def(|b| b.max_prompt_bytes = 10);
+    // 4 (system) + 3 + 3 = 10: at the cap.
+    let at = json!({ "systemPrompt": "abcd", "messages": text_messages(2, "xyz") });
+    assert_relayed(sampling_settle(&def, at));
+    let over = json!({ "systemPrompt": "abcde", "messages": text_messages(2, "xyz") });
+    assert_bound_refused(sampling_settle(&def, over), "max_prompt_bytes", "10");
+    // Non-text parts do not count.
+    let image = json!({ "messages": [
+        { "role": "user", "content": { "type": "image", "data": "x".repeat(100), "mimeType": "image/png" } }
+    ]});
+    assert_relayed(sampling_settle(&def, image));
+}
+
+#[test]
+fn sampling_max_stop_sequences_over_the_cap_is_refused_at_the_cap_relays() {
+    let def = sampling_def(|b| b.max_stop_sequences = 2);
+    let stops = |n: usize| json!({ "messages": [], "stopSequences": vec!["s"; n] });
+    assert_bound_refused(sampling_settle(&def, stops(3)), "max_stop_sequences", "2");
+    assert_relayed(sampling_settle(&def, stops(2)));
+}
+
+#[test]
+fn sampling_max_stop_sequence_bytes_over_the_cap_is_refused_at_the_cap_relays() {
+    let def = sampling_def(|b| b.max_stop_sequence_bytes = 4);
+    assert_bound_refused(
+        sampling_settle(&def, json!({ "stopSequences": ["abcde"] })),
+        "max_stop_sequence_bytes",
+        "4",
+    );
+    assert_relayed(sampling_settle(&def, json!({ "stopSequences": ["abcd"] })));
+}
+
+#[test]
+fn sampling_temperature_outside_the_range_is_refused_at_the_edges_relays() {
+    let def = sampling_def(|b| {
+        b.temperature_min_milli = 200;
+        b.temperature_max_milli = 1500;
+    });
+    assert_bound_refused(
+        sampling_settle(&def, json!({ "temperature": 1.6 })),
+        "temperature_max_milli",
+        "1500",
+    );
+    assert_bound_refused(
+        sampling_settle(&def, json!({ "temperature": 0.1 })),
+        "temperature_min_milli",
+        "200",
+    );
+    assert_bound_refused(
+        sampling_settle(&def, json!({ "temperature": "hot" })),
+        "temperature_min_milli",
+        "200",
+    );
+    assert_relayed(sampling_settle(&def, json!({ "temperature": 0.2 })));
+    assert_relayed(sampling_settle(&def, json!({ "temperature": 1.5 })));
+    // Absent temperature is never a violation.
+    assert_relayed(sampling_settle(&def, json!({})));
+}
+
+/// The defaults apply when `sampling_bounds` is not written at all: 64 messages, 65536 prompt bytes,
+/// 8 stop sequences of 64 bytes, temperature 0.0..=2.0.
+#[test]
+fn sampling_bounds_default_when_the_keys_are_omitted() {
+    let def = sampling_def(|_| {});
+    assert_eq!(
+        def.sampling_bounds,
+        crate::tools_config::SamplingBoundsCfg {
+            max_messages: 64,
+            max_prompt_bytes: 65536,
+            max_stop_sequences: 8,
+            max_stop_sequence_bytes: 64,
+            temperature_min_milli: 0,
+            temperature_max_milli: 2000,
+            max_input_response_bytes: 1_048_576,
+        }
+    );
+    assert_bound_refused(
+        sampling_settle(&def, json!({ "messages": text_messages(65, "") })),
+        "max_messages",
+        "64",
+    );
+    assert_relayed(sampling_settle(
+        &def,
+        json!({ "messages": text_messages(64, "") }),
+    ));
+    assert_bound_refused(
+        sampling_settle(&def, json!({ "systemPrompt": "x".repeat(65537) })),
+        "max_prompt_bytes",
+        "65536",
+    );
+    assert_relayed(sampling_settle(
+        &def,
+        json!({ "systemPrompt": "x".repeat(65536) }),
+    ));
+    assert_bound_refused(
+        sampling_settle(&def, json!({ "stopSequences": vec!["s"; 9] })),
+        "max_stop_sequences",
+        "8",
+    );
+    assert_bound_refused(
+        sampling_settle(&def, json!({ "stopSequences": ["x".repeat(65)] })),
+        "max_stop_sequence_bytes",
+        "64",
+    );
+    assert_bound_refused(
+        sampling_settle(&def, json!({ "temperature": 2.001 })),
+        "temperature_max_milli",
+        "2000",
+    );
+    assert_relayed(sampling_settle(&def, json!({ "temperature": 2.0 })));
+}
+
+/// The bound is read where there is no definition too (the defaults), and a roots ask is never
+/// measured.
+#[test]
+fn sampling_bounds_measure_only_sampling_asks() {
+    let roots = r#"{"jsonrpc":"2.0","id":0,"result":{"resultType":"input_required","inputRequests":{"r":{"method":"roots/list","params":{"messages":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65]}}}}}"#;
+    assert_relayed(settle_far(roots));
+}
+
+/// THE CALLER'S REPLY IS BOUNDED TOO (ARCHITECT 2026-10-14): the continuation sent upstream
+/// (`inputResponses` with the `requestState` it carries) is measured as serialised; one byte over
+/// `max_input_response_bytes` is refused by name (`sampling_bound_exceeded`, 403) and not forwarded,
+/// exactly at the cap it is forwarded.
+#[test]
+fn input_responses_over_the_cap_are_refused_and_not_forwarded_at_the_cap_forwarded() {
+    let continuation = json!({
+        "inputResponses": { "s": { "action": "accept", "content": { "text": "x".repeat(40) } } },
+        "requestState": "opaque"
+    });
+    let exact = continuation.to_string().len();
+    let at = sampling_def(|b| b.max_input_response_bytes = u32::try_from(exact).expect("small"));
+    crate::call::judge_continuation("fs", &at.sampling_bounds, &continuation)
+        .expect("exactly at the cap is forwarded");
+
+    let over =
+        sampling_def(|b| b.max_input_response_bytes = u32::try_from(exact - 1).expect("small"));
+    let refusal = crate::call::judge_continuation("fs", &over.sampling_bounds, &continuation)
+        .expect_err("one byte over is refused");
+    assert!(matches!(
+        &refusal,
+        crate::call::AskRefusal::SamplingBound {
+            key: "max_input_response_bytes",
+            ..
+        }
+    ));
+    assert_eq!(refusal.audit_reason(), "sampling_bound_exceeded");
+    assert!(refusal.to_string().contains(&format!("{exact} bytes")));
+    assert_bound_refused(
+        crate::call::ask_refused(&admitted(), &refusal),
+        "max_input_response_bytes",
+        &(exact - 1).to_string(),
+    );
+}
+
+/// The default cap is 1 MiB: a reply just over it is refused, with the key unwritten.
+#[test]
+fn input_responses_default_cap_is_one_mebibyte() {
+    let def = sampling_def(|_| {});
+    assert_eq!(def.sampling_bounds.max_input_response_bytes, 1_048_576);
+    let big = json!({ "inputResponses": { "s": "y".repeat(1_048_576) } });
+    crate::call::judge_continuation("fs", &def.sampling_bounds, &big).expect_err("over");
+    let small = json!({ "inputResponses": { "s": "y" }, "requestState": "z" });
+    crate::call::judge_continuation("fs", &def.sampling_bounds, &small).expect("under");
+}
