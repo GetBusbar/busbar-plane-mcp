@@ -396,7 +396,7 @@ pub const TAIL: &PlaneTail = &PlaneTail {
     flags: busbar_contract::abi::plane::TAIL_HOOKS_GATED,
     ingress: INGRESS_REQUEST_RESPONSE | INGRESS_RESPONSE_STREAM,
     dispatch_shape: SHAPE_PIECEWISE,
-    _reserved: 0,
+    answer_layout: busbar_contract::abi::plane::ANSWER_LAYOUT,
     scope: abi_str(SCOPE),
     label: abi_str(LABEL),
     subject_noun: abi_str(SUBJECT_NOUN),
