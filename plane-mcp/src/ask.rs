@@ -124,6 +124,11 @@ pub struct AskState {
     /// Present only on a state minted for a relayed ask; busbar's own rounds were already answered.
     #[serde(rename = "u", default, skip_serializing_if = "Option::is_none")]
     pub upstream: Option<UpstreamLeg>,
+    /// BUSBAR'S OWN ANSWERS SO FAR: every earlier round's `inputResponses`, sealed. A retry answers
+    /// the `inputRequests` of the result it retries (MRTR), so an earlier round's answers ride here
+    /// and the exchange's last retry merges them all. `None` before any round was answered.
+    #[serde(rename = "a", default, skip_serializing_if = "Option::is_none")]
+    pub answers: Option<Map<String, Value>>,
 }
 
 /// AN UPSTREAM'S ASK, RELAYED: the pool member that asked (the retry goes back to it), the state it
@@ -145,6 +150,11 @@ pub struct UpstreamLeg {
     /// answers each on the child's input under the child's own id, then reads on for the call.
     #[serde(rename = "c", default, skip_serializing_if = "Option::is_none")]
     pub child: Option<ChildLeg>,
+    /// BUSBAR'S OWN ANSWERS the call went out with (its `ask_caller` rounds' keys, as merged into
+    /// the arguments): merged again on the retry, so the retry is the same request plus the
+    /// upstream's answers. `None` when the call went out with none.
+    #[serde(rename = "a", default, skip_serializing_if = "Option::is_none")]
+    pub answers: Option<Map<String, Value>>,
 }
 
 /// THE CHILD'S SIDE OF A RELAYED ASK (spec Part 3 B.3 item 10: across separate HTTP arrivals the
@@ -281,6 +291,9 @@ pub trait Seal {
 pub enum AskDecision {
     /// No ask stands between the caller and the call.
     Proceed,
+    /// THE EXCHANGE COMPLETED: busbar's own asks were answered, every round's answers here (the
+    /// sealed earlier rounds' and the last retry's), to be merged into the arguments.
+    Answered(Map<String, Value>),
     /// Ask the caller.
     Ask {
         /// The round's asks the caller can answer.
@@ -550,6 +563,7 @@ pub fn decide(
         })
     };
     let mut presented: Option<(String, u64)> = None;
+    let mut answers: Map<String, Value> = Map::new();
     let next_round = match retry.state {
         None => 0u32,
         Some(blob) => {
@@ -576,6 +590,7 @@ pub fn decide(
             {
                 return AskDecision::Refuse(AskRefusal::StateRejected(Rejected::StaleRoots));
             }
+            answers = opened.answers.clone().unwrap_or_default();
             presented = Some((
                 opened.nonce.clone(),
                 opened.issued_at.saturating_add(opened.ttl_secs),
@@ -605,6 +620,13 @@ pub fn decide(
                 missing: previous,
             });
         }
+        // CUMULATIVE: this retry's answers join the sealed earlier rounds'. An earlier round's answer
+        // stands: a later retry cannot rewrite what an earlier confirmation was given for.
+        if let Some(given) = retry.responses.and_then(Value::as_object) {
+            for (key, value) in given {
+                answers.entry(key.clone()).or_insert_with(|| value.clone());
+            }
+        }
     }
     let Some(this_round) = this_round else {
         let (Some((nonce, expires_at)), Some(seal)) = (presented, seal.as_deref_mut()) else {
@@ -613,7 +635,7 @@ pub fn decide(
         if !seal.redeem(&nonce, expires_at, bind.now) {
             return AskDecision::Refuse(AskRefusal::StateRejected(Rejected::AlreadySpent));
         }
-        return AskDecision::Proceed;
+        return AskDecision::Answered(answers);
     };
     let asks: Vec<CallerAsk> = this_round
         .iter()
@@ -660,6 +682,7 @@ pub fn decide(
         ttl_secs: DEFAULT_TTL_SECS,
         roots_epoch: exchange_asks_roots.then_some(bind.roots_epoch),
         upstream: None,
+        answers: (!answers.is_empty()).then_some(answers),
     }) else {
         return no_sealer();
     };
@@ -744,6 +767,7 @@ pub fn relay_state_for(
         ttl_secs,
         roots_epoch: None,
         upstream: Some(leg),
+        answers: None,
     })
 }
 
