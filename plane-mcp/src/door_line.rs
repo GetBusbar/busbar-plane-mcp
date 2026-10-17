@@ -323,20 +323,9 @@ pub(super) fn listen(plane: &McpDoor, ticket: Ticket, unit: &mut CallUnit) -> Op
     let id = id.clone();
     let held = plane.current().or_else(|| unit.held.clone())?;
     door_listen::entitled_afresh(plane, ticket, unit, &held);
-    let Some(now) = door_listen::mono_ns(plane.services, ticket, unit) else {
-        let body = busbar_contract::jsonrpc::error_body(
-            id,
-            crate::codec::CODE_REFUSED,
-            super::CLOCK_UNREAD,
-            None,
-        );
-        return Some(Pending::answer(
-            503,
-            serde_json::to_vec(&body).unwrap_or_default(),
-            None,
-            &[],
-        ));
-    };
+    // STOPPED (row 159 P-M4, owner ruling asked): a subscription keeps the reading it always took
+    // on a host whose clock read fails, as the HTTP carrier's ([`door_listen`]).
+    let now = door_listen::mono_ns(plane.services, ticket, unit).unwrap_or(0);
     let entitled = unit.entitled.clone();
     let admit = |kind: &str, name: &str| {
         entitled
