@@ -225,6 +225,10 @@ pub struct McpDoor {
     said_ungoverned: Keyed<(), ()>,
     /// The session revision each line-carrier session negotiated with `initialize`.
     line_revisions: Keyed<u64, crate::revision::Revision>,
+    /// THE OPERATOR `connect`S UNDER WAY, by server: the ticket each runs on and its negotiated
+    /// fetch, kept while it pends (an operator verb has no unit to keep it on). One per server: a
+    /// newer `connect` of the same server takes its place.
+    connecting: Keyed<String, (Ticket, Box<door_sessions::Negotiating>)>,
 }
 
 impl McpDoor {
@@ -336,6 +340,7 @@ slot!(
             legacy: Keyed::new(),
             said_ungoverned: Keyed::new(),
             line_revisions: Keyed::new(),
+            connecting: Keyed::new(),
         };
         plane.sessions.insert(
             (),
@@ -872,6 +877,11 @@ const NO_SESSION_TEXT: &str = r#"{"status":400,"id":null,"code":-32600,"message"
 /// The words of an arrival from a browser origin the deployment does not admit.
 const FORBIDDEN_ORIGIN_TEXT: &str = r#"{"origin":"forbidden"}"#;
 
+/// Why a unit that needs a time is refused when the host's clock read fails: a failed read is never
+/// a time (row 159 finding P-M4), so nothing is stamped, armed or judged at the epoch.
+const CLOCK_UNREAD: &str = "the host's clock could not be read, and busbar never stamps, arms or \
+                            judges anything at a time it made up";
+
 /// The head field a browser names its origin in.
 const ORIGIN: &str = "origin";
 
@@ -1014,6 +1024,28 @@ slot!(
             .and_then(|(_, _, call, _)| serde_json::from_slice::<Value>(call).ok())
             .map(|v| crate::codec::mirrored(&v))
             .unwrap_or_default();
+        // ADMISSION BOUNDS LIVE WORK; NOTHING EVICTS IT: a full table refuses the new arrival, before
+        // anything else is stated of it, and every unit it holds goes on. Arrivals racing the last
+        // free places overshoot by no more than the instance's in-flight bound. It is judged before
+        // a line of the line carrier is read: reading one moves its carrier session (a live ask's
+        // answer is taken, a revision kept, a cancel applied), and a line the cap refuses has moved
+        // nothing (row 159 finding A-M3).
+        let at_cap = plane
+            .units
+            .with_all(|held| held.len() >= MAX_UNITS && !held.contains_key(&input.get().unit));
+        if at_cap {
+            let refusal = crate::tool_arrival::Refusal {
+                status: STATUS_BUSY,
+                id: None,
+                code: crate::codec::CODE_REFUSED,
+                message: format!(
+                    "this server holds {MAX_UNITS} requests in flight, the most it will; retry \
+                     when some have finished"
+                ),
+                data: Some(serde_json::json!({ "reason": "capacity" })),
+            };
+            return refused_arrival(&mut out, refusal.status, refusal_text(&refusal));
+        }
         // A LINE OF THE LINE CARRIER (ARCHITECT Q1a): what it is to the carrier session it arrived
         // over, and the bytes the one dispatch decides on (none: the unit answers its preset).
         let line_route = input.get().claim as usize == door::LINE_ROUTE;
@@ -1109,25 +1141,6 @@ slot!(
         }
         if let Disposition::Refused(refusal) = &disposition {
             return refused_arrival(&mut out, refusal.status, refusal_text(refusal));
-        }
-        // ADMISSION BOUNDS LIVE WORK; NOTHING EVICTS IT: a full table refuses the new arrival, before
-        // anything else is stated of it, and every unit it holds goes on. Arrivals racing the last
-        // free places overshoot by no more than the instance's in-flight bound.
-        let at_cap = plane
-            .units
-            .with_all(|held| held.len() >= MAX_UNITS && !held.contains_key(&input.get().unit));
-        if at_cap {
-            let refusal = crate::tool_arrival::Refusal {
-                status: STATUS_BUSY,
-                id: None,
-                code: crate::codec::CODE_REFUSED,
-                message: format!(
-                    "this server holds {MAX_UNITS} requests in flight, the most it will; retry \
-                     when some have finished"
-                ),
-                data: Some(serde_json::json!({ "reason": "capacity" })),
-            };
-            return refused_arrival(&mut out, refusal.status, refusal_text(&refusal));
         }
         let Some(op_class) = op_class(&disposition) else {
             return Outcome::Failed;
@@ -1499,9 +1512,12 @@ fn verify_on_call(
             _reserved: 0,
         };
         unit.issued += 1;
+        // A failed read is never a time (row 159 finding P-M4): the cached list is then stale and
+        // fetched again, and what that fetch landed is not stamped.
         services
             .clock_now(handle)
-            .map_or(0, |r| r.wall_ns / 1_000_000)
+            .ok()
+            .map(|r| r.wall_ns / 1_000_000)
     };
     let sighting = match unit.verified.take() {
         Some(kept) => kept,
@@ -1513,10 +1529,12 @@ fn verify_on_call(
             )
             .unwrap_or(0)
             .saturating_mul(1000);
-            let fresh = plane
-                .checked
-                .get(&server.to_string())
-                .is_some_and(|at| ttl_ms > 0 && now_ms.saturating_sub(at) < ttl_ms);
+            let fresh = now_ms.is_some_and(|now_ms| {
+                plane
+                    .checked
+                    .get(&server.to_string())
+                    .is_some_and(|at| ttl_ms > 0 && now_ms.saturating_sub(at) < ttl_ms)
+            });
             if fresh {
                 return Looked::Fresh;
             }
@@ -1597,8 +1615,19 @@ fn verify_on_call(
             return Looked::Pending;
         }
     }
+    // THE FRESHNESS CLOCK starts only on a list that LANDED, read at a time the clock gave: an
+    // unreachable server is fetched again on its next call (row 159 finding A-H1), and a failed
+    // clock read stamps nothing (P-M4).
+    let landed = matches!(sighting, Sighting::Seen(_));
     plane.sightings.insert(server.to_string(), sighting);
-    plane.checked.insert(server.to_string(), now_ms);
+    match now_ms {
+        Some(now_ms) if landed => {
+            plane.checked.insert(server.to_string(), now_ms);
+        }
+        _ => {
+            plane.checked.remove(&server.to_string());
+        }
+    }
     Looked::Fresh
 }
 
@@ -2513,7 +2542,22 @@ fn relay_ask(
                 c.work = Some(opened.reference.to_string());
                 let mut fresh = None;
                 let h = door_tasks::handle(ticket, issued, &mut fresh);
-                let now_ms = services.clock_now(h).map_or(0, |r| r.wall_ns / 1_000_000);
+                let now_ms = services.clock_now(h).ok().map(|r| r.wall_ns / 1_000_000);
+                // A failed clock read gives the handle no lapse (never one at the epoch): it is
+                // settled at once and the ask refused (row 159 finding P-M4).
+                let Some(now_ms) = now_ms else {
+                    let mut fresh = None;
+                    let h = door_tasks::handle(ticket, issued, &mut fresh);
+                    let _unheard = services.work_settle(h, opened.handle, CHILD_LAPSED);
+                    relay.asked = None;
+                    return refused(
+                        child,
+                        crate::call::AskRefusal::Unavailable {
+                            server,
+                            reason: CLOCK_UNREAD.to_string(),
+                        },
+                    );
+                };
                 sweep_relays(plane, services, ticket, issued, now_ms);
                 plane.relays.insert(
                     opened.handle,
@@ -3174,14 +3218,15 @@ slot!(
                         let server = unit.member.clone().unwrap_or_default();
                         let in_session = door_sessions::session_of(&unit.session);
                         let owner = door_sessions::owner_of(&caller);
-                        let now = in_session.as_ref().map_or(0, |_| {
+                        // The caller's session is touched only at a time the clock gave.
+                        let now = in_session.as_ref().and_then(|_| {
                             door_sessions::wall_ms(plane.services, ticket, &mut unit.issued)
                         });
                         door_sessions::heard(
                             plane,
                             &server,
                             &relay.far,
-                            in_session.as_deref().map(|s| (s, &owner, now)),
+                            in_session.as_deref().zip(now).map(|(s, now)| (s, &owner, now)),
                         );
                     }
                     let progress = frames;
@@ -3730,6 +3775,11 @@ fn exchange_at(
 /// The JSON-RPC id a `connect`'s `tools/list` carries: one request, correlated by this id.
 const CONNECT_REQUEST_ID: u64 = 1;
 
+/// The binding an operator `connect`'s conversation is kept under: never a caller reference (those
+/// are the kernel's opaque hex, or empty for the ungoverned chain), so the operator's upstream
+/// session is never a caller's (row 159 finding 3).
+const CONNECT_BINDING: &str = "operator:connect";
+
 /// THE SIGHTING a `connect`'s exchange landed: the server's tool list re-hashed, or why the contact
 /// failed, in the served engine's words.
 fn sighting_of(
@@ -3856,8 +3906,6 @@ slot!(
                 "server `{name}` registers no `url:` this door can reach it at"
             )),
             None => {
-                use busbar_contract::abi::sdk::conn::ConnFailure;
-                use busbar_contract::abi::sdk::exchange::{exchange, Exchange, Request};
                 let url = def.url.clone();
                 // A `token_exchange:` registration's binding exchanges for its approved set.
                 let scope = crate::tool_scope::exchanges(
@@ -3865,50 +3913,34 @@ slot!(
                     held.section.effective_upstream_credentials(name),
                 )
                 .then(|| crate::tool_scope::registration_scope(name, &def));
-                // THE FETCH REACHES THE REGISTRATION `name` (SEAM-4p): its own private reach
-                // (`allow_private:`, sealed per registration) applies to this dial.
-                let parked = instance.resume::<Exchange>().map(|e| *e);
-                let state = match parked {
-                    Some(state) => Ok(state),
-                    None => {
-                        let mut request =
-                            crate::client::jsonrpc::tools_list(&url, CONNECT_REQUEST_ID, None);
-                        scoped(&mut request.headers, scope.as_deref());
-                        Exchange::request(Request {
-                            method: b"POST".to_vec(),
-                            target: crate::call::path_of(&url).into_bytes(),
-                            fields: request
-                                .headers
-                                .iter()
-                                .map(|(n, v)| (n.as_bytes().to_vec(), v.as_bytes().to_vec()))
-                                .collect(),
-                            body: request.body,
-                            // An upstream is not trusted to answer, and an operator verb that
-                            // hangs is one that gets killed and retried: the server's own
-                            // `timeout:` bounds the fetch.
-                            timeout_ms: def.timeout_ms(),
-                        })
-                        .map(|e| e.as_member(name.as_str()))
+                // THE FETCH IS VERIFY-ON-CALL'S (row 159 finding A-H1): the stateless `tools/list`
+                // first, NEGOTIATED with a server that requires a session or speaks only the
+                // `2024-11-05` event stream ([`door_sessions::fetch_in`]), every hop on the
+                // connector to the REGISTRATION `name` (SEAM-4p: its own private reach applies),
+                // bounded by the server's own `timeout:` (an operator verb that hangs is one that
+                // gets killed and retried). The conversation is the operator's own binding, never a
+                // caller's.
+                let mut request = crate::client::jsonrpc::tools_list(&url, CONNECT_REQUEST_ID, None);
+                scoped(&mut request.headers, scope.as_deref());
+                let mut slot = plane
+                    .connecting
+                    .remove(name)
+                    .filter(|(ticket, _)| *ticket == instance.ticket())
+                    .map(|(_, negotiating)| negotiating);
+                let answer = door_sessions::fetch_in(
+                    &instance,
+                    plane,
+                    &mut slot,
+                    (0, name.as_str(), CONNECT_BINDING, def.timeout_ms()),
+                    request,
+                );
+                let std::task::Poll::Ready(answer) = answer else {
+                    if let Some(negotiating) = slot {
+                        plane.connecting.insert(name.clone(), (instance.ticket(), negotiating));
                     }
+                    return Outcome::Pending;
                 };
-                let answer = match (state, plane.host.as_ref()) {
-                    (Err(e), _) => Err(e),
-                    // No host tables: every exchange is unarmed, as the SDK's op answers it.
-                    (Ok(_), None) => Err(ConnFailure::Unarmed),
-                    (Ok(mut state), Some(host)) => {
-                        let answer =
-                            exchange(&mut host.connector(instance.ticket()), &mut state, 0, Some(&url));
-                        if answer.is_pending() {
-                            instance.park(state);
-                            return Outcome::Pending;
-                        }
-                        let std::task::Poll::Ready(answer) = answer else {
-                            return Outcome::Pending;
-                        };
-                        answer
-                    }
-                };
-                sighting_of(answer.map_err(|e| e.to_string()), CONNECT_REQUEST_ID)
+                sighting_of(answer, CONNECT_REQUEST_ID)
             }
         };
         // THE KERNEL'S TRUST BOOK records the observed catalogue (it stamps the re-verification
@@ -3937,10 +3969,12 @@ slot!(
             }
         }
         plane.sightings.insert(name.clone(), sighting.clone());
-        // THE FRESHNESS CLOCK records that the operator's connect LOOKED, whatever it saw (the
-        // served engine's settle stamped `last_checked_ms` on every observation): a call within
-        // `verify_ttl` of it reuses this sighting rather than fetching the list again.
-        if let Some(services) = plane.services {
+        // THE FRESHNESS CLOCK records that the operator's connect SAW the list: a call within
+        // `verify_ttl` of it reuses this sighting rather than fetching the list again. A contact
+        // that failed stamps nothing (row 159 finding A-H1): the next call fetches again, never
+        // answered "never sent" off the operator's failed refresh for `verify_ttl`.
+        plane.checked.remove(name);
+        if let (Some(services), Sighting::Seen(_)) = (plane.services, &sighting) {
             let handle = CompletionHandle {
                 ticket: instance.ticket(),
                 seq: CONNECT_CLOCK_SEQ,

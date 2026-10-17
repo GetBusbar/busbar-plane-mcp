@@ -264,11 +264,13 @@ pub(super) fn handle(ticket: Ticket, issued: &mut u32, slot: &mut Option<u32>) -
     }
 }
 
-/// The kernel's wall clock in Unix milliseconds, on a fresh handle of `ticket`.
-fn task_clock_ms(services: Services, ticket: Ticket, issued: &mut u32) -> u64 {
+/// The kernel's wall clock in Unix milliseconds, on a fresh handle of `ticket`; `None` when the
+/// read fails, which is never a time (row 159 finding P-M4): a task is never stamped at the epoch.
+/// A create refuses; a transition keeps the task's own last time; a lease is not renewed.
+fn task_clock_ms(services: Services, ticket: Ticket, issued: &mut u32) -> Option<u64> {
     let mut fresh = None;
     let h = handle(ticket, issued, &mut fresh);
-    services.clock_now(h).map_or(0, |r| r.wall_ns / 1_000_000)
+    services.clock_now(h).ok().map(|r| r.wall_ns / 1_000_000)
 }
 
 /// The caller's declared capabilities in `params`.
@@ -623,7 +625,9 @@ fn creating(
     let now = match st.at {
         Some(at) => at,
         None => {
-            let at = task_clock_ms(services, ticket, &mut unit.issued);
+            let Some(at) = task_clock_ms(services, ticket, &mut unit.issued) else {
+                return unavailable(unit, super::CLOCK_UNREAD);
+            };
             st.at = Some(at);
             at
         }
@@ -974,6 +978,7 @@ fn asking(
     let params = run.params.clone();
     let parked = plane.tasks.with(&run.reference, |t| match t {
         Some(t) if !t.status().is_terminal() => {
+            let now = now.unwrap_or(t.stamps().1);
             t.park_relay(&requests, state, params, now);
             t.runner = None;
             Ok(t.clone())
@@ -1281,7 +1286,7 @@ fn running(
                         if t.status().is_terminal() {
                             return Then::Gone(t.status());
                         }
-                        t.park(asks.clone(), now);
+                        t.park(asks.clone(), now.unwrap_or(t.stamps().1));
                         if t.answered() {
                             return Then::Next;
                         }
@@ -1303,7 +1308,7 @@ fn running(
                 }
                 plane.tasks.with(&run.reference, |t| {
                     if let Some(t) = t {
-                        t.set_working(now);
+                        t.set_working(now.unwrap_or(t.stamps().1));
                     }
                 });
                 run.phase = Phase::Call;
@@ -1333,12 +1338,15 @@ fn running(
                                 .as_ref()
                                 .and_then(|m| held.section.servers.get(m))
                                 .map_or(0, crate::tools_config::McpServerDefCfg::timeout_ms);
-                            let now = task_clock_ms(services, ticket, &mut unit.issued);
-                            let until = now
-                                .saturating_add(timeout)
-                                .saturating_add(tasks::RUN_LEASE_MS);
-                            let records = live_records(plane, &task, Some(until));
-                            ride(unit, records);
+                            // A clock that cannot be read renews no lease: its end would be a
+                            // time the plane made up.
+                            if let Some(now) = task_clock_ms(services, ticket, &mut unit.issued) {
+                                let until = now
+                                    .saturating_add(timeout)
+                                    .saturating_add(tasks::RUN_LEASE_MS);
+                                let records = live_records(plane, &task, Some(until));
+                                ride(unit, records);
+                            }
                         }
                         return Step::Write;
                     }
@@ -1356,7 +1364,13 @@ fn running(
                 let at = match run.at {
                     Some(at) => at,
                     None => {
-                        let at = task_clock_ms(services, ticket, &mut unit.issued);
+                        // A failed read keeps the task's own last time; with no task held here
+                        // there is none, and the run settles nothing.
+                        let at = task_clock_ms(services, ticket, &mut unit.issued)
+                            .or_else(|| plane.tasks.get(&run.reference).map(|t| t.stamps().1));
+                        let Some(at) = at else {
+                            return not_run(unit, run);
+                        };
                         run.at = Some(at);
                         at
                     }
@@ -1655,7 +1669,8 @@ fn verbing(
     let at = match st.at {
         Some(at) => at,
         None => {
-            let at = task_clock_ms(services, ticket, &mut unit.issued);
+            // A failed read keeps the task's own last time, never the epoch.
+            let at = task_clock_ms(services, ticket, &mut unit.issued).unwrap_or(task.stamps().1);
             st.at = Some(at);
             at
         }
