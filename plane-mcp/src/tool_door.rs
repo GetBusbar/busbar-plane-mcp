@@ -1711,16 +1711,10 @@ fn hides(trust: &crate::call::Trust) -> bool {
     )
 }
 
-/// A STDIO CALL WAITING ITS TURN (finding 5), called again on the wake of the call ahead of it
-/// leaving its member's line or at its deadline: sent once it is first in line; answered busy,
-/// never sent, once its deadline passed while it waited. `None` for a unit that is not waiting.
-fn take_turn(
-    plane: &McpDoor,
-    ticket: Ticket,
-    principal: &str,
-    generation: u64,
-    unit: &mut CallUnit,
-) -> Option<Step> {
+/// A QUEUED STDIO CALL'S TURN, the synchronous call's and a task's continuation's alike: `Ok` the
+/// step it takes (sent once it is first in line, else waiting on within its deadline); `Err` its
+/// deadline passed while it waited, and it was never sent. `None` for a unit that is not waiting.
+fn queued_turn(plane: &McpDoor, ticket: Ticket, unit: &mut CallUnit) -> Option<Result<Step, ()>> {
     let deadline = unit.relay.as_ref()?.queued.as_ref()?.1;
     let now = mono_ms(plane.services, ticket, unit);
     let relay = unit.relay.as_mut()?;
@@ -1732,13 +1726,30 @@ fn take_turn(
         let (outbound, _) = relay.queued.take()?;
         relay.dispatched_ms = now;
         unit.pending = Some(Pending::far(outbound).laned(&relay.admitted.entry.namespaced));
-        return Some(Step::Write);
+        return Some(Ok(Step::Write));
     }
     if deadline == 0 || now.is_none_or(|now| now < deadline) {
-        return Some(Step::Wait(deadline.saturating_mul(1_000_000)));
+        return Some(Ok(Step::Wait(deadline.saturating_mul(1_000_000))));
     }
     relay.queued = None;
     relay.program = None;
+    Some(Err(()))
+}
+
+/// A STDIO CALL WAITING ITS TURN (finding 5), called again on the wake of the call ahead of it
+/// leaving its member's line or at its deadline: sent once it is first in line; answered busy,
+/// never sent, once its deadline passed while it waited. `None` for a unit that is not waiting.
+fn take_turn(
+    plane: &McpDoor,
+    ticket: Ticket,
+    principal: &str,
+    generation: u64,
+    unit: &mut CallUnit,
+) -> Option<Step> {
+    if let Ok(step) = queued_turn(plane, ticket, unit)? {
+        return Some(step);
+    }
+    let relay = unit.relay.as_ref()?;
     let Settled::Answer { status, body, line } =
         crate::call::never_sent(&relay.admitted, door_program::BUSY)
     else {
@@ -2076,35 +2087,15 @@ fn answer_body(
                 if admitted.relay.as_ref().is_some_and(|r| r.member != member) {
                     return Some(Step::Decline);
                 }
-                let def = held.section.servers.get(&member)?;
-                let mut relay = Relay::of(admitted);
-                let (round, continuation) = match &relay.admitted.relay {
-                    Some(r) => (r.round, Some(r.continuation.clone())),
-                    None => (0, None),
-                };
-                relay.round = round;
-                let child = relay.admitted.relay.as_ref().and_then(|r| r.child.clone());
-                // THE CALLER'S REPLY IS BOUNDED TOO (`sampling_bounds.max_input_response_bytes`):
-                // what would be forwarded, as it would be serialised, is measured before anything
-                // is sent, and a reply over the cap is refused by name and never forwarded.
-                let judged = match (&child, &continuation) {
-                    (Some(child), _) => crate::tool_program::judge_child_replies(
-                        &member,
-                        def,
-                        &crate::tool_program::child_replies(
-                            child,
-                            continuation.as_ref().and_then(|c| c.get("inputResponses")),
-                        ),
-                    ),
-                    (None, Some(continuation)) => {
-                        crate::call::judge_continuation(&member, &def.sampling_bounds, continuation)
-                    }
-                    (None, None) => Ok(()),
-                };
-                if let Err(refusal) = judged {
-                    if let crate::call::Settled::Answer { status, body, line } =
-                        crate::call::ask_refused(&relay.admitted, &refusal)
-                    {
+                match send_to_member(plane, ticket, caller, unit, &held, &member, admitted)? {
+                    MemberSend::Step(step) => step,
+                    MemberSend::Decline => Step::Decline,
+                    MemberSend::Judged(admitted, refusal) => {
+                        let crate::call::Settled::Answer { status, body, line } =
+                            crate::call::ask_refused(&admitted, &refusal)
+                        else {
+                            return None;
+                        };
                         unit.pending = Some(
                             Pending::answer(status, body, unit.framing.as_ref(), &[]).logged(
                                 Some(&line),
@@ -2113,125 +2104,34 @@ fn answer_body(
                                 clock_s(services, ticket, unit),
                             ),
                         );
-                        return Some(Step::Write);
+                        Step::Write
+                    }
+                    MemberSend::Spent(admitted) => {
+                        let refusal = crate::ask::AskRefusal::StateRejected(
+                            crate::ask::Rejected::AlreadySpent,
+                        );
+                        let line = crate::call::retry_refused_line(
+                            &admitted.entry,
+                            refusal.audit_reason(),
+                        );
+                        let refusal = refusal.refusal(&admitted.id);
+                        unit.pending = Some(
+                            Pending::answer(
+                                refusal.status,
+                                refusal.body(),
+                                unit.framing.as_ref(),
+                                &[],
+                            )
+                            .logged(
+                                Some(&line),
+                                principal,
+                                generation,
+                                clock_s(services, ticket, unit),
+                            ),
+                        );
+                        Step::Write
                     }
                 }
-                let mut outbound = if let Some(child) = child {
-                    // A STDIO CHILD'S RELAYED ASK, ANSWERED: its work handle bound, the caller's
-                    // answers written to the child under its own ids, and the call it still owes
-                    // read on.
-                    if !door_program::is_program(def) {
-                        return Some(Step::Decline);
-                    }
-                    match bind_child_work(plane, ticket, unit, &member, &child) {
-                        std::task::Poll::Pending => return Some(Step::Pending),
-                        std::task::Poll::Ready(true) => {}
-                        std::task::Poll::Ready(false) => {
-                            let refusal = crate::ask::AskRefusal::StateRejected(
-                                crate::ask::Rejected::AlreadySpent,
-                            );
-                            let line = crate::call::retry_refused_line(
-                                &relay.admitted.entry,
-                                refusal.audit_reason(),
-                            );
-                            let refusal = refusal.refusal(&relay.admitted.id);
-                            unit.pending = Some(
-                                Pending::answer(
-                                    refusal.status,
-                                    refusal.body(),
-                                    unit.framing.as_ref(),
-                                    &[],
-                                )
-                                .logged(
-                                    Some(&line),
-                                    principal,
-                                    generation,
-                                    clock_s(services, ticket, unit),
-                                ),
-                            );
-                            return Some(Step::Write);
-                        }
-                    }
-                    let mut replies = crate::tool_program::child_replies(
-                        &child,
-                        continuation.as_ref().and_then(|c| c.get("inputResponses")),
-                    );
-                    let first = if replies.is_empty() {
-                        Vec::new()
-                    } else {
-                        replies.remove(0)
-                    };
-                    relay.program = Some(door_program::ProgramRelay::retrying(
-                        plane,
-                        &member,
-                        child.wait,
-                        child.generation,
-                        replies,
-                    ));
-                    crate::call::OutboundCall {
-                        verb: "POST",
-                        target: "/".to_string(),
-                        fields: Vec::new(),
-                        body: first,
-                    }
-                } else if door_program::is_program(def) {
-                    // A stdio member: the call carries the unit's own id on the child.
-                    let id = door_program::id_of(unit.key, round);
-                    relay.program = Some(door_program::ProgramRelay::waiting(plane, &member, id));
-                    crate::call::outbound_program(
-                        &relay.admitted,
-                        &member,
-                        def,
-                        continuation.as_ref(),
-                        id,
-                    )?
-                } else {
-                    crate::call::outbound(
-                        &relay.admitted,
-                        &member,
-                        def,
-                        round,
-                        continuation.as_ref(),
-                    )?
-                };
-                // A member's token_exchange down-scope / passthrough lend rides its outbound
-                // (Q-L3B-DOOR-EXCHANGE); a stdio child carries none.
-                if relay.program.is_none() {
-                    relay.scope =
-                        exchange_scope(services, ticket, unit, &held, &member, &relay.admitted);
-                    scoped(&mut outbound.fields, relay.scope.as_deref());
-                    // THE CLIENT LADDER'S FIRST HOP is the walk's: the stateless request as it
-                    // always was, or, to an upstream busbar holds a session with, that request
-                    // lowered into the session ([`door_sessions::Negotiating`]).
-                    let original = door_sessions::original(&def.url, &outbound);
-                    // The conversation is this CALLER's (row 159 finding 3): a session busbar
-                    // holds with the member for another caller is never this call's.
-                    let negotiating =
-                        door_sessions::Negotiating::begin(plane, &member, caller, original);
-                    if let Some(first) = negotiating.first_request() {
-                        outbound.fields.clone_from(&first.headers);
-                        outbound.body.clone_from(&first.body);
-                    }
-                    unit.negotiating = Some(Box::new(negotiating));
-                }
-                // ONE CALL AT A TIME on a child whose asks are relayed (finding 5): a call behind
-                // another in its member's line waits its turn, within its own deadline.
-                let now = mono_ms(services, ticket, unit);
-                if door_program::serialised(def)
-                    && relay
-                        .program
-                        .as_ref()
-                        .is_some_and(|p| !door_program::in_line(plane, p, now, ticket))
-                {
-                    let deadline = now.map_or(0, |now| now.saturating_add(def.timeout_ms()));
-                    relay.queued = Some((outbound, deadline));
-                    unit.relay = Some(relay);
-                    return Some(Step::Wait(deadline.saturating_mul(1_000_000)));
-                }
-                relay.dispatched_ms = now;
-                unit.pending = Some(Pending::far(outbound).laned(&relay.admitted.entry.namespaced));
-                unit.relay = Some(relay);
-                Step::Write
             }
         });
     }
@@ -2501,40 +2401,20 @@ fn relay_ask(
         relay.asked = None;
         return refused(child, no_sealer);
     }
-    let mut child = child;
-    if let Some(c) = child.as_mut().filter(|c| c.work.is_none()) {
-        relay.asked = Some((result.clone(), round, c.clone()));
-        let h = door_tasks::handle(ticket, issued, &mut relay.work_slot);
-        let record = child_record(&member, c);
-        let (mut buf, mut spans) = ([0u8; 64], [door_tasks::blank(); 2]);
-        match services.work_open(h, door::KIND_APPROVAL, &record, &mut buf, &mut spans) {
-            std::task::Poll::Pending => return Relayed::Pending,
-            std::task::Poll::Ready(Ok(opened)) => {
-                c.work = Some(opened.reference.to_string());
-                let mut fresh = None;
-                let h = door_tasks::handle(ticket, issued, &mut fresh);
-                let now_ms = services.clock_now(h).map_or(0, |r| r.wall_ns / 1_000_000);
-                sweep_relays(plane, services, ticket, issued, now_ms);
-                plane.relays.insert(
-                    opened.handle,
-                    now_ms.saturating_add(crate::ask::DEFAULT_TTL_SECS.saturating_mul(1000)),
-                );
-            }
-            std::task::Poll::Ready(Err(_)) => {
-                relay.asked = None;
-                return refused(
-                    child,
-                    crate::call::AskRefusal::Unavailable {
-                        server,
-                        reason: "the host opened no work handle to correlate the caller's answer \
-                                 under (it keeps no store for them, or holds as many live ones as \
-                                 it keeps)"
-                            .to_string(),
-                    },
-                );
-            }
-        }
-    }
+    let child = match child {
+        Some(c) if c.work.is_none() => match open_child_work(
+            plane,
+            (services, ticket, &mut *issued),
+            (&mut relay.asked, &mut relay.work_slot),
+            (&server, &member),
+            (&result, round, c),
+        ) {
+            ChildOpened::Pending => return Relayed::Pending,
+            ChildOpened::Open(c) => Some(c),
+            ChildOpened::Refused(c, refusal) => return refused(Some(c), refusal),
+        },
+        other => other,
+    };
     relay.asked = None;
     let leg = crate::ask::UpstreamLeg {
         member,
@@ -2573,6 +2453,64 @@ fn relay_ask(
             line: crate::call::relayed_line(&relay.admitted.entry),
         }),
         Err(refusal) => refused(child, refusal),
+    }
+}
+
+/// What giving a stdio child's relayed ask its work handle came to ([`open_child_work`]).
+enum ChildOpened {
+    /// The open pended: called again on its wake, the ask held in the relay.
+    Pending,
+    /// The handle is open: the child's leg names it.
+    Open(crate::ask::ChildLeg),
+    /// The host opened none: the child's ask is refused in these words.
+    Refused(crate::ask::ChildLeg, crate::call::AskRefusal),
+}
+
+/// A STDIO CHILD'S RELAYED ASK GIVEN ITS WORK HANDLE (`work.open`): across separate arrivals the
+/// caller's answer is correlated with `work.*`, the synchronous call's and a task's alike. The ask
+/// (`result`, `round`, the child's leg `c`) is held in `asked` while the open pends, the open
+/// re-issued under `work_slot`; an opened handle is swept with the relays once its state lapses.
+fn open_child_work(
+    plane: &McpDoor,
+    (services, ticket, issued): (Services, Ticket, &mut u32),
+    (asked, work_slot): (
+        &mut Option<(Value, u32, crate::ask::ChildLeg)>,
+        &mut Option<u32>,
+    ),
+    (server, member): (&str, &str),
+    (result, round, mut c): (&Value, u32, crate::ask::ChildLeg),
+) -> ChildOpened {
+    *asked = Some((result.clone(), round, c.clone()));
+    let h = door_tasks::handle(ticket, issued, work_slot);
+    let record = child_record(member, &c);
+    let (mut buf, mut spans) = ([0u8; 64], [door_tasks::blank(); 2]);
+    match services.work_open(h, door::KIND_APPROVAL, &record, &mut buf, &mut spans) {
+        std::task::Poll::Pending => ChildOpened::Pending,
+        std::task::Poll::Ready(Ok(opened)) => {
+            c.work = Some(opened.reference.to_string());
+            let mut fresh = None;
+            let h = door_tasks::handle(ticket, issued, &mut fresh);
+            let now_ms = services.clock_now(h).map_or(0, |r| r.wall_ns / 1_000_000);
+            sweep_relays(plane, services, ticket, issued, now_ms);
+            plane.relays.insert(
+                opened.handle,
+                now_ms.saturating_add(crate::ask::DEFAULT_TTL_SECS.saturating_mul(1000)),
+            );
+            ChildOpened::Open(c)
+        }
+        std::task::Poll::Ready(Err(_)) => {
+            *asked = None;
+            ChildOpened::Refused(
+                c,
+                crate::call::AskRefusal::Unavailable {
+                    server: server.to_string(),
+                    reason: "the host opened no work handle to correlate the caller's answer \
+                             under (it keeps no store for them, or holds as many live ones as \
+                             it keeps)"
+                        .to_string(),
+                },
+            )
+        }
     }
 }
 
@@ -2727,6 +2665,149 @@ impl Relay {
             queued: None,
         }
     }
+}
+
+/// What sending an admitted call to its member came to ([`send_to_member`]).
+enum MemberSend {
+    /// The step the unit takes: its request written, held in its member's line, or pending.
+    Step(Step),
+    /// The member is not one this call may be sent to: the walk moves on.
+    Decline,
+    /// The caller's reply to the member's ask is over the member's `sampling_bounds` (owner ruling
+    /// Q22c): refused by name, never forwarded.
+    Judged(Box<AdmittedCall>, crate::call::AskRefusal),
+    /// The work handle a stdio child's relayed ask is correlated under is gone, another's or spent.
+    Spent(Box<AdmittedCall>),
+}
+
+/// THE ONE MEMBER-SEND (row 159 mcp findings C-H2, C-H3, C-M4): an admitted call sent to `member`,
+/// the synchronous call's and a task's continuation's alike. The caller's reply to a relayed ask is
+/// judged against the member's bound before anything is sent; a `transport: stdio` member's call
+/// goes to its child (a relayed ask's retry binding the work handle the ask is correlated under);
+/// a network member's carries the caller's `token_exchange:` down-scope and rides the client ladder
+/// for this caller (`caller`, the binding its upstream sessions are kept under); and a call behind
+/// another on a child whose asks are relayed waits its turn. `None` for a member the section does
+/// not register or a call the client dialect cannot build.
+fn send_to_member(
+    plane: &McpDoor,
+    ticket: Ticket,
+    caller: &str,
+    unit: &mut CallUnit,
+    held: &Held,
+    member: &str,
+    admitted: AdmittedCall,
+) -> Option<MemberSend> {
+    let services = plane.services;
+    let def = held.section.servers.get(member)?;
+    let mut relay = Relay::of(admitted);
+    let (round, continuation) = match &relay.admitted.relay {
+        Some(r) => (r.round, Some(r.continuation.clone())),
+        None => (0, None),
+    };
+    relay.round = round;
+    let child = relay.admitted.relay.as_ref().and_then(|r| r.child.clone());
+    // THE CALLER'S REPLY IS BOUNDED TOO (`sampling_bounds.max_input_response_bytes`):
+    // what would be forwarded, as it would be serialised, is measured before anything
+    // is sent, and a reply over the cap is refused by name and never forwarded.
+    let judged = match (&child, &continuation) {
+        (Some(child), _) => crate::tool_program::judge_child_replies(
+            member,
+            def,
+            &crate::tool_program::child_replies(
+                child,
+                continuation.as_ref().and_then(|c| c.get("inputResponses")),
+            ),
+        ),
+        (None, Some(continuation)) => {
+            crate::call::judge_continuation(member, &def.sampling_bounds, continuation)
+        }
+        (None, None) => Ok(()),
+    };
+    if let Err(refusal) = judged {
+        return Some(MemberSend::Judged(Box::new(relay.admitted), refusal));
+    }
+    let mut outbound = if let Some(child) = child {
+        // A STDIO CHILD'S RELAYED ASK, ANSWERED: its work handle bound, the caller's
+        // answers written to the child under its own ids, and the call it still owes
+        // read on.
+        if !door_program::is_program(def) {
+            return Some(MemberSend::Decline);
+        }
+        match bind_child_work(plane, ticket, unit, member, &child) {
+            std::task::Poll::Pending => return Some(MemberSend::Step(Step::Pending)),
+            std::task::Poll::Ready(true) => {}
+            std::task::Poll::Ready(false) => {
+                return Some(MemberSend::Spent(Box::new(relay.admitted)));
+            }
+        }
+        let mut replies = crate::tool_program::child_replies(
+            &child,
+            continuation.as_ref().and_then(|c| c.get("inputResponses")),
+        );
+        let first = if replies.is_empty() {
+            Vec::new()
+        } else {
+            replies.remove(0)
+        };
+        relay.program = Some(door_program::ProgramRelay::retrying(
+            plane,
+            member,
+            child.wait,
+            child.generation,
+            replies,
+        ));
+        crate::call::OutboundCall {
+            verb: "POST",
+            target: "/".to_string(),
+            fields: Vec::new(),
+            body: first,
+        }
+    } else if door_program::is_program(def) {
+        // A stdio member: the call carries the unit's own id on the child.
+        let id = door_program::id_of(unit.key, round);
+        relay.program = Some(door_program::ProgramRelay::waiting(plane, member, id));
+        crate::call::outbound_program(&relay.admitted, member, def, continuation.as_ref(), id)?
+    } else {
+        crate::call::outbound(&relay.admitted, member, def, round, continuation.as_ref())?
+    };
+    // A member's token_exchange down-scope / passthrough lend rides its outbound
+    // (Q-L3B-DOOR-EXCHANGE); a stdio child carries none.
+    if relay.program.is_none() {
+        relay.scope = exchange_scope(services, ticket, unit, held, member, &relay.admitted);
+        scoped(&mut outbound.fields, relay.scope.as_deref());
+        // THE CLIENT LADDER'S FIRST HOP is the walk's: the stateless request as it
+        // always was, or, to an upstream busbar holds a session with, that request
+        // lowered into the session ([`door_sessions::Negotiating`]).
+        let original = door_sessions::original(&def.url, &outbound);
+        // The conversation is this CALLER's (row 159 finding 3): a session busbar
+        // holds with the member for another caller is never this call's.
+        let negotiating = door_sessions::Negotiating::begin(plane, member, caller, original);
+        if let Some(first) = negotiating.first_request() {
+            outbound.fields.clone_from(&first.headers);
+            outbound.body.clone_from(&first.body);
+        }
+        unit.negotiating = Some(Box::new(negotiating));
+    }
+    // ONE CALL AT A TIME on a child whose asks are relayed (finding 5): a call behind
+    // another in its member's line waits its turn, within its own deadline.
+    let now = mono_ms(services, ticket, unit);
+    if door_program::serialised(def)
+        && relay
+            .program
+            .as_ref()
+            .is_some_and(|p| !door_program::in_line(plane, p, now, ticket))
+    {
+        let deadline = now.map_or(0, |now| now.saturating_add(def.timeout_ms()));
+        relay.queued = Some((outbound, deadline));
+        unit.relay = Some(relay);
+        return Some(MemberSend::Step(Step::Wait(
+            deadline.saturating_mul(1_000_000),
+        )));
+    }
+    relay.dispatched_ms = now;
+    unit.pending = Some(Pending::far(outbound).laned(&relay.admitted.entry.namespaced));
+    unit.relay = Some(relay);
+    Some(MemberSend::Step(Step::Write))
 }
 
 /// THE DOWN-SCOPE a `token_exchange:` member's token is asked for on this unit's call (ARCHITECT
@@ -3120,6 +3201,38 @@ slot!(
                             child,
                         } if task_run => {
                             let server = relay.admitted.entry.server.clone();
+                            // A STDIO CHILD'S ASK on a task is given its work handle as the
+                            // synchronous call's is: the task's retry binds it (C-H3).
+                            let child = match (child, plane.services) {
+                                (Some(c), Some(services)) if c.work.is_none() => {
+                                    let member = unit.member.clone().unwrap_or_default();
+                                    match open_child_work(
+                                        plane,
+                                        (services, ticket, &mut unit.issued),
+                                        (&mut relay.asked, &mut relay.work_slot),
+                                        (&server, &member),
+                                        (&result, round, c),
+                                    ) {
+                                        ChildOpened::Pending => return Some(Step::Pending),
+                                        ChildOpened::Open(c) => Some(c),
+                                        ChildOpened::Refused(c, refusal) => {
+                                            let ids: Vec<Value> =
+                                                c.asks.iter().map(|(_, id)| id.clone()).collect();
+                                            let (Some(def), Some(program)) =
+                                                (def, relay.program.as_mut())
+                                            else {
+                                                return None;
+                                            };
+                                            return Some(refuse_child(
+                                                plane, ticket, &member, def, program, &ids,
+                                                &refusal,
+                                            ));
+                                        }
+                                    }
+                                }
+                                (child, _) => child,
+                            };
+                            relay.asked = None;
                             let digest = relay.admitted.sent_digest.clone();
                             let answered = (relay.status != 0).then_some(relay.far.len());
                             return Some(door_tasks::continuation_asked(
