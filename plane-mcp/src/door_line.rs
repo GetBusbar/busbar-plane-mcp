@@ -224,7 +224,8 @@ pub(super) fn preset(plane: &McpDoor, ticket: Ticket, unit: &mut CallUnit) -> Op
         let line_unit = unit.line.as_mut()?;
         if let Some(mut live) = plane.live_asks.remove(&(session, n)) {
             let fresh = next_ask(plane);
-            if let Some(ask) = live.issue(fresh) {
+            // A clock that cannot be read arms no lapse: the caller is handed the result itself.
+            if let (Some(now), Some(ask)) = (now, live.issue(fresh)) {
                 live.arm(now);
                 // Kept before it is asked: its answer may arrive before the emit returns.
                 let fallback = live.fallback.clone();
@@ -284,7 +285,11 @@ pub(super) fn liven(plane: &McpDoor, ticket: Ticket, principal: &str, unit: &mut
         return;
     };
     live.session = session;
-    live.arm(door_listen::mono_ns(plane.services, ticket, unit));
+    // A clock that cannot be read arms no lapse: the answer is left as it is.
+    let Some(now) = door_listen::mono_ns(plane.services, ticket, unit) else {
+        return;
+    };
+    live.arm(now);
     let n = next_ask(plane);
     let Some(ask) = live.issue(n) else {
         return;
@@ -318,7 +323,20 @@ pub(super) fn listen(plane: &McpDoor, ticket: Ticket, unit: &mut CallUnit) -> Op
     let id = id.clone();
     let held = plane.current().or_else(|| unit.held.clone())?;
     door_listen::entitled_afresh(plane, ticket, unit, &held);
-    let now = door_listen::mono_ns(plane.services, ticket, unit);
+    let Some(now) = door_listen::mono_ns(plane.services, ticket, unit) else {
+        let body = busbar_contract::jsonrpc::error_body(
+            id,
+            crate::codec::CODE_REFUSED,
+            super::CLOCK_UNREAD,
+            None,
+        );
+        return Some(Pending::answer(
+            503,
+            serde_json::to_vec(&body).unwrap_or_default(),
+            None,
+            &[],
+        ));
+    };
     let entitled = unit.entitled.clone();
     let admit = |kind: &str, name: &str| {
         entitled
