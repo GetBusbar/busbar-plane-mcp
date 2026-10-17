@@ -1359,3 +1359,57 @@ fn a_create_settles_every_page_of_its_callers_left_behind_tasks() {
         missed.len()
     );
 }
+
+// ── C-H1: the answers to a task's own rounds ────────────────────────────────────────────────────
+
+/// An ask, built the one way a `CallerAsk` can be built: from an operator-written config entry.
+fn elicitation(key: &str) -> busbar_plane_mcp::ask::CallerAsk {
+    busbar_plane_mcp::ask::CallerAsk::from_config(
+        key,
+        &busbar_plane_mcp::tools_config::AskEntryCfg {
+            method: "elicitation/create".into(),
+            params: Some(json!({})),
+        },
+    )
+}
+
+/// C-H1 [HIGH]: `tasks/update` keeps only the answers the task's current round asked for. A key
+/// the round did not ask is ignored (SEP-2663: keys the task is not waiting on are not refused), so
+/// an update cannot smuggle a tool argument into the call the task runs (call.rs, the synchronous
+/// rule: "an answer may only supply what was asked for").
+#[test]
+fn an_update_keeps_only_the_keys_the_round_asked() {
+    let mut t = tool_tasks::Task::new("0123456789abcdef0123456789abcdef", "k", 7, "d1", 1);
+    t.park(vec![elicitation("confirm")], 1);
+    assert!(t.deliver(
+        &serde_json::from_value(json!({"confirm": {"action": "accept"}, "path": "/etc/shadow"}))
+            .unwrap(),
+        2,
+    ));
+    assert_eq!(
+        t.answers().get("confirm"),
+        Some(&json!({"action": "accept"}))
+    );
+    assert!(
+        t.answers().get("path").is_none(),
+        "an answer the round never asked is kept: {:?}",
+        t.answers()
+    );
+    let mut idle = tool_tasks::Task::new("0123456789abcdef0123456789abcdef", "k", 7, "d1", 1);
+    assert!(idle.deliver(&serde_json::from_value(json!({"path": "/x"})).unwrap(), 2));
+    assert!(idle.answers().is_empty(), "{:?}", idle.answers());
+}
+
+/// C-H1 [HIGH]: the answers never rewrite an argument the call was admitted with: the hooks and the
+/// argument guard judged the admitted arguments, and those are the arguments that go out.
+#[test]
+fn an_answer_never_rewrites_an_admitted_argument() {
+    let answers: serde_json::Map<String, Value> =
+        serde_json::from_value(json!({"path": "/etc/shadow", "confirm": {"action": "accept"}}))
+            .unwrap();
+    assert_eq!(
+        tool_tasks::merge_answers(&json!({ "path": "/a" }), &answers),
+        json!({ "path": "/a", "confirm": {"action": "accept"} }),
+        "an answer rewrote an admitted argument"
+    );
+}
