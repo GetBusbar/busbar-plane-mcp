@@ -1094,9 +1094,6 @@ fn seen() -> Vec<Seen> {
         .unwrap_or_default()
 }
 
-/// An upstream that refuses the stateless revision and requires `initialize` is reached by
-/// negotiation: busbar opens a session with it, and the relayed call is answered from inside it.
-/// When the upstream then forgets that session, the walk's answer (`404`) is recovered by a fresh
 // ── the `2024-11-05` rung: busbar as a client of a legacy-only server (row 159 finding 1) ───────
 
 /// A `tools/call` of the legacy registration's `read_file`, asking for `path`, under JSON-RPC id
@@ -1177,10 +1174,6 @@ fn legacy_text(answered: &Answered) -> (Value, String) {
         .to_string();
     (body["id"].clone(), text)
 }
-
-/// A REGISTERED SERVER THAT SPEAKS ONLY `2024-11-05` IS REACHED END TO END: busbar opens its event
-/// stream, `initialize`s on it, and POSTs each call to the message address it names. Two calls of
-/// ONE caller in flight at once, answered on the stream in the reverse order, each reach the call
 
 // ── the operator's verbs and the line carrier, op by op ─────────────────────────────────────────
 
@@ -1425,11 +1418,10 @@ fn a_failed_connect_never_holds_back_the_next_calls_fetch() {
     );
     d.piece(94, &Given::attempt(ALICE, "dn"));
     d.pump(94, &Given::caller(ALICE, DN_CALL));
+    let after = requests_to(DOWN_URL);
     assert!(
-        requests_to(DOWN_URL) > before,
-        "the call fetched the list again: {} requests before, {} after",
-        before,
-        requests_to(DOWN_URL)
+        after > before,
+        "the call fetched the list again: {before} requests before, {after} after"
     );
 }
 
@@ -1509,4 +1501,45 @@ fn a_name_the_routing_key_cannot_spell_is_refused_at_validate() {
     assert!(refused.contains("s+t"), "{refused}");
     let fine = br#"{"st": {"url": "https://up.example/st", "pin": {"mechanism": "unpinned"}, "tools_allow": {"read_file.v2-x": {}}}}"#;
     assert!(door::read_tools_section(fine).is_ok());
+}
+
+// ── A-M2: the event stream carries the answer's own bytes ─────────────────────────────────────
+
+/// The `data` of the stream's last event, its `data:` lines joined back with `\n` as a client
+/// joins them.
+fn last_data(bytes: &[u8]) -> String {
+    let text = String::from_utf8(bytes.to_vec()).expect("an event stream is text");
+    let last = text
+        .trim_end_matches('\n')
+        .rsplit("\n\n")
+        .next()
+        .expect("an event");
+    last.lines()
+        .filter_map(|l| l.strip_prefix("data: "))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// RED A-M2: THE STREAM CARRIES THE ANSWER'S OWN BYTES (Law 11): its members in the upstream's
+/// order, its numbers as the upstream spelled them (an integer past 64 bits, a float's exponent),
+/// and its line breaks as `data:` lines a client joins back. Never parsed and printed again.
+#[test]
+fn the_stream_carries_the_answers_own_bytes() {
+    let body = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "fs_read", "_meta": {"progressToken": "p"}}});
+    let framing = busbar_plane_mcp::framing::Framing::of(
+        Some(busbar_plane_mcp::framing::EVENT_STREAM),
+        "tools/call",
+        &body,
+    )
+    .expect("framed");
+    let answer = b"{\"jsonrpc\":\"2.0\",\"id\":1,\n  \"result\":{\"zeta\":123456789012345678901234567890,\n  \"alpha\":1.0e0,\"content\":[]}}".to_vec();
+    let (bytes, framed) = framing.frame(200, answer.clone(), &[]);
+    assert!(framed);
+    assert_eq!(
+        last_data(&bytes),
+        String::from_utf8(answer).unwrap(),
+        "the answer's own bytes, line for line: {}",
+        String::from_utf8_lossy(&bytes)
+    );
 }
