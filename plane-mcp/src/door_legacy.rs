@@ -332,7 +332,7 @@ impl Link {
                         woken.push(t);
                     }
                 }
-                LinkEffect::FromPeer(v) => self.from_peer(&v, grants, woken, announced),
+                LinkEffect::FromPeer(v) => self.peer_message(&v, grants, woken, announced),
                 LinkEffect::Ignored => {}
             }
         }
@@ -344,7 +344,7 @@ impl Link {
     /// ONE MESSAGE OF THE SERVER'S OWN, routed as the other rungs route it (Law 11: busbar answers
     /// only the protocol's housekeeping, and an ask it cannot carry to the caller is refused, never
     /// answered for the caller).
-    fn from_peer(
+    fn peer_message(
         &mut self,
         v: &Value,
         grants: ServerRequestGrants,
