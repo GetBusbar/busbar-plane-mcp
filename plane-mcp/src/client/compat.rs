@@ -57,6 +57,52 @@ pub fn probe_outcome(status: u16, body: &[u8]) -> StepOutcome {
     }
 }
 
+/// Reads what the answer to busbar's STATELESS request says about the upstream's revision: the
+/// ladder moves only on a refusal that names the revision or a session, and any other answer, an
+/// upstream's own JSON-RPC error included, is the stateless path's answer, handed on as it came (THE
+/// DESIGN section 2, the mcp bullet: the stateless path of the `2026-07-28` revision stays
+/// byte-identical).
+///
+/// A refusal of the revision is what a server of an earlier revision answers a request that opens
+/// no session:
+///
+/// - a `4xx` whose body is no JSON-RPC error: a `2024-11-05` server's `404`/`405` at its event
+///   stream's endpoint, a session server's bare `400` or `404` for the session it was not named;
+/// - a `405`, whatever its body: the endpoint takes no POST;
+/// - a JSON-RPC error `-32022` (the revision is unsupported), at any status;
+/// - a JSON-RPC error whose message names the session or the initialization the request skipped
+///   (`Bad Request: No valid session ID provided`, `Server not initialized`), at any status.
+///
+/// A `5xx`, or no answer, says nothing about the revision.
+#[must_use]
+pub fn stateless_outcome(status: u16, body: &[u8]) -> StepOutcome {
+    if (500..600).contains(&status) {
+        return StepOutcome::Unreachable;
+    }
+    let error = serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|v| v.get("error").filter(|e| e.is_object()).cloned());
+    let Some(error) = error else {
+        return if (400..500).contains(&status) {
+            StepOutcome::Refused4xx
+        } else {
+            StepOutcome::Answered
+        };
+    };
+    let code = error.get("code").and_then(Value::as_i64);
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let names_session = message.contains("session") || message.contains("initializ");
+    if status == 405 || code == Some(CODE_UNSUPPORTED_PROTOCOL_VERSION) || names_session {
+        StepOutcome::Refused4xx
+    } else {
+        StepOutcome::Answered
+    }
+}
+
 /// The `initialize` request, sent to `url` with the credential `template` carries. `client_version`
 /// is the caller's own version string (the plane reads no build metadata).
 #[must_use]
