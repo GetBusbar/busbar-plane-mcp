@@ -1023,11 +1023,6 @@ fn sampling_max_prompt_bytes_counts_the_system_prompt_and_every_message() {
     assert_relayed(sampling_settle(&def, at));
     let over = json!({ "systemPrompt": "abcde", "messages": text_messages(2, "xyz") });
     assert_bound_refused(sampling_settle(&def, over), "max_prompt_bytes", "10");
-    // Non-text parts do not count.
-    let image = json!({ "messages": [
-        { "role": "user", "content": { "type": "image", "data": "x".repeat(100), "mimeType": "image/png" } }
-    ]});
-    assert_relayed(sampling_settle(&def, image));
 }
 
 #[test]
@@ -1181,4 +1176,188 @@ fn input_responses_default_cap_is_one_mebibyte() {
     crate::call::judge_continuation("fs", &def.sampling_bounds, &big).expect_err("over");
     let small = json!({ "inputResponses": { "s": "y" }, "requestState": "z" });
     crate::call::judge_continuation("fs", &def.sampling_bounds, &small).expect("under");
+}
+
+// ---------------------------------------------------------------------------------------------
+// BUSBAR'S OWN ANSWERS ACROSS ROUNDS AND ACROSS A RELAYED ASK (row 159 mcp findings C-M5, C-M6):
+// what went out on the first call is what goes out on every retry of the same exchange, plus the
+// answers of the round the retry closes.
+// ---------------------------------------------------------------------------------------------
+
+/// A seal that writes the state as JSON behind a marker and spends each nonce once (the ask
+/// tests' own stand-in for the host's).
+#[derive(Default)]
+struct PlainSeal {
+    spent: std::collections::BTreeSet<String>,
+    next: u32,
+}
+
+const PLAIN: &str = "sealed:";
+
+impl crate::ask::Seal for PlainSeal {
+    fn mint(&mut self, state: &crate::ask::AskState) -> Option<String> {
+        Some(format!("{PLAIN}{}", serde_json::to_string(state).ok()?))
+    }
+    fn open(&mut self, blob: &str) -> Result<crate::ask::AskState, crate::ask::Rejected> {
+        let body = blob
+            .strip_prefix(PLAIN)
+            .ok_or(crate::ask::Rejected::BadSignature)?;
+        serde_json::from_str(body).map_err(|_| crate::ask::Rejected::Malformed)
+    }
+    fn nonce(&mut self) -> Option<String> {
+        self.next += 1;
+        Some(format!("n{}", self.next))
+    }
+    fn redeem(&mut self, nonce: &str, _: u64, _: u64) -> bool {
+        self.spent.insert(nonce.to_string())
+    }
+}
+
+/// A tool whose operator asks its caller in TWO rounds before it runs.
+const TWO_ROUNDS: &str = r#"{"fs": {"url": "https://mcp.example/fs", "pin": {"mechanism": "unpinned"},
+  "tools_allow": {
+    "pay": {"schema_hash": "sha256:dd", "ask_caller": [
+      {"confirm": {"method": "elicitation/create", "params": {"message": "sure?"}}},
+      {"really": {"method": "elicitation/create", "params": {"message": "really sure?"}}}
+    ]}
+  }}}"#;
+
+/// `p` admitted with busbar's own ask decided over `seal`, as the door decides it.
+fn admit_asking(cat: &Catalogue, seal: &mut PlainSeal, p: &Value) -> Admission {
+    let mut ask = |entry: &ToolEntry, arguments: &Value| {
+        let retry = crate::ask::Retry {
+            responses: p.get("inputResponses"),
+            state: p.get("requestState").and_then(Value::as_str),
+        };
+        let bind = crate::ask::Bind {
+            principal: "k",
+            method: crate::codec::METHOD_TOOLS_CALL,
+            capability: &entry.namespaced,
+            generation: 1,
+            now: 100,
+            roots_epoch: 0,
+        };
+        crate::ask::decide(
+            &entry.ask_caller,
+            3,
+            &json!({ "elicitation": {} }),
+            retry,
+            bind,
+            &crate::ask::digest_arguments(arguments),
+            Some(&mut *seal),
+        )
+    };
+    admit_call(cat, &json!(1), Some(p), &no_header, &everyone, &mut ask)
+}
+
+/// The `requestState` an `input_required` answer carries.
+fn asked_state(a: Admission) -> String {
+    let Admission::Asked(body, _) = a else {
+        panic!("busbar asks its caller: {a:?}");
+    };
+    let body: Value = serde_json::from_slice(&body).expect("json");
+    body["result"]["requestState"]
+        .as_str()
+        .expect("a sealed state")
+        .to_string()
+}
+
+/// C-M6: an exchange of two rounds goes out with BOTH rounds' answers. The caller's retry answers
+/// the round it was asked (MRTR: `inputResponses` answers the `inputRequests` of the result it
+/// retries), so the earlier round's answers ride in the sealed state, not in the caller's memory.
+#[test]
+fn a_two_round_exchange_goes_out_with_every_rounds_answers() {
+    let section = crate::door::read_tools_section(TWO_ROUNDS.as_bytes()).expect("reads");
+    let cat = Catalogue::build(1, &section);
+    let mut seal = PlainSeal::default();
+    let first = json!({ "name": "fs_pay", "arguments": { "amount": 5 }, "_meta": {} });
+    let s0 = asked_state(admit_asking(&cat, &mut seal, &first));
+    let mut second = first.clone();
+    second["inputResponses"] = json!({ "confirm": { "action": "accept" } });
+    second["requestState"] = json!(s0);
+    let s1 = asked_state(admit_asking(&cat, &mut seal, &second));
+    let mut last = first.clone();
+    last["inputResponses"] = json!({ "really": { "action": "accept" } });
+    last["requestState"] = json!(s1);
+    let a = go(admit_asking(&cat, &mut seal, &last));
+    assert_eq!(
+        a.arguments,
+        json!({
+            "amount": 5,
+            "confirm": { "action": "accept" },
+            "really": { "action": "accept" },
+        }),
+        "the first round's answer is lost when the last round's retry carries only its own"
+    );
+}
+
+/// C-M5: the retry of an upstream's ask relayed to the caller goes out as the first call did (the
+/// caller's arguments with busbar's own answers merged), plus the upstream's answers in the
+/// continuation. The relayed state carries busbar's own answers sealed (`a`).
+#[test]
+fn a_relayed_asks_retry_goes_out_with_busbars_own_answers_merged_again() {
+    let leg: crate::ask::UpstreamLeg = serde_json::from_value(json!({
+        "m": "fs", "s": "theirs", "r": 1, "a": { "ok": true }
+    }))
+    .expect("a leg reads");
+    let retry = json!({ "name": "fs_confirm", "arguments": { "n": 1 },
+        "inputResponses": { "u": { "action": "accept" } }, "requestState": "ours", "_meta": {} });
+    let mut relayed = |_: &ToolEntry, _: &Value| crate::ask::AskDecision::Relayed(leg.clone());
+    let a = go(admit_call(
+        &catalogue(),
+        &json!(1),
+        Some(&retry),
+        &no_header,
+        &everyone,
+        &mut relayed,
+    ));
+    assert_eq!(
+        a.arguments,
+        json!({ "n": 1, "ok": true }),
+        "the retry must be the same request as the first call: busbar's own answer is merged again"
+    );
+    let relay = a.relay.expect("the relayed retry");
+    assert_eq!(
+        relay.continuation["inputResponses"],
+        json!({ "u": { "action": "accept" } }),
+        "the caller's answers go to the upstream, not into the arguments"
+    );
+}
+
+/// C-M7 (owner ruling Q22c): `max_prompt_bytes` measures every content part an ask carries, not
+/// only its text: an image, an audio clip or an embedded resource is prompt the caller's model is
+/// handed, and an upstream picks its size.
+#[test]
+fn sampling_max_prompt_bytes_counts_every_content_part() {
+    let def = sampling_def(|b| b.max_prompt_bytes = 64);
+    for part in [
+        json!({ "type": "image", "data": "x".repeat(100), "mimeType": "image/png" }),
+        json!({ "type": "audio", "data": "x".repeat(100), "mimeType": "audio/wav" }),
+        json!({ "type": "resource", "resource": { "uri": "file:///a", "text": "x".repeat(100) } }),
+    ] {
+        let settled = sampling_settle(
+            &def,
+            json!({ "messages": [{ "role": "user", "content": part }] }),
+        );
+        assert!(
+            matches!(settled, Settled::Answer { .. }),
+            "a {} part past max_prompt_bytes must be refused, got {settled:?}",
+            part["type"]
+        );
+        assert_bound_refused(settled, "max_prompt_bytes", "64");
+    }
+    // In an array of parts too.
+    let mixed = json!({ "messages": [{ "role": "user", "content": [
+        { "type": "text", "text": "hi" },
+        { "type": "image", "data": "x".repeat(100), "mimeType": "image/png" }
+    ] }] });
+    let settled = sampling_settle(&def, mixed);
+    assert!(
+        matches!(settled, Settled::Answer { .. }),
+        "an image beside a text part must be measured, got {settled:?}"
+    );
+    // The control: a small image is within the bound.
+    let small = json!({ "messages": [{ "role": "user", "content":
+        { "type": "image", "data": "xx", "mimeType": "image/png" } }] });
+    assert_relayed(sampling_settle(&def, small));
 }
