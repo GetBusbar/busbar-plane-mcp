@@ -32,8 +32,10 @@
 //! ([`crate::client::negotiate`]) open a session with it (`initialize`, `notifications/initialized`,
 //! the request lowered into the session), every further hop over the door's own connector. An
 //! upstream answering in the stateless revision is remembered as such and never renegotiated. The
-//! ladder's last rung, the `2024-11-05` event stream, is not carried as a client: an upstream that
-//! refuses both the stateless request and `initialize` fails the call in words that name it.
+//! ladder's last rung, the `2024-11-05` event stream, is held over the connector and read on the
+//! driver ticket ([`super::door_legacy`]): an upstream that refuses both the stateless request and
+//! `initialize` is reached there, and fails the call in words that name it only when no connector
+//! is lent to hold the stream over.
 
 use std::collections::VecDeque;
 use std::task::Poll;
@@ -87,6 +89,15 @@ const STATUS_UNAVAILABLE: u32 = 503;
 /// The status of a message accepted and answered elsewhere (a notification, or a `2024-11-05`
 /// message whose answer goes on its stream).
 const STATUS_ACCEPTED: u32 = 202;
+
+/// The status a held stream past its owner's quota is refused with (as a subscription past its own).
+const STATUS_QUOTA: u32 = 429;
+
+/// The most held session streams (`GET`s, the `2024-11-05` stream's included) one owner holds open
+/// at once: the per-owner quota THE DESIGN section 2 (the mcp bullet) names, the same bound
+/// `subscriptions/listen` holds a caller to. A caller at it is refused its next one; no held stream
+/// is evicted for it.
+const MAX_STREAMS_PER_OWNER: usize = super::door_listen::MAX_LISTENS_PER_OWNER;
 
 /// The most resource subscriptions one owner holds across its sessions.
 const MAX_OWNER_SUBSCRIPTIONS: usize = 256;
@@ -814,6 +825,8 @@ pub(super) fn announce(plane: &McpDoor, server: &str, uri: &str) {
     for session in sessions {
         due(plane, &session);
     }
+    // The subscriptions held by `subscriptions/listen`, on either carrier, hear it too.
+    door_listen::announced(plane, server, uri);
 }
 
 /// WHAT AN UPSTREAM SAID ON ITS EVENT STREAM beside a relayed call's answer: its resource updates
@@ -1164,6 +1177,24 @@ fn open_stream(
     };
     if plane.streams.with(&unit.key, |s| s.is_some()) {
         return Some((false, false));
+    }
+    // THE QUOTA REFUSES THE NEW STREAM, never evicts a held one.
+    let held = plane
+        .streams
+        .with_all(|m| m.values().filter(|s| s.owner == *owner).count());
+    if held >= MAX_STREAMS_PER_OWNER {
+        let refusal = Refusal {
+            status: STATUS_QUOTA,
+            id: None,
+            code: CODE_REFUSED,
+            message: format!(
+                "this caller holds {MAX_STREAMS_PER_OWNER} open MCP session streams, the most one \
+                 caller may hold; close one and open again"
+            ),
+            data: Some(json!({ "reason": "stream_quota" })),
+        };
+        unit.pending = Some(Pending::answer(refusal.status, refusal.body(), None, &[]));
+        return Some((true, false));
     }
     let now = wall_ms(plane.services, ticket, &mut unit.issued);
     let mono = door_listen::mono_ns(plane.services, ticket, unit);
@@ -1573,7 +1604,7 @@ impl Negotiating {
                             self.next = Some(Action::AwaitEvent);
                             return Poll::Pending;
                         }
-                        Poll::Ready(Ok((body, id, dropped))) => {
+                        Poll::Ready(Ok((body, sse, id, dropped))) => {
                             self.dropped = dropped;
                             self.legacy_id = Some(id);
                             plane.upstreams.with(&(), |t| {
@@ -1588,7 +1619,7 @@ impl Negotiating {
                                     );
                                 }
                             });
-                            return Poll::Ready(Negotiated::Answer(200, body, false, Some(id)));
+                            return Poll::Ready(Negotiated::Answer(200, body, sse, Some(id)));
                         }
                         Poll::Ready(Err(why)) => {
                             plane.upstreams.with(&(), |t| {

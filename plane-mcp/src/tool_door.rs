@@ -221,6 +221,9 @@ pub struct McpDoor {
     /// THE HELD `2024-11-05` EVENT STREAMS busbar reaches legacy-only servers over, by member and
     /// caller binding ([`door_legacy`]).
     legacy: Keyed<String, door_legacy::Link>,
+    /// The tick cycle the held streams' driver-ticket handles are numbered in, and how many they
+    /// issued in it, all links together ([`door_legacy::drive`]).
+    legacy_seq: Keyed<(), (u64, u32)>,
     /// Whether this instance said its ungoverned chain's sessions are unisolated (once).
     said_ungoverned: Keyed<(), ()>,
     /// The session revision each line-carrier session negotiated with `initialize`.
@@ -334,6 +337,7 @@ slot!(
             streams: Keyed::new(),
             upstreams: Keyed::new(),
             legacy: Keyed::new(),
+            legacy_seq: Keyed::new(),
             said_ungoverned: Keyed::new(),
             line_revisions: Keyed::new(),
         };
