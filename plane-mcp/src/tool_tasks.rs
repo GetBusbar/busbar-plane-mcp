@@ -106,9 +106,18 @@ pub const TASK_RELAY_TTL_SECS: u64 = ACTIVE_TASK_ABANDON_MS / 1000;
 /// [`busbar_contract::bounded::MAX_RECORD_BYTES`].
 pub const RESULT_CHUNK_BYTES: usize = 480;
 
-/// The most chunks one task's result is written in; a longer result is answered while the task is
-/// in hand and is not written.
-pub const MAX_RESULT_CHUNKS: usize = 256;
+/// The most chunks one task's result (or its live state) is written in: what one answer's record
+/// writes hold (`busbar_contract::abi::plane::check::MAX_RECORDS`, 1024) with the strikes of the
+/// state it replaces beside it. THE TASK STORE IS HOST RECORDS (THE DESIGN, the mcp bullet): a
+/// result longer than this settles the task `failed` in words ([`kept_bytes`]), and a live state
+/// longer than this is refused where it would be made; neither is held only in hand.
+pub const MAX_RESULT_CHUNKS: usize = 480;
+
+/// The most bytes a task keeps in the host's records, its result or its live state.
+#[must_use]
+pub const fn kept_bytes() -> usize {
+    RESULT_CHUNK_BYTES * MAX_RESULT_CHUNKS
+}
 
 /// THE RUN'S LEASE beyond its server's own `timeout:`: how long a task's run may go unheard from
 /// before another process takes its handle as left behind (the process running it gone) and settles
@@ -505,9 +514,11 @@ impl Task {
         self.relay.take()
     }
 
-    /// Deliver `inputResponses`. Keys the task is not waiting on are IGNORED rather than refused.
-    /// On a task parked on its upstream's ask the answers are the upstream's: kept for the retry,
-    /// never merged into the tool's arguments.
+    /// Deliver `inputResponses`. Keys the task is not waiting on are IGNORED rather than refused:
+    /// only a key the current round asked is kept (row 159 mcp finding C-H1: an answer may only
+    /// supply what was asked for, as the synchronous call's rule says). On a task parked on its
+    /// upstream's ask the answers are the upstream's: kept for the retry, never merged into the
+    /// tool's arguments.
     ///
     /// Returns `false`, applying NOTHING, when this batch would grow the task's answer map past
     /// [`MAX_TASK_ANSWERS`] DISTINCT keys — refused whole, never truncated. A key already held is a
@@ -532,14 +543,18 @@ impl Task {
             }
             return true;
         }
-        let new_keys = responses
-            .keys()
-            .filter(|k| !self.answers.contains_key(k.as_str()))
+        let asked: Vec<(&String, &Value)> = responses
+            .iter()
+            .filter(|(k, _)| self.input_requests.iter().any(|(r, _)| r == *k))
+            .collect();
+        let new_keys = asked
+            .iter()
+            .filter(|(k, _)| !self.answers.contains_key(k.as_str()))
             .count();
         if self.answers.len() + new_keys > MAX_TASK_ANSWERS {
             return false;
         }
-        for (key, value) in responses {
+        for (key, value) in asked {
             self.answers.insert(key.clone(), value.clone());
         }
         self.input_requests
@@ -788,24 +803,28 @@ pub fn chunk_prefix(id: &str) -> Vec<u8> {
 }
 
 /// THE RESULT, IN CHUNKS: the terminal value's bytes cut into plane records of at most
-/// [`RESULT_CHUNK_BYTES`]; none when it would take more than [`MAX_RESULT_CHUNKS`].
-#[must_use]
-pub fn result_chunks(id: &str, terminal: &Value) -> Vec<(Vec<u8>, Vec<u8>)> {
+/// [`RESULT_CHUNK_BYTES`]; `Err` its length in bytes when it would take more than
+/// [`MAX_RESULT_CHUNKS`].
+///
+/// # Errors
+///
+/// The value's length, when the host's records do not keep it.
+pub fn result_chunks(id: &str, terminal: &Value) -> Result<Vec<(Vec<u8>, Vec<u8>)>, usize> {
     chunked(|n| chunk_key(id, n), terminal)
 }
 
-/// `value`'s bytes cut into plane records of at most [`RESULT_CHUNK_BYTES`], keyed `key(n)`; none
-/// when it would take more than [`MAX_RESULT_CHUNKS`].
-fn chunked(key: impl Fn(u32) -> Vec<u8>, value: &Value) -> Vec<(Vec<u8>, Vec<u8>)> {
+/// `value`'s bytes cut into plane records of at most [`RESULT_CHUNK_BYTES`], keyed `key(n)`; `Err`
+/// its length in bytes when it would take more than [`MAX_RESULT_CHUNKS`].
+fn chunked(key: impl Fn(u32) -> Vec<u8>, value: &Value) -> Result<Vec<(Vec<u8>, Vec<u8>)>, usize> {
     let bytes = serde_json::to_vec(value).unwrap_or_default();
     let chunks: Vec<&[u8]> = bytes.chunks(RESULT_CHUNK_BYTES).collect();
     if chunks.len() > MAX_RESULT_CHUNKS {
-        return Vec::new();
+        return Err(bytes.len());
     }
-    (0u32..)
+    Ok((0u32..)
         .zip(chunks)
         .map(|(n, c)| (key(n), c.to_vec()))
-        .collect()
+        .collect())
 }
 
 /// The key of chunk `n` of task `id`'s live state: ordered, apart from its result's.
@@ -821,8 +840,11 @@ pub fn live_prefix(id: &str) -> Vec<u8> {
 }
 
 /// THE LIVE STATE, IN CHUNKS ([`Task::live`]), as [`result_chunks`] cuts a result.
-#[must_use]
-pub fn live_parts(id: &str, live: &Value) -> Vec<(Vec<u8>, Vec<u8>)> {
+///
+/// # Errors
+///
+/// The state's length, when the host's records do not keep it.
+pub fn live_parts(id: &str, live: &Value) -> Result<Vec<(Vec<u8>, Vec<u8>)>, usize> {
     chunked(|n| live_key(id, n), live)
 }
 
@@ -911,7 +933,9 @@ pub fn read_chunks<'a>(chunks: impl Iterator<Item = &'a [u8]>) -> Option<Value> 
 }
 
 /// The arguments a continuation calls with: the admitted arguments, with the caller's gathered ask
-/// answers merged in under the operator's own keys. A clone, never a mutation.
+/// answers merged in under the operator's own keys, and NEVER over an argument the call was
+/// admitted with (row 159 mcp finding C-H1: the hooks and the argument guard judged the admitted
+/// arguments; an answer may never rewrite one). A clone, never a mutation.
 #[must_use]
 pub fn merge_answers(arguments: &Value, answers: &Map<String, Value>) -> Value {
     if answers.is_empty() {
@@ -919,7 +943,9 @@ pub fn merge_answers(arguments: &Value, answers: &Map<String, Value>) -> Value {
     }
     let mut merged = arguments.as_object().cloned().unwrap_or_default();
     for (key, value) in answers {
-        merged.insert(key.clone(), value.clone());
+        if !merged.contains_key(key) {
+            merged.insert(key.clone(), value.clone());
+        }
     }
     Value::Object(merged)
 }
