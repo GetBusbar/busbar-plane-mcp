@@ -57,6 +57,18 @@ pub(super) struct LineListen {
     listen: Box<Listen>,
     /// The entitlement answers it was opened under.
     entitled: BTreeMap<String, bool>,
+    /// The upstream announcements `(server, uri)` heard since its last step.
+    updates: Vec<(String, String)>,
+}
+
+/// AN UPSTREAM ANNOUNCED that `uri` of its registration `server` changed: every subscription kept
+/// on a carrier session holds it for its next step, which relays it to one that asked for the uri.
+pub(super) fn announced(plane: &McpDoor, server: &str, uri: &str) {
+    plane.line_listens.with_all(|m| {
+        for kept in m.values_mut() {
+            door_listen::hold_update(&mut kept.updates, server, uri);
+        }
+    });
 }
 
 /// One line as `arrive` read it: what the unit is to the carrier, and the bytes the one dispatch
@@ -348,6 +360,7 @@ pub(super) fn listen(plane: &McpDoor, ticket: Ticket, unit: &mut CallUnit) -> Op
         LineListen {
             listen: Box::new(listen),
             entitled,
+            updates: Vec::new(),
         },
     );
     Some(Pending::answer(200, lines(&frames), None, &[]))
@@ -405,10 +418,11 @@ pub(super) fn tick(plane: &McpDoor, ticket: Ticket, now_ns: u64) {
                     .copied()
                     .unwrap_or(false)
             };
+            let updates = std::mem::take(&mut kept.updates);
             let (bytes, ended) =
                 match kept
                     .listen
-                    .step(&held.catalogue, &admit, &Standing::Live, &[], now_ns)
+                    .step(&held.catalogue, &admit, &Standing::Live, &updates, now_ns)
                 {
                     ListenStep::Frames(frames) => (lines(&frames), false),
                     ListenStep::Keepalive => {

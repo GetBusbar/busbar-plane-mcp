@@ -32,7 +32,7 @@ use serde_json::Value;
 
 use super::compat::{
     initialize_request, initialized_notification, lower_request, offered_revision, probe_outcome,
-    EventStreamLink, LinkEffect, StreamEvent, H_SESSION,
+    stateless_outcome, EventStreamLink, LinkEffect, StreamEvent, H_SESSION,
 };
 use super::jsonrpc::OutboundRequest;
 use crate::revision::{self, Revision, StepOutcome};
@@ -134,9 +134,12 @@ enum Phase {
 
 /// How many requests one `2024-11-05` link waits on at once: `initialize` and the call itself.
 const LINK_WAITING: usize = 2;
-/// The id busbar's own `initialize` carries. Its own request ids come from
-/// [`super::jsonrpc::dispatch_request_id`], which never reaches this value.
-const INITIALIZE_ID: u64 = u64::MAX;
+/// The id busbar's own `initialize` carries, on a session upstream and on a `2024-11-05` stream:
+/// `2^53 - 1`, the largest integer a JavaScript peer reads back exactly (an id past it comes back
+/// rounded and correlates with nothing). Busbar's other request ids stay below it: a stateless
+/// round's ([`super::jsonrpc::dispatch_request_id`]), a session's own from
+/// [`crate::tool_sessions::SESSION_FIRST_ID`] (`2^32`) up, a held stream's from `1` up.
+pub(crate) const INITIALIZE_ID: u64 = (1 << 53) - 1;
 
 /// ONE CALL'S NEGOTIATION. See the module header for the driver's side.
 #[derive(Debug)]
@@ -297,7 +300,7 @@ impl Negotiator {
             return self.fail(Refusal::Unreachable(None));
         };
         match self.phase.clone() {
-            Phase::Probe => match probe_outcome(answer.status, &answer.body) {
+            Phase::Probe => match stateless_outcome(answer.status, &answer.body) {
                 StepOutcome::Answered => {
                     self.remembered = Some(Remembered {
                         revision: Revision::R2026_07_28,

@@ -71,6 +71,38 @@ pub(super) struct Listening {
     due: bool,
     /// The stream's head is written.
     headed: bool,
+    /// The upstream announcements `(server, uri)` heard since its last step: its next step relays
+    /// those it watches, under the grant it re-asks that frame.
+    updates: Vec<(String, String)>,
+}
+
+/// The most announcements one held subscription keeps between two of its steps (the oldest go).
+pub(super) const MAX_HELD_UPDATES: usize = 64;
+
+/// Holds `(server, uri)` for the next step of `updates`, at most [`MAX_HELD_UPDATES`] of them.
+pub(super) fn hold_update(updates: &mut Vec<(String, String)>, server: &str, uri: &str) {
+    if updates.len() >= MAX_HELD_UPDATES {
+        updates.remove(0);
+    }
+    updates.push((server.to_string(), uri.to_string()));
+}
+
+/// AN UPSTREAM ANNOUNCED that `uri` of its registration `server` changed: every held subscription on
+/// the HTTP carrier is asked for a step that relays it (the step relays it only to a subscription
+/// that asked for the uri, under the caller's grant re-asked that frame), and so is every one kept
+/// on a line carrier ([`super::door_line::announced`]).
+pub(super) fn announced(plane: &McpDoor, server: &str, uri: &str) {
+    let any = plane.listens.with_all(|m| {
+        for l in m.values_mut() {
+            hold_update(&mut l.updates, server, uri);
+            l.due = true;
+        }
+        !m.is_empty()
+    });
+    super::door_line::announced(plane, server, uri);
+    if any {
+        wake_driver(plane);
+    }
 }
 
 /// A frame of the stream: its head (status, fields and the request's fee unit) with the first.
@@ -220,6 +252,7 @@ fn open(plane: &McpDoor, ticket: Ticket, principal: &str, unit: &mut CallUnit) -
                 first_tick: 0,
                 due: false,
                 headed: false,
+                updates: Vec::new(),
             };
             // THE QUOTA REFUSES THE NEW STREAM, never evicts a held one: this caller at its own
             // bound, or the instance at its total, is told so.
@@ -268,7 +301,10 @@ fn step(plane: &McpDoor, ticket: Ticket, principal: &str, unit: &mut CallUnit) -
     let (stepped, headed) = plane.listens.with(&unit.key, |l| {
         let l = l?;
         l.due = false;
-        let stepped = l.listen.step(&held.catalogue, &admit, &standing, &[], now);
+        let updates = std::mem::take(&mut l.updates);
+        let stepped = l
+            .listen
+            .step(&held.catalogue, &admit, &standing, &updates, now);
         Some((stepped, l.headed))
     })?;
     let (bytes, done) = match stepped {
