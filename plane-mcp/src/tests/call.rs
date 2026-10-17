@@ -40,6 +40,16 @@ fn proceed(_: &ToolEntry, _: &Value) -> crate::ask::AskDecision {
     crate::ask::AskDecision::Proceed
 }
 
+/// Busbar's own exchange completed with `p`'s `inputResponses` as every round's answers.
+fn answering(p: &Value) -> impl FnMut(&ToolEntry, &Value) -> crate::ask::AskDecision {
+    let answers = p
+        .get("inputResponses")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    move |_: &ToolEntry, _: &Value| crate::ask::AskDecision::Answered(answers.clone())
+}
+
 fn no_header(_: &str) -> Option<String> {
     None
 }
@@ -318,7 +328,7 @@ fn an_answer_binds_only_what_was_asked_and_never_a_sent_argument() {
         Some(&answered),
         &no_header,
         &everyone,
-        &mut proceed,
+        &mut answering(&answered),
     ));
     assert_eq!(a.arguments, json!({ "ok": true }));
     let smuggled = json!({ "name": "fs_confirm", "arguments": {}, "inputResponses": { "amount": 1 }, "_meta": {} });
@@ -328,7 +338,7 @@ fn an_answer_binds_only_what_was_asked_and_never_a_sent_argument() {
         Some(&smuggled),
         &no_header,
         &everyone,
-        &mut proceed,
+        &mut answering(&smuggled),
     ));
     assert_eq!(r.status, 404);
     assert!(r.message.starts_with("the answer named `amount`"));
@@ -340,7 +350,7 @@ fn an_answer_binds_only_what_was_asked_and_never_a_sent_argument() {
         Some(&rewritten),
         &no_header,
         &everyone,
-        &mut proceed,
+        &mut answering(&rewritten),
     ));
 }
 
@@ -1360,4 +1370,54 @@ fn sampling_max_prompt_bytes_counts_every_content_part() {
     let small = json!({ "messages": [{ "role": "user", "content":
         { "type": "image", "data": "xx", "mimeType": "image/png" } }] });
     assert_relayed(sampling_settle(&def, small));
+}
+
+/// C-M5, the sealing half: the relayed state's leg carries busbar's own answers the call went out
+/// with ([`own_answers`]), and its retry goes out with the first call's arguments exactly.
+#[test]
+fn the_relayed_leg_seals_the_answers_the_first_call_went_out_with() {
+    let cat = catalogue();
+    let first = json!({ "name": "fs_confirm", "arguments": { "n": 1 },
+        "inputResponses": { "ok": true }, "_meta": {} });
+    let sent = go(admit_call(
+        &cat,
+        &json!(1),
+        Some(&first),
+        &no_header,
+        &everyone,
+        &mut answering(&first),
+    ));
+    assert_eq!(sent.arguments, json!({ "n": 1, "ok": true }));
+    let answers = own_answers(&sent);
+    assert_eq!(answers, json!({ "ok": true }).as_object().cloned());
+    let leg = crate::ask::UpstreamLeg {
+        member: "fs".into(),
+        state: None,
+        round: 1,
+        child: None,
+        answers,
+    };
+    let retry = json!({ "name": "fs_confirm", "arguments": { "n": 1 },
+        "inputResponses": { "u": true }, "requestState": "ours", "_meta": {} });
+    let mut relayed = |_: &ToolEntry, _: &Value| crate::ask::AskDecision::Relayed(leg.clone());
+    let again = go(admit_call(
+        &cat,
+        &json!(1),
+        Some(&retry),
+        &no_header,
+        &everyone,
+        &mut relayed,
+    ));
+    assert_eq!(again.arguments, sent.arguments);
+    assert_eq!(again.sent_digest, sent.sent_digest);
+    // A call that went out with none seals none.
+    let plain = go(admit_call(
+        &cat,
+        &json!(1),
+        Some(&params("fs_confirm", json!({ "n": 1 }))),
+        &no_header,
+        &everyone,
+        &mut proceed,
+    ));
+    assert_eq!(own_answers(&plain), None);
 }

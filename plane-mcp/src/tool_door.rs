@@ -2270,7 +2270,7 @@ fn answer_body(
                     return Some(Step::Pending);
                 }
                 match decided {
-                    AskDecision::Proceed => {
+                    AskDecision::Proceed | AskDecision::Answered(_) => {
                         (200, crate::reads::prompts_get(prompt, id, params.as_ref()))
                     }
                     AskDecision::Refuse(refusal) => {
@@ -2541,6 +2541,7 @@ fn relay_ask(
         state: result.get("requestState").cloned(),
         round: round.saturating_add(1),
         child: child.clone(),
+        answers: crate::call::own_answers(&relay.admitted),
     };
     let mut seal = DoorSeal {
         services,
