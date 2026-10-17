@@ -437,11 +437,7 @@ fn owe(plane: &McpDoor, task: &Task) {
 ///
 /// `Err` the state's length when the host's records do not keep it (row 159 mcp finding P-M6): the
 /// caller refuses what would make it, and nothing earlier is struck.
-fn live_records(
-    plane: &McpDoor,
-    task: &Task,
-    until: Option<u64>,
-) -> Result<Vec<(Vec<u8>, Vec<u8>)>, usize> {
+fn live_records(plane: &McpDoor, task: &Task, until: Option<u64>) -> Result<tasks::Records, usize> {
     let mut out = tasks::live_parts(&task.id, &task.live())?;
     let wrote = u32::try_from(out.len()).unwrap_or(u32::MAX);
     let before = plane.tasks.with(&task.id, |t| {
