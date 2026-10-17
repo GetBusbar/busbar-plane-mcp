@@ -74,7 +74,7 @@
 use busbar_contract::abi::host::service::{
     DEST_ALLOWED, DEST_INTERNAL, DEST_METADATA, DEST_NO_HOST, DEST_OBFUSCATED,
 };
-use busbar_contract::net::{extract_normalized_host, scheme_is};
+use busbar_contract::net::extract_normalized_host;
 use serde_json::Value;
 
 /// THE HOST'S JUDGE, as the walk asks it: one host an argument names (an IPv6 literal bracketed,
@@ -333,7 +333,7 @@ fn judge_string(
             why,
         });
     }
-    if starts_with_http(trimmed) {
+    if is_http_url(trimmed) {
         scan.undeclared_judged += 1;
         return judge_argument(Urlish::AbsoluteUrl, trimmed, judge).map_err(|why| ArgRefusal {
             pointer: pointer.to_string(),
@@ -344,12 +344,37 @@ fn judge_string(
     Ok(())
 }
 
-/// Whether the WHOLE value is an `http(s)` URL. Deliberately a prefix test on the whole trimmed
-/// string rather than a search: see the module header on why substring matching over free text is
-/// not wanted here.
-fn starts_with_http(v: &str) -> bool {
-    let lower = v.to_ascii_lowercase();
-    lower.starts_with("http://") || lower.starts_with("https://")
+/// Whether the WHOLE value is an `http(s)` URL AS A WHATWG PARSER READS ONE (row 159 mcp finding
+/// C-M8): after the parser's own clean-up ([`whatwg_cleaned`]), an `http:`/`https:` scheme in any
+/// case followed by `//`, or by anything the parser reads a host out of (`http:host`,
+/// `http:/\host`: no `//` is needed after a web scheme and `\` reads as `/`). Deliberately a test
+/// on the whole value rather than a search: see the module header on why substring matching over
+/// free text is not wanted here. Prose that only mentions `http:` names no host and is not one.
+fn is_http_url(v: &str) -> bool {
+    let cleaned = whatwg_cleaned(v);
+    if !http_scheme(&cleaned) {
+        return false;
+    }
+    let lower = cleaned.to_ascii_lowercase();
+    lower.starts_with("http://")
+        || lower.starts_with("https://")
+        || busbar_contract::net::parse_url(&cleaned).is_ok()
+}
+
+/// The WHATWG URL parser's first step, as a connecting stack applies it: leading and trailing C0
+/// controls and spaces trimmed, then every tab, LF and CR removed (`ht\ttp://` is `http://`).
+fn whatwg_cleaned(v: &str) -> String {
+    v.trim_matches(|c: char| c <= '\u{1f}' || c == ' ')
+        .chars()
+        .filter(|c| !matches!(*c, '\t' | '\n' | '\r'))
+        .collect()
+}
+
+/// Whether `cleaned` names the `http` or `https` scheme, in any case.
+fn http_scheme(cleaned: &str) -> bool {
+    cleaned
+        .split_once(':')
+        .is_some_and(|(s, _)| s.eq_ignore_ascii_case("http") || s.eq_ignore_ascii_case("https"))
 }
 
 fn judge_argument(kind: Urlish, value: &str, judge: &mut Judge<'_>) -> Result<(), ArgWhy> {
@@ -364,7 +389,7 @@ fn judge_argument(kind: Urlish, value: &str, judge: &mut Judge<'_>) -> Result<()
                 let host = authority.rsplit('@').next().unwrap_or(authority);
                 return judge_host(strip_port(host), judge);
             }
-            if value.contains("://") {
+            if value.contains("://") || http_scheme(&whatwg_cleaned(value)) {
                 return judge_absolute(value, judge);
             }
             Ok(())
@@ -378,7 +403,7 @@ fn judge_argument(kind: Urlish, value: &str, judge: &mut Judge<'_>) -> Result<()
             // a `hostname` declaration, so it is judged as one (scheme allowlist + host judgement
             // on the REAL host), the same authority the `Reference` arm above already gives a
             // scheme-relative value.
-            if value.contains("://") {
+            if value.contains("://") || http_scheme(&whatwg_cleaned(value)) {
                 return judge_absolute(value, judge);
             }
             judge_host(value, judge)
@@ -386,16 +411,27 @@ fn judge_argument(kind: Urlish, value: &str, judge: &mut Judge<'_>) -> Result<()
     }
 }
 
-/// An absolute URL: the scheme allowlist, then the host.
+/// An absolute URL, read as a WHATWG parser reads it ([`whatwg_cleaned`]): the scheme allowlist,
+/// then the host.
 fn judge_absolute(url: &str, judge: &mut Judge<'_>) -> Result<(), ArgWhy> {
-    if !scheme_is(url, "http") && !scheme_is(url, "https") {
+    let cleaned = whatwg_cleaned(url);
+    if !http_scheme(&cleaned) {
         return Err(ArgWhy::Scheme(url.to_string()));
     }
-    // `extract_normalized_host` is the tree's strictest host reader: it mirrors the WHATWG
-    // tab/newline strip, the backslash fold, the userinfo drop, the trailing-root-dot strip and the
-    // percent-decode that a connecting stack applies. Re-deriving any of that here would be a
-    // second copy of a guard that already exists.
-    let host = extract_normalized_host(url).ok_or_else(|| ArgWhy::NoHost(url.to_string()))?;
+    // `extract_normalized_host` is the tree's strictest host reader for a `scheme://` URL: it
+    // mirrors the WHATWG tab/newline strip, the backslash fold, the userinfo drop, the
+    // trailing-root-dot strip and the percent-decode that a connecting stack applies. A web URL
+    // spelled without `//` (`http:host`, `http:/\host`) is read by the contract's `parse_url`, which
+    // skips any run of `/` and `\` after a web scheme as WHATWG does. Re-deriving either here would
+    // be a second copy of a reader that already exists; the verdict on the host is `dest.judge`'s.
+    let host = if cleaned.contains("://") {
+        extract_normalized_host(&cleaned)
+    } else {
+        busbar_contract::net::parse_url(&cleaned)
+            .ok()
+            .map(|p| p.host)
+    }
+    .ok_or_else(|| ArgWhy::NoHost(url.to_string()))?;
     judge_host(&host, judge)
 }
 

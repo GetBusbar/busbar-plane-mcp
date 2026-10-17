@@ -24,6 +24,7 @@ fn state() -> AskState {
         ttl_secs: 300,
         roots_epoch: None,
         upstream: None,
+        answers: None,
     }
 }
 
