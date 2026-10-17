@@ -396,7 +396,7 @@ pub const TAIL: &PlaneTail = &PlaneTail {
     flags: busbar_contract::abi::plane::TAIL_HOOKS_GATED,
     ingress: INGRESS_REQUEST_RESPONSE | INGRESS_RESPONSE_STREAM,
     dispatch_shape: SHAPE_PIECEWISE,
-    _reserved: 0,
+    answer_layout: busbar_contract::abi::plane::ANSWER_LAYOUT,
     scope: abi_str(SCOPE),
     label: abi_str(LABEL),
     subject_noun: abi_str(SUBJECT_NOUN),
@@ -442,6 +442,9 @@ pub const TAIL: &PlaneTail = &PlaneTail {
     // a stalled consumer (its event and subscribe streams were pull-based bodies, `session_serve.rs`,
     // `subscribe.rs`), so the mcp plane states none and keeps that behaviour.
     stream_ceiling_secs: 0,
+    // No lane words of its own: its counters carry entry names only.
+    metric_lanes: std::ptr::null(),
+    metric_lanes_len: 0,
 };
 
 /// One path the plane answers on: the verb, the target, the transport claim it arrives over, and
