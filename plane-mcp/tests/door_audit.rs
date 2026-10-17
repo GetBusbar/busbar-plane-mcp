@@ -1458,7 +1458,7 @@ fn a_line_refused_at_the_unit_cap_moves_nothing_on_its_session() {
         if arrived.outcome != Outcome::Ready {
             assert_eq!(
                 (arrived.outcome, arrived.refusal_status),
-                (Outcome::Refused, 503),
+                (Outcome::Refused, 429),
                 "only the cap refuses a filler"
             );
             break;
@@ -1469,7 +1469,7 @@ fn a_line_refused_at_the_unit_cap_moves_nothing_on_its_session() {
     let at_cap = d.line(200, 9, LINE_INIT);
     assert_eq!(
         (at_cap.outcome, at_cap.refusal_status),
-        (Outcome::Refused, 503),
+        (Outcome::Refused, 429),
         "the cap refuses the line"
     );
 
