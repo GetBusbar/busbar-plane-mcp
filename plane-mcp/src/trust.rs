@@ -43,16 +43,8 @@ pub fn tool_digest(name: &str, description: &str, input_schema: &Value) -> Strin
     }
     format!(
         "sha256:{}",
-        hex(&busbar_contract::abi::sdk::digest::sha256(&framed))
+        hex::encode(busbar_contract::abi::sdk::digest::sha256(&framed))
     )
-}
-
-fn hex(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    bytes.iter().fold(String::new(), |mut s, b| {
-        let _ = write!(s, "{b:02x}");
-        s
-    })
 }
 
 /// `value` with every object's keys sorted, recursively: key ORDER is not drift, any change of key,
@@ -145,7 +137,7 @@ pub fn catalogue_hash(observation: &Observation) -> String {
     }
     format!(
         "sha256:{}",
-        hex(&busbar_contract::abi::sdk::digest::sha256(&bytes))
+        hex::encode(busbar_contract::abi::sdk::digest::sha256(&bytes))
     )
 }
 
