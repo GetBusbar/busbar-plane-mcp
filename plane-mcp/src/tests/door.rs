@@ -310,18 +310,10 @@ fn validate_reads_the_dealt_blob_at_its_tools_section() {
 /// ABI table its snapshot publishes (verb, target, carrier, flags), and `tool_claims::CLAIMS`, the
 /// engine grammar's claims (carrier, selector, scheme). Nothing derives one from the other, so this
 /// pins them to each other in BOTH directions: every claim has a route over the same carrier and the
-/// same path with the same openness and exactness, and every route is claimed, bar the one named
-/// exception. RED arms below prove each direction bites.
+/// same path with the same openness and exactness, and every route is claimed, including the
+/// task-run route. RED arms below prove each direction bites.
 ///
-/// THE ONE EXCEPTION: the task-run route (`TASK_RUN_ROUTE`, the continuation of a task, nested by the
-/// unit that created it with `unit.nest`: `door_tasks.rs` module doc, line 10). The static grammar
-/// table `CLAIMS` (what the boot seal registers) has no claim for it; the route is served through
-/// the SNAPSHOT instead: it is published as `ROUTES[TASK_RUN_ROUTE]` (`door.rs`, the
-/// `TASK_RUN_MOUNT` row, line 486), and `arrive` dispatches on that index
-/// (`tool_door.rs`, `claim == door::TASK_RUN_ROUTE`, line 1010). A tie with another plane's claim
-/// on `/mcp/tasks/run` is therefore judged at the snapshot's registration, not at the boot seal of
-/// the static table; whether the static table should also state it is the open question this
-/// exception records, not settles.
+/// There is no exception: the task-run route is claimed like every other.
 fn pinned(
     routes: &[busbar_contract::abi::sdk::publish::ServedRoute],
     claims: &[busbar_contract::grammar::Claim],
@@ -337,9 +329,8 @@ fn pinned(
                 ))
             }
         };
-        let hit = routes.iter().enumerate().any(|(i, r)| {
-            i != crate::door::TASK_RUN_ROUTE
-                && r.carrier == c.transport
+        let hit = routes.iter().any(|r| {
+            r.carrier == c.transport
                 && path.map_or(r.carrier == crate::tool_claims::CARRIER_STDIO, |p| {
                     r.target == p
                 })
@@ -352,10 +343,7 @@ fn pinned(
             ));
         }
     }
-    for (i, r) in routes.iter().enumerate() {
-        if i == crate::door::TASK_RUN_ROUTE {
-            continue;
-        }
+    for r in routes {
         let hit = claims.iter().any(|c| {
             c.transport == r.carrier
                 && match c.selector {
@@ -390,4 +378,30 @@ fn the_claims_and_the_route_table_state_one_route_set() {
     let mut closed = crate::tool_claims::CLAIMS.to_vec();
     closed[0].scheme = closed[1].scheme;
     assert!(pinned(ROUTES, &closed).is_err());
+}
+
+/// THE TASK-RUN ROUTE IS CLAIMED AT THE BOOT SEAL, with the flags its `ServedRoute` row publishes
+/// (a closed, exact route over the http carrier), and a second claimant of that path TIES with it.
+/// The seal refuses equal-precedence overlapping claims at boot (`Selector::overlaps` is the
+/// predicate it judges by; the refusal itself is the kernel's, exercised by
+/// `busbar-kernel/tests/registry_and_claims.rs::two_claims_that_could_both_match_at_equal_precedence_are_refused_at_boot`,
+/// a crate this plugin does not link).
+#[test]
+fn the_task_run_path_is_claimed_and_a_second_claimant_ties() {
+    use busbar_contract::grammar::Selector;
+    let task = crate::tool_claims::CLAIMS
+        .iter()
+        .find(|c| c.selector == Selector::ExactPath(crate::tool_claims::TASK_RUN_MOUNT))
+        .expect("the task-run path is claimed at the boot seal");
+    let route = &ROUTES[crate::door::TASK_RUN_ROUTE];
+    assert_eq!(task.transport, route.carrier);
+    assert_eq!(task.scheme.is_none(), route.open);
+    assert_eq!(route.claim_flags() & CLAIM_EXACT, CLAIM_EXACT);
+    // RED: another plane claiming the same path on the same transport overlaps it (a tie).
+    let rival = Selector::ExactPath(crate::tool_claims::TASK_RUN_MOUNT);
+    assert!(task.selector.overlaps(&rival));
+    // And a neighbour does not: the claim is exactly this path.
+    assert!(!task
+        .selector
+        .overlaps(&Selector::ExactPath("/mcp/tasks/other")));
 }
