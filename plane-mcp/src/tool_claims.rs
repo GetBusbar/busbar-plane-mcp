@@ -126,6 +126,10 @@ pub const CLAIMS: &[Claim] = &[
     claim(CARRIER_HTTP, Selector::ExactPath(DEFAULT_MOUNT)),
     // The streamed answer arrives on the same path, framed as events.
     claim(CARRIER_SSE, Selector::ExactPath(DEFAULT_MOUNT)),
+    // A task's continuation, nested by the unit that created the task: it takes a credential like
+    // the endpoint. Claimed here as well as in the snapshot (`door::ROUTES`), so a second plane's
+    // claim on this path is a tie refused at the boot seal, not later at registration.
+    claim(CARRIER_HTTP, Selector::ExactPath(TASK_RUN_MOUNT)),
     // A locally launched server has no path at all: its frames arrive on a named stream.
     claim(CARRIER_STDIO, Selector::StreamName(STDIO_STREAM)),
 ];
