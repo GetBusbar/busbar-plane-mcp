@@ -134,7 +134,7 @@ enum Init {
 
 /// Where one reply POST to the message address is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Posting {
+enum ReplyStep {
     Establish,
     Head,
     Body,
@@ -145,7 +145,7 @@ enum Posting {
 
 /// ONE REPLY to a request of the server's own, POSTed to the message address on the driver ticket.
 struct Reply {
-    step: Posting,
+    step: ReplyStep,
     stream: Option<u64>,
     head: Box<[u8]>,
     head_piece: Box<RequestPiece>,
@@ -583,7 +583,7 @@ impl Link {
             // Each step is one service: PENDING leaves it for the next drive; anything else is
             // taken (a failed reply is let go: the stream itself says whether the server is there).
             let done = match r.step {
-                Posting::Establish => match c.establish_as(
+                ReplyStep::Establish => match c.establish_as(
                     crate::door::NEED_UPSTREAM,
                     Some(&address),
                     "",
@@ -593,44 +593,44 @@ impl Link {
                     Poll::Pending => return,
                     Poll::Ready(Ok(s)) => {
                         r.stream = Some(s);
-                        Posting::Head
+                        ReplyStep::Head
                     }
-                    Poll::Ready(Err(_)) => Posting::Close,
+                    Poll::Ready(Err(_)) => ReplyStep::Close,
                 },
-                Posting::Head => match c.write_request(stream, &r.head_piece, &r.head) {
+                ReplyStep::Head => match c.write_request(stream, &r.head_piece, &r.head) {
                     Poll::Pending => return,
-                    Poll::Ready(Ok(_)) => Posting::Body,
-                    Poll::Ready(Err(_)) => Posting::Close,
+                    Poll::Ready(Ok(_)) => ReplyStep::Body,
+                    Poll::Ready(Err(_)) => ReplyStep::Close,
                 },
-                Posting::Body if r.sent >= r.body.len() => {
+                ReplyStep::Body if r.sent >= r.body.len() => {
                     // Nothing left of the body: no service made.
-                    r.step = Posting::End;
+                    r.step = ReplyStep::End;
                     continue;
                 }
-                Posting::Body => {
+                ReplyStep::Body => {
                     match c.write_request(stream, &self.body_piece, &r.body[r.sent..]) {
                         Poll::Pending => return,
-                        Poll::Ready(Ok(0) | Err(_)) => Posting::Close,
+                        Poll::Ready(Ok(0) | Err(_)) => ReplyStep::Close,
                         Poll::Ready(Ok(n)) => {
                             r.sent = r.sent.saturating_add(n);
-                            Posting::Body
+                            ReplyStep::Body
                         }
                     }
                 }
-                Posting::End => match c.write_request(stream, &self.end_piece, &[]) {
+                ReplyStep::End => match c.write_request(stream, &self.end_piece, &[]) {
                     Poll::Pending => return,
-                    Poll::Ready(Ok(_)) => Posting::Read,
-                    Poll::Ready(Err(_)) => Posting::Close,
+                    Poll::Ready(Ok(_)) => ReplyStep::Read,
+                    Poll::Ready(Err(_)) => ReplyStep::Close,
                 },
-                Posting::Read => match c.read_reply(stream, &mut self.buf, &mut self.slot) {
+                ReplyStep::Read => match c.read_reply(stream, &mut self.buf, &mut self.slot) {
                     Poll::Pending => return,
                     Poll::Ready(Ok(got)) if matches!(got.piece.kind, REPLY_END | REPLY_ACK) => {
-                        Posting::Close
+                        ReplyStep::Close
                     }
-                    Poll::Ready(Ok(_)) => Posting::Read,
-                    Poll::Ready(Err(_)) => Posting::Close,
+                    Poll::Ready(Ok(_)) => ReplyStep::Read,
+                    Poll::Ready(Err(_)) => ReplyStep::Close,
                 },
-                Posting::Close => {
+                ReplyStep::Close => {
                     if r.stream.is_some() && c.close(stream).is_pending() {
                         return;
                     }
@@ -668,7 +668,7 @@ impl Link {
             timeout_ms: 0,
         };
         Reply {
-            step: Posting::Establish,
+            step: ReplyStep::Establish,
             stream: None,
             head: head.into_boxed_slice(),
             head_piece: Box::new(head_piece),
