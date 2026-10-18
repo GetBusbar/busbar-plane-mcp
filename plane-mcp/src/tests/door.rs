@@ -313,8 +313,15 @@ fn validate_reads_the_dealt_blob_at_its_tools_section() {
 /// same path with the same openness and exactness, and every route is claimed, bar the one named
 /// exception. RED arms below prove each direction bites.
 ///
-/// THE ONE EXCEPTION: the task-run route (`TASK_RUN_ROUTE`) is a continuation nested by the unit
-/// that created the task; the engine's claim grammar has no claim of its own for it.
+/// THE ONE EXCEPTION: the task-run route (`TASK_RUN_ROUTE`, the continuation of a task, nested by the
+/// unit that created it with `unit.nest`: `door_tasks.rs` module doc, line 10). The static grammar
+/// table `CLAIMS` (what the boot seal registers) has no claim for it; the route is served through
+/// the SNAPSHOT instead: it is published as `ROUTES[TASK_RUN_ROUTE]` (`door.rs`, the
+/// `TASK_RUN_MOUNT` row, line 486), and `arrive` dispatches on that index
+/// (`tool_door.rs`, `claim == door::TASK_RUN_ROUTE`, line 1010). A tie with another plane's claim
+/// on `/mcp/tasks/run` is therefore judged at the snapshot's registration, not at the boot seal of
+/// the static table; whether the static table should also state it is the open question this
+/// exception records, not settles.
 fn pinned(
     routes: &[busbar_contract::abi::sdk::publish::ServedRoute],
     claims: &[busbar_contract::grammar::Claim],
