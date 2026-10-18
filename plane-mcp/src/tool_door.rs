@@ -3636,7 +3636,8 @@ slot!(
             .then(|| unitless_kernel_body(given.reason))
             .flatten();
         let (status, body, allow) = if let Some(body) = unitless {
-            (given.status, body.to_vec(), false)
+            // `0`: the kernel's status stands.
+            (0, body.to_vec(), false)
         } else if given.cause == REFUSAL_ARRIVE {
             match words_of(text) {
                 Some(Words::Rpc(refusal)) => (refusal.status, refusal.body(), false),
