@@ -1543,3 +1543,66 @@ fn the_stream_carries_the_answers_own_bytes() {
         String::from_utf8_lossy(&bytes)
     );
 }
+
+// ── a kernel refusal that ended no unit (audit K4#2(b)) ─────────────────────────────────────────
+
+/// `refusal` for a kernel refusal before any unit: the status and body the door answers.
+fn unitless_kernel_refusal(d: &Door, status: u32, reason: u32) -> (Outcome, u32, Vec<u8>) {
+    use busbar_contract::abi::plane::{RefusalIn, RefusalOut, REFUSAL_KERNEL};
+    let mut reply = vec![0_u8; 1 << 12];
+    let mut fields = [z::<OutField>(); 8];
+    let mut arena = vec![0_u8; 1 << 12];
+    let mut i: RefusalIn = z();
+    i.head = head::<RefusalIn>(slot::REFUSAL, Ticket::NONE);
+    i.cause = REFUSAL_KERNEL;
+    i.status = status;
+    i.reason = reason;
+    i.unit = 0;
+    i.text = str_of("unauthenticated");
+    i.target = str_of("/mcp/sub");
+    (i.reply_buf, i.reply_cap) = (reply.as_mut_ptr(), reply.len());
+    (i.fields_buf, i.fields_cap) = (fields.as_mut_ptr(), fields.len());
+    (i.arena_buf, i.arena_cap) = (arena.as_mut_ptr(), arena.len());
+    let mut o: RefusalOut = z();
+    o.head = out_head::<RefusalOut>();
+    let f = ops().refusal.expect("refusal");
+    let ret = f(
+        d.instance,
+        std::ptr::from_ref(&i).cast(),
+        std::ptr::from_mut(&mut o).cast(),
+    );
+    let status = if o.status == 0 { status } else { o.status };
+    (
+        ret.outcome(),
+        status,
+        reply[..usize::try_from(o.reply_written).unwrap()].to_vec(),
+    )
+}
+
+/// THE PLANE OWNS THE WORDS OF A KERNEL REFUSAL BEFORE ANY UNIT (audit K4#2(b), ARCHITECT ruling: the
+/// plugin owns the text). A mounted path's failed authentication and the body limit answer the
+/// JSON-RPC envelope with no id, in the bytes the kernel rendered before: the 1.6.0 baseline.
+/// RED: the door fell to its generic arm (`-32000` with the reason's word).
+#[test]
+fn a_kernel_refusal_with_no_unit_answers_the_baseline_json_rpc_bytes() {
+    use busbar_contract::abi::plane::RefusalCode;
+    let d = open();
+    assert_eq!(
+        unitless_kernel_refusal(&d, 401, RefusalCode::Unauthenticated.code()),
+        (
+            Outcome::Ready,
+            401,
+            br#"{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"authentication failed"}}"#
+                .to_vec()
+        )
+    );
+    assert_eq!(
+        unitless_kernel_refusal(&d, 413, RefusalCode::BodyTooLarge.code()),
+        (
+            Outcome::Ready,
+            413,
+            br#"{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"request body exceeds the maximum allowed size"}}"#
+                .to_vec()
+        )
+    );
+}
