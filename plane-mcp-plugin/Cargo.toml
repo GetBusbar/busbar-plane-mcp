@@ -28,3 +28,6 @@ busbar-contract = { workspace = true }
 busbar-plugin-loader = { workspace = true, features = ["conformance"] }
 # The door witness reads the plane's answers as JSON documents.
 serde_json = { workspace = true }
+# The SHARED HOST-SERVICES DOUBLE (`services-double`, dev-only): the door witness binds a clock on
+# its loader host through it.
+busbar-contract = { workspace = true, features = ["services-double"] }

@@ -53,6 +53,9 @@ const STATUS_INVALID: u32 = 400;
 /// The status a `subscriptions/listen` is refused with when its caller is at its quota.
 const STATUS_QUOTA: u32 = 429;
 
+/// The status a `subscriptions/listen` is refused with when the host's clock cannot be read.
+const STATUS_CLOCK: u32 = 503;
+
 /// One held subscription, by its session's stream.
 #[derive(Debug, Clone)]
 pub(super) struct Listening {
@@ -224,7 +227,19 @@ fn open(plane: &McpDoor, ticket: Ticket, principal: &str, unit: &mut CallUnit) -
     let id = id.clone();
     let held = plane.current().or_else(|| unit.held.clone())?;
     entitled_afresh(plane, ticket, unit, &held);
-    let now = mono_ns(plane.services, ticket, unit);
+    // A subscription opened at a clock read that failed is refused, never opened at the epoch
+    // (row 159 finding P-M4): its lifetime and keepalive are judged against this reading.
+    let Some(now) = mono_ns(plane.services, ticket, unit) else {
+        let refusal = crate::tool_arrival::Refusal {
+            status: STATUS_CLOCK,
+            id: Some(id),
+            code: crate::codec::CODE_REFUSED,
+            message: super::CLOCK_UNREAD.to_string(),
+            data: None,
+        };
+        unit.pending = Some(Pending::answer(refusal.status, refusal.body(), None, &[]));
+        return Some(true);
+    };
     let opened = {
         let entitled = &unit.entitled;
         let admit = |kind: &str, name: &str| {
@@ -289,7 +304,10 @@ fn open(plane: &McpDoor, ticket: Ticket, principal: &str, unit: &mut CallUnit) -
 fn step(plane: &McpDoor, ticket: Ticket, principal: &str, unit: &mut CallUnit) -> Option<bool> {
     let held = plane.current().or_else(|| unit.held.clone())?;
     entitled_afresh(plane, ticket, unit, &held);
-    let now = mono_ns(plane.services, ticket, unit);
+    // A step whose clock read failed says nothing: the next one reads it again.
+    let Some(now) = mono_ns(plane.services, ticket, unit) else {
+        return Some(false);
+    };
     let standing = standing(plane, ticket, principal, unit);
     let entitled = &unit.entitled;
     let admit = |kind: &str, name: &str| {
@@ -447,18 +465,21 @@ pub(super) fn asks_a_round(
     asks && !retried
 }
 
-/// The host's monotonic clock on a fresh handle of the unit's ticket; `0` with no clock.
-pub(super) fn mono_ns(services: Option<Services>, ticket: Ticket, unit: &mut CallUnit) -> u64 {
-    let Some(services) = services else {
-        return 0;
-    };
+/// The host's monotonic clock on a fresh handle of the unit's ticket; `None` with no clock or a
+/// failed read, which is never a time (row 159 finding P-M4): no timer is armed at it.
+pub(super) fn mono_ns(
+    services: Option<Services>,
+    ticket: Ticket,
+    unit: &mut CallUnit,
+) -> Option<u64> {
+    let services = services?;
     let handle = CompletionHandle {
         ticket,
         seq: unit.issued,
         _reserved: 0,
     };
     unit.issued += 1;
-    services.clock_now(handle).map_or(0, |r| r.mono_ns)
+    services.clock_now(handle).ok().map(|r| r.mono_ns)
 }
 
 /// The catalogue's every grant, entitled afresh for this frame: a held unit re-asks what its caller

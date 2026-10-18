@@ -178,9 +178,16 @@ pub fn request_log(method: &str, target: Option<Value>, status: u32) -> Vec<LogR
 
 /// One answer as an event stream: each progress frame, then each log record, then the answer, one
 /// `message` event each. `None` when `body` is not one JSON document (it goes out as it was).
+///
+/// THE ANSWER IS ITS OWN BYTES (Law 11, row 159 finding A-M2): the body is never parsed into a value
+/// and printed again, which would re-order its members and re-spell its numbers. Each of its lines
+/// is one `data:` line, and a client joins them back with `\n`: a JSON document carries a line
+/// break only between its tokens, so the one change the event-stream framing can make is a `\r`
+/// there read back as `\n`.
 #[must_use]
 pub fn event_stream(body: &[u8], logs: &[LogRecord], progress: &[Value]) -> Option<Vec<u8>> {
-    let result = serde_json::from_slice::<Value>(body).ok()?;
+    let text = std::str::from_utf8(body).ok()?;
+    serde_json::from_str::<serde::de::IgnoredAny>(text).ok()?;
     let mut out = String::new();
     for frame in progress {
         push_event(&mut out, frame);
@@ -188,8 +195,31 @@ pub fn event_stream(body: &[u8], logs: &[LogRecord], progress: &[Value]) -> Opti
     for log in logs {
         push_event(&mut out, &log.envelope());
     }
-    push_event(&mut out, &result);
+    push_raw_event(&mut out, text);
     Some(out.into_bytes())
+}
+
+/// One `message` event carrying `data` as it is: one `data:` line per line of it.
+fn push_raw_event(out: &mut String, data: &str) {
+    out.push_str("event: message\n");
+    let mut rest = data;
+    loop {
+        let (line, next) = match rest.find(['\r', '\n']) {
+            Some(at) => {
+                let skip = if rest[at..].starts_with("\r\n") { 2 } else { 1 };
+                (&rest[..at], Some(&rest[at + skip..]))
+            }
+            None => (rest, None),
+        };
+        out.push_str("data: ");
+        out.push_str(line);
+        out.push('\n');
+        match next {
+            Some(next) => rest = next,
+            None => break,
+        }
+    }
+    out.push('\n');
 }
 
 /// Messages as an event stream: one `message` event each, in order.
