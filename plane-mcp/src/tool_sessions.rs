@@ -170,9 +170,9 @@ struct Use {
     bytes: usize,
 }
 
-#[derive(Debug)]
 /// One buffered server-sent event of a session stream, kept so a reconnecting `Last-Event-ID` can
 /// resume from it.
+#[derive(Debug)]
 struct ReplayEvent {
     seq: u64,
     /// Session-wide write order, so the oldest event in any stream is found without a clock.
