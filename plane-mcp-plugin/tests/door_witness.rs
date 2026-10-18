@@ -1085,9 +1085,19 @@ mod both_ways {
                 "{code:?} (class {class:?}) is answered at the kernel's status"
             );
             let body = document(&r.reply);
+            // A mounted path's failed authentication and the body limit, refused before any
+            // unit, keep the bytes the kernel's own JSON-RPC rendering answered (`-32600`, the
+            // 1.6.0 baseline; audit K4#2(b)): every other reason is the one refusal family.
+            let want = if matches!(
+                code,
+                RefusalCode::Unauthenticated | RefusalCode::BodyTooLarge
+            ) {
+                json!(-32600)
+            } else {
+                json!(busbar_plane_mcp::codec::CODE_REFUSED)
+            };
             assert_eq!(
-                body["error"]["code"],
-                json!(busbar_plane_mcp::codec::CODE_REFUSED),
+                body["error"]["code"], want,
                 "{code:?} (class {class:?}) renders {body}"
             );
             assert_ne!(

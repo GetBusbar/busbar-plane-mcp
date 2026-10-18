@@ -1571,6 +1571,7 @@ fn unitless_kernel_refusal(d: &Door, status: u32, reason: u32) -> (Outcome, u32,
         std::ptr::from_ref(&i).cast(),
         std::ptr::from_mut(&mut o).cast(),
     );
+    // `0`: the kernel's status stands.
     let status = if o.status == 0 { status } else { o.status };
     (
         ret.outcome(),
