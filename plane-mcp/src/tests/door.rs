@@ -305,3 +305,82 @@ fn validate_reads_the_dealt_blob_at_its_tools_section() {
     assert!(read_dealt_tools(&bad).is_err());
     assert!(read_dealt_tools(b"[]").is_err());
 }
+
+/// THE TWO STATEMENTS OF ONE ROUTE SET AGREE. The plane states its routes twice: [`ROUTES`], the
+/// ABI table its snapshot publishes (verb, target, carrier, flags), and `tool_claims::CLAIMS`, the
+/// engine grammar's claims (carrier, selector, scheme). Nothing derives one from the other, so this
+/// pins them to each other in BOTH directions: every claim has a route over the same carrier and the
+/// same path with the same openness and exactness, and every route is claimed, bar the one named
+/// exception. RED arms below prove each direction bites.
+///
+/// THE ONE EXCEPTION: the task-run route (`TASK_RUN_ROUTE`) is a continuation nested by the unit
+/// that created the task; the engine's claim grammar has no claim of its own for it.
+fn pinned(
+    routes: &[busbar_contract::abi::sdk::publish::ServedRoute],
+    claims: &[busbar_contract::grammar::Claim],
+) -> Result<(), String> {
+    use busbar_contract::grammar::Selector;
+    for c in claims {
+        let path = match c.selector {
+            Selector::ExactPath(p) => Some(p),
+            Selector::StreamName(_) => None,
+            ref other => {
+                return Err(format!(
+                    "a claim with the selector {other:?} has no route form"
+                ))
+            }
+        };
+        let hit = routes.iter().enumerate().any(|(i, r)| {
+            i != crate::door::TASK_RUN_ROUTE
+                && r.carrier == c.transport
+                && path.map_or(r.carrier == crate::tool_claims::CARRIER_STDIO, |p| {
+                    r.target == p
+                })
+                && r.open == c.scheme.is_none()
+                && r.claim_flags() & CLAIM_EXACT != 0
+        });
+        if !hit {
+            return Err(format!(
+                "claim {c:?} has no route over the same carrier, path, openness and exactness"
+            ));
+        }
+    }
+    for (i, r) in routes.iter().enumerate() {
+        if i == crate::door::TASK_RUN_ROUTE {
+            continue;
+        }
+        let hit = claims.iter().any(|c| {
+            c.transport == r.carrier
+                && match c.selector {
+                    busbar_contract::grammar::Selector::ExactPath(p) => r.target == p,
+                    busbar_contract::grammar::Selector::StreamName(_) => {
+                        r.carrier == crate::tool_claims::CARRIER_STDIO
+                    }
+                    _ => false,
+                }
+                && c.scheme.is_none() == r.open
+        });
+        if !hit {
+            return Err(format!("route {r:?} is claimed by no claim"));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn the_claims_and_the_route_table_state_one_route_set() {
+    pinned(ROUTES, crate::tool_claims::CLAIMS).expect("the two statements agree");
+    // RED, direction one: a claim with no route (a claim on a path the table does not serve).
+    let mut extra = crate::tool_claims::CLAIMS.to_vec();
+    extra.push(busbar_contract::grammar::Claim {
+        selector: busbar_contract::grammar::Selector::ExactPath("/mcp/elsewhere"),
+        ..extra[1]
+    });
+    assert!(pinned(ROUTES, &extra).is_err());
+    // RED, direction two: a route with no claim (the discovery claim removed).
+    assert!(pinned(ROUTES, &crate::tool_claims::CLAIMS[1..]).is_err());
+    // RED, flags: a claim that turns the discovery document closed disagrees with the open route.
+    let mut closed = crate::tool_claims::CLAIMS.to_vec();
+    closed[0].scheme = closed[1].scheme;
+    assert!(pinned(ROUTES, &closed).is_err());
+}
