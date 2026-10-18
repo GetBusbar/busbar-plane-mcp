@@ -49,8 +49,8 @@ use busbar_contract::abi::plane::{
     ProjectIn, ProjectOut, RecordWrite, RefusalIn, RefusalOut, ServeIn, ServeOut, UnitCount,
     AUDIT_APPLIED, AUDIT_REJECTED, CANCEL_ABORTED, EMIT_DONE, EMIT_TO_FAR_END, FROM_CALLER,
     FROM_FAR_END, FROM_KERNEL, PIECE_HAS_STATUS, PIECE_LAST, PRINCIPAL_REQUIRED, RECORD_AUDIT,
-    RECORD_PUT, REFUSAL_ARRIVE, REFUSAL_GATE, ROUTE_DIRECT, ROUTE_POOL, UNITS_REPORTED,
-    VERDICT_RETRY,
+    RECORD_PUT, REFUSAL_ARRIVE, REFUSAL_GATE, REFUSAL_KERNEL, ROUTE_DIRECT, ROUTE_POOL,
+    UNITS_REPORTED, VERDICT_RETRY,
 };
 use busbar_contract::abi::sdk::door::statement;
 use busbar_contract::abi::sdk::exchange::{REPLY_MAX, REPLY_OVER_BOUND};
@@ -3629,7 +3629,15 @@ slot!(
         }
         let mut audit: Option<crate::call::AuditRow> = None;
         let mut retry_after: Option<u32> = None;
-        let (status, body, allow) = if given.cause == REFUSAL_ARRIVE {
+        // A KERNEL REFUSAL BEFORE ANY UNIT (a mounted path's authentication, the body limit): the
+        // JSON-RPC envelope with no id, in the 1.6.0 baseline's bytes (audit K4#2(b): the plane owns
+        // the text, the kernel no longer renders it).
+        let unitless = (given.unit == 0 && given.cause == REFUSAL_KERNEL)
+            .then(|| unitless_kernel_body(given.reason))
+            .flatten();
+        let (status, body, allow) = if let Some(body) = unitless {
+            (given.status, body.to_vec(), false)
+        } else if given.cause == REFUSAL_ARRIVE {
             match words_of(text) {
                 Some(Words::Rpc(refusal)) => (refusal.status, refusal.body(), false),
                 Some(Words::NotAllowed) => (
@@ -3811,6 +3819,26 @@ slot!(
         Outcome::Ready
     }
 );
+
+/// The JSON-RPC body of a kernel refusal that ended no unit, by its reason: the bytes the kernel's
+/// JSON-RPC transport refusal rendered before the plane owned them (`None` for any other reason).
+fn unitless_kernel_body(reason: u32) -> Option<&'static [u8]> {
+    use busbar_contract::abi::plane::RefusalCode;
+    if reason == RefusalCode::Unauthenticated.code() {
+        Some(UNITLESS_UNAUTHENTICATED)
+    } else if reason == RefusalCode::BodyTooLarge.code() {
+        Some(UNITLESS_BODY_TOO_LARGE)
+    } else {
+        None
+    }
+}
+
+/// A unit-less authentication refusal's body.
+pub const UNITLESS_UNAUTHENTICATED: &[u8] =
+    br#"{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"authentication failed"}}"#;
+
+/// A unit-less body-limit refusal's body.
+pub const UNITLESS_BODY_TOO_LARGE: &[u8] = br#"{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"request body exceeds the maximum allowed size"}}"#;
 
 /// The status of a call no member of its server's pool could be sent to (its breaker is open).
 const STATUS_UNAVAILABLE_UPSTREAM: u32 = 503;
