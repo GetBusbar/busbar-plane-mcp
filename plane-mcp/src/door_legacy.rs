@@ -830,7 +830,7 @@ pub(super) type Called = Result<(Vec<u8>, bool, u64, u32), String>;
 
 /// The answer `body`, with `frames` ahead of it as one event stream when there are any: `(bytes,
 /// is an event stream)`.
-fn answered(body: Vec<u8>, frames: Vec<Value>) -> (Vec<u8>, bool) {
+fn framed_answer(body: Vec<u8>, frames: Vec<Value>) -> (Vec<u8>, bool) {
     if frames.is_empty() {
         return (body, false);
     }
@@ -982,7 +982,7 @@ pub(super) fn call(
         match next {
             Next::Answered(body, frames, id, dropped) => {
                 *state = None;
-                let (body, sse) = answered(body, frames);
+                let (body, sse) = framed_answer(body, frames);
                 return Poll::Ready(Ok((body, sse, id, dropped)));
             }
             Next::Fail(why) => {
