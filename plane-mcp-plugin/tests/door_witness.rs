@@ -245,7 +245,7 @@ mod both_ways {
     use busbar_contract::abi::mechanism::call::{AbiStr, Blob, Field, Outcome, Span, BLOB_OCTETS};
     use busbar_contract::abi::mechanism::door::Door;
     use busbar_contract::abi::mechanism::lifecycle::{
-        slot as life, CancelIn, CancelOut, GenIn, RefreshIn, TickIn, TickOut, ValidateIn,
+        slot as life, CancelIn, CancelOut, GenIn, TickIn, TickOut, ValidateIn,
     };
     use busbar_contract::abi::plane::{
         self, slot, ArriveIn, ArriveOut, OnPieceIn, OnPieceOut, OutField, PlaneOpenIn,
@@ -740,9 +740,9 @@ mod both_ways {
         s.detail = format!("disposition={}", x.out.disposition);
         t.push(s);
 
-        let mut f: Frame<RefreshIn, PlaneRefreshOut> = Frame::new(z(), z());
-        (f.input.head, f.out.head) = (in_head(), out_head());
-        (f.input.generation, f.input.settings) = (2, octets(b""));
+        let mut f: Frame<plane::PlaneRefreshIn, PlaneRefreshOut> = Frame::new(z(), z());
+        (f.input.refresh.head, f.out.head) = (in_head(), out_head());
+        (f.input.refresh.generation, f.input.refresh.settings) = (2, octets(b""));
         let (c, snapshot) = p.refresh(&mut f);
         let mut s = Step::new("refresh", c.outcome);
         s.snapshot = snapshot;
