@@ -376,7 +376,7 @@ fn whatwg_host(value: &str) -> Option<Option<String>> {
 /// The host a parsed URL names, as the destination judge reads one (an IPv6 literal unbracketed).
 fn host_of(parsed: &url::Url) -> Option<String> {
     match parsed.host()? {
-        url::Host::Domain(d) if d.is_empty() => None,
+        url::Host::Domain("") => None,
         url::Host::Domain(d) => Some(d.to_string()),
         url::Host::Ipv4(a) => Some(a.to_string()),
         url::Host::Ipv6(a) => Some(a.to_string()),
