@@ -515,8 +515,9 @@ fn an_http_url_in_an_undeclared_field_is_judged_and_a_hostname_shaped_word_is_no
     assert_eq!(err.pointer, "/undeclared_extra");
     assert!(matches!(err.why, ArgWhy::InternalHost(_)));
 
-    // AND THE LIMIT, asserted: bare hostnames, mid-string URLs and non-http schemes in UNDECLARED
-    // fields are NOT sniffed. Each of these is a legitimate value for some real tool.
+    // AND THE LIMIT, asserted: bare hostnames, mid-string URLs, a URL naming no host and a
+    // scheme-relative reference no reader resolves without a base are NOT sniffed in UNDECLARED
+    // fields. Each of these is a legitimate value for some real tool.
     let tolerated = json!({
         "query": "localhost",
         "a": "169.254.169.254",
@@ -525,7 +526,7 @@ fn an_http_url_in_an_undeclared_field_is_judged_and_a_hostname_shaped_word_is_no
         "d": "//169.254.169.254/x"
     });
     let scan = guard(&schema, &tolerated, public())
-        .expect("the undeclared detector reads whole http(s) values and nothing else");
+        .expect("the undeclared detector reads whole URLs naming a host and nothing else");
     assert_eq!(scan.undeclared_judged, 0);
     assert_eq!(
         scan.strings_seen, 5,
@@ -754,6 +755,61 @@ fn a_transition_address_embedding_a_private_v4_is_refused() {
         assert!(
             matches!(err.why, ArgWhy::InternalHost(_)),
             "`{url}`: {err:?}"
+        );
+    }
+}
+
+/// A URL IS JUDGED HOWEVER A WHATWG READER WOULD ACCEPT IT. Most MCP servers fetch with a WHATWG
+/// parser (a browser's or Node's `fetch`), which reads `http:/h`, `https:\\h`, a scheme split by a
+/// tab and a value led by a control character as the same `http(s)://h/...` URL. Each of those
+/// names the metadata host to the upstream, so each is put to the destination judge: undeclared,
+/// and in a declared `uri-reference`, where a backslash starts a scheme-relative reference too.
+#[test]
+fn a_url_a_whatwg_reader_accepts_is_judged_however_it_is_spelled() {
+    let undeclared = json!({
+        "type": "object",
+        "properties": {"target": {"type": "string"}}
+    });
+    for spelled in [
+        "http:/169.254.169.254/latest/meta-data/",
+        "https:\\\\169.254.169.254\\latest\\meta-data",
+        "ht\ttp://169.254.169.254/latest/meta-data/",
+        "\u{1}http://169.254.169.254/latest/meta-data/",
+        "HTTP:169.254.169.254/latest/meta-data/",
+    ] {
+        let refused = guard(&undeclared, &json!({ "target": spelled }), public()).err();
+        assert!(
+            refused.as_ref().is_some_and(|e| e.pointer == "/target"
+                && e.declared_format.is_none()
+                && e.why == ArgWhy::CloudMetadata("169.254.169.254".into())),
+            "`{spelled:?}` names the metadata host to a WHATWG reader and is refused as one: \
+             {refused:?}"
+        );
+    }
+    let reference = json!({
+        "type": "object",
+        "properties": {"path": {"type": "string", "format": "uri-reference"}}
+    });
+    for spelled in [
+        "\\\\169.254.169.254\\latest",
+        "/\\169.254.169.254/latest",
+        "\\/169.254.169.254/latest",
+        "http:/169.254.169.254/latest",
+    ] {
+        let refused = guard(&reference, &json!({ "path": spelled }), public()).err();
+        assert!(
+            refused
+                .as_ref()
+                .is_some_and(|e| e.why == ArgWhy::CloudMetadata("169.254.169.254".into())),
+            "the reference `{spelled:?}` names the metadata host and is refused as one: \
+             {refused:?}"
+        );
+    }
+    // The legitimate relative references stay admissible.
+    for relative in ["/v1/items", "items/3", "?q=1", "#frag"] {
+        assert!(
+            guard(&reference, &json!({ "path": relative }), public()).is_ok(),
+            "`{relative}` names no host"
         );
     }
 }
