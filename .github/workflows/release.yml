@@ -25,7 +25,7 @@ jobs:
     secrets: inherit
   release:
     needs: ci
-    uses: GetBusbar/busbar/.github/workflows/plugin-release.yml@29d93143717c043a33652659f04790b54545c369
+    uses: GetBusbar/busbar/.github/workflows/plugin-release.yml@ec2c8f9d41ed0a5e4ebd10ed7ca24b7e5f916444
     with:
       plugin_crate: busbar-plane-mcp-plugin
       manifest_name: busbar-plane-mcp
@@ -41,7 +41,7 @@ jobs:
   consumer-verify:
     needs: release
     if: ${{ !cancelled() }}
-    uses: GetBusbar/busbar/.github/workflows/plugin-consumer-verify.yml@29d93143717c043a33652659f04790b54545c369
+    uses: GetBusbar/busbar/.github/workflows/plugin-consumer-verify.yml@ec2c8f9d41ed0a5e4ebd10ed7ca24b7e5f916444
     with:
       version: ${{ github.ref_name }}
       asset_prefix: busbar-plane-mcp
