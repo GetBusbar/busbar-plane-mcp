@@ -23,7 +23,9 @@ use busbar_contract::abi::host::conn::connector::{
     Need, DIRECTION_OUTBOUND, EGRESS_OPERATOR_INFRASTRUCTURE, EGRESS_PROVIDER, KEEP_NAMED,
 };
 use busbar_contract::abi::mechanism::call::{AbiStr, Blob, BLOB_ABSENT};
-use busbar_contract::abi::mechanism::door::{KindTailHead, Section, SECTION_DECLARING};
+use busbar_contract::abi::mechanism::door::{
+    KindTailHead, Section, SECTION_DECLARING, SECTION_ENDPOINT_DOOR, SECTION_NAMED_MAP,
+};
 use busbar_contract::abi::plane::{
     AdminRoute, BillableClass, OpClass, PinMechanism, PlaneTail, RecordChain, RecordRetention,
     TrustKey, ANSWER_LAYOUT, CHAIN_DIGESTS_SCOPE, CHAIN_LENGTH_PREFIXED, INGRESS_REQUEST_RESPONSE,
@@ -77,20 +79,21 @@ const NONE: AbiStr = AbiStr {
     len: 0,
 };
 
-/// THE SECTIONS THE PLANE'S STATEMENT DECLARES: `tools:`, which it owns and judges, and its endpoint
-/// block beside it.
+/// THE SECTIONS THE PLANE'S STATEMENT DECLARES: `tools:`, which it owns and judges (a named map:
+/// every key is a registration), and its endpoint block beside it, the plane's endpoint door
+/// (`SECTION_ENDPOINT_DOOR`: its canonical URI is the bound audience, its open front door refused).
 /// The names are literals (the config-schema census reads a door-only plane's sections off this
 /// table); a test holds them equal to the grammar's `tools_config::SECTION` and [`ENDPOINT_SECTION`].
 pub const SECTIONS: &[Section] = &[
     Section {
         name: abi_str("tools"),
-        flags: SECTION_DECLARING,
+        flags: SECTION_DECLARING | SECTION_NAMED_MAP,
         _reserved: 0,
         ..Section::ZERO
     },
     Section {
         name: abi_str("mcp"),
-        flags: 0,
+        flags: SECTION_ENDPOINT_DOOR,
         _reserved: 0,
         ..Section::ZERO
     },
@@ -770,6 +773,7 @@ pub fn snapshot_spec_with(
         audience,
         resource_metadata,
         listed: Vec::new(),
+        ..SnapshotSpec::default()
     }
 }
 
