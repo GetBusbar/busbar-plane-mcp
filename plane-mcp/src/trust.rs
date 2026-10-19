@@ -43,7 +43,9 @@ pub fn tool_digest(name: &str, description: &str, input_schema: &Value) -> Strin
     }
     format!(
         "sha256:{}",
-        hex::encode(busbar_contract::abi::sdk::digest::sha256(&framed))
+        busbar_contract::abi::sdk::digest::lower_hex(&busbar_contract::abi::sdk::digest::sha256(
+            &framed
+        ))
     )
 }
 
@@ -137,7 +139,9 @@ pub fn catalogue_hash(observation: &Observation) -> String {
     }
     format!(
         "sha256:{}",
-        hex::encode(busbar_contract::abi::sdk::digest::sha256(&bytes))
+        busbar_contract::abi::sdk::digest::lower_hex(&busbar_contract::abi::sdk::digest::sha256(
+            &bytes
+        ))
     )
 }
 

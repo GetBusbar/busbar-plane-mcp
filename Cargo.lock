@@ -70,7 +70,6 @@ dependencies = [
  "base64",
  "busbar-contract",
  "bytes",
- "hex",
  "indexmap",
  "serde",
  "serde_json",
