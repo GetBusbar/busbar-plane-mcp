@@ -71,3 +71,32 @@ fn the_registrations_scope_is_its_approved_tools() {
         "fs_read_file fs_stat fs_write_file"
     );
 }
+
+/// A `publish_as` TOOL IS ASKED FOR BY ITS `{server}_{tool}` SCOPE. The grammar keeps the RFC 8693
+/// scope the namespaced spelling, never the wire alias, and the registration's own fetch already
+/// asks for it so: a caller's call to the alias asks the authorization server for the same scope,
+/// on the wildcard arm and the granted one alike.
+#[test]
+fn a_published_alias_is_asked_for_by_its_namespaced_scope() {
+    const ALIASED: &str = r#"{
+      "fs": {"url": "https://mcp.example/fs", "pin": {"mechanism": "unpinned"},
+        "tools_allow": {"stat": {"schema_hash": "sha256:cc", "publish_as": "file_stat"}}}
+    }"#;
+    let section = crate::door::read_tools_section(ALIASED.as_bytes()).expect("the section reads");
+    let catalogue = Catalogue::build(1, &section);
+    assert_eq!(
+        caller_downscope(&catalogue, "fs", "file_stat", true, &|_: &str| true),
+        "fs_stat",
+        "a wildcard narrows to the called tool's namespaced scope"
+    );
+    assert_eq!(
+        caller_downscope(&catalogue, "fs", "file_stat", false, &|n: &str| n
+            == "file_stat"),
+        "fs_stat",
+        "a granted alias is asked for by its namespaced scope"
+    );
+    assert_eq!(
+        registration_scope("fs", section.servers.get("fs").expect("fs")),
+        "fs_stat"
+    );
+}

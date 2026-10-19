@@ -598,3 +598,20 @@ fn a_servers_timeout_bounds_the_doors_own_fetches_and_the_kernel_owns_its_judgem
         "the zero timeout is the kernel's to refuse, not the door's"
     );
 }
+
+/// THE CERTIFICATE-KEY PINS ARE THE CONNECTOR'S TO ENFORCE. `cert_spki` and `mtls` pin the far
+/// end's certificate key, so each is declared `peer_key`: the host seals the operator's key into the
+/// registration's trust anchors and the connector refuses every connection whose leaf key is another
+/// (as predev quarantined a server whose presented key did not match). A mechanism with no key to
+/// observe on the hop declares none.
+#[test]
+fn the_certificate_key_pins_are_declared_for_the_connector_to_enforce() {
+    for declared in TRUST_KEYS[0].mechanisms {
+        assert_eq!(
+            declared.peer_key,
+            McpPinMechanism::observes_the_peer_certificate(declared.token),
+            "`{}`",
+            declared.token
+        );
+    }
+}
