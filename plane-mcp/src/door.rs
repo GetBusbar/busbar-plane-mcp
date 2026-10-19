@@ -442,43 +442,39 @@ pub const TAIL: &PlaneTail = &PlaneTail {
     // a stalled consumer (its event and subscribe streams were pull-based bodies, `session_serve.rs`,
     // `subscribe.rs`), so the mcp plane states none and keeps that behaviour.
     stream_ceiling_secs: 0,
+    // No lane words of its own: its counters carry entry names only.
     metric_lanes: std::ptr::null(),
     metric_lanes_len: 0,
 };
 
-/// One path the plane answers on: the SDK's one route row ([`ServedRoute`]): the verb, the target,
-/// the transport claim it arrives over, and whether the route admits a caller with no credential
-/// at all (the discovery document).
-pub type Route = ServedRoute;
-
 /// EVERY ROUTE THE PLANE SERVES, in the order the engine mounts them: the discovery document, the
 /// endpoint's three verbs, and the event-framed answer on the same path.
-pub const ROUTES: &[Route] = &[
-    Route {
+pub const ROUTES: &[ServedRoute] = &[
+    ServedRoute {
         verb: "GET",
         target: DEFAULT_METADATA,
         carrier: CARRIER_HTTP,
         open: true,
     },
-    Route {
+    ServedRoute {
         verb: "POST",
         target: DEFAULT_MOUNT,
         carrier: CARRIER_HTTP,
         open: false,
     },
-    Route {
+    ServedRoute {
         verb: "GET",
         target: DEFAULT_MOUNT,
         carrier: CARRIER_HTTP,
         open: false,
     },
-    Route {
+    ServedRoute {
         verb: "DELETE",
         target: DEFAULT_MOUNT,
         carrier: CARRIER_HTTP,
         open: false,
     },
-    Route {
+    ServedRoute {
         verb: "POST",
         target: DEFAULT_MOUNT,
         carrier: CARRIER_SSE,
@@ -486,7 +482,7 @@ pub const ROUTES: &[Route] = &[
     },
     // THE TASK-RUN CLAIM (ARCHITECT round 5 Q-L3B-TASKS (b) → (A)): a task's continuation, nested
     // by the unit that created the task.
-    Route {
+    ServedRoute {
         verb: "POST",
         target: TASK_RUN_MOUNT,
         carrier: CARRIER_HTTP,
@@ -494,7 +490,7 @@ pub const ROUTES: &[Route] = &[
     },
     // THE LINE CARRIER (ARCHITECT Q1a, round 4 Q-L3B-STDIO-SHAPE (B)): the host holds the process's
     // own stdin/stdout open as one carrier session and opens a unit per line.
-    Route {
+    ServedRoute {
         verb: "POST",
         target: DEFAULT_MOUNT,
         carrier: CARRIER_STDIO,

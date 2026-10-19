@@ -305,3 +305,103 @@ fn validate_reads_the_dealt_blob_at_its_tools_section() {
     assert!(read_dealt_tools(&bad).is_err());
     assert!(read_dealt_tools(b"[]").is_err());
 }
+
+/// THE TWO STATEMENTS OF ONE ROUTE SET AGREE. The plane states its routes twice: [`ROUTES`], the
+/// ABI table its snapshot publishes (verb, target, carrier, flags), and `tool_claims::CLAIMS`, the
+/// engine grammar's claims (carrier, selector, scheme). Nothing derives one from the other, so this
+/// pins them to each other in BOTH directions: every claim has a route over the same carrier and the
+/// same path with the same openness and exactness, and every route is claimed, including the
+/// task-run route. RED arms below prove each direction bites.
+///
+/// There is no exception: the task-run route is claimed like every other.
+fn pinned(
+    routes: &[busbar_contract::abi::sdk::publish::ServedRoute],
+    claims: &[busbar_contract::grammar::Claim],
+) -> Result<(), String> {
+    use busbar_contract::grammar::Selector;
+    for c in claims {
+        let path = match c.selector {
+            Selector::ExactPath(p) => Some(p),
+            Selector::StreamName(_) => None,
+            ref other => {
+                return Err(format!(
+                    "a claim with the selector {other:?} has no route form"
+                ))
+            }
+        };
+        let hit = routes.iter().any(|r| {
+            r.carrier == c.transport
+                && path.map_or(r.carrier == crate::tool_claims::CARRIER_STDIO, |p| {
+                    r.target == p
+                })
+                && r.open == c.scheme.is_none()
+                && r.claim_flags() & CLAIM_EXACT != 0
+        });
+        if !hit {
+            return Err(format!(
+                "claim {c:?} has no route over the same carrier, path, openness and exactness"
+            ));
+        }
+    }
+    for r in routes {
+        let hit = claims.iter().any(|c| {
+            c.transport == r.carrier
+                && match c.selector {
+                    busbar_contract::grammar::Selector::ExactPath(p) => r.target == p,
+                    busbar_contract::grammar::Selector::StreamName(_) => {
+                        r.carrier == crate::tool_claims::CARRIER_STDIO
+                    }
+                    _ => false,
+                }
+                && c.scheme.is_none() == r.open
+        });
+        if !hit {
+            return Err(format!("route {r:?} is claimed by no claim"));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn the_claims_and_the_route_table_state_one_route_set() {
+    pinned(ROUTES, crate::tool_claims::CLAIMS).expect("the two statements agree");
+    // RED, direction one: a claim with no route (a claim on a path the table does not serve).
+    let mut extra = crate::tool_claims::CLAIMS.to_vec();
+    extra.push(busbar_contract::grammar::Claim {
+        selector: busbar_contract::grammar::Selector::ExactPath("/mcp/elsewhere"),
+        ..extra[1]
+    });
+    assert!(pinned(ROUTES, &extra).is_err());
+    // RED, direction two: a route with no claim (the discovery claim removed).
+    assert!(pinned(ROUTES, &crate::tool_claims::CLAIMS[1..]).is_err());
+    // RED, flags: a claim that turns the discovery document closed disagrees with the open route.
+    let mut closed = crate::tool_claims::CLAIMS.to_vec();
+    closed[0].scheme = closed[1].scheme;
+    assert!(pinned(ROUTES, &closed).is_err());
+}
+
+/// THE TASK-RUN ROUTE IS CLAIMED AT THE BOOT SEAL, with the flags its `ServedRoute` row publishes
+/// (a closed, exact route over the http carrier), and a second claimant of that path TIES with it.
+/// The seal refuses equal-precedence overlapping claims at boot (`Selector::overlaps` is the
+/// predicate it judges by; the refusal itself is the kernel's, exercised by
+/// `busbar-kernel/tests/registry_and_claims.rs::two_claims_that_could_both_match_at_equal_precedence_are_refused_at_boot`,
+/// a crate this plugin does not link).
+#[test]
+fn the_task_run_path_is_claimed_and_a_second_claimant_ties() {
+    use busbar_contract::grammar::Selector;
+    let task = crate::tool_claims::CLAIMS
+        .iter()
+        .find(|c| c.selector == Selector::ExactPath(crate::tool_claims::TASK_RUN_MOUNT))
+        .expect("the task-run path is claimed at the boot seal");
+    let route = &ROUTES[crate::door::TASK_RUN_ROUTE];
+    assert_eq!(task.transport, route.carrier);
+    assert_eq!(task.scheme.is_none(), route.open);
+    assert_eq!(route.claim_flags() & CLAIM_EXACT, CLAIM_EXACT);
+    // RED: another plane claiming the same path on the same transport overlaps it (a tie).
+    let rival = Selector::ExactPath(crate::tool_claims::TASK_RUN_MOUNT);
+    assert!(task.selector.overlaps(&rival));
+    // And a neighbour does not: the claim is exactly this path.
+    assert!(!task
+        .selector
+        .overlaps(&Selector::ExactPath("/mcp/tasks/other")));
+}
