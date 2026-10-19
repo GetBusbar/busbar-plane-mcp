@@ -50,7 +50,6 @@ fn answer(out: *mut ServiceOut, outcome: Outcome, value: u64, len: u64) -> RawOu
         out.write(ServiceOut {
             size: std::mem::size_of::<ServiceOut>() as u32,
             outcome: RawOutcome::of(outcome),
-            _reserved: [0; 3],
             value,
             len,
             items: 0,
@@ -60,6 +59,7 @@ fn answer(out: *mut ServiceOut, outcome: Outcome, value: u64, len: u64) -> RawOu
                 ptr: std::ptr::null(),
                 len: 0,
             },
+            ..ServiceOut::ZERO
         });
     }
     RawOutcome::of(outcome)
@@ -140,6 +140,10 @@ static HOST_SLOTS: HostSlots = HostSlots {
     trust_decide: None,
     trust_state: None,
     session_emit: None,
+    auth_call: None,
+    unit_hand_in: None,
+    unit_refuse: None,
+    console_line: None,
 };
 
 // ── the upstreams behind the connector ──────────────────────────────────────────────────────────

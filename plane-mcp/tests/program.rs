@@ -79,7 +79,6 @@ fn answer(out: *mut ServiceOut, outcome: Outcome, value: u64, len: u64) -> RawOu
         out.write(ServiceOut {
             size: std::mem::size_of::<ServiceOut>() as u32,
             outcome: RawOutcome::of(outcome),
-            _reserved: [0; 3],
             value,
             len,
             items: 0,
@@ -89,6 +88,7 @@ fn answer(out: *mut ServiceOut, outcome: Outcome, value: u64, len: u64) -> RawOu
                 ptr: std::ptr::null(),
                 len: 0,
             },
+            ..ServiceOut::ZERO
         });
     }
     RawOutcome::of(outcome)
