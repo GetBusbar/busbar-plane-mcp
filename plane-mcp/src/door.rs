@@ -25,17 +25,13 @@ use busbar_contract::abi::host::conn::connector::{
 use busbar_contract::abi::mechanism::call::{AbiStr, Blob, BLOB_ABSENT};
 use busbar_contract::abi::mechanism::door::{KindTailHead, Section, SECTION_DECLARING};
 use busbar_contract::abi::plane::{
-    AdminRoute, BillableClass, OpClass, PinMechanism, PlaneTail, RecordChain, RecordRetention,
-    TrustKey,
+    AdminRoute, BillableClass, OpClass, PinMechanism, PlaneTail, RecordChain, TrustKey,
     CHAIN_DIGESTS_SCOPE, CHAIN_LENGTH_PREFIXED, CLAIM_EXACT, CLAIM_OPEN, INGRESS_REQUEST_RESPONSE,
     INGRESS_RESPONSE_STREAM, MECHANISM_ROOT, SHAPE_PIECEWISE, TRUST_PIN, TRUST_PRIVATE_REACH,
     TRUST_REVERIFY_TTL,
 };
 use busbar_contract::abi::sdk::door::abi_str;
-use busbar_contract::abi::sdk::publish::{
-    record_retention, AdminRouteSpec, ClaimSpec, SnapshotSpec,
-};
-use busbar_contract::records::Retention;
+use busbar_contract::abi::sdk::publish::{AdminRouteSpec, ClaimSpec, SnapshotSpec};
 
 use crate::tool_claims::{
     CARRIER_HTTP, CARRIER_SSE, CARRIER_STDIO, DEFAULT_METADATA, DEFAULT_MOUNT, TASK_RUN_MOUNT,
@@ -210,12 +206,6 @@ const RECORD_KINDS: &[AbiStr] = &[
     abi_str(crate::tool_records::KIND_APPROVAL),
     abi_str(crate::tool_records::KIND_TASK),
 ];
-
-/// The retention rule of each record kind that is not purged by age ([`RECORD_KINDS`] indexes): a
-/// task's record is kept while it is active, so a purge drops only the terminal ones. Every other
-/// kind lists no rule and is purged by age.
-const RECORD_RETENTIONS: &[RecordRetention] =
-    &[record_retention(RECORD_TASK, Retention::TerminalOnly)];
 
 /// The kind a completed ask exchange's approval is claimed under, once ([`RECORD_KINDS`]): the
 /// spent-approval ledger is the host's one-time `records.claim` (ARCHITECT Q-L3B-ASK).
@@ -406,7 +396,6 @@ pub const TAIL: &PlaneTail = &PlaneTail {
     flags: busbar_contract::abi::plane::TAIL_HOOKS_GATED,
     ingress: INGRESS_REQUEST_RESPONSE | INGRESS_RESPONSE_STREAM,
     dispatch_shape: SHAPE_PIECEWISE,
-    _reserved: 0,
     scope: abi_str(SCOPE),
     label: abi_str(LABEL),
     subject_noun: abi_str(SUBJECT_NOUN),
@@ -417,30 +406,20 @@ pub const TAIL: &PlaneTail = &PlaneTail {
     cli_help: abi_str(crate::tool_meta::HELP_FLAGS),
     dialects: DIALECTS.as_ptr(),
     dialects_len: DIALECTS.len(),
-    dialect_auth: std::ptr::null(),
-    dialect_auth_len: 0,
     scope_kinds: SCOPE_KINDS.as_ptr(),
     scope_kinds_len: SCOPE_KINDS.len(),
     op_classes: OP_CLASS_TABLE.as_ptr(),
     op_classes_len: OP_CLASS_TABLE.len(),
     billable_classes: BILLABLE_CLASSES.as_ptr(),
     billable_classes_len: BILLABLE_CLASSES.len(),
-    route_cost: std::ptr::null(),
-    route_cost_len: 0,
     fee_units: FEE_UNITS.as_ptr(),
     fee_units_len: FEE_UNITS.len(),
     record_kinds: RECORD_KINDS.as_ptr(),
     record_kinds_len: RECORD_KINDS.len(),
-    record_retentions: RECORD_RETENTIONS.as_ptr(),
-    record_retentions_len: RECORD_RETENTIONS.len(),
-    egress_targets: std::ptr::null(),
-    egress_targets_len: 0,
     record_chains: RECORD_CHAINS.as_ptr(),
     record_chains_len: RECORD_CHAINS.len(),
     trust_keys: TRUST_KEYS.as_ptr(),
     trust_keys_len: TRUST_KEYS.len(),
-    refusal_statuses: std::ptr::null(),
-    refusal_statuses_len: 0,
     caller_credential_refusal: NONE,
     admin_routes: ADMIN_ROUTES.as_ptr(),
     admin_routes_len: ADMIN_ROUTES.len(),
@@ -453,7 +432,7 @@ pub const TAIL: &PlaneTail = &PlaneTail {
     // No stream ceiling (ARCHITECT STREAM-CEILING, 2026-10-07): predev's mcp engine put no bound on
     // a stalled consumer (its event and subscribe streams were pull-based bodies, `session_serve.rs`,
     // `subscribe.rs`), so the mcp plane states none and keeps that behaviour.
-    stream_ceiling_secs: 0,
+    ..PlaneTail::ZERO,
 };
 
 /// One path the plane answers on: the verb, the target, the transport claim it arrives over, and
