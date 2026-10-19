@@ -97,7 +97,6 @@ const fn claim(transport: &'static str, selector: Selector) -> Claim {
         // today, and declaring one here would change the shape of every request that reaches a
         // server, which is precisely the behaviour this crate is not allowed to change.
         idempotency: None,
-        ..Claim::ZERO
     }
 }
 
@@ -112,7 +111,6 @@ const fn open(transport: &'static str, selector: Selector) -> Claim {
         scheme: None,
         scheme_alternatives: &[],
         idempotency: None,
-        ..Claim::ZERO
     }
 }
 
