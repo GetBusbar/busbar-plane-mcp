@@ -27,6 +27,7 @@ use std::collections::BTreeMap;
 use serde_json::Value;
 
 use super::{door_listen, CallUnit, McpDoor, Pending};
+use crate::catalogue::Catalogue;
 use crate::line::{self, Era, LiveAsk, Reply};
 use crate::subscribe::{Listen, Standing, Step as ListenStep};
 use crate::tool_arrival::Disposition;
@@ -57,6 +58,40 @@ pub(super) struct LineListen {
     listen: Box<Listen>,
     /// The entitlement answers it was opened under.
     entitled: BTreeMap<String, bool>,
+}
+
+impl LineListen {
+    /// The subscription `listen`, opened by `_owner` at `_now_ns` under the entitlement answers
+    /// `entitled`.
+    fn opened(
+        listen: Listen,
+        entitled: BTreeMap<String, bool>,
+        _owner: &str,
+        _now_ns: u64,
+    ) -> Self {
+        LineListen {
+            listen: Box::new(listen),
+            entitled,
+        }
+    }
+
+    /// ONE STEP at `now_ns` over the live `catalogue`, under the grants it holds.
+    fn step_at(&mut self, catalogue: &Catalogue, now_ns: u64) -> ListenStep {
+        let entitled = &self.entitled;
+        let admit = |kind: &str, name: &str| {
+            entitled
+                .get(&format!("{kind}:{name}"))
+                .copied()
+                .unwrap_or(false)
+        };
+        self.listen
+            .step(catalogue, &admit, &Standing::Live, &[], now_ns)
+    }
+}
+
+/// Whether `_owner` holds as many line subscriptions as one caller may, or the instance its total.
+fn line_quota_full(_held: &BTreeMap<(u64, String), LineListen>, _owner: &str) -> bool {
+    false
 }
 
 /// One line as `arrive` read it: what the unit is to the carrier, and the bytes the one dispatch
@@ -307,7 +342,12 @@ pub(super) fn liven(plane: &McpDoor, ticket: Ticket, principal: &str, unit: &mut
 /// OPEN a subscription on the carrier session: refused in its own words, or answered with its
 /// acknowledgement and kept on the session. `None` for a unit that is not a line's
 /// `subscriptions/listen`.
-pub(super) fn listen(plane: &McpDoor, ticket: Ticket, unit: &mut CallUnit) -> Option<Pending> {
+pub(super) fn listen(
+    plane: &McpDoor,
+    ticket: Ticket,
+    principal: &str,
+    unit: &mut CallUnit,
+) -> Option<Pending> {
     let session = unit.line.as_ref()?.session;
     let Disposition::Request { row, id } = &unit.disposition else {
         return None;
@@ -343,13 +383,20 @@ pub(super) fn listen(plane: &McpDoor, ticket: Ticket, unit: &mut CallUnit) -> Op
         ListenStep::Frames(frames) | ListenStep::End(frames) => frames,
         _ => Vec::new(),
     };
-    plane.line_listens.insert(
-        (session, line::id_key(&id)),
-        LineListen {
-            listen: Box::new(listen),
-            entitled,
-        },
-    );
+    let key = (session, line::id_key(&id));
+    let kept = LineListen::opened(listen, entitled, principal, now);
+    // THE QUOTA REFUSES THE NEW SUBSCRIPTION, never evicts a held one, as on the HTTP carrier.
+    let admitted = plane.line_listens.with_all(|m| {
+        if !m.contains_key(&key) && line_quota_full(m, principal) {
+            return false;
+        }
+        m.insert(key, kept);
+        true
+    });
+    if !admitted {
+        let refusal = door_listen::quota_refusal(id);
+        return Some(Pending::answer(refusal.status, refusal.body(), None, &[]));
+    }
     Some(Pending::answer(200, lines(&frames), None, &[]))
 }
 
@@ -398,35 +445,24 @@ pub(super) fn tick(plane: &McpDoor, ticket: Ticket, now_ns: u64) {
     let gone = plane.line_listens.with_all(|m| {
         let mut gone = Vec::new();
         for ((session, key), kept) in m.iter_mut() {
-            let entitled = &kept.entitled;
-            let admit = |kind: &str, name: &str| {
-                entitled
-                    .get(&format!("{kind}:{name}"))
-                    .copied()
-                    .unwrap_or(false)
+            let (bytes, ended) = match kept.step_at(&held.catalogue, now_ns) {
+                ListenStep::Frames(frames) => (lines(&frames), false),
+                ListenStep::Keepalive => {
+                    let n = next_ask(plane);
+                    (
+                        serde_json::to_vec(&serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": format!("{}{n}", line::ASK_ID_PREFIX),
+                            "method": crate::adapt::METHOD_PING,
+                        }))
+                        .unwrap_or_default(),
+                        false,
+                    )
+                }
+                ListenStep::Quiet => (Vec::new(), false),
+                ListenStep::End(frames) => (lines(&frames), true),
+                ListenStep::Closed => (Vec::new(), true),
             };
-            let (bytes, ended) =
-                match kept
-                    .listen
-                    .step(&held.catalogue, &admit, &Standing::Live, &[], now_ns)
-                {
-                    ListenStep::Frames(frames) => (lines(&frames), false),
-                    ListenStep::Keepalive => {
-                        let n = next_ask(plane);
-                        (
-                            serde_json::to_vec(&serde_json::json!({
-                                "jsonrpc": "2.0",
-                                "id": format!("{}{n}", line::ASK_ID_PREFIX),
-                                "method": crate::adapt::METHOD_PING,
-                            }))
-                            .unwrap_or_default(),
-                            false,
-                        )
-                    }
-                    ListenStep::Quiet => (Vec::new(), false),
-                    ListenStep::End(frames) => (lines(&frames), true),
-                    ListenStep::Closed => (Vec::new(), true),
-                };
             let went = bytes.is_empty() || emit(plane, ticket, seq, *session, &bytes);
             seq = seq.wrapping_add(1);
             if ended || !went {
@@ -440,3 +476,7 @@ pub(super) fn tick(plane: &McpDoor, ticket: Ticket, now_ns: u64) {
     });
     let _ = gone;
 }
+
+#[cfg(test)]
+#[path = "tests/door_line_tests.rs"]
+mod tests;

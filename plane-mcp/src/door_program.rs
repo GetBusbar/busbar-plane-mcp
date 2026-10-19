@@ -256,19 +256,56 @@ impl DoorPeer<'_> {
         first: impl FnOnce() -> Option<u64>,
     ) -> (Option<u64>, bool) {
         let key = (self.member.to_string(), generation, id.to_string());
-        self.plane.answered.with_all(|m| {
-            if let Some(owner) = m.get(&key) {
-                return (*owner, false);
+        self.plane
+            .answered
+            .with_all(|m| m.entry(()).or_default().decide(key, first))
+    }
+}
+
+/// A child's own request, as the memo keys it: its member, the child's generation and its id.
+pub(super) type AnsweredKey = (String, u64, String);
+
+/// THE MEMO OF A CHILD'S OWN REQUESTS THE DOOR DECIDED: the call each was put to (`None` = busbar
+/// answered it), so two exchanges reading one request decide it once. Bounded at its cap.
+#[derive(Debug)]
+pub(super) struct Answered {
+    cap: usize,
+    by_key: std::collections::BTreeMap<AnsweredKey, Option<u64>>,
+}
+
+impl Default for Answered {
+    fn default() -> Self {
+        Answered::with_cap(MAX_ANSWERED)
+    }
+}
+
+impl Answered {
+    /// An empty memo holding at most `cap` decisions.
+    pub(super) fn with_cap(cap: usize) -> Self {
+        Answered {
+            cap,
+            by_key: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// What became of request `key`: the decision already made (`false`), or `first`'s, remembered
+    /// (`true`).
+    pub(super) fn decide(
+        &mut self,
+        key: AnsweredKey,
+        first: impl FnOnce() -> Option<u64>,
+    ) -> (Option<u64>, bool) {
+        if let Some(owner) = self.by_key.get(&key) {
+            return (*owner, false);
+        }
+        while self.by_key.len() >= self.cap {
+            if self.by_key.pop_first().is_none() {
+                break;
             }
-            while m.len() >= MAX_ANSWERED {
-                if m.pop_first().is_none() {
-                    break;
-                }
-            }
-            let owner = first();
-            m.insert(key, owner);
-            (owner, true)
-        })
+        }
+        let owner = first();
+        self.by_key.insert(key, owner);
+        (owner, true)
     }
 }
 
@@ -607,3 +644,7 @@ pub(super) fn progress(relay: &mut ProgramRelay) -> Vec<Value> {
 pub(super) fn id_of(key: u64, round: u32) -> u64 {
     call_id(key, round)
 }
+
+#[cfg(test)]
+#[path = "tests/door_program_tests.rs"]
+mod tests;
