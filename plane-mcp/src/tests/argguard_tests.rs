@@ -515,8 +515,9 @@ fn an_http_url_in_an_undeclared_field_is_judged_and_a_hostname_shaped_word_is_no
     assert_eq!(err.pointer, "/undeclared_extra");
     assert!(matches!(err.why, ArgWhy::InternalHost(_)));
 
-    // AND THE LIMIT, asserted: bare hostnames, mid-string URLs and non-http schemes in UNDECLARED
-    // fields are NOT sniffed. Each of these is a legitimate value for some real tool.
+    // AND THE LIMIT, asserted: bare hostnames, mid-string URLs, a URL naming no host and a
+    // scheme-relative reference no reader resolves without a base are NOT sniffed in UNDECLARED
+    // fields. Each of these is a legitimate value for some real tool.
     let tolerated = json!({
         "query": "localhost",
         "a": "169.254.169.254",
@@ -525,7 +526,7 @@ fn an_http_url_in_an_undeclared_field_is_judged_and_a_hostname_shaped_word_is_no
         "d": "//169.254.169.254/x"
     });
     let scan = guard(&schema, &tolerated, public())
-        .expect("the undeclared detector reads whole http(s) values and nothing else");
+        .expect("the undeclared detector reads whole URLs naming a host and nothing else");
     assert_eq!(scan.undeclared_judged, 0);
     assert_eq!(
         scan.strings_seen, 5,

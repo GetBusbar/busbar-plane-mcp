@@ -1796,6 +1796,9 @@ fn answer_body(
     } else {
         caller
     };
+    // Every line of a carrier session's caller re-asks the standing and grants its subscriptions on
+    // that session are stepped under ([`door_line::reconfirm`]).
+    door_line::reconfirm(plane, ticket, principal, unit);
     // A SESSION REVISION'S UNIT: its session checked against its owner first (a mismatch is `404`
     // on every path); what the session answers itself is answered here.
     if let Some(step) = door_sessions::answer(plane, ticket, caller, unit) {
