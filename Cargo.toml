@@ -29,8 +29,8 @@ publish = false
 repository = "https://github.com/GetBusbar/busbar-plane-mcp"
 
 [workspace.dependencies]
-busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "092362b8ab25564a8d1f26a54cd8db1e6b16a1b1" }
-busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "092362b8ab25564a8d1f26a54cd8db1e6b16a1b1" }
+busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "3a5ecf6c6e010efe3570ffdec0f2dea5f2becf21" }
+busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "3a5ecf6c6e010efe3570ffdec0f2dea5f2becf21" }
 # busbar's root [workspace.dependencies], third-party rows, at 29d93143717c043a33652659f04790b54545c369
 a2a-lf = "0.3.0"
 a2a-pb = "0.2.0"
