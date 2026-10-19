@@ -757,3 +757,58 @@ fn a_transition_address_embedding_a_private_v4_is_refused() {
         );
     }
 }
+
+/// A URL IS JUDGED HOWEVER A WHATWG READER WOULD ACCEPT IT. Most MCP servers fetch with a WHATWG
+/// parser (a browser's or Node's `fetch`), which reads `http:/h`, `https:\\h`, a scheme split by a
+/// tab and a value led by a control character as the same `http(s)://h/...` URL. Each of those
+/// names the metadata host to the upstream, so each is put to the destination judge: undeclared,
+/// and in a declared `uri-reference`, where a backslash starts a scheme-relative reference too.
+#[test]
+fn a_url_a_whatwg_reader_accepts_is_judged_however_it_is_spelled() {
+    let undeclared = json!({
+        "type": "object",
+        "properties": {"target": {"type": "string"}}
+    });
+    for spelled in [
+        "http:/169.254.169.254/latest/meta-data/",
+        "https:\\\\169.254.169.254\\latest\\meta-data",
+        "ht\ttp://169.254.169.254/latest/meta-data/",
+        "\u{1}http://169.254.169.254/latest/meta-data/",
+        "HTTP:169.254.169.254/latest/meta-data/",
+    ] {
+        let refused = guard(&undeclared, &json!({ "target": spelled }), public()).err();
+        assert!(
+            refused.as_ref().is_some_and(|e| e.pointer == "/target"
+                && e.declared_format.is_none()
+                && e.why == ArgWhy::CloudMetadata("169.254.169.254".into())),
+            "`{spelled:?}` names the metadata host to a WHATWG reader and is refused as one: \
+             {refused:?}"
+        );
+    }
+    let reference = json!({
+        "type": "object",
+        "properties": {"path": {"type": "string", "format": "uri-reference"}}
+    });
+    for spelled in [
+        "\\\\169.254.169.254\\latest",
+        "/\\169.254.169.254/latest",
+        "\\/169.254.169.254/latest",
+        "http:/169.254.169.254/latest",
+    ] {
+        let refused = guard(&reference, &json!({ "path": spelled }), public()).err();
+        assert!(
+            refused
+                .as_ref()
+                .is_some_and(|e| e.why == ArgWhy::CloudMetadata("169.254.169.254".into())),
+            "the reference `{spelled:?}` names the metadata host and is refused as one: \
+             {refused:?}"
+        );
+    }
+    // The legitimate relative references stay admissible.
+    for relative in ["/v1/items", "items/3", "?q=1", "#frag"] {
+        assert!(
+            guard(&reference, &json!({ "path": relative }), public()).is_ok(),
+            "`{relative}` names no host"
+        );
+    }
+}

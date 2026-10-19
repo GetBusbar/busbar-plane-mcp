@@ -393,6 +393,17 @@ impl Task {
         ) = kept;
     }
 
+    /// THE ROUND OF ITS OWN ASKS A `tasks/update` ANSWERED, taken: the round and the call the resume
+    /// it nests runs with.
+    pub fn answer_round(&mut self) -> Option<(usize, Value)> {
+        self.asked.take()
+    }
+
+    /// Whether the continuation resuming at `_round` for `principal` may run it.
+    pub fn take_resume(&mut self, principal: &str, _round: usize) -> bool {
+        self.owned_by(principal) && self.status == Status::Working
+    }
+
     /// Its status.
     #[must_use]
     pub fn status(&self) -> Status {
