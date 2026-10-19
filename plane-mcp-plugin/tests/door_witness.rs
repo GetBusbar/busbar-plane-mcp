@@ -462,6 +462,20 @@ mod both_ways {
             }
         }
 
+        /// The far end ended with no answer at all: the kernel's `Ok(None)` piece (last, no
+        /// status, no bytes; `busbar-kernel` `plane_driver/route.rs`, the far walk's read loop).
+        const fn unanswered() -> Self {
+            Push {
+                from: FROM_FAR_END,
+                flags: PIECE_LAST,
+                status: 0,
+                attempt: 0,
+                member: "",
+                head: &[],
+                bytes: b"",
+            }
+        }
+
         /// The far end's whole answer: its status, its kept head fields and its body.
         const fn far(status: u32, head: &'static [Field], bytes: &'static [u8]) -> Self {
             Push {
@@ -1331,6 +1345,8 @@ mod both_ways {
     const FAR_ERROR: &[u8] =
         br#"{"jsonrpc":"2.0","id":0,"error":{"code":-32601,"message":"nope"}}"#;
     const FAR_SSE: &[u8] = b"event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{\"progressToken\":\"busbar-0\",\"progress\":1}}\n\nevent: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{\"content\":[]}}\n\n";
+    /// A gateway in front of the server answered for it: HTTP 502 and a body that is no JSON-RPC.
+    const FAR_BAD_GATEWAY: &[u8] = b"<html><body>502 Bad Gateway</body></html>";
     const FAR_ASK: &[u8] = br#"{"jsonrpc":"2.0","id":0,"result":{"resultType":"input_required","inputRequests":{"r":{"method":"roots/list"}}}}"#;
 
     /// THE RELAY SCRIPT: the calls a member answers, the ones the plane refuses itself, and the
@@ -1358,6 +1374,20 @@ mod both_ways {
             t.push(push(p, "send", n, Push::caller(RELAY_CALL), 64));
             t.push(push(p, what, n, Push::far(200, head, far), 64));
         }
+        t.push(arrive(p, "arrive unanswered", 45, post, RELAY_CALL, RELAY_FIELDS).0);
+        t.push(push(p, "attempt unanswered", 45, Push::attempt("fs"), 64));
+        t.push(push(p, "send unanswered", 45, Push::caller(RELAY_CALL), 64));
+        t.push(push(p, "answer none", 45, Push::unanswered(), 64));
+        t.push(arrive(p, "arrive 5xx", 46, post, RELAY_CALL, RELAY_FIELDS).0);
+        t.push(push(p, "attempt 5xx", 46, Push::attempt("fs"), 64));
+        t.push(push(p, "send 5xx", 46, Push::caller(RELAY_CALL), 64));
+        t.push(push(
+            p,
+            "answer 5xx",
+            46,
+            Push::far(502, &[], FAR_BAD_GATEWAY),
+            64,
+        ));
         t.push(arrive(p, "arrive draft", 50, post, DRAFT_CALL, DRAFT_FIELDS).0);
         t.push(push(p, "attempt draft", 50, Push::attempt("fs"), 64));
         t.push(push(p, "answer draft", 50, Push::caller(DRAFT_CALL), 64));
@@ -1710,6 +1740,73 @@ mod both_ways {
         assert_eq!(
             document(&ask.reply)["error"]["data"]["reason"],
             json!("ask_no_sealer")
+        );
+    }
+
+    /// $ A CALL ITS UPSTREAM NEVER ANSWERED BILLS ITS FEE UNIT AND NO CLASS (/status row 123; #62,
+    /// BUSBAR-1.6.0.md l.2252: what is billed is what was delivered; #71: the plane reports counts,
+    /// the kernel writes them). The call went out, and the far end ended with nothing (the kernel's
+    /// `Ok(None)` piece). The caller is answered the upstream-failure result, 200 `isError`, and the
+    /// plane reports exactly the fee unit that success earns (tail class 2, `per_request`): the call
+    /// left, so it keeps its fee (Q35, "a hop that left is billed whatever the backend then
+    /// answered"). It reports no `tool_calls` and no `bytes`, because no server answered a call and
+    /// no document was read back. MCP is new in 1.6.0, so this pins predev's own figures
+    /// (BUSBAR-1.6.0.md l.4684-4685: the baseline for the new planes is current predev behaviour,
+    /// never a 1.5.5 one). It is also the one shape that reads `requests=1`, the flat fee and no
+    /// class counts on the admin usage row: a red `h2-class-price` with that shape is an upstream
+    /// that never answered.
+    #[test]
+    fn a_call_its_upstream_never_answered_bills_its_fee_unit_and_no_class() {
+        let t = relay_script(&linked(&served(ALL)));
+        let send = step(&t, "send unanswered");
+        assert!(
+            send.detail.contains("far=true"),
+            "the call went out: {}",
+            send.detail
+        );
+        let none = step(&t, "answer none");
+        assert_eq!((none.outcome, none.status), (Outcome::Ready, 200));
+        assert_eq!(document(&none.reply)["id"], json!(30));
+        assert_eq!(
+            document(&none.reply)["result"]["isError"],
+            json!(true),
+            "the upstream-failure result: {:?}",
+            String::from_utf8_lossy(&none.reply)
+        );
+        assert_eq!(
+            none.units,
+            vec![(door::CLASS_FEE_INDEX, 1)],
+            "the fee unit alone: no tool call and no byte was measured"
+        );
+    }
+
+    /// $ AN UPSTREAM THAT ANSWERED HTTP 5xx WITH NO JSON-RPC BODY IS STILL A SERVED CALL
+    /// (ARCHITECT/coordinator ruling 2026-10-14, Q35 in 1.6.0-QUESTIONS.md: "a hop that left is
+    /// billed whatever the backend then answered"). The far end answered, so the plane counts one
+    /// `tool_calls` and the bytes of the body it read back (tail classes 0 and 1), beside the fee
+    /// unit its caller's 200 `isError` answer earns (tail class 2).
+    #[test]
+    fn an_upstream_5xx_that_is_no_json_rpc_counts_as_a_served_call() {
+        let t = relay_script(&linked(&served(ALL)));
+        let answered = step(&t, "answer 5xx");
+        assert_eq!((answered.outcome, answered.status), (Outcome::Ready, 200));
+        assert_eq!(
+            document(&answered.reply)["result"]["isError"],
+            json!(true),
+            "the upstream-failure result: {:?}",
+            String::from_utf8_lossy(&answered.reply)
+        );
+        assert_eq!(
+            answered.units,
+            vec![
+                (door::CLASS_FEE_INDEX, 1),
+                (0, 1),
+                (
+                    1,
+                    u64::try_from(FAR_BAD_GATEWAY.len()).expect("a small body")
+                )
+            ],
+            "one tool call, the bytes the far end answered with, and the fee unit"
         );
     }
 

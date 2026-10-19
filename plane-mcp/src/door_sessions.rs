@@ -1323,9 +1323,13 @@ fn step_stream(plane: &McpDoor, ticket: Ticket, unit: &mut CallUnit) -> Option<b
 /// How many connector handles one hop of a negotiation may number.
 pub(super) const HOP_SPAN: u32 = 1 << 9;
 
-/// What busbar remembers about `member`.
-fn remembered(plane: &McpDoor, member: &str) -> Option<Remembered> {
-    plane.upstreams.with(&(), |t| t.and_then(|t| t.get(member)))
+/// What busbar remembers about the conversation `key` names ([`crate::tool_sessions::upstream_key`]:
+/// a member and the caller binding it was negotiated for), and the next request id of its session.
+fn remembered(plane: &McpDoor, key: &str) -> (Option<Remembered>, Option<u64>) {
+    plane
+        .upstreams
+        .with(&(), |t| t.map(|t| (t.get(key), t.next_id(key))))
+        .unwrap_or((None, None))
 }
 
 /// One hop's answer as the connector read it: its status, its head fields (lower-case names) and
@@ -1336,7 +1340,9 @@ type Hop = (u16, Vec<(String, String)>, Vec<u8>);
 pub(super) enum Negotiated {
     /// The answer to hand on: the status, the body as the upstream sent it, and whether it is an
     /// event stream.
-    Answer(u16, Vec<u8>, bool),
+    /// The last field is the id the request carried in a session when it is not the original's
+    /// (the id the answer is correlated by).
+    Answer(u16, Vec<u8>, bool, Option<u64>),
     /// No answer: why, in words, for the caller's upstream-failure answer.
     Failed(String),
 }
@@ -1358,6 +1364,18 @@ pub(super) struct Negotiating {
     pub(super) walk_session: Option<String>,
     /// The last answer's body as sent, and whether it is an event stream.
     raw: (Vec<u8>, bool),
+    /// The conversation's key: the member and the caller binding it is negotiated for. What busbar
+    /// learns is kept under it, so one caller's session is never another's (row 159 finding 3).
+    key: String,
+    /// The upstream is known to speak only the `2024-11-05` event stream: the walk's refusal of the
+    /// stateless request goes straight to the held stream ([`super::door_legacy`]).
+    legacy_known: bool,
+    /// The call's place on the held stream, while it waits there.
+    legacy: Option<super::door_legacy::Calling>,
+    /// The id the call carried on the held stream, once answered.
+    legacy_id: Option<u64>,
+    /// Replies no call waited for on the held stream, dropped since its last answer.
+    dropped: u32,
     /// The statuses of the hops that refused, for the words of a failure.
     refused: Vec<u16>,
     /// Why the last hop had no answer at all.
@@ -1365,17 +1383,32 @@ pub(super) struct Negotiating {
 }
 
 impl Negotiating {
-    /// A conversation carrying `original` (a stateless request) to `member`, and the request its
-    /// first hop is: `original` itself, or lowered into the session busbar remembers.
-    pub(super) fn begin(plane: &McpDoor, member: &str, original: OutboundRequest) -> Self {
-        let remembered = remembered(plane, member);
+    /// A conversation carrying `original` (a stateless request) to `member` for the caller bound
+    /// as `binding` (the caller reference the kernel lends; empty for the ungoverned chain), and the
+    /// request its first hop is: `original` itself, or lowered into the session busbar remembers
+    /// for that member AND that caller, under that session's own next id.
+    pub(super) fn begin(
+        plane: &McpDoor,
+        member: &str,
+        binding: &str,
+        original: OutboundRequest,
+    ) -> Self {
+        let key = crate::tool_sessions::upstream_key(member, binding);
+        let (remembered, session_id) = remembered(plane, &key);
         let stateless_known = remembered
             .as_ref()
             .is_some_and(|r| r.revision == Revision::R2026_07_28);
-        let probing = !remembered
+        let legacy_known = remembered
             .as_ref()
-            .is_some_and(|r| r.revision.has_sessions());
-        let mut negotiator = Negotiator::new(original, remembered, super::VERSION);
+            .is_some_and(|r| r.revision.is_event_stream_revision());
+        // The walk's first hop is the stateless request unless busbar holds a session with the
+        // member for this caller; a held `2024-11-05` stream has no session the hop could ride.
+        let probing = legacy_known
+            || !remembered
+                .as_ref()
+                .is_some_and(|r| r.revision.has_sessions());
+        let mut negotiator =
+            Negotiator::new(original, remembered, super::VERSION).with_session_id(session_id);
         let first = negotiator.start();
         Negotiating {
             negotiator,
@@ -1386,9 +1419,25 @@ impl Negotiating {
             fed: false,
             walk_session: None,
             raw: (Vec::new(), false),
+            key,
+            legacy_known,
+            legacy: None,
+            legacy_id: None,
+            dropped: 0,
             refused: Vec::new(),
             failure: None,
         }
+    }
+
+    /// The id the conversation's request carried in a session, when it is not the original's.
+    pub(super) fn sent_id(&self) -> Option<u64> {
+        self.negotiator.sent_id().or(self.legacy_id)
+    }
+
+    /// Replies no call waited for on the call's held stream, dropped since its last answer: each
+    /// is audited on this call's answer, rejected.
+    pub(super) fn dropped(&self) -> u32 {
+        self.dropped
     }
 
     /// The request the first hop sends, when it is one.
@@ -1419,6 +1468,15 @@ impl Negotiating {
             fields,
             body: json,
         };
+        // A KNOWN LEGACY UPSTREAM: an answer to the stateless request is the answer; a refusal goes
+        // straight to the held event stream, never through `initialize` again.
+        if probing && self.legacy_known {
+            return if (200..300).contains(&status) {
+                Action::Finish(hop)
+            } else {
+                Action::AwaitEvent
+            };
+        }
         // A KNOWN STATELESS UPSTREAM, or a refusal that says nothing about the revision (the
         // credential, or a rate): its answer is the stateless path's, unrenegotiated.
         if probing && (self.stateless_known || matches!(status, 401 | 403 | 407 | 429)) {
@@ -1480,32 +1538,85 @@ impl Negotiating {
                     self.next = Some(self.feed(answered));
                 }
                 Some(Action::Finish(answer)) => {
-                    self.keep(plane, member);
+                    self.keep(plane);
                     let (raw, sse) = std::mem::take(&mut self.raw);
                     let raw = if raw.is_empty() { answer.body } else { raw };
-                    return Poll::Ready(Negotiated::Answer(answer.status, raw, sse));
+                    return Poll::Ready(Negotiated::Answer(
+                        answer.status,
+                        raw,
+                        sse,
+                        self.negotiator.sent_id(),
+                    ));
                 }
                 Some(Action::Fail(refusal)) => {
-                    self.keep(plane, member);
+                    self.keep(plane);
                     return Poll::Ready(self.failed(&refusal, member));
                 }
-                // THE LAST RUNG, NOT CARRIED: the `2024-11-05` event stream is read only as a held
-                // stream, which the exchange cannot hold. Said, never papered over.
+                // THE LAST RUNG: the `2024-11-05` event stream, held by the connector and read on the
+                // driver ticket, this call's request POSTed to the address it names and its answer
+                // taken by its id ([`super::door_legacy`]; row 159 finding 1).
+                Some(Action::OpenStream { .. } | Action::AwaitEvent)
+                    if plane.host.as_ref().is_some_and(|h| h.lends_connector()) =>
+                {
+                    let at = base.saturating_add(self.hops.saturating_mul(HOP_SPAN));
+                    let original = self.negotiator.original().clone();
+                    let called = super::door_legacy::call(
+                        instance,
+                        plane,
+                        (&self.key, member),
+                        &original,
+                        &mut self.legacy,
+                        (at, timeout_ms),
+                    );
+                    match called {
+                        Poll::Pending => {
+                            self.next = Some(Action::AwaitEvent);
+                            return Poll::Pending;
+                        }
+                        Poll::Ready(Ok((body, id, dropped))) => {
+                            self.dropped = dropped;
+                            self.legacy_id = Some(id);
+                            plane.upstreams.with(&(), |t| {
+                                if let Some(t) = t {
+                                    t.put(
+                                        &self.key,
+                                        Remembered {
+                                            revision: Revision::R2024_11_05,
+                                            session: None,
+                                            message_address: None,
+                                        },
+                                    );
+                                }
+                            });
+                            return Poll::Ready(Negotiated::Answer(200, body, false, Some(id)));
+                        }
+                        Poll::Ready(Err(why)) => {
+                            plane.upstreams.with(&(), |t| {
+                                if let Some(t) = t {
+                                    t.forget(&self.key);
+                                }
+                            });
+                            return Poll::Ready(Negotiated::Failed(why));
+                        }
+                    }
+                }
+                // No connector to hold a stream over: said, never papered over.
                 Some(Action::OpenStream { .. } | Action::AwaitEvent) | None => {
-                    self.keep(plane, member);
+                    self.keep(plane);
                     return Poll::Ready(Negotiated::Failed(self.legacy_only(member)));
                 }
             }
         }
     }
 
-    /// What busbar learnt, kept (or forgotten) for the next call to `member`.
-    fn keep(&self, plane: &McpDoor, member: &str) {
+    /// What busbar learnt, kept (or forgotten) for the next call to the same member by the same
+    /// caller.
+    fn keep(&self, plane: &McpDoor) {
         plane.upstreams.with(&(), |t| {
             if let Some(t) = t {
                 match self.negotiator.remembered() {
-                    Some(r) => t.put(member, r),
-                    None => t.forget(member),
+                    Some(r) => t.put(&self.key, r),
+                    None => t.forget(&self.key),
                 }
             }
         });
@@ -1516,8 +1627,8 @@ impl Negotiating {
         let statuses: Vec<String> = self.refused.iter().map(u16::to_string).collect();
         format!(
             "MCP server `{member}` refused the stateless {PROTOCOL_VERSION} request and refused \
-             `initialize` (HTTP {}); the one revision left is 2024-11-05 (HTTP+SSE), which busbar \
-             does not speak as a client",
+             `initialize` (HTTP {}); the one revision left is 2024-11-05 (HTTP+SSE), whose event \
+             stream busbar holds over the connector, and none is lent here",
             statuses.join(", ")
         )
     }
@@ -1532,7 +1643,7 @@ impl Negotiating {
                 } else {
                     raw
                 };
-                Negotiated::Answer(answer.status, raw, sse)
+                Negotiated::Answer(answer.status, raw, sse, self.negotiator.sent_id())
             }
             Refused::Unreachable(None) => Negotiated::Failed(
                 self.failure
@@ -1551,7 +1662,7 @@ impl Negotiating {
 }
 
 /// One hop as the connector's exchange sends it.
-fn exchange_request(
+pub(super) fn exchange_request(
     verb: Verb,
     request: &OutboundRequest,
     timeout_ms: u64,
@@ -1574,34 +1685,64 @@ fn exchange_request(
 
 /// A FETCH OF THE DOOR'S OWN (verify-on-call's `tools/list`), negotiated: every hop over the
 /// connector from `base`, the conversation parked on the unit while one pends.
+///
+/// The conversation is the CALLER's (`binding`, row 159 finding 3); an answer to a request that
+/// carried its session's own id is handed back under the original's id, which the fetch correlates.
 pub(super) fn fetch(
     instance: &Instance<'_, McpDoor>,
     plane: &McpDoor,
     unit: &mut CallUnit,
-    (base, member, timeout_ms): (u32, &str, u64),
+    (base, member, binding, timeout_ms): (u32, &str, &str, u64),
     original: OutboundRequest,
 ) -> Poll<Result<busbar_contract::abi::sdk::exchange::ExchangeResponse, String>> {
+    // The id the fetch correlates its answer by: its own request's.
+    let original_id = serde_json::from_slice::<serde_json::Value>(&original.body)
+        .ok()
+        .and_then(|v| v.get("id").cloned());
     let negotiating = unit
         .negotiating
-        .get_or_insert_with(|| Box::new(Negotiating::begin(plane, member, original)));
+        .get_or_insert_with(|| Box::new(Negotiating::begin(plane, member, binding, original)));
     let Poll::Ready(done) = negotiating.drive(instance, plane, base, member, timeout_ms) else {
         return Poll::Pending;
     };
+    // Replies dropped on the caller's held stream are audited on a relayed call's answer, which a
+    // fetch has none of: they stay counted on the stream for the next one.
+    super::door_legacy::recount(plane, &negotiating.key, negotiating.dropped);
     unit.negotiating = None;
     Poll::Ready(match done {
-        Negotiated::Answer(status, raw, sse) => {
+        Negotiated::Answer(status, raw, sse, sent) => {
+            let body = if sse {
+                crate::call::last_sse_data(&raw)
+            } else {
+                raw
+            };
             Ok(busbar_contract::abi::sdk::exchange::ExchangeResponse {
                 status,
-                body: if sse {
-                    crate::call::last_sse_data(&raw)
-                } else {
-                    raw
+                body: match (sent, original_id) {
+                    (Some(sent), Some(id)) => with_id(body, sent, id),
+                    _ => body,
                 },
                 ..Default::default()
             })
         }
         Negotiated::Failed(reason) => Err(reason),
     })
+}
+
+/// `body` (one JSON-RPC answer) with its top-level `id` put back to `id` when it is `sent`, the
+/// id the request carried in its session: the answer as the request that asked it is correlated.
+/// Any other body is handed on as it came.
+fn with_id(body: Vec<u8>, sent: u64, id: serde_json::Value) -> Vec<u8> {
+    let Ok(mut doc) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return body;
+    };
+    match doc.as_object_mut() {
+        Some(obj) if obj.get("id") == Some(&serde_json::Value::from(sent)) => {
+            obj.insert("id".to_string(), id);
+            serde_json::to_vec(&doc).unwrap_or(body)
+        }
+        _ => body,
+    }
 }
 
 /// THE WALK'S ANSWER to a relayed call's first hop (`status`, event stream or not, `far`), and the
@@ -1629,7 +1770,7 @@ pub(super) fn far_answer(
         let lends = plane.host.is_some_and(|h| h.lends_connector());
         match next {
             Action::Finish(_) => {
-                negotiating.keep(plane, member);
+                negotiating.keep(plane);
                 return Poll::Ready(None);
             }
             Action::Send { .. } if !lends => return Poll::Ready(None),

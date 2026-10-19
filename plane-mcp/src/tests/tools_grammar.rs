@@ -196,6 +196,81 @@ fn server_initiated_grants_default_to_denied() {
     assert!(!g.allows("elicitation") && !g.allows("roots"));
 }
 
+/// `tools.<server>.sampling_bounds` (owner ruling Q22c): omitted ⇒ the shipped defaults; written ⇒
+/// read as written, round-tripping through the serialised form; a typo'd key fails; zero
+/// `max_messages`/`max_prompt_bytes` and an inverted temperature range are refused naming the key.
+#[test]
+fn sampling_bounds_grammar_defaults_round_trips_and_refuses() {
+    let server = |bounds: Value| {
+        json!({ "s": { "url": "https://x/", "pin": { "mechanism": "unpinned" },
+            "grants": { "sampling": true }, "sampling_bounds": bounds } })
+    };
+    let omitted =
+        grammar(json!({ "s": { "url": "https://x/", "pin": { "mechanism": "unpinned" } } }))
+            .unwrap();
+    let d = omitted.servers["s"].sampling_bounds;
+    assert_eq!(
+        (
+            d.max_messages,
+            d.max_prompt_bytes,
+            d.max_stop_sequences,
+            d.max_stop_sequence_bytes,
+            d.temperature_min_milli,
+            d.temperature_max_milli
+        ),
+        (64, 65536, 8, 64, 0, 2000)
+    );
+    assert_eq!(
+        d.max_input_response_bytes, 1_048_576,
+        "the reply cap defaults to 1 MiB when omitted"
+    );
+
+    let written = grammar(server(
+        json!({ "max_messages": 5, "temperature_max_milli": 900 }),
+    ))
+    .unwrap();
+    let b = written.servers["s"].sampling_bounds;
+    assert_eq!((b.max_messages, b.temperature_max_milli), (5, 900));
+    assert_eq!(
+        b.max_prompt_bytes, 65536,
+        "an unwritten key keeps its default"
+    );
+    let def = &written.servers["s"];
+    let again: crate::tools_config::McpServerDefCfg =
+        serde_json::from_value(serde_json::to_value(def).expect("serialises"))
+            .expect("round trips");
+    assert_eq!(again.sampling_bounds, b);
+    assert_eq!(&again, def);
+    let plain = serde_json::to_value(&omitted.servers["s"]).expect("serialises");
+    assert!(
+        plain.get("sampling_bounds").is_none(),
+        "an all-default block is not written back"
+    );
+
+    assert!(grammar(server(json!({ "max_message": 5 }))).is_err());
+
+    for (bounds, key) in [
+        (json!({ "max_messages": 0 }), "max_messages"),
+        (json!({ "max_prompt_bytes": 0 }), "max_prompt_bytes"),
+        (
+            json!({ "max_input_response_bytes": 0 }),
+            "max_input_response_bytes",
+        ),
+        (
+            json!({ "temperature_min_milli": 1500, "temperature_max_milli": 500 }),
+            "temperature_min_milli",
+        ),
+    ] {
+        let err = door_validate(&server(bounds)).expect_err(key);
+        assert!(
+            err.contains(&format!("sampling_bounds.{key}")),
+            "the refusal names `{key}`: {err}"
+        );
+    }
+    door_validate(&server(json!({ "max_messages": 1, "max_prompt_bytes": 1 })))
+        .expect("positive caps are accepted");
+}
+
 /// BOTH TRANSPORTS BOOT, the typed half: a stdio registration carries its command and arguments and
 /// no url (the root battery asserts boot accepts both).
 #[test]
