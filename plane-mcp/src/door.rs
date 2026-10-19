@@ -432,7 +432,7 @@ pub const TAIL: &PlaneTail = &PlaneTail {
     // No stream ceiling (ARCHITECT STREAM-CEILING, 2026-10-07): predev's mcp engine put no bound on
     // a stalled consumer (its event and subscribe streams were pull-based bodies, `session_serve.rs`,
     // `subscribe.rs`), so the mcp plane states none and keeps that behaviour.
-    ..PlaneTail::ZERO,
+    ..PlaneTail::ZERO
 };
 
 /// One path the plane answers on: the verb, the target, the transport claim it arrives over, and
