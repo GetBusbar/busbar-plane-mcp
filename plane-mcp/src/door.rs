@@ -86,11 +86,13 @@ pub const SECTIONS: &[Section] = &[
         name: abi_str("tools"),
         flags: SECTION_DECLARING,
         _reserved: 0,
+        ..Section::ZERO
     },
     Section {
         name: abi_str("mcp"),
         flags: 0,
         _reserved: 0,
+        ..Section::ZERO
     },
 ];
 
@@ -130,6 +132,7 @@ const NO_DETAILS: Blob = Blob {
     len: 0,
     fmt: BLOB_ABSENT,
     flags: 0,
+    ..Blob::ZERO
 };
 
 /// THE PLANE'S CONNECTION NEEDS: outbound over http to the servers the operator registered at a URL,
@@ -154,6 +157,7 @@ pub const NEEDS: &[Need] = &[
         _reserved: 0,
         deny_response_headers: std::ptr::null(),
         deny_response_headers_len: 0,
+        ..Need::ZERO
     },
     Need {
         direction: DIRECTION_OUTBOUND,
@@ -170,6 +174,7 @@ pub const NEEDS: &[Need] = &[
         _reserved: 0,
         deny_response_headers: std::ptr::null(),
         deny_response_headers_len: 0,
+        ..Need::ZERO
     },
 ];
 
@@ -181,10 +186,12 @@ const BILLABLE_CLASSES: &[BillableClass] = &[
     BillableClass {
         class: abi_str(crate::tool_meta::CLASS_TOOL_CALLS.as_str()),
         family: abi_str(CALLS_FAMILY),
+        ..BillableClass::ZERO
     },
     BillableClass {
         class: abi_str(crate::tool_meta::CLASS_BYTES.as_str()),
         family: abi_str(BYTES_FAMILY),
+        ..BillableClass::ZERO
     },
     // THE FEE UNIT is also a class (the tail check holds `fee_units ⊆ billable_classes`, ARCHITECT
     // Q-L5-FEE (C)): reported `1` on an answer the caller is served with a success, so a unit whose
@@ -192,6 +199,7 @@ const BILLABLE_CLASSES: &[BillableClass] = &[
     BillableClass {
         class: abi_str(FEE_PER_REQUEST),
         family: abi_str(FEE_FAMILY),
+        ..BillableClass::ZERO
     },
 ];
 
@@ -237,6 +245,7 @@ const RECORD_CHAINS: &[RecordChain] = &[RecordChain {
     framing: CHAIN_LENGTH_PREFIXED,
     flags: CHAIN_DIGESTS_SCOPE,
     _reserved: 0,
+    ..RecordChain::ZERO
 }];
 
 /// The pin's four mechanisms; three are authenticity roots and `unpinned` is not.
@@ -245,21 +254,25 @@ const PIN_MECHANISMS: &[PinMechanism] = &[
         token: abi_str("pinned_pubkey"),
         flags: MECHANISM_ROOT,
         _reserved: 0,
+        ..PinMechanism::ZERO
     },
     PinMechanism {
         token: abi_str("cert_spki"),
         flags: MECHANISM_ROOT,
         _reserved: 0,
+        ..PinMechanism::ZERO
     },
     PinMechanism {
         token: abi_str("mtls"),
         flags: MECHANISM_ROOT,
         _reserved: 0,
+        ..PinMechanism::ZERO
     },
     PinMechanism {
         token: abi_str("unpinned"),
         flags: 0,
         _reserved: 0,
+        ..PinMechanism::ZERO
     },
 ];
 
@@ -274,6 +287,7 @@ const TRUST_KEYS: &[TrustKey] = &[
         default: NONE,
         mechanisms: PIN_MECHANISMS.as_ptr(),
         mechanisms_len: PIN_MECHANISMS.len(),
+        ..TrustKey::ZERO
     },
     TrustKey {
         key: abi_str("verify_ttl"),
@@ -282,6 +296,7 @@ const TRUST_KEYS: &[TrustKey] = &[
         default: abi_str(DEFAULT_MCP_VERIFY_TTL),
         mechanisms: std::ptr::null(),
         mechanisms_len: 0,
+        ..TrustKey::ZERO
     },
     TrustKey {
         key: abi_str("allow_private"),
@@ -290,6 +305,7 @@ const TRUST_KEYS: &[TrustKey] = &[
         default: NONE,
         mechanisms: std::ptr::null(),
         mechanisms_len: 0,
+        ..TrustKey::ZERO
     },
     TrustKey {
         key: abi_str(crate::tools_config::TOOL_APPROVALS_KEY),
@@ -298,6 +314,7 @@ const TRUST_KEYS: &[TrustKey] = &[
         default: abi_str(crate::tools_config::TOOL_APPROVAL_FIELD),
         mechanisms: std::ptr::null(),
         mechanisms_len: 0,
+        ..TrustKey::ZERO
     },
 ];
 
@@ -305,6 +322,7 @@ const fn op_class(i: usize) -> OpClass {
     OpClass {
         op: abi_str(crate::tool_ops::OP_CLASSES[i].as_str()),
         name: abi_str(crate::tool_ops::OP_CLASSES[i].as_str()),
+        ..OpClass::ZERO
     }
 }
 
@@ -436,6 +454,7 @@ pub const TAIL: &PlaneTail = &PlaneTail {
         len: ADMIN_OPENAPI.len(),
         fmt: busbar_contract::abi::mechanism::call::BLOB_JSON,
         flags: 0,
+        ..Blob::ZERO
     },
     // No stream ceiling (ARCHITECT STREAM-CEILING, 2026-10-07): predev's mcp engine put no bound on
     // a stalled consumer (its event and subscribe streams were pull-based bodies, `session_serve.rs`,
