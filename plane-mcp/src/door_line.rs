@@ -29,7 +29,7 @@ use serde_json::Value;
 use super::{door_listen, CallUnit, McpDoor, Pending};
 use crate::catalogue::Catalogue;
 use crate::line::{self, Era, LiveAsk, Reply};
-use crate::subscribe::{Listen, Standing, Step as ListenStep};
+use crate::subscribe::{Listen, Standing, Step as ListenStep, KEEPALIVE_NS};
 use crate::tool_arrival::Disposition;
 use busbar_contract::abi::mechanism::ticket::{CompletionHandle, Ticket};
 
@@ -52,31 +52,78 @@ pub(super) struct LineUnit {
     pub(super) raised: bool,
 }
 
+/// After this long with no unit of its caller re-asking its standing and grants, a line
+/// subscription asks its caller a `ping`: the answer is a line, so a unit, and the unit re-asks.
+const RECONFIRM_NS: u64 = KEEPALIVE_NS;
+
+/// After this long with no unit of its caller re-asking its standing and grants (two pings went
+/// unanswered, or the kernel admitted none of its caller's lines, as it admits none of a revoked
+/// caller's), a line subscription's permission is not re-confirmed and it ends on its frame.
+const UNCONFIRMED_NS: u64 = 3 * KEEPALIVE_NS;
+
 /// One subscription kept on a carrier session.
 #[derive(Debug, Clone)]
 pub(super) struct LineListen {
     listen: Box<Listen>,
-    /// The entitlement answers it was opened under.
+    /// The entitlement answers the last unit of its caller re-asked (at open, the opener's).
     entitled: BTreeMap<String, bool>,
+    /// The caller that opened it: the principal whose units re-ask it, and the quota counts under.
+    owner: String,
+    /// Its caller's standing, as the last unit of its caller re-asked it.
+    standing: Standing,
+    /// When a unit of its caller last re-asked its standing and grants.
+    confirmed_ns: u64,
+    /// When busbar last asked its caller a `ping`.
+    pinged_ns: u64,
 }
 
 impl LineListen {
-    /// The subscription `listen`, opened by `_owner` at `_now_ns` under the entitlement answers
+    /// The subscription `listen`, opened by `owner` at `now_ns` under the entitlement answers
     /// `entitled`.
-    fn opened(
-        listen: Listen,
-        entitled: BTreeMap<String, bool>,
-        _owner: &str,
-        _now_ns: u64,
-    ) -> Self {
+    fn opened(listen: Listen, entitled: BTreeMap<String, bool>, owner: &str, now_ns: u64) -> Self {
         LineListen {
             listen: Box::new(listen),
             entitled,
+            owner: owner.to_string(),
+            standing: Standing::Live,
+            confirmed_ns: now_ns,
+            pinged_ns: now_ns,
         }
     }
 
-    /// ONE STEP at `now_ns` over the live `catalogue`, under the grants it holds.
+    /// A unit of its caller re-asked, at `now_ns`: the grants `entitled` and the standing
+    /// `standing` are what its next frames are stepped under.
+    fn reconfirm(&mut self, entitled: BTreeMap<String, bool>, standing: Standing, now_ns: u64) {
+        self.entitled = entitled;
+        self.standing = standing;
+        self.confirmed_ns = now_ns;
+    }
+
+    /// Its caller's standing at `now_ns`: the last unit's answer, or lapsed when none re-confirmed
+    /// it for [`UNCONFIRMED_NS`].
+    fn standing_at(&self, now_ns: u64) -> Standing {
+        if matches!(self.standing, Standing::Lapsed { .. }) {
+            return self.standing.clone();
+        }
+        if now_ns.saturating_sub(self.confirmed_ns) > UNCONFIRMED_NS {
+            return Standing::Lapsed {
+                message: format!(
+                    "`{}` answered nothing on its carrier session for {} s, so the standing \
+                     decision it was admitted under is not re-confirmed",
+                    self.owner,
+                    UNCONFIRMED_NS / 1_000_000_000
+                ),
+                reason: busbar_contract::vocab::REASON_IDENTITY_NOT_LIVE.to_string(),
+            };
+        }
+        Standing::Live
+    }
+
+    /// ONE STEP at `now_ns` over the live `catalogue`, under the grants and the standing its
+    /// caller's units last re-asked (on either carrier the permission is re-asked, never the one
+    /// captured at open).
     fn step_at(&mut self, catalogue: &Catalogue, now_ns: u64) -> ListenStep {
+        let standing = self.standing_at(now_ns);
         let entitled = &self.entitled;
         let admit = |kind: &str, name: &str| {
             entitled
@@ -84,14 +131,57 @@ impl LineListen {
                 .copied()
                 .unwrap_or(false)
         };
-        self.listen
-            .step(catalogue, &admit, &Standing::Live, &[], now_ns)
+        self.listen.step(catalogue, &admit, &standing, &[], now_ns)
+    }
+
+    /// Whether busbar asks its caller a `ping` at `now_ns` to have its standing re-asked: none
+    /// re-confirmed it, and none was asked, for [`RECONFIRM_NS`]. Asked, it is noted.
+    fn wants_ping(&mut self, now_ns: u64) -> bool {
+        let due = now_ns.saturating_sub(self.confirmed_ns) >= RECONFIRM_NS
+            && now_ns.saturating_sub(self.pinged_ns) >= RECONFIRM_NS;
+        if due {
+            self.pinged_ns = now_ns;
+        }
+        due
     }
 }
 
-/// Whether `_owner` holds as many line subscriptions as one caller may, or the instance its total.
-fn line_quota_full(_held: &BTreeMap<(u64, String), LineListen>, _owner: &str) -> bool {
-    false
+/// Whether `owner` holds as many line subscriptions as one caller may, or the instance its total:
+/// the HTTP carrier's bounds ([`door_listen::MAX_LISTENS_PER_OWNER`], [`super::MAX_UNITS`]).
+fn line_quota_full(held: &BTreeMap<(u64, String), LineListen>, owner: &str) -> bool {
+    held.len() >= super::MAX_UNITS
+        || held.values().filter(|l| l.owner == owner).count() >= door_listen::MAX_LISTENS_PER_OWNER
+}
+
+/// THE PERMISSION, RE-ASKED ON A LINE: a unit of the carrier session's caller (any line it sends,
+/// the answer to busbar's `ping` among them) re-asks the kernel its standing and the catalogue's
+/// grants on its own ticket, and every subscription that caller holds on the session takes the
+/// answers. The kernel answers them only for a unit in flight, which a kept subscription is not.
+pub(super) fn reconfirm(plane: &McpDoor, ticket: Ticket, principal: &str, unit: &mut CallUnit) {
+    let Some(session) = unit.line.as_ref().map(|l| l.session) else {
+        return;
+    };
+    let holds = plane.line_listens.with_all(|m| {
+        m.iter()
+            .any(|((s, _), l)| *s == session && l.owner == principal)
+    });
+    if !holds {
+        return;
+    }
+    let Some(held) = plane.current().or_else(|| unit.held.clone()) else {
+        return;
+    };
+    door_listen::entitled_afresh(plane, ticket, unit, &held);
+    let standing = door_listen::standing(plane, ticket, principal, unit);
+    let now = door_listen::mono_ns(plane.services, ticket, unit);
+    let entitled = unit.entitled.clone();
+    plane.line_listens.with_all(|m| {
+        for ((s, _), l) in m.iter_mut() {
+            if *s == session && l.owner == principal {
+                l.reconfirm(entitled.clone(), standing.clone(), now);
+            }
+        }
+    });
 }
 
 /// One line as `arrive` read it: what the unit is to the carrier, and the bytes the one dispatch
@@ -433,9 +523,22 @@ fn lapse_asks(plane: &McpDoor, ticket: Ticket, now_ns: u64, seq: &mut u32) {
     }
 }
 
-/// THE TICK, for the subscriptions kept on carrier sessions: each stepped over the live catalogue,
-/// what it says emitted on its session (a `ping` when it has been quiet), and a subscription whose
-/// session can take nothing more, or that ended, dropped.
+/// Busbar's own `ping`, as one line: its answer is a line of the caller's, so a unit.
+fn ping(plane: &McpDoor) -> Vec<u8> {
+    let n = next_ask(plane);
+    serde_json::to_vec(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": format!("{}{n}", line::ASK_ID_PREFIX),
+        "method": crate::adapt::METHOD_PING,
+    }))
+    .unwrap_or_default()
+}
+
+/// THE TICK, for the subscriptions kept on carrier sessions: each stepped over the live catalogue
+/// under the standing and grants its caller's units last re-asked ([`reconfirm`]), what it says
+/// emitted on its session (a `ping` when it has been quiet, or when its standing is due to be
+/// re-asked), and a subscription whose session can take nothing more, or that ended (its
+/// permission lapsed, or not re-confirmed), dropped.
 pub(super) fn tick(plane: &McpDoor, ticket: Ticket, now_ns: u64) {
     let mut seq: u32 = 0;
     lapse_asks(plane, ticket, now_ns, &mut seq);
@@ -445,24 +548,22 @@ pub(super) fn tick(plane: &McpDoor, ticket: Ticket, now_ns: u64) {
     let gone = plane.line_listens.with_all(|m| {
         let mut gone = Vec::new();
         for ((session, key), kept) in m.iter_mut() {
-            let (bytes, ended) = match kept.step_at(&held.catalogue, now_ns) {
+            let (mut bytes, ended) = match kept.step_at(&held.catalogue, now_ns) {
                 ListenStep::Frames(frames) => (lines(&frames), false),
                 ListenStep::Keepalive => {
-                    let n = next_ask(plane);
-                    (
-                        serde_json::to_vec(&serde_json::json!({
-                            "jsonrpc": "2.0",
-                            "id": format!("{}{n}", line::ASK_ID_PREFIX),
-                            "method": crate::adapt::METHOD_PING,
-                        }))
-                        .unwrap_or_default(),
-                        false,
-                    )
+                    kept.pinged_ns = now_ns;
+                    (ping(plane), false)
                 }
                 ListenStep::Quiet => (Vec::new(), false),
                 ListenStep::End(frames) => (lines(&frames), true),
                 ListenStep::Closed => (Vec::new(), true),
             };
+            if !ended && kept.wants_ping(now_ns) {
+                if !bytes.is_empty() {
+                    bytes.push(b'\n');
+                }
+                bytes.extend(ping(plane));
+            }
             let went = bytes.is_empty() || emit(plane, ticket, seq, *session, &bytes);
             seq = seq.wrapping_add(1);
             if ended || !went {

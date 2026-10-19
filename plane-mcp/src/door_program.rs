@@ -266,11 +266,18 @@ impl DoorPeer<'_> {
 pub(super) type AnsweredKey = (String, u64, String);
 
 /// THE MEMO OF A CHILD'S OWN REQUESTS THE DOOR DECIDED: the call each was put to (`None` = busbar
-/// answered it), so two exchanges reading one request decide it once. Bounded at its cap.
+/// answered it), so two exchanges reading one request decide it once. Bounded at its cap by
+/// forgetting the OLDEST decision first: the order a decision was made in, never its key's order,
+/// which would forget the alphabetically-first member's live decision.
 #[derive(Debug)]
 pub(super) struct Answered {
     cap: usize,
-    by_key: std::collections::BTreeMap<AnsweredKey, Option<u64>>,
+    /// The number the next decision is made under.
+    next: u64,
+    /// Each decision, and the number it was made under.
+    by_key: std::collections::BTreeMap<AnsweredKey, (u64, Option<u64>)>,
+    /// Each decision's key, by the number it was made under: oldest first.
+    by_age: std::collections::BTreeMap<u64, AnsweredKey>,
 }
 
 impl Default for Answered {
@@ -284,7 +291,9 @@ impl Answered {
     pub(super) fn with_cap(cap: usize) -> Self {
         Answered {
             cap,
+            next: 0,
             by_key: std::collections::BTreeMap::new(),
+            by_age: std::collections::BTreeMap::new(),
         }
     }
 
@@ -295,16 +304,20 @@ impl Answered {
         key: AnsweredKey,
         first: impl FnOnce() -> Option<u64>,
     ) -> (Option<u64>, bool) {
-        if let Some(owner) = self.by_key.get(&key) {
+        if let Some((_, owner)) = self.by_key.get(&key) {
             return (*owner, false);
         }
         while self.by_key.len() >= self.cap {
-            if self.by_key.pop_first().is_none() {
+            let Some((_, oldest)) = self.by_age.pop_first() else {
                 break;
-            }
+            };
+            self.by_key.remove(&oldest);
         }
         let owner = first();
-        self.by_key.insert(key, owner);
+        let made = self.next;
+        self.next = self.next.wrapping_add(1);
+        self.by_age.insert(made, key.clone());
+        self.by_key.insert(key, (made, owner));
         (owner, true)
     }
 }
