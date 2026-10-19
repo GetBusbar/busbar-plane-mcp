@@ -1192,8 +1192,8 @@ fn running(
                         // answered it nested it once, and the host's one-time claim of that round
                         // takes it; it asks from that round on.
                         Some(Retry::Asked(round)) => {
-                            let working = plane.tasks.get(&run.reference).is_some_and(|t| {
-                                t.owned_by(principal) && t.status() == Status::Working
+                            let working = plane.tasks.with(&run.reference, |t| {
+                                t.is_some_and(|t| t.take_resume(principal, round))
                             });
                             if !working {
                                 return not_run(unit, run);
@@ -1681,7 +1681,7 @@ fn verbing(
                     && was == Status::InputRequired
                     && t.status() == Status::Working
                 {
-                    t.asked.take()
+                    t.answer_round()
                 } else {
                     None
                 };

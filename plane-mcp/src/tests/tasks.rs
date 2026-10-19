@@ -562,3 +562,29 @@ fn an_update_to_a_terminal_task_changes_nothing() {
     assert!(t.deliver(&serde_json::from_value(json!({"a": 1})).unwrap(), T0 + 9));
     assert_eq!(t, before);
 }
+
+/// A RESUME RUNS ONLY THE ROUND AN UPDATE ANSWERED, AND ONLY ONCE. The task-run claim is a credentialed
+/// route, so a `resume: <round>` body can arrive that no `tasks/update` nested: it must not skip the
+/// operator's `task_ask_caller` rounds (a round past the answered one) nor run the call again (a
+/// second resume of the same round).
+#[test]
+fn a_resume_runs_only_the_round_an_update_answered_and_only_once() {
+    let mut t = task("k");
+    assert!(
+        !t.take_resume("k", 0) && !t.take_resume("k", 7),
+        "no update answered a round: a resume is a forgery"
+    );
+    t.asked = Some((1, json!({ "name": "fs_confirm" })));
+    let (round, _) = t.answer_round().expect("the round it was parked on");
+    assert_eq!(round, 1);
+    assert!(
+        !t.take_resume("k", 2),
+        "a round past the answered one skips the operator's rounds"
+    );
+    assert!(!t.take_resume("j", 1), "another caller's task");
+    assert!(t.take_resume("k", 1), "the round the update answered runs");
+    assert!(
+        !t.take_resume("k", 1),
+        "taken once: a second resume would run the call again"
+    );
+}

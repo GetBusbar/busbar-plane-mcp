@@ -21,17 +21,19 @@ const BYTE_FAMILY: &str = "byte";
 
 /// The two classes this plane meters.
 ///
-/// A tool call is FLAT-metered, which is what the codec already does: it posts one attributed
-/// request event per round, with no quantity attached. So the call class divides by one and counts
-/// calls, and a rate card that wants to charge per call has a key to hang a price on. The byte class
-/// is the second axis the design's plane table names, and it is what makes a very large argument or
-/// a very large answer cost more than a small one on a deployment that wants it to.
+/// A tool call is FLAT-metered: the call class divides by one and counts calls, and a rate card that
+/// wants to charge per call has a key to hang a price on. The byte class is the second axis the
+/// design's plane table names, and it is what makes a very large answer cost more than a small one
+/// on a deployment that wants it to.
 ///
-/// One observation worth recording rather than smoothing over: the codec today posts a quantity of
-/// zero for its request event, so a deployment that priced the call class would be pricing something
-/// the codec does not currently report a number for. That is a gap between what the design's table
-/// declares and what the engine beside the codec measures, and closing it is a change to the
-/// metering side rather than to this adapter.
+/// WHAT THE DOOR REPORTS (#71; the design's money section, "The plane reports; the kernel
+/// writes"): once a server has answered a relayed `tools/call`, one `tool_calls` and the byte length
+/// of the document it answered with (`tool_door.rs` `Pending::counted`), beside the fee unit a
+/// success earns. A call whose upstream never answered reports neither class, because nothing was
+/// measured (#62: what is billed is what was delivered); it went out, so it keeps the fee unit its
+/// caller's answer earns (Q35). A call that never left reports no fee unit either: one whose
+/// deadline passed in its queue (`call::never_sent`), or one whose server the live tool-list check
+/// could not reach.
 const METER_CLASSES: &[MeterClassDecl] = &[
     MeterClassDecl {
         key: MeterClassId::new("tool_calls"),
