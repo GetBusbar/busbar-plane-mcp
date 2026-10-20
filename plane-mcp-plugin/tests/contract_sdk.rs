@@ -14,34 +14,47 @@
 //! instance-wide mutex.
 
 use std::path::PathBuf;
-use std::process::Command;
 
-/// One file of the SDK (`src/abi/sdk/<file>`) of the busbar-contract this workspace builds against.
+/// The commit of GetBusbar/busbar this workspace's lock takes busbar-contract from.
+fn contract_rev() -> String {
+    let lock = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../Cargo.lock"))
+        .expect("the workspace lock reads");
+    let block = lock
+        .split("\n\n")
+        .find(|b| b.lines().any(|l| l.trim() == "name = \"busbar-contract\""))
+        .expect("the lock holds busbar-contract");
+    let source = block
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("source = \""))
+        .expect("busbar-contract is locked from a source");
+    let (_, rev) = source
+        .trim_end_matches('"')
+        .rsplit_once('#')
+        .expect("a git source names its commit");
+    rev.to_string()
+}
+
+/// One file of the SDK (`src/abi/sdk/<file>`) of the busbar-contract this workspace builds against:
+/// read from cargo's checkout of the locked commit (`$CARGO_HOME/git/checkouts/<repo>/<short id>`),
+/// which the build that compiled this test made.
 fn contract_sdk(file: &str) -> String {
-    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-    let out = Command::new(cargo)
-        .args(["metadata", "--format-version", "1", "--locked", "--offline"])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
-        .expect("cargo metadata runs");
-    assert!(
-        out.status.success(),
-        "cargo metadata failed: {}",
-        String::from_utf8_lossy(&out.stderr)
+    let rev = contract_rev();
+    let short = rev.get(..7).expect("a commit id is longer than 7");
+    let home = std::env::var_os("CARGO_HOME").map_or_else(
+        || PathBuf::from(std::env::var_os("HOME").expect("a home directory")).join(".cargo"),
+        PathBuf::from,
     );
-    let meta: serde_json::Value = serde_json::from_slice(&out.stdout).expect("metadata is JSON");
-    let manifest = meta["packages"]
-        .as_array()
-        .expect("metadata lists packages")
-        .iter()
-        .find(|p| p["name"] == "busbar-contract")
-        .and_then(|p| p["manifest_path"].as_str())
-        .expect("busbar-contract is a package of this workspace");
-    let dir = PathBuf::from(manifest)
-        .parent()
-        .expect("the manifest has a directory")
-        .to_path_buf();
-    std::fs::read_to_string(dir.join("src/abi/sdk").join(file)).expect("the SDK source reads")
+    let checkouts = home.join("git").join("checkouts");
+    let tail = PathBuf::from(short)
+        .join("crates/busbar-contract/src/abi/sdk")
+        .join(file);
+    let found = std::fs::read_dir(&checkouts)
+        .expect("cargo's git checkouts read")
+        .filter_map(Result::ok)
+        .map(|e| e.path().join(&tail))
+        .find(|p| p.is_file())
+        .unwrap_or_else(|| panic!("no checkout of busbar {rev} under {}", checkouts.display()));
+    std::fs::read_to_string(found).expect("the SDK source reads")
 }
 
 #[test]
