@@ -368,9 +368,9 @@ fn judge_string(
 /// accepts it, so no host can be judged and it is refused. `None`: it names no host.
 fn whatwg_host(value: &str) -> Option<Option<String>> {
     match url::Url::parse(value) {
-        // The reader's own serialisation, read by the contract's shared host reader (an IPv6
-        // literal unbracketed, the host normalised as the destination judge reads it).
-        Ok(parsed) => busbar_contract::net::url_host(parsed.as_str()).map(Some),
+        // The reader's own serialisation, its host read VERBATIM by the contract's shared reader:
+        // an IPv6 literal unbracketed, any other host as the reader spelled it (a root dot kept).
+        Ok(parsed) => busbar_contract::net::url_host_verbatim(parsed.as_str()).map(Some),
         Err(_) => names_web_scheme(value).then_some(None),
     }
 }
@@ -404,7 +404,7 @@ fn reference_host(value: &str) -> Option<Option<String>> {
             .ok()?
             .join(value)
             .ok()
-            .and_then(|u| busbar_contract::net::url_host(u.as_str()))
+            .and_then(|u| busbar_contract::net::url_host_verbatim(u.as_str()))
     };
     match (against("https://a.invalid/"), against("https://b.invalid/")) {
         (Some(a), Some(b)) if a == b => Some(Some(a)),
