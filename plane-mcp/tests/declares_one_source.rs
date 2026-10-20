@@ -19,8 +19,8 @@ fn packed() -> (String, String) {
         .find_map(|l| l.trim().strip_prefix("declares_file:"))
         .map(|v| v.trim().trim_matches('"').to_string())
         .expect("the release names its declares_file");
-    let text = std::fs::read_to_string(format!("{root}/{named}"))
-        .expect("the packed declaration reads");
+    let text =
+        std::fs::read_to_string(format!("{root}/{named}")).expect("the packed declaration reads");
     (named, text)
 }
 
