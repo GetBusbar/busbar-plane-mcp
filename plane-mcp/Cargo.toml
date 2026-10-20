@@ -31,11 +31,10 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 description = "The MCP plane for busbar: the plugin contract's plane kind implemented as a thin adapter over the busbar-mcp JSON-RPC codec."
-# THE ROOT CELLS' ADDRESS (busbar #1006): `build.rs` states `cells=<this crate>/tests/root/mod.rs`
-# under this `links` name, and busbar's composition root reads it as
-# `DEP_BUSBAR_DOOR_CELLS_<CRATE>_CELLS` (the same for a path dependency and this pinned one), so the
-# root compiles this plane's own root cells without naming this crate or resolving its checkout.
-# Links no native library.
+# THE ROOT CELLS' ADDRESS: `build.rs` states `cells=<this crate>/tests/root/mod.rs` under this
+# `links` name, and the composition root's `build.rs` reads it as `DEP_BUSBAR_DOOR_CELLS_<CRATE>_CELLS`
+# (the same for a path dependency and a pinned one), so the root compiles this plane's own root cells
+# without naming this crate or resolving its checkout. Links no native library.
 links = "busbar-door-cells-busbar-plane-mcp"
 
 [lib]
@@ -64,6 +63,12 @@ serde = { workspace = true }
 # The object notation the codec speaks. The adapter hands values across the seam and never invents
 # a second parser.
 serde_json = { workspace = true }
+# THE WHATWG URL READER the argument guard reads an argument string with: a value a fetching client
+# would read as a URL naming a host (`http:/h`, `https:\\h`, an embedded tab, a leading control
+# character) is put to the host's destination judge, however it is spelled.
+url = { workspace = true }
+# Selects `idna`'s unicode-rs backend for the `url` above, the version busbar's own build pins.
+idna_adapter = { workspace = true }
 
 [dev-dependencies]
 # The TEST-ONLY seal (#65). `busbar_contract::plugin::TestKernelSeal` is the one blessed

@@ -41,18 +41,7 @@ pub fn tool_digest(name: &str, description: &str, input_schema: &Value) -> Strin
         framed.extend_from_slice(&(part.len() as u64).to_be_bytes());
         framed.extend_from_slice(part.as_bytes());
     }
-    format!(
-        "sha256:{}",
-        hex(&busbar_contract::abi::sdk::digest::sha256(&framed))
-    )
-}
-
-fn hex(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    bytes.iter().fold(String::new(), |mut s, b| {
-        let _ = write!(s, "{b:02x}");
-        s
-    })
+    format!("sha256:{}", busbar_contract::sha256_hex(&framed))
 }
 
 /// `value` with every object's keys sorted, recursively: key ORDER is not drift, any change of key,
@@ -143,24 +132,13 @@ pub fn catalogue_hash(observation: &Observation) -> String {
         bytes.extend_from_slice(digest.as_bytes());
         bytes.push(b'\n');
     }
-    format!(
-        "sha256:{}",
-        hex(&busbar_contract::abi::sdk::digest::sha256(&bytes))
-    )
+    format!("sha256:{}", busbar_contract::sha256_hex(&bytes))
 }
 
-/// The last contact. `Never` is not a failure: a declaratively approved server has legitimately
-/// never been reached.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub enum Sighting {
-    /// Never contacted.
-    #[default]
-    Never,
-    /// The contact failed, with the operator-visible reason.
-    Failed(String),
-    /// Contacted, and this is what it offered.
-    Seen(Observation),
-}
+/// The last contact: the SDK's one shape of a sighting
+/// ([`busbar_contract::abi::sdk::trust::Sighting`]), over what the server offered. `Never` is not
+/// a failure: a declaratively approved server has legitimately never been reached.
+pub type Sighting = busbar_contract::abi::sdk::trust::Sighting<Observation>;
 
 /// ONE ITEM OF THE KERNEL'S TRUST STATE (`trust.state`, ARCHITECT Q3): the kernel owns every
 /// approval and every verdict; the plane's views read them, they derive none.
@@ -174,31 +152,26 @@ pub struct KernelItem {
     pub approved: Option<String>,
 }
 
-/// The view's state word.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum State {
-    /// Nothing is approved: nothing served.
-    Pending,
-    /// Something is approved, and the kernel holds no drift on what the server offers. Serves.
-    Approved,
-    /// The kernel holds a tool drifted or quarantined, or the server offers what nothing approved.
-    Quarantined,
-    /// The last contact failed.
-    Error,
-}
+impl KernelItem {
+    /// The kernel serves it: its word is `approved` or `same` and it holds an approved digest. A
+    /// digest beside any other word (`new` for a revoked counterparty or an unapproved pin) is the
+    /// configured approval the kernel is not honouring now.
+    fn serves(&self) -> bool {
+        self.approved.is_some() && (self.word == "approved" || self.word == "same")
+    }
 
-impl State {
-    /// The wire word a UI branches on.
-    #[must_use]
-    pub fn word(self) -> &'static str {
-        match self {
-            State::Pending => "pending",
-            State::Approved => "approved",
-            State::Quarantined => "quarantined",
-            State::Error => "error",
-        }
+    /// The kernel holds it demoted: `drifted`, or `quarantined` (a durable demotion it replayed
+    /// after a restart included), whatever the plane last sighted.
+    fn demoted(&self) -> bool {
+        self.word == "drifted" || self.word == "quarantined"
     }
 }
+
+/// The view's state word: the SDK's one state word of a trust view
+/// ([`busbar_contract::abi::sdk::trust::State`]). `Approved`: something is approved and the kernel
+/// holds no drift on what the server offers; `Quarantined`: the kernel holds a tool drifted or
+/// quarantined, or the server offers what nothing approved.
+pub use busbar_contract::abi::sdk::trust::State;
 
 /// The changes queue: what the server offers now against what the kernel holds approved.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -217,41 +190,51 @@ impl Drift {
     }
 }
 
-/// The changes queue of `sighting` against the kernel's `items`; empty with no successful
-/// sighting. The verdict on a tool offered at another digest is the kernel's word, never a
-/// comparison here.
+/// The changes queue of `sighting` against the kernel's `items`. The verdict on a tool offered at
+/// another digest is the kernel's word, never a comparison here, so a tool the kernel holds demoted
+/// is `changed` with or without a successful sighting (after a restart the plane has sighted
+/// nothing while the kernel replayed the demotion); `added` and `removed` need a sighting.
 #[must_use]
 pub fn drift(items: &[KernelItem], sighting: &Sighting) -> Drift {
     let Sighting::Seen(obs) = sighting else {
-        return Drift::default();
+        return Drift {
+            changed: items
+                .iter()
+                .filter(|i| i.demoted())
+                .map(|i| i.item.clone())
+                .collect(),
+            ..Drift::default()
+        };
     };
     let held = |name: &str| items.iter().find(|i| i.item == name);
     let mut d = Drift::default();
     for name in obs.capabilities.keys() {
         match held(name) {
-            Some(i) if i.word == "drifted" || i.word == "quarantined" => {
-                d.changed.push(name.clone())
-            }
-            Some(i) if i.approved.is_some() => {}
+            Some(i) if i.demoted() => d.changed.push(name.clone()),
+            Some(i) if i.serves() => {}
             _ => d.added.push(name.clone()),
         }
     }
     for i in items {
-        if i.approved.is_some() && !obs.capabilities.contains_key(&i.item) {
+        if i.serves() && !obs.capabilities.contains_key(&i.item) {
             d.removed.push(i.item.clone());
         }
     }
     d
 }
 
-/// The view's state. Order is precedence: a failed contact is never reported as trust; nothing
-/// approved is pending; drift is quarantine.
+/// The view's state, read off the verdict the kernel enforces. Order is precedence: a failed
+/// contact is never reported as trust; a tool the kernel holds demoted is quarantine; nothing the
+/// kernel serves is pending; drift is quarantine.
 #[must_use]
 pub fn state(items: &[KernelItem], sighting: &Sighting) -> State {
     if matches!(sighting, Sighting::Failed(_)) {
         return State::Error;
     }
-    if !items.iter().any(|i| i.approved.is_some()) {
+    if items.iter().any(KernelItem::demoted) {
+        return State::Quarantined;
+    }
+    if !items.iter().any(KernelItem::serves) {
         return State::Pending;
     }
     if drift(items, sighting).is_empty() {
@@ -325,6 +308,7 @@ pub fn trust_view(
     let d = drift(items, sighting);
     let mut capabilities: BTreeMap<&str, CapabilityView<'_>> = items
         .iter()
+        .filter(|i| i.serves())
         .filter_map(|i| {
             let digest = i.approved.as_deref()?;
             Some((
@@ -337,7 +321,9 @@ pub fn trust_view(
             ))
         })
         .collect();
-    for tool in def.tools_allow.keys() {
+    // Every other item the kernel holds, and every allowed tool, is not served now: pending.
+    let others = items.iter().map(|i| i.item.as_str());
+    for tool in others.chain(def.tools_allow.keys().map(String::as_str)) {
         capabilities.entry(tool).or_insert(CapabilityView {
             tool,
             status: "pending",

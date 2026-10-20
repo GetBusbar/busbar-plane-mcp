@@ -189,7 +189,7 @@ pub struct McpDoor {
     /// The requests of a stdio child's own the door decided, by member, generation and id: the call
     /// a granted ask was put to, or `None` = busbar answered it, decided once by whichever exchange
     /// read it first.
-    answered: Keyed<(String, u64, String), Option<u64>>,
+    answered: Keyed<(), door_program::Answered>,
     /// The line of calls relayed to stdio children: which call a child serves, so whose its ask
     /// is ([`door_program::Relaying`]).
     relaying: door_program::Relaying,
@@ -245,14 +245,6 @@ fn opened_section(bytes: &[u8]) -> Result<(ToolsCfg, BTreeMap<String, door::Tool
     door::read_open(bytes).map_err(Refusal::refused)
 }
 
-/// The public base URL the host lent, when it states one.
-fn public_url(bytes: &[u8]) -> Option<String> {
-    std::str::from_utf8(bytes)
-        .ok()
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-}
-
 /// One slot body on the SDK's safe surface, over this plane's [`McpDoor`].
 macro_rules! slot {
     ($(#[$doc:meta])* $name:ident, $in:ty, $out:ty,
@@ -290,7 +282,7 @@ slot!(
         let generation = input.get().open.generation;
         let owned = input.field(|i| &i.owned).bytes();
         let admitted = match door::admitted_endpoint(
-            public_url(input.field(|i| &i.public_url).bytes()).as_deref(),
+            input.field(|i| &i.public_url).stated().as_deref(),
             owned,
         ) {
             Ok(admitted) => admitted,
@@ -1796,6 +1788,9 @@ fn answer_body(
     } else {
         caller
     };
+    // Every line of a carrier session's caller re-asks the standing and grants its subscriptions on
+    // that session are stepped under ([`door_line::reconfirm`]).
+    door_line::reconfirm(plane, ticket, principal, unit);
     // A SESSION REVISION'S UNIT: its session checked against its owner first (a mismatch is `404`
     // on every path); what the session answers itself is answered here.
     if let Some(step) = door_sessions::answer(plane, ticket, caller, unit) {
@@ -1807,7 +1802,7 @@ fn answer_body(
         unit.pending = Some(pending);
         return Some(Step::Write);
     }
-    if let Some(pending) = door_line::listen(plane, ticket, unit) {
+    if let Some(pending) = door_line::listen(plane, ticket, principal, unit) {
         unit.pending = Some(pending);
         return Some(Step::Write);
     }
