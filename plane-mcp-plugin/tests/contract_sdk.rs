@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE DROPPED-IN IMAGE CARRIES THE SDK A BUSBAR BUILD LINKS (THE DESIGN, "compiled in or dropped
-//! in ... nothing changes about the plugin itself"; "no allocation and no blocking on the hot path").
+//! THE DROPPED-IN IMAGE CARRIES THE SDK A BUSBAR BUILD LINKS (THE DESIGN, "compiled in or
+//! dropped in ... nothing changes about the plugin itself"; "no allocation and no blocking on the
+//! hot path").
 //!
-//! The cdylib's `export_door!` trampolines and the SDK's `Out` and `Safe` code are compiled from the
-//! busbar-contract this repo pins, while a busbar build links the same door against its own contract.
+//! The cdylib's `export_door!` trampolines and the SDK's `Out` and `Safe` code are compiled from
+//! the busbar-contract this repo pins, while a busbar build links the same door against its own
+//! contract.
 //! These tests read the SDK source the image is built from and require the two hot-path fixes the
 //! linked door has: an entry on an instance with nothing parked takes no shared lock, and a READY
 //! arrival's route entry is named from the instance's kept table, not a fresh heap text under the
