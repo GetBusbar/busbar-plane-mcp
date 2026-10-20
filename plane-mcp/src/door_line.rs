@@ -75,6 +75,8 @@ pub(super) struct LineListen {
     confirmed_ns: u64,
     /// When busbar last asked its caller a `ping`.
     pinged_ns: u64,
+    /// The upstream announcements `(server, uri)` heard since its last step.
+    updates: Vec<(String, String)>,
 }
 
 impl LineListen {
@@ -88,6 +90,7 @@ impl LineListen {
             standing: Standing::Live,
             confirmed_ns: now_ns,
             pinged_ns: now_ns,
+            updates: Vec::new(),
         }
     }
 
@@ -121,9 +124,10 @@ impl LineListen {
 
     /// ONE STEP at `now_ns` over the live `catalogue`, under the grants and the standing its
     /// caller's units last re-asked (on either carrier the permission is re-asked, never the one
-    /// captured at open).
+    /// captured at open), relaying the upstream announcements held since its last step.
     fn step_at(&mut self, catalogue: &Catalogue, now_ns: u64) -> ListenStep {
         let standing = self.standing_at(now_ns);
+        let updates = std::mem::take(&mut self.updates);
         let entitled = &self.entitled;
         let admit = |kind: &str, name: &str| {
             entitled
@@ -131,7 +135,8 @@ impl LineListen {
                 .copied()
                 .unwrap_or(false)
         };
-        self.listen.step(catalogue, &admit, &standing, &[], now_ns)
+        self.listen
+            .step(catalogue, &admit, &standing, &updates, now_ns)
     }
 
     /// Whether busbar asks its caller a `ping` at `now_ns` to have its standing re-asked: none
@@ -178,8 +183,21 @@ pub(super) fn reconfirm(plane: &McpDoor, ticket: Ticket, principal: &str, unit: 
     plane.line_listens.with_all(|m| {
         for ((s, _), l) in m.iter_mut() {
             if *s == session && l.owner == principal {
-                l.reconfirm(entitled.clone(), standing.clone(), now);
+                // A clock that cannot be read is never a time (P-M4): the re-asked grants and
+                // standing still apply, but the confirmation is not moved to a time never read.
+                let at = now.unwrap_or(l.confirmed_ns);
+                l.reconfirm(entitled.clone(), standing.clone(), at);
             }
+        }
+    });
+}
+
+/// AN UPSTREAM ANNOUNCED that `uri` of its registration `server` changed: every subscription kept
+/// on a carrier session holds it for its next step, which relays it to one that asked for the uri.
+pub(super) fn announced(plane: &McpDoor, server: &str, uri: &str) {
+    plane.line_listens.with_all(|m| {
+        for kept in m.values_mut() {
+            door_listen::hold_update(&mut kept.updates, server, uri);
         }
     });
 }
@@ -349,7 +367,8 @@ pub(super) fn preset(plane: &McpDoor, ticket: Ticket, unit: &mut CallUnit) -> Op
         let line_unit = unit.line.as_mut()?;
         if let Some(mut live) = plane.live_asks.remove(&(session, n)) {
             let fresh = next_ask(plane);
-            if let Some(ask) = live.issue(fresh) {
+            // A clock that cannot be read arms no lapse: the caller is handed the result itself.
+            if let (Some(now), Some(ask)) = (now, live.issue(fresh)) {
                 live.arm(now);
                 // Kept before it is asked: its answer may arrive before the emit returns.
                 let fallback = live.fallback.clone();
@@ -409,7 +428,11 @@ pub(super) fn liven(plane: &McpDoor, ticket: Ticket, principal: &str, unit: &mut
         return;
     };
     live.session = session;
-    live.arm(door_listen::mono_ns(plane.services, ticket, unit));
+    // A clock that cannot be read arms no lapse: the answer is left as it is.
+    let Some(now) = door_listen::mono_ns(plane.services, ticket, unit) else {
+        return;
+    };
+    live.arm(now);
     let n = next_ask(plane);
     let Some(ask) = live.issue(n) else {
         return;
@@ -448,7 +471,22 @@ pub(super) fn listen(
     let id = id.clone();
     let held = plane.current().or_else(|| unit.held.clone())?;
     door_listen::entitled_afresh(plane, ticket, unit, &held);
-    let now = door_listen::mono_ns(plane.services, ticket, unit);
+    // A subscription opened at a clock read that failed is refused, never opened at the epoch
+    // (row 159 finding P-M4).
+    let Some(now) = door_listen::mono_ns(plane.services, ticket, unit) else {
+        let body = busbar_contract::jsonrpc::error_body(
+            id,
+            crate::codec::CODE_REFUSED,
+            super::CLOCK_UNREAD,
+            None,
+        );
+        return Some(Pending::answer(
+            503,
+            serde_json::to_vec(&body).unwrap_or_default(),
+            None,
+            &[],
+        ));
+    };
     let entitled = unit.entitled.clone();
     let admit = |kind: &str, name: &str| {
         entitled

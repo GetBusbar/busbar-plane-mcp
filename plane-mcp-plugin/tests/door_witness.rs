@@ -1085,9 +1085,19 @@ mod both_ways {
                 "{code:?} (class {class:?}) is answered at the kernel's status"
             );
             let body = document(&r.reply);
+            // A mounted path's failed authentication and the body limit, refused before any
+            // unit, keep the bytes the kernel's own JSON-RPC rendering answered (`-32600`, the
+            // 1.6.0 baseline; audit K4#2(b)): every other reason is the one refusal family.
+            let want = if matches!(
+                code,
+                RefusalCode::Unauthenticated | RefusalCode::BodyTooLarge
+            ) {
+                json!(-32600)
+            } else {
+                json!(busbar_plane_mcp::codec::CODE_REFUSED)
+            };
             assert_eq!(
-                body["error"]["code"],
-                json!(busbar_plane_mcp::codec::CODE_REFUSED),
+                body["error"]["code"], want,
                 "{code:?} (class {class:?}) renders {body}"
             );
             assert_ne!(
@@ -2210,12 +2220,30 @@ mod bounds {
         );
     }
 
+    /// A HOST WITH A CLOCK: the shared services double, serving `clock.now` (a subscription is
+    /// timed on it) and nothing else.
+    struct Clocked;
+
+    impl busbar_contract::services::double::ServicesDouble for Clocked {
+        fn now(&self) -> busbar_contract::services::Reading {
+            busbar_contract::services::Reading {
+                wall_ns: 1_800_000_000_000_000_000,
+                mono_ns: 1_000_000_000,
+            }
+        }
+    }
+
+    /// A dispatcher whose host serves a clock.
+    fn clocked() -> Dispatcher {
+        Dispatcher::with_services(DispatchConfig::default(), Arc::new(Clocked))
+    }
+
     /// One caller opening its quota's worth of subscriptions, plus one, cuts off no other caller's
     /// stream: the extra one is refused, in the caller's own answer.
     #[test]
     fn a_caller_at_its_subscription_quota_is_refused_and_evicts_no_other_caller() {
         const QUOTA: u64 = 64;
-        let d = Dispatcher::new(DispatchConfig::default());
+        let d = clocked();
         let p = started(&d);
         // Streams are opened through a one-byte reply buffer, so each stays held, its head part
         // written.
@@ -2245,6 +2273,22 @@ mod bounds {
         assert!(
             !b.reply.is_empty(),
             "caller B's stream still has its frame to write"
+        );
+    }
+
+    /// FAIL CLOSED ON THE CLOCK (row 159 finding P-M4): on a host whose clock is unbound, a
+    /// subscription is refused `503` in its caller's own answer, never opened at the epoch.
+    #[test]
+    fn a_subscription_on_a_host_whose_clock_is_unbound_is_refused() {
+        let d = Dispatcher::new(DispatchConfig::default());
+        let p = started(&d);
+        arrive_listen(&p, 1);
+        let refused = push(&p, (1, FROM_CALLER, 0), (1, "caller-a"), 1 << 16);
+        assert_eq!(
+            refused.status,
+            503,
+            "a subscription the clock cannot time is refused: {}",
+            String::from_utf8_lossy(&refused.reply)
         );
     }
 
