@@ -122,6 +122,9 @@ const fn host(clock: Option<ServiceFn>) -> HostSlots {
         trust_decide: None,
         trust_state: None,
         session_emit: None,
+        auth_call: None,
+        unit_hand_in: None,
+        unit_refuse: None,
     }
 }
 
@@ -138,9 +141,7 @@ fn with_seal<R>(
     let tables = HostTables {
         size: std::mem::size_of::<HostTables>() as u32,
         _reserved: 0,
-        ctx: HostCtx {
-            ptr: std::ptr::null_mut(),
-        },
+        ctx: HostCtx::NONE,
         wake: None,
         conns: std::ptr::null(),
         io: std::ptr::null(),

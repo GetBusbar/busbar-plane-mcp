@@ -29,9 +29,9 @@ publish = false
 repository = "https://github.com/GetBusbar/busbar-plane-mcp"
 
 [workspace.dependencies]
-busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "00555bd98ac1a143587ea4ab8948d8ef3b44dcf0" }
-busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "00555bd98ac1a143587ea4ab8948d8ef3b44dcf0" }
-# busbar's root [workspace.dependencies], third-party rows, at 00555bd98ac1a143587ea4ab8948d8ef3b44dcf0
+busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "dba8e46d2a93ecd46264261a1c640a6c7ace78ec" }
+busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "dba8e46d2a93ecd46264261a1c640a6c7ace78ec" }
+# busbar's root [workspace.dependencies], third-party rows, at 29d93143717c043a33652659f04790b54545c369
 a2a-lf = "0.3.0"
 a2a-pb = "0.2.0"
 aes = { version = "0.8", default-features = false }
@@ -108,7 +108,7 @@ url = "2"
 webpki = { package = "rustls-webpki", version = "0.103", default-features = false, features = ["std", "ring"] }
 webpki-roots = "1"
 zeroize = "1"
-# busbar .github/fleet/deps.toml [plugin-deps], at 00555bd98ac1a143587ea4ab8948d8ef3b44dcf0
+# busbar .github/fleet/deps.toml [plugin-deps], at 29d93143717c043a33652659f04790b54545c369
 fallible-iterator = "0.2"
 ldap3 = { version = "0.12", default-features = false, features = ["sync"] }
 mysql = { version = "28", default-features = false, features = ["minimal-rust"] }
