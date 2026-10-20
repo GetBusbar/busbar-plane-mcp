@@ -1,0 +1,30 @@
+{
+  "schema": "blackbox/1",
+  "case": "the_catalog_sections_are_required_only_when_a_linked_plane_requires_them",
+  "requires": {
+    "sections": [
+      "tools"
+    ],
+    "axes": [
+      "body-ingress"
+    ]
+  },
+  "files": {
+    "providers.yaml": "",
+    "config.yaml": "listen: \"127.0.0.1:0\"\nstore: {module: memory}\n"
+  },
+  "vars": {
+    "BUSBAR_CONFIG": "{dir}/config.yaml",
+    "BUSBAR_PROVIDERS": "{dir}/providers.yaml"
+  },
+  "steps": [
+    {
+      "validate": {
+        "exit": "nonzero",
+        "stderr_line_eq": [
+          "[error] BUSBAR-3015: config.yaml: invalid YAML: missing field `providers`"
+        ]
+      }
+    }
+  ]
+}
