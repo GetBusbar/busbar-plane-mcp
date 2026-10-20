@@ -182,7 +182,10 @@ pub(super) fn reconfirm(plane: &McpDoor, ticket: Ticket, principal: &str, unit: 
     plane.line_listens.with_all(|m| {
         for ((s, _), l) in m.iter_mut() {
             if *s == session && l.owner == principal {
-                l.reconfirm(entitled.clone(), standing.clone(), now);
+                // A clock that cannot be read is never a time (P-M4): the re-asked grants and
+                // standing still apply, but the confirmation is not moved to a time never read.
+                let at = now.unwrap_or(l.confirmed_ns);
+                l.reconfirm(entitled.clone(), standing.clone(), at);
             }
         }
     });
