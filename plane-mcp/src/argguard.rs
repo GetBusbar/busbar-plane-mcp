@@ -368,18 +368,10 @@ fn judge_string(
 /// accepts it, so no host can be judged and it is refused. `None`: it names no host.
 fn whatwg_host(value: &str) -> Option<Option<String>> {
     match url::Url::parse(value) {
-        Ok(parsed) => host_of(&parsed).map(Some),
+        // The reader's own serialisation, read by the contract's shared host reader (an IPv6
+        // literal unbracketed, the host normalised as the destination judge reads it).
+        Ok(parsed) => busbar_contract::net::url_host(parsed.as_str()).map(Some),
         Err(_) => names_web_scheme(value).then_some(None),
-    }
-}
-
-/// The host a parsed URL names, as the destination judge reads one (an IPv6 literal unbracketed).
-fn host_of(parsed: &url::Url) -> Option<String> {
-    match parsed.host()? {
-        url::Host::Domain("") => None,
-        url::Host::Domain(d) => Some(d.to_string()),
-        url::Host::Ipv4(a) => Some(a.to_string()),
-        url::Host::Ipv6(a) => Some(a.to_string()),
     }
 }
 
@@ -412,7 +404,7 @@ fn reference_host(value: &str) -> Option<Option<String>> {
             .ok()?
             .join(value)
             .ok()
-            .and_then(|u| host_of(&u))
+            .and_then(|u| busbar_contract::net::url_host(u.as_str()))
     };
     match (against("https://a.invalid/"), against("https://b.invalid/")) {
         (Some(a), Some(b)) if a == b => Some(Some(a)),
