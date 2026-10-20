@@ -18,7 +18,7 @@ use busbar_contract::abi::host::conn::connector::{
     SERVICES,
 };
 use busbar_contract::abi::host::service::ServiceOut;
-use busbar_contract::abi::mechanism::call::{AbiStr, Outcome, RawOutcome};
+use busbar_contract::abi::mechanism::call::{Outcome, RawOutcome};
 use busbar_contract::abi::mechanism::ticket::{HostCtx, HostTables, Ticket};
 use busbar_contract::abi::sdk::conn::Host;
 use busbar_contract::abi::transport::FrameSpan;
@@ -79,16 +79,9 @@ fn answer(out: *mut ServiceOut, outcome: Outcome, value: u64, len: u64) -> RawOu
         out.write(ServiceOut {
             size: std::mem::size_of::<ServiceOut>() as u32,
             outcome: RawOutcome::of(outcome),
-            _reserved: [0; 3],
             value,
             len,
-            items: 0,
-            needed_bytes: 0,
-            needed_items: 0,
-            error: AbiStr {
-                ptr: std::ptr::null(),
-                len: 0,
-            },
+            ..ServiceOut::ZERO
         });
     }
     RawOutcome::of(outcome)
