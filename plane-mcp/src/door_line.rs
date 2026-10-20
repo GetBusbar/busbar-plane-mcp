@@ -135,7 +135,8 @@ impl LineListen {
                 .copied()
                 .unwrap_or(false)
         };
-        self.listen.step(catalogue, &admit, &standing, &updates, now_ns)
+        self.listen
+            .step(catalogue, &admit, &standing, &updates, now_ns)
     }
 
     /// Whether busbar asks its caller a `ping` at `now_ns` to have its standing re-asked: none
