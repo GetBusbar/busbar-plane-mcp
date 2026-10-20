@@ -759,6 +759,63 @@ fn a_transition_address_embedding_a_private_v4_is_refused() {
     }
 }
 
+/// THE URL FORMS A WHATWG PARSER ACCEPTS (row 159 mcp finding C-M8): a connecting stack strips
+/// leading C0 controls and every tab/newline, reads the scheme case-blind, needs no `//` after a web
+/// scheme and reads `\` as `/`. Each spelling below is the metadata endpoint to such a stack, so
+/// each is judged on that host, in an undeclared field and in a declared `uri-reference` or
+/// `hostname` one; prose that only mentions `http:` is still not sniffed.
+#[test]
+fn a_url_is_read_as_a_whatwg_parser_reads_it() {
+    let hostile = [
+        "http:169.254.169.254/latest/meta-data/",
+        "\u{1}http://169.254.169.254/latest/",
+        "\u{0}https://169.254.169.254/latest/",
+        "ht\ttp://169.254.169.254/latest/",
+        "http:/\\169.254.169.254/latest/",
+        "HTTPS:\\\\169.254.169.254\\latest",
+        "http://169.254.169.254\n/latest/",
+    ];
+    let undeclared = json!({
+        "type": "object",
+        "properties": { "target": { "type": "string" } }
+    });
+    let reference = json!({
+        "type": "object",
+        "properties": { "target": { "type": "string", "format": "uri-reference" } }
+    });
+    let host = json!({
+        "type": "object",
+        "properties": { "target": { "type": "string", "format": "hostname" } }
+    });
+    for value in hostile {
+        for schema in [&undeclared, &reference, &host] {
+            let got = guard(schema, &json!({ "target": value }), public());
+            assert!(
+                matches!(&got, Err(ArgRefusal { why: ArgWhy::CloudMetadata(h), .. }) if h == "169.254.169.254"),
+                "`{value:?}` under {schema} must be judged on its real host, got {got:?}"
+            );
+        }
+    }
+    // The control: a public host in the same spellings passes, judged.
+    for value in [
+        "http:example.com/x",
+        "\u{1}https://example.com/",
+        "http:/\\example.com/",
+    ] {
+        let scan = guard(&undeclared, &json!({ "target": value }), public())
+            .unwrap_or_else(|e| panic!("`{value:?}` names a public host: {e}"));
+        assert_eq!(scan.undeclared_judged, 1, "`{value:?}` was judged");
+    }
+    // And prose that merely mentions the scheme is not a URL to any parser: not sniffed.
+    let scan = guard(
+        &undeclared,
+        &json!({ "target": "http: the protocol, see below" }),
+        public(),
+    )
+    .expect("prose passes");
+    assert_eq!(scan.undeclared_judged, 0);
+}
+
 /// A URL IS JUDGED HOWEVER A WHATWG READER WOULD ACCEPT IT. Most MCP servers fetch with a WHATWG
 /// parser (a browser's or Node's `fetch`), which reads `http:/h`, `https:\\h`, a scheme split by a
 /// tab and a value led by a control character as the same `http(s)://h/...` URL. Each of those

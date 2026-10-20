@@ -32,8 +32,10 @@
 //! ([`crate::client::negotiate`]) open a session with it (`initialize`, `notifications/initialized`,
 //! the request lowered into the session), every further hop over the door's own connector. An
 //! upstream answering in the stateless revision is remembered as such and never renegotiated. The
-//! ladder's last rung, the `2024-11-05` event stream, is not carried as a client: an upstream that
-//! refuses both the stateless request and `initialize` fails the call in words that name it.
+//! ladder's last rung, the `2024-11-05` event stream, is held over the connector and read on the
+//! driver ticket ([`super::door_legacy`]): an upstream that refuses both the stateless request and
+//! `initialize` is reached there, and fails the call in words that name it only when no connector
+//! is lent to hold the stream over.
 
 use std::collections::VecDeque;
 use std::task::Poll;
@@ -87,6 +89,15 @@ const STATUS_UNAVAILABLE: u32 = 503;
 /// The status of a message accepted and answered elsewhere (a notification, or a `2024-11-05`
 /// message whose answer goes on its stream).
 const STATUS_ACCEPTED: u32 = 202;
+
+/// The status a held stream past its owner's quota is refused with (as a subscription past its own).
+const STATUS_QUOTA: u32 = 429;
+
+/// The most held session streams (`GET`s, the `2024-11-05` stream's included) one owner holds open
+/// at once: the per-owner quota THE DESIGN section 2 (the mcp bullet) names, the same bound
+/// `subscriptions/listen` holds a caller to. A caller at it is refused its next one; no held stream
+/// is evicted for it.
+const MAX_STREAMS_PER_OWNER: usize = super::door_listen::MAX_LISTENS_PER_OWNER;
 
 /// The most resource subscriptions one owner holds across its sessions.
 const MAX_OWNER_SUBSCRIPTIONS: usize = 256;
@@ -409,12 +420,13 @@ fn handle(ticket: Ticket, issued: &mut u32) -> CompletionHandle {
     h
 }
 
-/// The kernel's wall clock in milliseconds; `0` with no clock.
-pub(super) fn wall_ms(services: Option<Services>, ticket: Ticket, issued: &mut u32) -> u64 {
-    services.map_or(0, |s| {
-        s.clock_now(handle(ticket, issued))
-            .map_or(0, |r| r.wall_ns / 1_000_000)
-    })
+/// The kernel's wall clock in milliseconds; `None` with no clock or a failed read, which is never a
+/// time (row 159 finding P-M4): its caller refuses or stamps nothing.
+pub(super) fn wall_ms(services: Option<Services>, ticket: Ticket, issued: &mut u32) -> Option<u64> {
+    let s = services?;
+    s.clock_now(handle(ticket, issued))
+        .ok()
+        .map(|r| r.wall_ns / 1_000_000)
 }
 
 /// The session table.
@@ -508,7 +520,13 @@ pub(super) fn answer(
 ) -> Option<Step> {
     let session_unit = unit.session.clone()?;
     let owner = owner_of(caller);
-    let now = wall_ms(plane.services, ticket, &mut unit.issued);
+    if matches!(session_unit, SessionUnit::Line | SessionUnit::Stream { .. }) {
+        return None;
+    }
+    let Some(now) = wall_ms(plane.services, ticket, &mut unit.issued) else {
+        let body = rpc_error(&Value::Null, CODE_INTERNAL, super::CLOCK_UNREAD);
+        return Some(written(unit, answer_of(STATUS_UNAVAILABLE, body)));
+    };
     let pending = match session_unit {
         SessionUnit::Line | SessionUnit::Stream { .. } => return None,
         SessionUnit::Open { id, requested } => {
@@ -814,6 +832,8 @@ pub(super) fn announce(plane: &McpDoor, server: &str, uri: &str) {
     for session in sessions {
         due(plane, &session);
     }
+    // The subscriptions held by `subscriptions/listen`, on either carrier, hear it too.
+    door_listen::announced(plane, server, uri);
 }
 
 /// WHAT AN UPSTREAM SAID ON ITS EVENT STREAM beside a relayed call's answer: its resource updates
@@ -901,10 +921,20 @@ pub(super) fn lower(plane: &McpDoor, ticket: Ticket, caller: &str, unit: &mut Ca
     if !lowerable {
         return;
     }
-    let now = legacy
-        .as_ref()
-        .map_or(0, |_| wall_ms(plane.services, ticket, &mut unit.issued));
+    let now = match legacy {
+        Some(_) => wall_ms(plane.services, ticket, &mut unit.issued),
+        None => Some(0),
+    };
     let Some(pending) = unit.pending.as_mut() else {
+        return;
+    };
+    // A legacy answer goes on its session's stream, which a failed clock read cannot touch: the
+    // POST is answered that it was not delivered.
+    let Some(now) = now else {
+        *pending = answer_of(
+            STATUS_UNAVAILABLE,
+            rpc_error(&Value::Null, CODE_INTERNAL, super::CLOCK_UNREAD),
+        );
         return;
     };
     let Ok(mut v) = serde_json::from_slice::<Value>(&pending.bytes) else {
@@ -1165,8 +1195,34 @@ fn open_stream(
     if plane.streams.with(&unit.key, |s| s.is_some()) {
         return Some((false, false));
     }
-    let now = wall_ms(plane.services, ticket, &mut unit.issued);
-    let mono = door_listen::mono_ns(plane.services, ticket, unit);
+    // THE QUOTA REFUSES THE NEW STREAM, never evicts a held one.
+    let held = plane
+        .streams
+        .with_all(|m| m.values().filter(|s| s.owner == *owner).count());
+    if held >= MAX_STREAMS_PER_OWNER {
+        let refusal = Refusal {
+            status: STATUS_QUOTA,
+            id: None,
+            code: CODE_REFUSED,
+            message: format!(
+                "this caller holds {MAX_STREAMS_PER_OWNER} open MCP session streams, the most one \
+                 caller may hold; close one and open again"
+            ),
+            data: Some(json!({ "reason": "stream_quota" })),
+        };
+        unit.pending = Some(Pending::answer(refusal.status, refusal.body(), None, &[]));
+        return Some((true, false));
+    }
+    let clocks = wall_ms(plane.services, ticket, &mut unit.issued).zip(door_listen::mono_ns(
+        plane.services,
+        ticket,
+        unit,
+    ));
+    let Some((now, mono)) = clocks else {
+        let body = rpc_error(&Value::Null, CODE_INTERNAL, super::CLOCK_UNREAD);
+        unit.pending = Some(answer_of(STATUS_UNAVAILABLE, body));
+        return Some((true, false));
+    };
     let ungoverned = owner.principal == crate::ask::UNGOVERNED;
     let (session, stream, delivered, legacy, bytes) = match session {
         None => {
@@ -1245,8 +1301,15 @@ fn open_stream(
 /// its end once its session is gone.
 fn step_stream(plane: &McpDoor, ticket: Ticket, unit: &mut CallUnit) -> Option<bool> {
     let held_stream = plane.streams.get(&unit.key)?;
-    let now = wall_ms(plane.services, ticket, &mut unit.issued);
-    let mono = door_listen::mono_ns(plane.services, ticket, unit);
+    // A collection whose clock read failed collects nothing: the next one reads it again.
+    let clocks = wall_ms(plane.services, ticket, &mut unit.issued).zip(door_listen::mono_ns(
+        plane.services,
+        ticket,
+        unit,
+    ));
+    let Some((now, mono)) = clocks else {
+        return Some(false);
+    };
     let updates: Vec<(String, String)> = plane
         .session_state
         .with(&held_stream.session, |s| {
@@ -1573,7 +1636,7 @@ impl Negotiating {
                             self.next = Some(Action::AwaitEvent);
                             return Poll::Pending;
                         }
-                        Poll::Ready(Ok((body, id, dropped))) => {
+                        Poll::Ready(Ok((body, sse, id, dropped))) => {
                             self.dropped = dropped;
                             self.legacy_id = Some(id);
                             plane.upstreams.with(&(), |t| {
@@ -1588,7 +1651,7 @@ impl Negotiating {
                                     );
                                 }
                             });
-                            return Poll::Ready(Negotiated::Answer(200, body, false, Some(id)));
+                            return Poll::Ready(Negotiated::Answer(200, body, sse, Some(id)));
                         }
                         Poll::Ready(Err(why)) => {
                             plane.upstreams.with(&(), |t| {
@@ -1692,6 +1755,18 @@ pub(super) fn fetch(
     instance: &Instance<'_, McpDoor>,
     plane: &McpDoor,
     unit: &mut CallUnit,
+    hop: (u32, &str, &str, u64),
+    original: OutboundRequest,
+) -> Poll<Result<busbar_contract::abi::sdk::exchange::ExchangeResponse, String>> {
+    fetch_in(instance, plane, &mut unit.negotiating, hop, original)
+}
+
+/// [`fetch`], its conversation kept in `slot` while it pends: a unit's, or an operator `connect`'s
+/// (which has no unit, row 159 finding A-H1).
+pub(super) fn fetch_in(
+    instance: &Instance<'_, McpDoor>,
+    plane: &McpDoor,
+    slot: &mut Option<Box<Negotiating>>,
     (base, member, binding, timeout_ms): (u32, &str, &str, u64),
     original: OutboundRequest,
 ) -> Poll<Result<busbar_contract::abi::sdk::exchange::ExchangeResponse, String>> {
@@ -1699,16 +1774,15 @@ pub(super) fn fetch(
     let original_id = serde_json::from_slice::<serde_json::Value>(&original.body)
         .ok()
         .and_then(|v| v.get("id").cloned());
-    let negotiating = unit
-        .negotiating
-        .get_or_insert_with(|| Box::new(Negotiating::begin(plane, member, binding, original)));
+    let negotiating =
+        slot.get_or_insert_with(|| Box::new(Negotiating::begin(plane, member, binding, original)));
     let Poll::Ready(done) = negotiating.drive(instance, plane, base, member, timeout_ms) else {
         return Poll::Pending;
     };
     // Replies dropped on the caller's held stream are audited on a relayed call's answer, which a
     // fetch has none of: they stay counted on the stream for the next one.
     super::door_legacy::recount(plane, &negotiating.key, negotiating.dropped);
-    unit.negotiating = None;
+    *slot = None;
     Poll::Ready(match done {
         Negotiated::Answer(status, raw, sse, sent) => {
             let body = if sse {

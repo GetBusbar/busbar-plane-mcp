@@ -41,7 +41,12 @@ pub fn tool_digest(name: &str, description: &str, input_schema: &Value) -> Strin
         framed.extend_from_slice(&(part.len() as u64).to_be_bytes());
         framed.extend_from_slice(part.as_bytes());
     }
-    format!("sha256:{}", busbar_contract::sha256_hex(&framed))
+    format!(
+        "sha256:{}",
+        busbar_contract::abi::sdk::digest::lower_hex(&busbar_contract::abi::sdk::digest::sha256(
+            &framed
+        ))
+    )
 }
 
 /// `value` with every object's keys sorted, recursively: key ORDER is not drift, any change of key,
@@ -132,7 +137,12 @@ pub fn catalogue_hash(observation: &Observation) -> String {
         bytes.extend_from_slice(digest.as_bytes());
         bytes.push(b'\n');
     }
-    format!("sha256:{}", busbar_contract::sha256_hex(&bytes))
+    format!(
+        "sha256:{}",
+        busbar_contract::abi::sdk::digest::lower_hex(&busbar_contract::abi::sdk::digest::sha256(
+            &bytes
+        ))
+    )
 }
 
 /// The last contact: the SDK's one shape of a sighting

@@ -303,11 +303,17 @@ fn the_cap_drops_the_oldest_terminal_tasks_and_never_a_working_one() {
     assert_eq!(swept.strike, vec![("done".to_string(), 2)]);
 }
 
-/// THE 257th distinct key is refused; 256 are accepted; a REPEAT of an already-held key still
-/// updates in place instead of being counted as new.
+/// THE 257th distinct key is refused; 256 are accepted; a REPEAT of a key already answered (no
+/// longer asked) changes nothing.
 #[test]
 fn a_tasks_answer_map_is_capped_at_max_task_answers_distinct_keys() {
     let mut t = task("key-answers-cap");
+    t.park(
+        (0..=MAX_TASK_ANSWERS)
+            .map(|i| elicitation(&format!("k{i}")))
+            .collect(),
+        T0,
+    );
     for i in 0..MAX_TASK_ANSWERS {
         let mut batch = Map::new();
         batch.insert(format!("k{i}"), json!(i));
@@ -317,15 +323,15 @@ fn a_tasks_answer_map_is_capped_at_max_task_answers_distinct_keys() {
     let mut repeat = Map::new();
     repeat.insert("k0".to_string(), json!("updated"));
     assert!(t.deliver(&repeat, T0), "a repeat is not a new key");
-    assert_eq!(t.answers().get("k0"), Some(&json!("updated")));
+    assert_eq!(t.answers().get("k0"), Some(&json!(0)));
     assert_eq!(t.answers().len(), MAX_TASK_ANSWERS);
     let mut overflow = Map::new();
-    overflow.insert("overflow".to_string(), json!("no"));
+    overflow.insert(format!("k{MAX_TASK_ANSWERS}"), json!("no"));
     assert!(
         !t.deliver(&overflow, T0),
         "the 257th distinct key is refused"
     );
-    assert!(t.answers().get("overflow").is_none());
+    assert!(t.answers().get(&format!("k{MAX_TASK_ANSWERS}")).is_none());
     assert_eq!(t.answers().len(), MAX_TASK_ANSWERS);
 }
 
@@ -333,6 +339,12 @@ fn a_tasks_answer_map_is_capped_at_max_task_answers_distinct_keys() {
 #[test]
 fn a_batch_that_would_cross_the_ceiling_is_refused_whole_not_truncated() {
     let mut t = task("key-answers-batch");
+    let mut asks: Vec<CallerAsk> = (0..(MAX_TASK_ANSWERS - 1))
+        .map(|i| elicitation(&format!("k{i}")))
+        .collect();
+    asks.push(elicitation("new-a"));
+    asks.push(elicitation("new-b"));
+    t.park(asks, T0);
     let mut batch = Map::new();
     for i in 0..(MAX_TASK_ANSWERS - 1) {
         batch.insert(format!("k{i}"), json!(i));
@@ -375,7 +387,7 @@ fn the_durable_row_round_trips_and_fits_the_work_record() {
 fn a_result_is_written_in_ordered_chunks_and_read_back_whole() {
     let text = "x".repeat(RESULT_CHUNK_BYTES * 3);
     let terminal = json!({ "result": { "content": [{ "type": "text", "text": text }] } });
-    let chunks = result_chunks("abc", &terminal);
+    let chunks = result_chunks("abc", &terminal).expect("a result the records keep");
     assert!(chunks.len() >= 3);
     assert!(chunks
         .iter()
@@ -389,7 +401,7 @@ fn a_result_is_written_in_ordered_chunks_and_read_back_whole() {
         Some(terminal)
     );
     let huge = json!({ "result": "y".repeat(RESULT_CHUNK_BYTES * (MAX_RESULT_CHUNKS + 1)) });
-    assert!(result_chunks("abc", &huge).is_empty());
+    assert!(result_chunks("abc", &huge).is_err());
     assert_eq!(read_chunks(std::iter::empty()), None);
 }
 
@@ -502,7 +514,7 @@ fn a_live_tasks_state_reads_back_from_its_records() {
         serde_json::from_value(json!({"r": {"method": "roots/list"}})).unwrap();
     relayed.park_relay(&requests, "sealed".into(), json!({"name": "fs_x"}), T0 + 3);
     for held in [own, relayed] {
-        let parts = live_parts(&held.id, &held.live());
+        let parts = live_parts(&held.id, &held.live()).expect("a state the records keep");
         assert!(parts
             .iter()
             .all(|(k, _)| k.starts_with(&live_prefix(&held.id))));
@@ -523,8 +535,9 @@ fn a_live_tasks_state_reads_back_from_its_records() {
 fn a_live_state_reads_back_whole_over_an_earlier_longer_one() {
     let short = json!({"status": "working", "updated": 1});
     let long = json!({"status": "input_required", "updated": 0, "pad": "x".repeat(2000)});
-    let mut stored: BTreeMap<Vec<u8>, Vec<u8>> = live_parts("t", &long).into_iter().collect();
-    stored.extend(live_parts("t", &short));
+    let mut stored: BTreeMap<Vec<u8>, Vec<u8>> =
+        live_parts("t", &long).expect("kept").into_iter().collect();
+    stored.extend(live_parts("t", &short).expect("kept"));
     let bytes: Vec<u8> = stored.values().flatten().copied().collect();
     assert_eq!(read_live(&bytes), Some(short));
 }

@@ -612,11 +612,22 @@ pub fn admit_trusted(
     // BUSBAR'S OWN ASK, decided over the arguments as the caller sent them: the state is sealed over
     // their digest, so the answers are merged only after it.
     let mut relay = None;
+    let mut answered = None;
     match ask(entry, &arguments) {
         crate::ask::AskDecision::Proceed => {}
+        // THE EXCHANGE COMPLETED: every round's answers, the sealed earlier rounds' with the last
+        // retry's, become arguments below.
+        crate::ask::AskDecision::Answered(answers) => answered = Some(answers),
         // A RELAYED ASK'S RETRY: the caller's answers are the upstream's, sent back to the member
-        // that asked with its own state, verbatim; none of them becomes an argument.
+        // that asked with its own state, verbatim; none of them becomes an argument. Busbar's own
+        // answers the first call went out with, sealed in the state, are merged again: the retry
+        // is the same request plus the upstream's answers.
         crate::ask::AskDecision::Relayed(leg) => {
+            if let (Some(own), Some(merged)) = (leg.answers, arguments.as_object_mut()) {
+                for (key, value) in own {
+                    merged.insert(key, value);
+                }
+            }
             let mut continuation = Map::new();
             if let Some(responses) = params.and_then(|p| p.get("inputResponses")) {
                 continuation.insert("inputResponses".to_string(), responses.clone());
@@ -655,11 +666,7 @@ pub fn admit_trusted(
     }
     // THE ANSWERS BECOME ARGUMENTS, bounded by what the operator asked for: an answer may bind only
     // a key this tool's own `ask_caller:` rounds declared, and never an argument the caller sent.
-    if let Some(responses) = params
-        .and_then(|p| p.get("inputResponses"))
-        .and_then(Value::as_object)
-        .filter(|_| relay.is_none())
-    {
+    if let Some(responses) = &answered {
         let declared: std::collections::BTreeSet<&str> = entry
             .ask_caller
             .iter()
@@ -712,6 +719,24 @@ pub fn admit_trusted(
         sent_digest,
         relay,
     })
+}
+
+/// BUSBAR'S OWN ANSWERS `admitted` goes out with: its arguments under the keys its tool's
+/// `ask_caller` rounds declare, as merged. Sealed in a relayed ask's state
+/// ([`crate::ask::UpstreamLeg::answers`]) so the retry goes out with them again. A key the caller
+/// itself sent is among them only with the value the caller sent, which the retry (bound to the
+/// same arguments) sends again. `None` when there are none.
+#[must_use]
+pub fn own_answers(admitted: &AdmittedCall) -> Option<Map<String, Value>> {
+    let arguments = admitted.arguments.as_object()?;
+    let own: Map<String, Value> = admitted
+        .entry
+        .ask_caller
+        .iter()
+        .flat_map(|round| round.keys())
+        .filter_map(|key| Some((key.clone(), arguments.get(key)?.clone())))
+        .collect();
+    (!own.is_empty()).then_some(own)
 }
 
 /// THE ARGUMENT GUARD ([`crate::argguard`]) on an admitted call: the arguments that go out (the
@@ -1424,9 +1449,10 @@ pub fn judge_continuation(
 /// `method` is `sampling/createMessage` is measured against the server's `sampling_bounds`, and the
 /// first bound it exceeds is returned as a named refusal. Other methods are not measured.
 ///
-/// Measured as the ask arrived: the message count, the prompt bytes (`systemPrompt` plus the text
-/// parts of every message's content), the stop-sequence count and each one's bytes, and a present
-/// `temperature` against `min..=max` thousandths.
+/// Measured as the ask arrived: the message count, the prompt bytes (`systemPrompt` plus every
+/// content part of every message: a text part's text, any other part (an image, audio, a resource,
+/// a tool use or result) as serialised, since an upstream picks its size too), the stop-sequence
+/// count and each one's bytes, and a present `temperature` against `min..=max` thousandths.
 pub fn judge_sampling_bounds<'a>(
     server: &str,
     bounds: &SamplingBoundsCfg,
@@ -1466,11 +1492,14 @@ pub fn judge_sampling_bounds<'a>(
                 None => &[],
             };
             for part in parts {
-                if part.get("type").and_then(Value::as_str) == Some("text") {
-                    prompt_bytes = prompt_bytes.saturating_add(
-                        part.get("text").and_then(Value::as_str).map_or(0, str::len),
-                    );
-                }
+                let bytes = match (
+                    part.get("type").and_then(Value::as_str),
+                    part.get("text").and_then(Value::as_str),
+                ) {
+                    (Some("text"), Some(text)) => text.len(),
+                    _ => part.to_string().len(),
+                };
+                prompt_bytes = prompt_bytes.saturating_add(bytes);
             }
         }
         if prompt_bytes as u64 > u64::from(bounds.max_prompt_bytes) {

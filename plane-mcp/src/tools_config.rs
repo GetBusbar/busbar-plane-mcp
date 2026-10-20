@@ -627,7 +627,7 @@ impl ServerRequestGrants {
 
 /// The DEFAULT ceiling on the messages of one sampling ask.
 pub const DEFAULT_MAX_SAMPLING_MESSAGES: u32 = 64;
-/// The DEFAULT ceiling on the prompt bytes (system prompt plus every message's text) of one ask.
+/// The DEFAULT ceiling on the prompt bytes (system prompt plus every message's content parts) of one ask.
 pub const DEFAULT_MAX_SAMPLING_PROMPT_BYTES: u32 = 64 * 1024;
 /// The DEFAULT ceiling on the stop sequences of one ask.
 pub const DEFAULT_MAX_STOP_SEQUENCES: u32 = 8;
@@ -654,8 +654,8 @@ pub const DEFAULT_MAX_INPUT_RESPONSE_BYTES: u32 = 1024 * 1024;
 pub struct SamplingBoundsCfg {
     /// The most `messages` one ask may carry. Default 64; zero is refused.
     pub max_messages: u32,
-    /// The most bytes the system prompt plus every message's text may total. Default 65536; zero is
-    /// refused.
+    /// The most bytes the system prompt plus every message's content (a text part's text, any other
+    /// part as serialised) may total. Default 65536; zero is refused.
     pub max_prompt_bytes: u32,
     /// The most `stopSequences` one ask may name. Default 8.
     pub max_stop_sequences: u32,
@@ -1398,6 +1398,10 @@ pub fn validate_server(name: &str, def: &McpServerDefCfg) -> Result<(), String> 
             name.replace(NAMESPACE_SEP, "-")
         ));
     }
+    // THE ROUTING KEY'S SPELLING (row 159 finding P-M11): a server id, and each `tools_allow` name
+    // under it, is the one spelling a relayed call is built under ([`crate::identity::ToolKey`]),
+    // so a name it refuses would make the tool silently undispatchable. Refused here, in its words.
+    let id = crate::identity::ServerId::new(name).map_err(|e| format!("{at}: {e}"))?;
 
     validate_endpoint(&at, def)?;
     def.sampling_bounds.validate(&at)?;
@@ -1411,6 +1415,8 @@ pub fn validate_server(name: &str, def: &McpServerDefCfg) -> Result<(), String> 
 
     for (tool, allow) in &def.tools_allow {
         validate_capability_name(&at, "tools_allow", tool)?;
+        crate::identity::ToolKey::new(id.clone(), tool)
+            .map_err(|e| format!("{at}: `tools_allow.{tool}`: {e}"))?;
         refuse_unknown_ask_methods(&at, "tools_allow", tool, "ask_caller", &allow.ask_caller)?;
         refuse_unknown_ask_methods(
             &at,
