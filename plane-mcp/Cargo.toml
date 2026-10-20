@@ -67,8 +67,6 @@ serde_json = { workspace = true }
 # would read as a URL naming a host (`http:/h`, `https:\\h`, an embedded tab, a leading control
 # character) is put to the host's destination judge, however it is spelled.
 url = { workspace = true }
-# Selects `idna`'s unicode-rs backend for the `url` above, the version busbar's own build pins.
-idna_adapter = { workspace = true }
 
 [dev-dependencies]
 # The TEST-ONLY seal (#65). `busbar_contract::plugin::TestKernelSeal` is the one blessed
