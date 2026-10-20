@@ -813,3 +813,25 @@ fn a_url_a_whatwg_reader_accepts_is_judged_however_it_is_spelled() {
         );
     }
 }
+
+/// A TRAILING ROOT DOT IS JUDGED AS THE NAME IT ROOTS, whichever reader found the host: a
+/// reference a WHATWG reader resolves (`\\example.com.\x`, read against a web base) and an
+/// absolute URL both ask `dest.judge` about `example.com`, the host the guard has asked about since
+/// it was written (`judge_host` normalises every host it is handed). Pinned so the host reader the
+/// guard shares with the contract can never move a rule's allow or deny on a rooted name.
+#[test]
+fn a_trailing_root_dot_is_judged_as_the_name_it_roots() {
+    let schema = json!({
+        "type": "object",
+        "properties": {"u": {"type": "string", "format": "uri-reference"}}
+    });
+    for value in ["\\\\example.com.\\x", "https://example.com./x"] {
+        let mut asked: Vec<String> = Vec::new();
+        let judged = guard(&schema, &json!({"u": value}), |dest: &str| {
+            asked.push(dest.to_string());
+            Some(DEST_ALLOWED)
+        });
+        assert!(judged.is_ok(), "`{value}`: {judged:?}");
+        assert_eq!(asked, ["example.com"], "`{value}`");
+    }
+}
