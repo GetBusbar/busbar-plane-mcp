@@ -918,6 +918,8 @@ impl Door {
             records_cap: records.len(),
             arena_buf: arena.as_mut_ptr(),
             arena_cap: arena.len(),
+            // The host's own cancel of a unit names the unit as arrive keyed it.
+            unit,
         };
         let mut o: PlaneCancelOut = z();
         o.cancel.head = out_head::<PlaneCancelOut>();
