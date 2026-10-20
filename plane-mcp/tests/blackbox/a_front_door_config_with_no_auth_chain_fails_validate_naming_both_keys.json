@@ -1,0 +1,33 @@
+{
+  "schema": "blackbox/1",
+  "case": "a_front_door_config_with_no_auth_chain_fails_validate_naming_both_keys",
+  "requires": {
+    "sections": [
+      "tools"
+    ],
+    "axes": [
+      "body-ingress"
+    ]
+  },
+  "files": {
+    "providers.yaml": "{}\n",
+    "config.yaml": "listen: \"127.0.0.1:{data_port}\"\nadmin_listen: \"127.0.0.1:{admin_port}\"\nstore: {module: memory}\nproviders: {}\nmodels: {}\npools: {}\nauth:\n  admin_auth: []\nmcp:\n  canonical_uri: \"http://127.0.0.1:{data_port}/mcp\"\n  authorization_servers:\n    - \"http://127.0.0.1:{admin_port}\"\n"
+  },
+  "vars": {
+    "BUSBAR_CONFIG": "{dir}/config.yaml",
+    "BUSBAR_PROVIDERS": "{dir}/providers.yaml",
+    "BUSBAR_ADMIN_TOKEN": "front-door-test-admin-token",
+    "BUSBAR_SIGNING_KEY": "0000000000000000000000000000000000000000000000000000000000000001"
+  },
+  "steps": [
+    {
+      "validate": {
+        "exit": "nonzero",
+        "output_contains": [
+          "mcp:",
+          "auth.chain"
+        ]
+      }
+    }
+  ]
+}
