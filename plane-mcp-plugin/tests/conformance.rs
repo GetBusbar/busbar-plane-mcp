@@ -11,7 +11,7 @@
 //! and after a short one. `plugin-ci.yml` runs it under `--release`.
 
 busbar_plugin_loader::conformance_suite! {
-    door: busbar_plane_mcp::tool_door::door,
+    door: busbar_plane_mcp::tool_door::MACRO_DOOR,
     cdylib: "busbar_plane_mcp_plugin",
     inputs: include_str!("conformance.json"),
 }

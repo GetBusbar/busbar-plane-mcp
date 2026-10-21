@@ -434,7 +434,7 @@ impl Link {
     }
 
     /// The connector for the next handle of the cycle, or none once the cycle's span is spent.
-    fn next(host: &Host, driver: Ticket, issued: u32) -> Option<Connector<'_>> {
+    fn next<'h>(host: &'h Host, driver: Ticket, issued: u32) -> Option<Connector<'h>> {
         (issued < CYCLE_SPAN).then(|| host.connector_from(driver, LINK_SEQ.saturating_add(issued)))
     }
 

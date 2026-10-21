@@ -181,17 +181,19 @@ static SLOTS: ConnectorSlots = ConnectorSlots {
     write_request: None,
 };
 
-fn host() -> Host {
-    Host::of(&HostTables {
-        size: std::mem::size_of::<HostTables>() as u32,
-        _reserved: 0,
-        ctx: HostCtx::NONE,
-        wake: None,
-        conns: &SLOTS,
-        services: std::ptr::null(),
-        io: std::ptr::null(),
-    })
-}
+struct Tables(HostTables);
+// SAFETY: the tables name only `'static` tables of `extern "C"` functions.
+unsafe impl Sync for Tables {}
+
+static TABLES: Tables = Tables(HostTables {
+    size: std::mem::size_of::<HostTables>() as u32,
+    _reserved: 0,
+    ctx: HostCtx::NONE,
+    wake: None,
+    conns: &SLOTS,
+    services: std::ptr::null(),
+    io: std::ptr::null(),
+});
 
 /// The door's record, as these tests keep it: the generation it greeted, what it answered.
 #[derive(Default)]
@@ -228,7 +230,8 @@ impl Peer for Door {
 
 /// A `tools/list` exchange with the member, under `id`, driven to its end.
 fn list(door: &mut Door, id: u64, ticket: u32) -> Exchanged {
-    let host = host();
+    // SAFETY: `TABLES` is a `'static` table of `extern "C"` functions.
+    let host = unsafe { Host::from_raw(&TABLES.0) };
     let request = busbar_plane_mcp::client::jsonrpc::tools_list("", id, None).body;
     let mut exchange = ProgramExchange::new(
         "srv",

@@ -526,7 +526,7 @@ fn every_ask_list_is_validated_and_the_three_legal_methods_still_parse() {
 /// Whether `stated` is the tail string built from `word` (the tail's strings are constants of this
 /// crate, so a word is found by address and length, as `tests/door.rs` reads them).
 fn spells(stated: AbiStr, word: &str) -> bool {
-    stated.ptr == word.as_ptr() && stated.len == word.len()
+    stated.ptr() == word.as_ptr() && stated.len() == word.len()
 }
 
 /// THE WORDS THE ROOT BATTERY READS OFF THE STATEMENT ARE THE GRAMMAR'S: the declaring section is
@@ -557,7 +557,7 @@ fn the_statement_names_the_grammars_section_noun_and_endpoint() {
             crate::door::ENDPOINT_SECTION
         )
     );
-    assert_eq!(crate::door::TAIL.dialects_len, 1, "one wire dialect");
+    assert_eq!(crate::door::TAIL.dialects_len(), 1, "one wire dialect");
 }
 
 /// RED (ARCHITECT timeout ruling): a server's `timeout:` is the kernel's reserved per-entry key, and
