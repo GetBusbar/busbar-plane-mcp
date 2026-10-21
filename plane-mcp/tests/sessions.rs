@@ -2208,18 +2208,22 @@ fn one_owner_holds_a_bounded_number_of_session_streams() {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
     *upstreams() = Some(Upstreams::default());
     let d = open();
-    let init = initialize(&d, 200, ALICE);
-    let session = init
-        .field("mcp-session-id")
-        .expect("the answer names its session")
-        .to_string();
-    let stream = [
-        ("accept", "text/event-stream"),
-        ("mcp-session-id", session.as_str()),
-        ("mcp-protocol-version", "2025-06-18"),
-    ];
+    // Five sessions (a session keeps sixteen streams), thirteen streams on each.
+    let sessions: Vec<String> = (0..5)
+        .map(|n| {
+            initialize(&d, 190 + n, ALICE)
+                .field("mcp-session-id")
+                .expect("the answer names its session")
+                .to_string()
+        })
+        .collect();
     let mut statuses = Vec::new();
-    for unit in 201..=265 {
+    for (n, unit) in (201..=265).enumerate() {
+        let stream = [
+            ("accept", "text/event-stream"),
+            ("mcp-session-id", sessions[n / 13].as_str()),
+            ("mcp-protocol-version", "2025-06-18"),
+        ];
         assert_eq!(
             d.arrive(unit, "GET", "/mcp", b"", &stream).outcome,
             Outcome::Ready
@@ -2497,4 +2501,47 @@ fn calls_in_flight_never_share_a_progress_token() {
         "the token of the id the call is sent under: {sent}"
     );
     assert!(!tokens.contains(&sent["params"]["_meta"]["progressToken"]));
+}
+
+/// RED: A HELD STREAM IS NEVER ENDED TO MAKE ROOM: past the streams one session keeps, the next GET
+/// is refused `429`, and the first stream still collects what its session buffers. RED: the next
+/// GET dropped the first stream's cursor, and that stream ended at its next collection.
+#[test]
+fn a_held_stream_is_never_ended_for_another() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open();
+    let session = initialize(&d, 140, ALICE)
+        .field("mcp-session-id")
+        .expect("the answer names its session")
+        .to_string();
+    let stream = [
+        ("accept", "text/event-stream"),
+        ("mcp-session-id", session.as_str()),
+        ("mcp-protocol-version", "2025-06-18"),
+    ];
+    let mut statuses = Vec::new();
+    for unit in 141..=157 {
+        assert_eq!(
+            d.arrive(unit, "GET", "/mcp", b"", &stream).outcome,
+            Outcome::Ready
+        );
+        statuses.push(d.piece(unit, &Given::stream_open(ALICE, unit)).status);
+    }
+    assert!(
+        statuses[..16].iter().all(|s| *s == 200),
+        "a session keeps sixteen streams: {statuses:?}"
+    );
+    assert_eq!(
+        statuses[16], 429,
+        "the seventeenth is refused: {statuses:?}"
+    );
+    // The first stream is still live: a collection writes no end of stream.
+    d.turn();
+    let collected = d.piece(141, &Given::collect(ALICE, 141));
+    assert!(
+        !collected.done,
+        "the first stream was ended for the seventeenth: {}",
+        collected.text()
+    );
 }

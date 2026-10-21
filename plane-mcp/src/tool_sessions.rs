@@ -9,27 +9,32 @@
 //! plane instance and serialises access to it. Nothing here is process-global (no statics), reads a
 //! clock (the caller passes `now_ms`), or draws randomness (the caller passes the entropy).
 //!
-//! ## Bounded, in count and in bytes, with eviction
+//! ## Bounded, in count and in bytes: live work is never evicted
 //!
 //! A session costs memory for as long as it lives, and a client that never sends DELETE never gives
-//! it back. So every dimension has a ceiling in [`Bounds`]:
+//! it back. So every dimension has a ceiling in [`Bounds`]. ADMISSION BOUNDS LIVE WORK, NOTHING
+//! EVICTS IT (THE DESIGN l.199): a session holding a live stream ([`SessionTable::hold_stream`]) is
+//! never given way for another, and a cursor a live stream reads is never dropped; the open past a
+//! ceiling is refused instead. Only an IDLE session (no live stream) gives way:
 //!
-//! - `max_owner_sessions`: an owner opening one more evicts ITS OWN least recently used session.
-//! - `max_sessions`: when the whole table is full, the opener's own least recently used session
+//! - `max_owner_sessions`: an owner opening one more evicts ITS OWN least recently used idle
+//!   session; an owner whose every session is live is refused ([`OpenRefused::OwnerFull`]).
+//! - `max_sessions`: when the whole table is full, the opener's own least recently used idle session
 //!   gives way; an opener with none is refused ([`OpenRefused::Full`]).
-//! - `idle_ms`: a session untouched for this long is gone at the next lookup or sweep.
+//! - `idle_ms`: a session untouched for this long is gone at the next lookup or sweep (a live
+//!   stream's collections touch it).
 //! - `max_session_bytes`: a session's buffered events are trimmed OLDEST FIRST to fit. A trimmed
 //!   event can no longer be replayed; the replay says so instead of pretending the tail is whole.
 //! - `max_owner_bytes` and `max_total_bytes`: an owner over its byte share, or a table over its
-//!   total, is brought back under by evicting THAT OWNER'S other sessions, least recently used
-//!   first, then trimming the session being written.
+//!   total, is brought back under by evicting THAT OWNER'S other idle sessions, least recently used
+//!   first, then trimming replay buffers.
 //!
 //! ONE OWNER'S PRESSURE NEVER EVICTS ANOTHER OWNER'S SESSION OR EVENTS (reviewer follow-up 1,
 //! ARCHITECT 2026-09-29). Every eviction and every trim above lands on the owner whose open or
 //! write caused it, so a caller filling its quota can cost itself sessions and replayable events and
 //! can cost nobody else anything.
 //! - `stream_cap`: how many resumable event stream cursors one session may hold; opening one more drops
-//!   the oldest.
+//!   the oldest cursor no live stream reads, and is refused when every one is read.
 //!
 //! An evicted or expired session answers exactly as an unknown one does. The spec's rule for that
 //! (404, and the client re-initialises) is what makes eviction safe to do at all.
@@ -159,9 +164,11 @@ pub enum OpenRefused {
     NoEntropy,
     /// The id already names a live session. The caller draws fresh entropy and tries again.
     Collision,
-    /// The table is full and the opener holds no session that could give way. Another owner's
-    /// session is never evicted to make room.
+    /// The table is full and the opener holds no idle session that could give way. Another
+    /// owner's session is never evicted to make room.
     Full,
+    /// The opener holds as many sessions as one owner may, each with a live stream: none gives way.
+    OwnerFull,
 }
 
 /// What one owner holds.
@@ -184,6 +191,8 @@ struct ReplayEvent {
 #[derive(Debug)]
 struct Stream {
     id: u32,
+    /// How many live streams read this cursor: while any does, it is never dropped.
+    live: u32,
     next_seq: u64,
     /// The highest seq ever trimmed away, or 0 when nothing was trimmed.
     trimmed_through: u64,
@@ -204,6 +213,11 @@ struct Session {
 }
 
 impl Session {
+    /// A live stream reads one of its cursors: it is live work, never evicted.
+    fn held(&self) -> bool {
+        self.open.iter().any(|s| s.live > 0)
+    }
+
     fn base_bytes(owner: &Owner) -> usize {
         SESSION_OVERHEAD + owner.principal.len() + owner.credential.len()
     }
@@ -330,7 +344,8 @@ impl SessionTable {
     ///
     /// # Errors
     /// [`OpenRefused::NoEntropy`] for an all-zero buffer, [`OpenRefused::Collision`] when the id is
-    /// already live, [`OpenRefused::Full`] when only another owner's session could make room.
+    /// already live, [`OpenRefused::Full`] when only another owner's session could make room, and
+    /// [`OpenRefused::OwnerFull`] when the owner is at its count and every session it holds is live.
     pub fn open(
         &mut self,
         entropy: [u8; 16],
@@ -353,7 +368,7 @@ impl SessionTable {
         }
         while self.owner_sessions(&owner) >= self.bounds.max_owner_sessions.max(1) {
             if !self.evict_lru_of(&owner, None) {
-                break;
+                return Err(OpenRefused::OwnerFull);
             }
         }
         while self.sessions.len() >= self.bounds.max_sessions.max(1) {
@@ -435,14 +450,21 @@ impl SessionTable {
         true
     }
 
-    /// Opens a resumable stream in `id`. When the session is at `stream_cap`, the oldest stream
-    /// and its buffered events are dropped first.
+    /// Opens a resumable stream in `id`. When the session is at `stream_cap`, the oldest cursor no
+    /// live stream reads, and its buffered events, are dropped first. `None` when `owner` does not
+    /// hold `id`, or when every cursor at the cap is read by a live stream (the open is refused;
+    /// no live stream is ended for it).
     pub fn open_stream(&mut self, id: &str, owner: &Owner, now_ms: u64) -> Option<u32> {
         let stream_cap = self.bounds.stream_cap.max(1);
         let s = self.find(id, owner, now_ms)?;
         let mut freed = 0;
         while s.open.len() >= stream_cap {
-            let dropped = s.open.remove(0);
+            let Some(oldest) = s.open.iter().position(|st| st.live == 0) else {
+                s.bytes -= freed;
+                self.release_bytes(owner, freed);
+                return None;
+            };
+            let dropped = s.open.remove(oldest);
             freed += dropped
                 .events
                 .iter()
@@ -454,12 +476,39 @@ impl SessionTable {
         s.next_stream = s.next_stream.wrapping_add(1);
         s.open.push(Stream {
             id: stream,
+            live: 0,
             next_seq: 1,
             trimmed_through: 0,
             events: VecDeque::new(),
         });
         self.release_bytes(owner, freed);
         Some(stream)
+    }
+
+    /// A live stream reads `stream` of `id` (its GET is held open): until [`Self::release_stream`],
+    /// the cursor is never dropped and the session never evicted. `false` when there is no such
+    /// cursor.
+    pub fn hold_stream(&mut self, id: &str, stream: u32) -> bool {
+        let Some(st) = self
+            .sessions
+            .get_mut(id)
+            .and_then(|s| s.open.iter_mut().find(|st| st.id == stream))
+        else {
+            return false;
+        };
+        st.live = st.live.saturating_add(1);
+        true
+    }
+
+    /// The live stream reading `stream` of `id` ended.
+    pub fn release_stream(&mut self, id: &str, stream: u32) {
+        if let Some(st) = self
+            .sessions
+            .get_mut(id)
+            .and_then(|s| s.open.iter_mut().find(|st| st.id == stream))
+        {
+            st.live = st.live.saturating_sub(1);
+        }
     }
 
     /// Buffers `data` as the next event on `stream` and returns its event id. The buffer is then
@@ -561,13 +610,13 @@ impl SessionTable {
         }
     }
 
-    /// Evicts `owner`'s least recently used session other than `keep`. `false` when there is none.
-    /// Never another owner's.
+    /// Evicts `owner`'s least recently used IDLE session other than `keep`. `false` when there is
+    /// none. Never another owner's, and never one a live stream reads.
     fn evict_lru_of(&mut self, owner: &Owner, keep: Option<&str>) -> bool {
         let victim = self
             .sessions
             .iter()
-            .filter(|(k, s)| s.owner == *owner && Some(k.as_str()) != keep)
+            .filter(|(k, s)| s.owner == *owner && Some(k.as_str()) != keep && !s.held())
             .min_by_key(|(k, s)| (s.last_ms, (*k).clone()))
             .map(|(k, _)| k.clone());
         match victim {
