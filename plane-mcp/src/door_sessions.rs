@@ -949,6 +949,10 @@ fn may_subscribe(plane: &McpDoor, session: &str, owner: &Owner, uri: &str) -> Op
 /// ([`fetch_in`]: the stateless request first, negotiated into a session or onto the `2024-11-05`
 /// stream as the member needs, every hop on the connector), on the unit's ticket: READY with
 /// whether the member answered it with a JSON-RPC result.
+///
+/// A STDIO MEMBER is sent nothing and the subscription stands: busbar keeps no subscription with a
+/// child, and what the child announces beside an exchange busbar relays to it reaches the uri's
+/// watchers ([`announce`]).
 fn upstream(
     instance: &Instance<'_, McpDoor>,
     plane: &McpDoor,
@@ -960,10 +964,13 @@ fn upstream(
     let Some(def) = held.section.servers.get(server) else {
         return Poll::Ready(Err(format!("MCP server `{server}` is not registered")));
     };
-    if super::door_program::is_program(def) || def.url.is_empty() {
-        return Poll::Ready(Err(
-            "it is reached over stdio, where busbar holds no resource subscription".to_string(),
-        ));
+    if super::door_program::is_program(def) {
+        return Poll::Ready(Ok(()));
+    }
+    if def.url.is_empty() {
+        return Poll::Ready(Err(format!(
+            "MCP server `{server}` registers no `url:` busbar can reach it at"
+        )));
     }
     let mut request = verb.build(&def.url, SUBSCRIBE_REQUEST_ID, None);
     // A token_exchange member's token is asked for under the registration's own scope, as its

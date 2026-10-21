@@ -2722,3 +2722,64 @@ fn the_ungoverned_legacy_diagnostic_is_reported_once_when_carried() {
     );
     assert_eq!(opened(172, "").diags, 0, "latched: said once per instance");
 }
+
+// ── a stdio member's resource subscription ─────────────────────────────────────────────────────
+
+/// `initialize` as `caller` on `unit`, re-called while it pends (a unit may carry an unsubscribe
+/// busbar owes a member before its own answer): the session it opened.
+fn open_session(d: &Door, unit: u64, caller: &str) -> String {
+    let arrived = d.arrive(unit, "POST", "/mcp", INIT_2025, &[ACCEPT_BOTH]);
+    assert_eq!(arrived.outcome, Outcome::Ready, "{arrived:?}");
+    let answered = d.settle(unit, &Given::caller(caller, INIT_2025));
+    assert_eq!(answered.status, 200, "{}", answered.text());
+    answered
+        .field("mcp-session-id")
+        .expect("the answer names its session")
+        .to_string()
+}
+
+/// `body` POSTed in `session` as `caller` on `unit`, re-called while it pends.
+fn session_post(d: &Door, unit: u64, session: &str, caller: &str, body: &[u8]) -> Answered {
+    let fields = [
+        ACCEPT_BOTH,
+        ("mcp-session-id", session),
+        ("mcp-protocol-version", "2025-06-18"),
+    ];
+    assert_eq!(
+        d.arrive(unit, "POST", "/mcp", body, &fields).outcome,
+        Outcome::Ready
+    );
+    d.settle(unit, &Given::caller(caller, body))
+}
+
+/// The section with one `transport: stdio` member declaring a resource.
+const STDIO_SECTION: &str = r#"{
+    "io": {"transport": "stdio", "command": "/usr/bin/true", "pin": {"mechanism": "unpinned"}, "tools_allow": {"read_file": {}}, "resources_allow": {"file:///notes": {"name": "notes", "text": "hi"}}}
+}"#;
+
+/// RED: A STDIO MEMBER'S RESOURCE SUBSCRIPTION STANDS: it is acknowledged and held, and nothing is
+/// sent to the child (busbar keeps no subscription with a child; what the child announces beside a
+/// relayed exchange reaches the watchers). RED: the caller was refused because the member is reached
+/// over stdio.
+#[test]
+fn a_stdio_members_resource_subscription_is_acknowledged() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open_with(STDIO_SECTION);
+    let session = open_session(&d, 230, ALICE);
+    let subscribe =
+        br#"{"jsonrpc":"2.0","id":3,"method":"resources/subscribe","params":{"uri":"file:///notes"}}"#;
+    let subscribed = session_post(&d, 231, &session, ALICE, subscribe);
+    assert_eq!(subscribed.status, 200, "{}", subscribed.text());
+    assert_eq!(
+        subscribed.json()["result"],
+        json!({}),
+        "the subscription is acknowledged: {}",
+        subscribed.text()
+    );
+    assert!(
+        subscriptions_seen().is_empty(),
+        "nothing was sent for it: {:?}",
+        subscriptions_seen()
+    );
+}
