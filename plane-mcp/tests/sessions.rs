@@ -2340,3 +2340,90 @@ fn the_legacy_get_carries_no_stateless_mirror_headers() {
         );
     }
 }
+
+/// RED: A SESSION REVISION'S ANSWER IS THE UPSTREAM'S OWN BYTES: a `tools/call` in a `2025-06-18`
+/// session reaches its caller with the upstream's result members in the upstream's order and its
+/// numbers as the upstream spelt them (`1.0`, `1e3`), only the stateless-only members cut out.
+/// RED: the answer was parsed and printed again, its members sorted and `1e3` re-spelt `1000.0`.
+#[test]
+fn a_session_answer_is_relayed_byte_for_byte() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open();
+    let init = initialize(&d, 120, ALICE);
+    let session = init
+        .field("mcp-session-id")
+        .expect("the answer names its session")
+        .to_string();
+    let call = br#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"st_read_file","arguments":{}}}"#;
+    let fields = [
+        ACCEPT_BOTH,
+        ("mcp-session-id", session.as_str()),
+        ("mcp-protocol-version", "2025-06-18"),
+    ];
+    let arrived = d.arrive(121, "POST", "/mcp", call, &fields);
+    assert_eq!(arrived.outcome, Outcome::Ready, "{arrived:?}");
+    d.piece(121, &Given::attempt(ALICE, "st"));
+    let send = d.pump(121, &Given::caller(ALICE, call));
+    assert!(
+        send.far,
+        "the call is relayed: {} {}",
+        send.status,
+        send.text()
+    );
+    let far = br#"{"jsonrpc":"2.0","id":0,"result":{"zeta":1.0,"content":[{"type":"text","text":"x"}],"resultType":"complete","alpha":1e3,"ttlMs":5}}"#;
+    let answered = d.settle(121, &Given::far(ALICE, 200, vec![JSON_TYPE], far));
+    assert_eq!(answered.status, 200, "{}", answered.text());
+    assert_eq!(
+        answered.text(),
+        r#"{"id":5,"jsonrpc":"2.0","result":{"zeta":1.0,"content":[{"type":"text","text":"x"}],"alpha":1e3}}"#,
+        "the upstream's own bytes, only the stateless-only members cut"
+    );
+}
+
+/// RED: A `2024-11-05` UPSTREAM'S ANSWER IS ITS OWN BYTES even when its log records ride ahead of
+/// it: the caller reads the result's members in the upstream's order and its numbers as spelt.
+/// RED: with a frame riding, the answer was parsed and printed again.
+#[test]
+fn a_legacy_answer_with_frames_is_relayed_byte_for_byte() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open_with(LEGACY_SECTION);
+    let (a, fields) = legacy_call(30, "a.txt");
+    relayed(&d, 122, ALICE, &a, &fields);
+    upstreams().as_mut().unwrap().hold_calls = true;
+    assert_eq!(
+        d.piece(122, &walk_refused(ALICE)).outcome,
+        Some(Outcome::Pending)
+    );
+    let session = legacy_sessions()[0].clone();
+    on_stream(&session, |s| {
+        let held = std::mem::take(&mut s.held);
+        let text = String::from_utf8(held[0].clone()).unwrap();
+        let data = text
+            .lines()
+            .find_map(|l| l.strip_prefix("data: "))
+            .expect("the held answer");
+        let id = serde_json::from_str::<Value>(data).unwrap()["id"].clone();
+        s.events.push_back(sse_event(
+            "message",
+            r#"{"jsonrpc":"2.0","method":"notifications/message","params":{"level":"info","data":"working"}}"#,
+        ));
+        s.events.push_back(sse_event(
+            "message",
+            &format!(
+                r#"{{"jsonrpc":"2.0","id":{id},"result":{{"zeta":1.0,"content":[{{"type":"text","text":"legacy a.txt"}}],"alpha":1e3}}}}"#
+            ),
+        ));
+    });
+    d.turn();
+    let answered = d.pump(122, &walk_refused(ALICE));
+    assert_eq!(answered.status, 200, "{}", answered.text());
+    assert!(
+        answered.text().contains(
+            r#""zeta":1.0,"content":[{"type":"text","text":"legacy a.txt"}],"alpha":1e3}"#
+        ),
+        "the upstream's own bytes: {}",
+        answered.text()
+    );
+}

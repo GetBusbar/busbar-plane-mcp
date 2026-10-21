@@ -834,16 +834,11 @@ fn framed_answer(body: Vec<u8>, frames: Vec<Value>) -> (Vec<u8>, bool) {
     if frames.is_empty() {
         return (body, false);
     }
-    let Ok(answer) = serde_json::from_slice::<Value>(&body) else {
-        return (body, false);
-    };
-    let mut out = Vec::new();
-    for frame in frames.iter().chain(std::iter::once(&answer)) {
-        out.extend_from_slice(b"event: message\ndata: ");
-        out.extend(serde_json::to_vec(frame).unwrap_or_default());
-        out.extend_from_slice(b"\n\n");
+    // The answer rides as its own bytes (Law 11), as the stateless path frames one.
+    match crate::framing::event_stream(&body, &[], &frames) {
+        Some(stream) => (stream, true),
+        None => (body, false),
     }
-    (out, true)
 }
 
 /// A CALL OVER THE HELD STREAM of `key` (a member and a caller binding), on the call's own ticket:

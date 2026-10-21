@@ -184,3 +184,46 @@ fn the_param_mirror_names_every_annotated_string_argument() {
     assert!(param_mirror(None, Some(&args)).is_empty());
     assert!(param_mirror(Some(&schema), None).is_empty());
 }
+
+/// LOWERING CUTS ONLY THE STATELESS-ONLY MEMBERS' SPANS: an answer with nothing to lower is its own
+/// bytes; one with them keeps every other member's order, spacing and number spelling, wherever
+/// the cut members sit (first, between, last, all); an incomplete result is not expressible.
+#[test]
+fn lowering_an_answer_splices_its_own_bytes() {
+    let plain = br#"{"id":1,"result":{"z":1.0,"a":1e3}}"#;
+    assert_eq!(lower_answer(plain), Some(Lowered::Unchanged));
+    let cases: &[(&str, &str)] = &[
+        (
+            r#"{"id":1,"result":{"resultType":"complete","z":1.0,"a":1e3}}"#,
+            r#"{"id":1,"result":{"z":1.0,"a":1e3}}"#,
+        ),
+        (
+            r#"{"id":1,"result":{"z":1.0,"ttlMs":5,"a":1e3}}"#,
+            r#"{"id":1,"result":{"z":1.0,"a":1e3}}"#,
+        ),
+        (
+            r#"{"id":1,"result":{"z":1.0,"ttlMs":5,"cacheScope":"x"}}"#,
+            r#"{"id":1,"result":{"z":1.0}}"#,
+        ),
+        (
+            r#"{"id":1,"result":{"ttlMs":5,"cacheScope":"x"}}"#,
+            r#"{"id":1,"result":{}}"#,
+        ),
+        (
+            "{\n  \"id\": 1,\n  \"result\": {\n    \"ttlMs\": 5,\n    \"b\": [1, 2]\n  }\n}",
+            "{\n  \"id\": 1,\n  \"result\": {\n    \"b\": [1, 2]\n  }\n}",
+        ),
+    ];
+    for (given, lowered) in cases {
+        assert_eq!(
+            lower_answer(given.as_bytes()),
+            Some(Lowered::Spliced(lowered.as_bytes().to_vec())),
+            "{given}"
+        );
+    }
+    assert_eq!(
+        lower_answer(br#"{"id":1,"result":{"resultType":"input_required"}}"#),
+        Some(Lowered::Inexpressible)
+    );
+    assert_eq!(lower_answer(b"not json"), None);
+}
