@@ -404,9 +404,9 @@ fn red_two_callers_of_one_member_never_share_a_session() {
     assert_ne!(upstream_key("f", "s\u{1f}x"), upstream_key("fs", "x"));
 }
 
-/// EVERY REQUEST IN A SESSION TAKES ITS OWN ID (row 159 finding 3): the session's numbering never
-/// repeats while the session is remembered, survives the session being remembered again, and
-/// starts over for a new session; a stateless memory numbers nothing. RED: a shared round id.
+/// EVERY REQUEST IN A SESSION TAKES ITS OWN ID (row 159 finding 3): the numbering never repeats
+/// while the session is remembered and survives the session being remembered again; a stateless
+/// memory numbers nothing. RED: a shared round id.
 #[test]
 fn red_every_request_in_a_session_takes_its_own_id() {
     let mut u = UpstreamTable::new(16, 1 << 16);
@@ -423,9 +423,9 @@ fn red_every_request_in_a_session_takes_its_own_id() {
         !distinct.contains(&next),
         "the same session reissued id {next}"
     );
-    // A new session starts its own numbering.
+    // A new session numbers on from the instance's counter.
     u.put(&k, in_session("s2"));
-    assert_eq!(u.next_id(&k), Some(SESSION_FIRST_ID));
+    assert!(u.next_id(&k).is_some_and(|id| id > next));
     // A stateless upstream has no session to number.
     let s = upstream_key("st", "alice");
     u.put(
@@ -439,4 +439,38 @@ fn red_every_request_in_a_session_takes_its_own_id() {
     assert_eq!(u.next_id(&s), None);
     u.forget(&k);
     assert_eq!(u.next_id(&k), None);
+}
+
+/// NO ID IS ISSUED TWICE BY AN INSTANCE, whatever becomes of its memory: a remembered session
+/// evicted and remembered again, one forgotten and opened anew, and the id a call carried into a
+/// session the upstream then forgot (a `404` re-initialize keeps it for the new session) are all
+/// numbered from one counter that only goes up. RED: each session counted from the first id
+/// again, so the re-put session and the re-initialized one reissued ids already in flight.
+#[test]
+fn red_no_id_is_issued_twice_whatever_becomes_of_the_memory() {
+    let mut u = UpstreamTable::new(1, 1 << 16);
+    let k = upstream_key("fs", "alice");
+    let mut issued = std::collections::BTreeSet::new();
+    let take = |u: &mut UpstreamTable, issued: &mut std::collections::BTreeSet<u64>, n: usize| {
+        for _ in 0..n {
+            let id = u.next_id(&k).expect("a session is remembered");
+            assert!(issued.insert(id), "id {id} was issued twice");
+        }
+    };
+    u.put(&k, in_session("s1"));
+    take(&mut u, &mut issued, 3);
+    // Another upstream evicts it (the table holds one), and a finishing call remembers it again.
+    u.put(&upstream_key("other", "bob"), in_session("o1"));
+    assert_eq!(u.next_id(&k), None, "evicted");
+    u.put(&k, in_session("s1"));
+    take(&mut u, &mut issued, 3);
+    // The upstream forgot it (`404`): the call keeps the id it took, and the new session numbers on.
+    let carried = u.next_id(&k).expect("an id");
+    assert!(issued.insert(carried));
+    u.forget(&k);
+    u.put(&k, in_session("s2"));
+    take(&mut u, &mut issued, 3);
+    // The stateless counter draws from the same numbering.
+    let drawn = u.take_id();
+    assert!(issued.insert(drawn), "id {drawn} was issued twice");
 }

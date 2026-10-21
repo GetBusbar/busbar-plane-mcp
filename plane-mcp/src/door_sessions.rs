@@ -1463,6 +1463,14 @@ impl Negotiating {
     ) -> Self {
         let key = crate::tool_sessions::upstream_key(member, binding);
         let (remembered, session_id) = remembered(plane, &key);
+        // A request lowered into a remembered session carries a token derived from the id it is
+        // sent under (the negotiator writes both); any other carries one drawn here from the
+        // instance's one counter, so two calls in flight never share a progress token (the round's
+        // id, `0` on every first round, is no such thing).
+        let original = match session_id {
+            Some(_) => original,
+            None => with_progress_token(plane, original),
+        };
         let stateless_known = remembered
             .as_ref()
             .is_some_and(|r| r.revision == Revision::R2026_07_28);
@@ -1806,6 +1814,28 @@ pub(super) fn fetch_in(
         }
         Negotiated::Failed(reason) => Err(reason),
     })
+}
+
+/// `request` with the progress token it carries (when it asks for progress at all) replaced by one
+/// no other request of this instance carries: `busbar-` and an id from the instance's one counter.
+fn with_progress_token(plane: &McpDoor, mut request: OutboundRequest) -> OutboundRequest {
+    let Ok(mut body) = serde_json::from_slice::<Value>(&request.body) else {
+        return request;
+    };
+    let Some(token) = body
+        .pointer_mut("/params/_meta/progressToken")
+        .filter(|t| !t.is_null())
+    else {
+        return request;
+    };
+    let Some(n) = plane.upstreams.with(&(), |t| t.map(|t| t.take_id())) else {
+        return request;
+    };
+    *token = Value::from(format!("busbar-{n}"));
+    if let Ok(bytes) = serde_json::to_vec(&body) {
+        request.body = bytes;
+    }
+    request
 }
 
 /// `body` (one JSON-RPC answer) with its top-level `id` put back to `id` when it is `sent`, the

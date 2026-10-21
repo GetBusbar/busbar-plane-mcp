@@ -636,16 +636,18 @@ pub fn upstream_key(member: &str, binding: &str) -> String {
 pub const SESSION_FIRST_ID: u64 = 1 << 32;
 
 /// The client's per-upstream memory, bounded in count and bytes with least-recently-used eviction.
-/// Forgetting an upstream costs one renegotiation and nothing else. Each remembered session also
-/// numbers the requests busbar sends in it ([`UpstreamTable::next_id`]), so no id repeats within
-/// one session (the session revisions forbid it).
+/// Forgetting an upstream costs one renegotiation and nothing else. The requests busbar sends in a
+/// remembered session are numbered by ONE counter for the whole instance ([`UpstreamTable::next_id`],
+/// [`UpstreamTable::take_id`]), never reset by an eviction, a session remembered again, or a
+/// session forgotten and opened anew, so no id repeats within any session (the session revisions
+/// forbid it), whatever became of the memory in between.
 #[derive(Debug)]
 pub struct UpstreamTable {
     max_entries: usize,
     max_bytes: usize,
     entries: BTreeMap<String, (Remembered, u64)>,
-    /// The next request id per remembered session, by key: kept while the session is.
-    ids: BTreeMap<String, u64>,
+    /// The next id the instance issues: monotonic for the instance's life.
+    next: u64,
     bytes: usize,
     tick: u64,
 }
@@ -658,7 +660,7 @@ impl UpstreamTable {
             max_entries: max_entries.max(1),
             max_bytes,
             entries: BTreeMap::new(),
-            ids: BTreeMap::new(),
+            next: SESSION_FIRST_ID,
             bytes: 0,
             tick: 0,
         }
@@ -692,33 +694,26 @@ impl UpstreamTable {
         })
     }
 
-    /// THE NEXT REQUEST ID of `upstream`'s remembered session, taken: unique within that session
-    /// for as long as it is remembered. `None` when nothing with a session is remembered for it.
+    /// THE NEXT REQUEST ID for `upstream`'s remembered session, taken from the instance's one
+    /// counter ([`Self::take_id`]): never issued before by this instance, so never repeated in that
+    /// session or any other. `None` when nothing with a session is remembered for it.
     pub fn next_id(&mut self, upstream: &str) -> Option<u64> {
         self.entries
             .get(upstream)
             .filter(|(r, _)| r.session.is_some())?;
-        let id = self
-            .ids
-            .entry(upstream.to_string())
-            .or_insert(SESSION_FIRST_ID);
-        let taken = *id;
-        *id = id.saturating_add(1);
-        Some(taken)
+        Some(self.take_id())
     }
 
-    /// Remembers `value` for `upstream`, evicting least-recently-used upstreams to fit. The same
-    /// session remembered again keeps its id numbering; another session starts its own.
+    /// AN ID NEVER ISSUED BEFORE by this instance: the counter only goes up, from
+    /// [`SESSION_FIRST_ID`], for the instance's life.
+    pub fn take_id(&mut self) -> u64 {
+        let taken = self.next;
+        self.next = self.next.saturating_add(1);
+        taken
+    }
+
+    /// Remembers `value` for `upstream`, evicting least-recently-used upstreams to fit.
     pub fn put(&mut self, upstream: &str, value: Remembered) {
-        let same = self
-            .entries
-            .get(upstream)
-            .is_some_and(|(r, _)| r.session.is_some() && r.session == value.session);
-        let kept = if same {
-            self.ids.get(upstream).copied()
-        } else {
-            None
-        };
         self.forget(upstream);
         let cost = value.bytes(upstream);
         if cost > self.max_bytes {
@@ -739,9 +734,6 @@ impl UpstreamTable {
         self.bytes += cost;
         self.entries
             .insert(upstream.to_string(), (value, self.tick));
-        if let Some(id) = kept {
-            self.ids.insert(upstream.to_string(), id);
-        }
     }
 
     /// Forgets `upstream` (its session ended, or it answered 404 for it).
@@ -749,7 +741,6 @@ impl UpstreamTable {
         if let Some((r, _)) = self.entries.remove(upstream) {
             self.bytes -= r.bytes(upstream);
         }
-        self.ids.remove(upstream);
     }
 }
 
