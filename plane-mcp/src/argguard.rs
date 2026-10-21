@@ -361,16 +361,19 @@ fn judge_string(
     Ok(())
 }
 
-/// THE HOST A WHATWG URL READER FINDS IN `value`, read as a fetching client reads it (the `url`
-/// crate is that reader: it strips leading and trailing C0 controls and spaces, removes every tab
-/// and newline, and reads a backslash as a slash under a web scheme). `Some(Some(host))`: the value
-/// is a URL naming `host`. `Some(None)`: it begins with a web scheme and a slash but no reader
-/// accepts it, so no host can be judged and it is refused. `None`: it names no host.
+/// THE HOST A WHATWG URL READER FINDS IN `value`, read as a fetching client reads it, by the
+/// contract's one URL reader (`busbar_contract::net::parse_url`, the reader the host's own
+/// destination guard reads with): leading and trailing C0 controls and spaces stripped, every tab
+/// and newline removed, a backslash read as a slash under a web scheme and any run of slashes after
+/// it skipped, the authority ended at `/`, `?`, `#` or `\`, the host percent-decoded.
+/// `Some(Some(host))`: the value is a URL naming `host`, lower-cased. `Some(None)`: it begins with
+/// a web scheme and a slash but names no host the reader accepts, or names one outside ASCII (a
+/// fetching client maps such a name through IDNA to a host this guard cannot see, so none is
+/// judged and it is refused). `None`: it names no host.
 fn whatwg_host(value: &str) -> Option<Option<String>> {
-    match url::Url::parse(value) {
-        // The reader's own serialisation, its host read VERBATIM by the contract's shared reader:
-        // an IPv6 literal unbracketed, any other host as the reader spelled it (a root dot kept).
-        Ok(parsed) => busbar_contract::net::url_host_verbatim(parsed.as_str()).map(Some),
+    match busbar_contract::net::parse_url(value) {
+        Ok(parts) if parts.host.is_ascii() => Some(Some(parts.host.to_ascii_lowercase())),
+        Ok(_) => Some(None),
         Err(_) => names_web_scheme(value).then_some(None),
     }
 }
@@ -393,23 +396,22 @@ fn names_web_scheme(value: &str) -> bool {
 
 /// THE HOST A `uri-reference` NAMES, under the WHATWG reading: an absolute one's own, or a relative
 /// one resolved against a web base. A reference that names a host (`//h`, and the `\\h`, `/\h`
-/// and `\/h` a reader takes for it) resolves to the same host against any base; a path-relative
-/// one takes the base's, so two bases that answer different hosts mean it names none.
+/// and `\/h` a reader takes for it) names that host against any web base; any other relative one
+/// (a path, a query, a fragment) takes the base's, so it names none of its own.
 fn reference_host(value: &str) -> Option<Option<String>> {
     if let Some(found) = whatwg_host(value) {
         return Some(found);
     }
-    let against = |base: &str| {
-        url::Url::parse(base)
-            .ok()?
-            .join(value)
-            .ok()
-            .and_then(|u| busbar_contract::net::url_host_verbatim(u.as_str()))
-    };
-    match (against("https://a.invalid/"), against("https://b.invalid/")) {
-        (Some(a), Some(b)) if a == b => Some(Some(a)),
-        _ => None,
+    let cleaned = whatwg_cleaned(value);
+    let mut opening = cleaned.chars();
+    let network_path = matches!(
+        (opening.next(), opening.next()),
+        (Some('/' | '\\'), Some('/' | '\\'))
+    );
+    if network_path {
+        return whatwg_host(&format!("https:{cleaned}"));
     }
+    None
 }
 
 /// Whether the WHOLE value is an `http(s)` URL. Deliberately a prefix test on the whole trimmed
