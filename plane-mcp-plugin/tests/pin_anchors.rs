@@ -41,10 +41,12 @@ fn linked(d: &Dispatcher) -> Plugin<Plane> {
     .expect("the linked door loads")
 }
 
-/// RED on a plane whose roots are not peer-key pins: the host would seal no pin, and an operator's
-/// `cert_spki`, `pinned_pubkey` or `mtls` key would be parsed and never compared with the far end's.
+/// RED on a plane whose far-end pins are not peer-key pins: the host would seal no pin, and an
+/// operator's `cert_spki` or `mtls` key would be parsed and never compared with the far end's.
+/// `pinned_pubkey` names a signed manifest's issuer key (predev's posture), a root that is not the
+/// far end's key.
 #[test]
-fn every_root_pin_mechanism_is_a_peer_key_pin_the_host_seals() {
+fn every_far_end_pin_mechanism_is_a_peer_key_pin_the_host_seals() {
     let d = Dispatcher::new(DispatchConfig::default());
     let served = linked(&d).served();
     let pin = served
@@ -59,14 +61,17 @@ fn every_root_pin_mechanism_is_a_peer_key_pin_the_host_seals() {
         .map(|m| m.token)
         .collect();
     assert_eq!(roots, ["pinned_pubkey", "cert_spki", "mtls"]);
-    for m in pin.mechanisms {
-        assert_eq!(
-            m.peer_key, m.root,
-            "`{}`: a root's key is the far end's key, sealed and enforced; the no-root spelling \
-             carries none",
-            m.token
-        );
-    }
+    let peer: Vec<&str> = pin
+        .mechanisms
+        .iter()
+        .filter(|m| m.peer_key)
+        .map(|m| m.token)
+        .collect();
+    assert_eq!(
+        peer,
+        ["cert_spki", "mtls"],
+        "the far end's key is sealed and enforced under `cert_spki` and `mtls`"
+    );
 }
 
 /// RED on a plane whose http need names no `trust_from`: an `mtls` registration's client

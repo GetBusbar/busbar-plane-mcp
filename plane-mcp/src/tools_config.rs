@@ -119,11 +119,11 @@ pub const ASK_METHODS: &[&str] = &[ASK_ELICITATION, ASK_SAMPLING, ASK_ROOTS];
 
 /// `tools.<server>.pin.mechanism` — WHICH authenticity root this registration has.
 ///
-/// Exactly four: an operator-pinned public key, the endpoint's certificate key, mutual TLS, or
-/// nothing at all — `pinned_pubkey | cert_spki | mtls | unpinned`. The three roots are each a pin of
-/// the FAR END'S KEY (`PinMechanismDecl::peer_key` in [`TRUST_KEYS`]): the host seals the pin's key
-/// into the registration's member route and the connector refuses every connection whose server
-/// presents another.
+/// Exactly four: a signed manifest's operator-pinned issuer key, the endpoint's certificate key,
+/// mutual TLS, or nothing at all — `pinned_pubkey | cert_spki | mtls | unpinned`. `cert_spki` and
+/// `mtls` are pins of the FAR END'S KEY (`PinMechanismDecl::peer_key` in [`TRUST_KEYS`]): the host
+/// seals the pin's key into the registration's member route and the connector refuses every
+/// connection whose server presents another.
 ///
 /// ## WHY THE `Mcp` PREFIX, and why it is on THIS one and not on the sibling plane's
 ///
@@ -147,9 +147,10 @@ pub const ASK_METHODS: &[&str] = &[ASK_ELICITATION, ASK_SAMPLING, ASK_ROOTS];
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum McpPinMechanism {
-    /// An operator-supplied, out-of-band public key, held as a PEER-KEY pin: the connector refuses a
-    /// connection whose server presents another key. This build does not verify an MCP-native
-    /// signed manifest under it; what is enforced is the far end's key.
+    /// A signed tool manifest's operator-supplied, out-of-band issuer public key. It is a root (it
+    /// carries key material, and makes the registration approvable), not a pin of the far end's
+    /// key: the connector does not compare it with the server's certificate, and this build
+    /// verifies no MCP-native manifest signature under it, as predev did not.
     PinnedPubkey,
     /// The endpoint's certificate key, pinned: the host seals it into the registration's member
     /// route and the connector refuses, before a request byte is written, a connection whose
@@ -198,10 +199,11 @@ pub struct ServerPinCfg {
     /// Which root this is. REQUIRED: a pin whose mechanism is inferred is a pin whose meaning
     /// changes when the code that infers it changes.
     pub mechanism: McpPinMechanism,
-    /// The operator-supplied material: the far end's key pin, the SHA-256 of its certificate's
-    /// SubjectPublicKeyInfo in standard base64 (`busbar_contract::transport::trust::key_pin`'s
-    /// spelling, the string the connector compares the observed key against). Absent only for
-    /// `unpinned`.
+    /// The operator-supplied material. Under `cert_spki` and `mtls`, the far end's key pin: the
+    /// SHA-256 of its certificate's SubjectPublicKeyInfo in standard base64
+    /// (`busbar_contract::transport::trust::key_pin`'s spelling, the string the connector compares
+    /// the observed key against). Under `pinned_pubkey`, a manifest issuer's public key. Absent
+    /// only for `unpinned`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
 }
@@ -775,8 +777,9 @@ pub const TOOL_APPROVAL_FIELD: &str = "schema_hash";
 
 /// THE KERNEL-OWNED TRUST KEYS of one registration, declared for the kernel to parse and judge:
 /// the `pin:` object over the four mechanisms above (no fingerprint: a server here offers none an
-/// operator could approve out of band; every root's key is the far end's key, `peer_key`, which
-/// the host seals into the registration's member route and the connector enforces), the `verify_ttl:` bound with its default, and the
+/// operator could approve out of band; the key of `cert_spki` and `mtls` is the far end's key,
+/// `peer_key`, which the host seals into the registration's member route and the connector
+/// enforces), the `verify_ttl:` bound with its default, and the
 /// registration's private reach, `allow_private:` (the connector admits that server's own private
 /// address for its need, never a metadata one), and its tool approvals, `tools_allow:`'s
 /// `schema_hash`. There is no recovery-backoff key; the kernel reads its absence as zero.
@@ -790,7 +793,7 @@ pub const TRUST_KEYS: &[TrustKeyDecl] = &[
             PinMechanismDecl {
                 token: "pinned_pubkey",
                 root: true,
-                peer_key: true,
+                peer_key: false,
             },
             PinMechanismDecl {
                 token: "cert_spki",

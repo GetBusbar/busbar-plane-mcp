@@ -97,8 +97,8 @@ pub const SECTIONS: &[Section] = &[
 /// WHERE EACH REGISTERED SERVER'S CLIENT IDENTITY IS WRITTEN, as a member path (`settings.*.<key>`,
 /// the http need's `trust_from`): a registration's `client_identity` (`{cert, key}`, secret
 /// references), busbar's client certificate for that server, which the host resolves once and the
-/// connector presents on every connection to it. The registration's `pin` key, under every root
-/// mechanism, is the far end's key the connector holds each of those connections to.
+/// connector presents on every connection to it. The registration's `pin` key, under `cert_spki`
+/// and `mtls`, is the far end's key the connector holds each of those connections to.
 pub const CLIENT_IDENTITY_FROM: &str = "settings.*.client_identity";
 
 /// THE SECRET REFERENCES ITS SECTION HOLDS, by settings path (`*` = every registration, every
@@ -252,13 +252,15 @@ const RECORD_CHAINS: &[RecordChain] = &[RecordChain {
     _reserved: 0,
 }];
 
-/// The pin's four mechanisms; three are authenticity roots and `unpinned` is not. Each root's key
-/// is the far end's key ([`MECHANISM_PEER_KEY`]): the host seals it into the registration's member
-/// route and the connector refuses a connection whose server presents another key.
+/// The pin's four mechanisms; three are authenticity roots and `unpinned` is not. `cert_spki` and
+/// `mtls` pin the far end's KEY ([`MECHANISM_PEER_KEY`]): the host seals it into the registration's
+/// member route and the connector refuses a connection whose server presents another key.
+/// `pinned_pubkey` is a root whose key is a signed manifest's issuer key, kept for the plane and
+/// the kernel's judgement as predev kept it, never compared with the far end's key.
 const PIN_MECHANISMS: &[PinMechanism] = &[
     PinMechanism {
         token: abi_str("pinned_pubkey"),
-        flags: MECHANISM_ROOT | MECHANISM_PEER_KEY,
+        flags: MECHANISM_ROOT,
         _reserved: 0,
     },
     PinMechanism {
