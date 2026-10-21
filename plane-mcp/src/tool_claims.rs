@@ -5,20 +5,13 @@
 //! route table: a boot that has to decide whether two claims could match the same bytes cannot do it
 //! through an unexplained disjunction.
 //!
-//! ## The one thing that does not fit, said first
+//! ## The mount is FIXED
 //!
-//! This protocol's mount is CONFIGURED. An operator writes an absolute address for the deployment,
-//! and the codec derives the path this plane is served at from that address's path — so two
-//! deployments of the same build can serve it at two different paths. The contract's claim, on the
-//! other hand, is an associated constant: a selector is a compile-time literal, read once at
-//! registration and sealed into policy.
-//!
-//! Those two facts cannot both be honoured. What is declared below is the path the codec's own
-//! documentation gives as the derivation's example and the one every fixture in the tree uses, and
-//! that is stated here rather than hidden: a deployment that configures a different path is a
-//! deployment this plane's claims do not cover, and the composition root must either constrain the
-//! configuration or the contract must grow a way for a claim to name a configured value. It is a
-//! finding, it is not fixed here, and it is the first thing the crate's notes record.
+//! A selector is a compile-time literal, read once at registration and sealed into policy, so this
+//! protocol is served at one path ([`DEFAULT_MOUNT`]) and its discovery document at the one path
+//! composed from it ([`DEFAULT_METADATA`]). An operator's configured address naming any other path
+//! is refused at validation (CG-17), so no deployment is served at a path these claims do not
+//! cover.
 
 use busbar_contract::grammar::{Claim, Selector};
 
@@ -119,21 +112,6 @@ pub const CLAIMS: &[Claim] = &[
     // A locally launched server has no path at all: its frames arrive on a named stream.
     claim(CARRIER_STDIO, Selector::StreamName(STDIO_STREAM)),
 ];
-
-/// Whether this plane declares a claim on `key`.
-///
-/// A NAMED QUESTION on the plane's own declaration, for the same reason `is_stdio` above is one.
-/// The arrival step must establish that the claim it was handed is one of THIS plane's — a plane
-/// may not answer a unit on a surface it never declared — and the only honest source for that
-/// answer is the claim table itself. Asked at the call site it reads as `claim.transport ==
-/// <something>`: an agnostic caller comparing against a wire carrier, which is the shape the axis
-/// lint exists to catch and which a type-blind reader cannot tell apart from the real thing. Asked
-/// here it is what it actually is — a lookup in the declaration — and it leaves exactly one line in
-/// the tree that compares a claim's transport, in the plane that owns the claims.
-#[must_use]
-pub fn declares(key: &str) -> bool {
-    CLAIMS.iter().any(|c| c.transport == key)
-}
 
 #[cfg(test)]
 #[path = "tests/claims.rs"]

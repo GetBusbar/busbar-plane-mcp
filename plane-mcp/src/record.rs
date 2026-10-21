@@ -59,13 +59,6 @@ impl McpCallRecord {
     // shape the actual reader (`from_journal_body`) cannot parse — a footgun, so it does not exist.
     // The plane owns only the READ-BACK of what the engine wrote.
 
-    /// Reconstruct a record from an opaque serde `call` body — the inverse of a plain `serde_json`
-    /// serialization of this struct. NOT the engine's persisted shape (that is the neutral journal
-    /// body — see [`Self::from_journal_body`]); this decodes a bare `McpCallRecord` where one is held.
-    pub fn from_body(body: &[u8]) -> RecordStoreResult<Self> {
-        decode_record(body)
-    }
-
     /// Reconstruct a record from the NEUTRAL durable-journal body the engine's call-log seam persists
     /// — `{seq, prev_hash, hash, content}`, where `content` is the pre-framed LengthPrefixed field
     /// SUFFIX the record's digest was sealed over. This is the shape core's store-backed call journal
@@ -238,6 +231,8 @@ impl McpDemotionRow {
     }
 
     /// Reconstruct a row from an opaque `demotion` body — the inverse of [`Self::to_plane_record`].
+    /// Read by the tests alone.
+    #[cfg(test)]
     pub fn from_body(body: &[u8]) -> RecordStoreResult<Self> {
         decode_record(body)
     }

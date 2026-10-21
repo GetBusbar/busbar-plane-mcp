@@ -10,8 +10,8 @@
 //!
 //! The transport guard closes the URL/host/address/redirect half: busbar resolves the UPSTREAM's own URL
 //! once, judges every address the resolver returned, and connects to the address that was judged.
-//! Routing is likewise immune to attacker text, because a route is decided on the bound identity
-//! and `super::dispatch` provably reads no free text at all.
+//! Routing is likewise immune to attacker text, because a route is decided on the published tool
+//! the call names (the catalogue entry it resolves to) and never on what its arguments say.
 //!
 //! Neither of those makes the PAYLOAD safe. A model that has just read a hostile tool description
 //! can still put `http://169.254.169.254/latest/meta-data/…` into a tool ARGUMENT, and without this
@@ -21,12 +21,13 @@
 //!
 //! ## Why the PINNED schema is what makes this a check rather than a guess
 //!
-//! `super::catalogue` already fetches, canonicalises and hash-pins each tool's input schema, and a
-//! schema that changed to hide or reveal a URL field is DRIFT, which quarantines the server before
-//! any call goes out. So the schema this walk reads is not "whatever the upstream said this
-//! morning" — it is the exact document whose digest an operator approved. [`super::dispatch`]
-//! re-compares that digest immediately before handing the schema here, so the walk cannot be
-//! steered by a schema swapped underneath it.
+//! Each tool's input schema is canonicalised and hash-pinned ([`crate::trust::tool_digest`]), and
+//! a schema that changed to hide or reveal a URL field is DRIFT: the kernel's approval
+//! (`trust.serves`) judges the digest the operator approved on every call, and refuses a drifted
+//! tool before any call goes out. So the schema this walk reads is not "whatever the upstream said
+//! this morning": it is the approved catalogue entry's own ([`crate::call::judge_arguments`] hands
+//! it here from the admitted call), so the walk cannot be steered by a schema swapped underneath
+//! it.
 //!
 //! ## Two detectors, and why there are two
 //!
@@ -71,8 +72,8 @@
 //! - **No mid-string URLs.** A URL embedded inside a longer free-text value in an UNDECLARED field
 //!   is not detected. Substring matching over prose is how a guard acquires false positives, and a
 //!   false positive here refuses a legitimate call.
-//! - **No plaintext-to-public rule.** `super::ssrf` refuses `http` to a public host because
-//!   busbar's own upstream credential rides that request. No busbar credential rides a tool
+//! - **No plaintext-to-public rule.** Refusing `http` to a public host protects a request that
+//!   carries busbar's own upstream credential. No busbar credential rides a tool
 //!   argument, so the rule does not transfer and is not applied.
 
 use busbar_contract::abi::host::service::{
@@ -246,10 +247,10 @@ pub struct ArgScan {
 }
 
 impl ArgScan {
-    /// Total values that were actually put through the guard.
-    /// Not read on the dispatch path: `mcp::upstream` acts on the REFUSAL, and the counts exist
-    /// for the floor assertions that stop a walker which visits nothing from passing.
-    #[allow(dead_code)]
+    /// Total values that were actually put through the guard. Read by the tests alone: the
+    /// dispatch path acts on the REFUSAL, and the counts exist for the floor assertions that stop
+    /// a walker which visits nothing from passing.
+    #[cfg(test)]
     pub fn judged(&self) -> usize {
         self.declared_judged + self.undeclared_judged
     }

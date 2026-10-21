@@ -16,7 +16,8 @@
 //!
 //! A CLIENT method is one a caller sends and this node answers. A PROVIDER method is one an upstream
 //! sends BACK during a call — asking for a completion, for a list of roots, or for something from
-//! the caller — which opens a unit of the upstream's own and runs all seven steps over it. A
+//! the caller — which is relayed to that call's caller inside the call's own unit (it opens no unit
+//! of its own; the caller's answer goes back to the upstream on the same unit). A
 //! NOTIFICATION is neither: it carries no identifier, obliges no answer, and the specification
 //! forbids replying to one.
 
