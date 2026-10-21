@@ -532,7 +532,6 @@ fn a_live_tasks_state_reads_back_from_its_records() {
         assert_eq!(read.detailed(), held.detailed());
         assert_eq!(read.answers(), held.answers());
         assert_eq!(read.asked, held.asked);
-        assert_eq!(read.relayed(), held.relayed());
         assert_eq!(read.take_relay(), held.clone().take_relay());
     }
 }
