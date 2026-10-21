@@ -443,7 +443,7 @@ fn open_session(
     revision: Revision,
     carriage: Carriage,
     now: u64,
-) -> Result<String, &'static str> {
+) -> Result<String, (u32, &'static str)> {
     for _ in 0..2 {
         let mut entropy = [0_u8; 16];
         let drawn = plane.services.is_some_and(|s| {
@@ -451,7 +451,10 @@ fn open_session(
                 .is_ok()
         });
         if !drawn {
-            return Err("the host's random source did not answer, so no session id can be minted");
+            return Err((
+                STATUS_UNAVAILABLE,
+                "the host's random source did not answer, so no session id can be minted",
+            ));
         }
         let opened = with_sessions(plane, |t| {
             t.open(entropy, owner.clone(), revision, carriage, now)
@@ -460,14 +463,29 @@ fn open_session(
             Some(Ok(id)) => return Ok(id.as_str().to_string()),
             Some(Err(OpenRefused::Collision)) => {}
             Some(Err(OpenRefused::NoEntropy)) => {
-                return Err("the host's random source answered no entropy")
+                return Err((
+                    STATUS_UNAVAILABLE,
+                    "the host's random source answered no entropy",
+                ))
+            }
+            Some(Err(OpenRefused::OwnerFull)) => {
+                return Err((
+                    STATUS_QUOTA,
+                    "this caller holds as many MCP sessions as this node keeps for one caller, \
+                     each with a live stream: end one (DELETE it, or close its stream) and open \
+                     again",
+                ))
             }
             Some(Err(OpenRefused::Full)) | None => {
-                return Err("this caller holds as many MCP sessions as this node keeps for it")
+                return Err((
+                    STATUS_UNAVAILABLE,
+                    "this node holds as many MCP sessions as it keeps, and none of this caller's \
+                     is idle to give way",
+                ))
             }
         }
     }
-    Err("two fresh session ids collided")
+    Err((STATUS_UNAVAILABLE, "two fresh session ids collided"))
 }
 
 /// A JSON-RPC error envelope.
@@ -656,7 +674,7 @@ fn open_endpoint(
         now,
     ) {
         Ok(session) => session,
-        Err(why) => return answer_of(STATUS_UNAVAILABLE, rpc_error(id, CODE_INTERNAL, why)),
+        Err((status, why)) => return answer_of(status, rpc_error(id, CODE_REFUSED, why)),
     };
     let result = adapt::initialize_result(&discovered, revision, false);
     let body = serde_json::to_vec(&crate::line::result(id, result)).unwrap_or_default();
@@ -1089,11 +1107,25 @@ pub(super) fn tick(plane: &McpDoor) {
     }
 }
 
-/// The op on `ticket` was cancelled: the stream it carried is dropped.
+/// The op on `ticket` was cancelled: the stream it carried is ended.
 pub(super) fn cancelled(plane: &McpDoor, ticket: Ticket) {
-    plane
-        .streams
-        .with_all(|m| m.retain(|_, s| s.ticket != ticket));
+    let keys: Vec<u64> = plane.streams.with_all(|m| {
+        m.iter()
+            .filter(|(_, s)| s.ticket == ticket)
+            .map(|(k, _)| *k)
+            .collect()
+    });
+    for key in keys {
+        end_stream(plane, key);
+    }
+}
+
+/// ENDS the held stream of unit `key`: it is no longer live work, so its cursor (kept for a
+/// resuming GET) and its session may give way again.
+fn end_stream(plane: &McpDoor, key: u64) -> Option<Stream> {
+    let ended = plane.streams.remove(&key)?;
+    with_sessions(plane, |t| t.release_stream(&ended.session, ended.stream));
+    Some(ended)
 }
 
 /// What an idle stream writes to say it is alive.
@@ -1123,7 +1155,7 @@ pub(super) fn piece(
         }
         match given.from {
             FROM_CALLER if given.flags & PIECE_LAST != 0 => {
-                plane.streams.remove(&key);
+                end_stream(plane, key);
                 unit.pending = Some(door_listen::frame(Vec::new(), true, true));
                 Some(true)
             }
@@ -1162,7 +1194,7 @@ pub(super) fn piece(
                 }
                 Some(Ok(Written::Done)) => {
                     plane.units.remove(&key);
-                    plane.streams.remove(&key);
+                    end_stream(plane, key);
                     Outcome::Ready
                 }
             }
@@ -1242,9 +1274,9 @@ fn open_stream(
             );
             let session = match opened {
                 Ok(session) => session,
-                Err(why) => {
-                    let body = rpc_error(&Value::Null, CODE_INTERNAL, why);
-                    unit.pending = Some(answer_of(STATUS_UNAVAILABLE, body));
+                Err((status, why)) => {
+                    let body = rpc_error(&Value::Null, CODE_REFUSED, why);
+                    unit.pending = Some(answer_of(status, body));
                     return Some((true, false));
                 }
             };
@@ -1275,13 +1307,32 @@ fn open_stream(
                     (session, replay.stream, delivered, false, bytes)
                 }
                 None => {
-                    let stream =
-                        with_sessions(plane, |t| t.open_stream(&session, owner, now)).flatten()?;
+                    let opened =
+                        with_sessions(plane, |t| t.open_stream(&session, owner, now)).flatten();
+                    // THE SESSION'S CURSORS ARE ALL READ BY LIVE STREAMS: the new one is refused,
+                    // and no live stream is ended for it.
+                    let Some(stream) = opened else {
+                        let refusal = Refusal {
+                            status: STATUS_QUOTA,
+                            id: None,
+                            code: CODE_REFUSED,
+                            message: "this MCP session holds as many open streams as a session \
+                                      keeps; close one and open again"
+                                .to_string(),
+                            data: Some(json!({ "reason": "stream_quota" })),
+                        };
+                        unit.pending =
+                            Some(Pending::answer(refusal.status, refusal.body(), None, &[]));
+                        return Some((true, false));
+                    };
                     (session, stream, 0, false, KEEPALIVE.to_vec())
                 }
             }
         }
     };
+    // THE STREAM IS LIVE WORK: its session is never evicted, nor its cursor dropped, while it is
+    // held ([`end_stream`] lets it go).
+    with_sessions(plane, |t| t.hold_stream(&session, stream));
     // One stream per live unit, so the unit table's admission bound (it refuses past `MAX_UNITS`,
     // and evicts nothing) bounds this table too.
     plane.streams.insert(
@@ -1361,8 +1412,8 @@ fn step_stream(plane: &McpDoor, ticket: Ticket, unit: &mut CallUnit) -> Option<b
     })
     .flatten();
     let Some(replay) = replay else {
-        // The session is gone (ended, expired, evicted): so is its stream.
-        plane.streams.remove(&unit.key);
+        // The session is gone (ended or expired): so is its stream.
+        end_stream(plane, unit.key);
         unit.pending = Some(door_listen::frame(Vec::new(), true, true));
         return Some(true);
     };

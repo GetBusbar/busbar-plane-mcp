@@ -474,3 +474,73 @@ fn red_no_id_is_issued_twice_whatever_becomes_of_the_memory() {
     let drawn = u.take_id();
     assert!(issued.insert(drawn), "id {drawn} was issued twice");
 }
+
+/// RED: LIVE WORK IS NEVER EVICTED. An owner at its session cap whose every session holds a live
+/// stream is refused its next open ([`OpenRefused::OwnerFull`]) rather than losing one; with one of
+/// them idle, that one gives way. A session at its cursor cap whose every cursor a live stream
+/// reads refuses the next stream rather than dropping the oldest; a cursor no stream reads any
+/// more gives way. RED: the open evicted the least recently used session, live stream and all, and
+/// the seventeenth stream dropped the first one's cursor.
+#[test]
+fn red_a_session_or_cursor_a_live_stream_reads_is_never_evicted() {
+    let mut t = quotas(100, 2, usize::MAX, usize::MAX);
+    let a = open(&mut t, 1, "alice", 0);
+    let b = open(&mut t, 2, "alice", 1);
+    let sa = t.open_stream(&a, &owner("alice"), 2).unwrap();
+    let sb = t.open_stream(&b, &owner("alice"), 3).unwrap();
+    assert!(t.hold_stream(&a, sa) && t.hold_stream(&b, sb));
+    let refused = t.open(
+        entropy(3),
+        owner("alice"),
+        Revision::R2025_11_25,
+        Carriage::Endpoint,
+        4,
+    );
+    assert_eq!(refused, Err(OpenRefused::OwnerFull));
+    assert!(
+        t.revision(&a, &owner("alice"), 5).is_some(),
+        "a's live stream survives"
+    );
+    assert!(
+        t.revision(&b, &owner("alice"), 5).is_some(),
+        "b's live stream survives"
+    );
+    // b's stream ends: b is idle, and gives way.
+    t.release_stream(&b, sb);
+    open(&mut t, 4, "alice", 6);
+    assert!(
+        t.revision(&a, &owner("alice"), 7).is_some(),
+        "the live session stays"
+    );
+    assert!(
+        t.revision(&b, &owner("alice"), 7).is_none(),
+        "the idle one gave way"
+    );
+
+    // The cursor cap (4 here): every cursor live refuses the fifth.
+    let s = open(&mut t, 5, "bob", 8);
+    let cursors: Vec<u32> = (0..4)
+        .map(|_| t.open_stream(&s, &owner("bob"), 9).unwrap())
+        .collect();
+    for c in &cursors {
+        assert!(t.hold_stream(&s, *c));
+    }
+    let first = t.push(&s, &owner("bob"), cursors[0], "kept", 10).unwrap();
+    assert_eq!(
+        t.open_stream(&s, &owner("bob"), 11),
+        None,
+        "refused at the cap"
+    );
+    let r = t.replay(&s, &owner("bob"), &format!("{}-0", cursors[0]), 12);
+    assert_eq!(
+        r.map(|r| r.events),
+        Some(vec![(first, "kept".to_string())]),
+        "the first stream's cursor survives"
+    );
+    // The first stream ends: its cursor gives way to the next.
+    t.release_stream(&s, cursors[0]);
+    assert!(t.open_stream(&s, &owner("bob"), 13).is_some());
+    assert!(t
+        .replay(&s, &owner("bob"), &format!("{}-0", cursors[0]), 14)
+        .is_none());
+}
