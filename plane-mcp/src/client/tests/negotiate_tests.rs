@@ -280,3 +280,39 @@ fn a_stateless_request_keeps_its_id() {
     assert_eq!(sent(&a).1["id"], json!(5));
     assert_eq!(n.sent_id(), None);
 }
+
+/// RED: a STATELESS-MODE server that answers the newest revision's request with the specification's
+/// `400` (an error naming neither the session nor `-32022`) is not taken for a stateless upstream:
+/// the `400` never reaches the caller, nothing is remembered from it, and the older revisions are
+/// tried; the server's `2025-06-18` session then carries the call.
+#[test]
+fn red_a_stateless_400_moves_the_ladder_and_is_never_remembered() {
+    let mut n = Negotiator::new(call(), None, "1.6.0");
+    n.start();
+    let next = n.on_answer(answer(
+        400,
+        json!({"jsonrpc":"2.0","id":null,
+            "error":{"code":-32600,"message":"Bad Request: Unsupported protocol version"}}),
+    ));
+    assert!(
+        !matches!(next, Action::Finish(_)),
+        "the probe's 400 was handed to the caller as the call's answer"
+    );
+    assert!(
+        n.remembered().is_none(),
+        "a 400 to the probe remembered the upstream as speaking a revision"
+    );
+    let (_, body) = sent(&next);
+    assert_eq!(body["method"], "initialize", "the older revisions are tried");
+    let initialized = n.on_answer(with_session(
+        200,
+        result(body["id"].clone(), json!({"protocolVersion":"2025-06-18"})),
+        "s1",
+    ));
+    assert_eq!(sent(&initialized).1["method"], "notifications/initialized");
+    let the_call = n.on_answer(accepted());
+    assert_eq!(sent(&the_call).1["method"], "tools/call");
+    let fin = n.on_answer(answer(200, result(json!(5), json!({"content":[]}))));
+    assert!(matches!(fin, Action::Finish(ref a) if a.status == 200));
+    assert_eq!(n.remembered().unwrap().revision, Revision::R2025_06_18);
+}
