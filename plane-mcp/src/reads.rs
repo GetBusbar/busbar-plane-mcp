@@ -195,15 +195,39 @@ fn concrete_content(res: &ResourceEntry) -> Value {
     Value::Object(content)
 }
 
+/// `template` with each `{name}` that `bindings` holds replaced by its value, in ONE pass over the
+/// template: a bound value is copied as it is, so a value that itself spells `{other}` is never
+/// substituted again. A `{...}` no binding names is kept as written.
+fn substitute(template: &str, bindings: &BTreeMap<String, String>) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        match after
+            .find('}')
+            .and_then(|close| Some((close, bindings.get(&after[..close])?)))
+        {
+            Some((close, value)) => {
+                out.push_str(value);
+                rest = &after[close + 1..];
+            }
+            None => {
+                out.push('{');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 fn templated_content(
     requested: &str,
     template: &ResourceTemplateEntry,
     bindings: &BTreeMap<String, String>,
 ) -> Value {
-    let mut text = template.text.clone().unwrap_or_default();
-    for (name, value) in bindings {
-        text = text.replace(&format!("{{{name}}}"), value);
-    }
+    let text = substitute(template.text.as_deref().unwrap_or_default(), bindings);
     let mut content = Map::new();
     content.insert("uri".into(), requested.into());
     if let Some(m) = &template.mime_type {
