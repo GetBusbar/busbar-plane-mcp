@@ -892,3 +892,39 @@ fn a_trailing_root_dot_is_judged_as_the_name_it_roots() {
         assert_eq!(asked, ["example.com"], "`{value}`");
     }
 }
+
+/// A HOST OUTSIDE ASCII, IN A SPELLING ONLY A WHATWG READER TAKES FOR A URL (`http:/h`,
+/// `https:\\h`), IS REFUSED, NEVER JUDGED AS WRITTEN. A fetching client maps such a name
+/// through IDNA (`ｌｏｃａｌｈｏｓｔ` is `localhost` to it), so the name as written is not the
+/// host it reaches; the guard reads no IDNA, so it judges none and refuses the value.
+#[test]
+fn a_host_outside_ascii_is_refused_not_judged_as_written() {
+    let undeclared = json!({
+        "type": "object",
+        "properties": { "target": { "type": "string" } }
+    });
+    for value in [
+        "http:/\u{ff4c}\u{ff4f}\u{ff43}\u{ff41}\u{ff4c}\u{ff48}\u{ff4f}\u{ff53}\u{ff54}/x",
+        "https:\\\\b\u{fc}cher.example\\",
+    ] {
+        let mut asked: Vec<String> = Vec::new();
+        let got = guard(&undeclared, &json!({ "target": value }), |dest: &str| {
+            asked.push(dest.to_string());
+            Some(DEST_ALLOWED)
+        });
+        assert!(
+            matches!(
+                &got,
+                Err(ArgRefusal {
+                    why: ArgWhy::NoHost(_),
+                    ..
+                })
+            ),
+            "`{value}` must be refused: {got:?}"
+        );
+        assert!(
+            asked.is_empty(),
+            "`{value}` was judged as written: {asked:?}"
+        );
+    }
+}
