@@ -60,8 +60,8 @@ mod both_ways {
     use busbar_contract::abi::sdk::{Instance, Lent, Out, Safe, SafeSlot};
     use busbar_plugin_loader::dispatch::kinds::plane::{OwnedSnapshot, Plane};
     use busbar_plugin_loader::dispatch::{
-        in_head, load_dropped, load_linked, out_head, rendering_of_macro, Bind, DispatchConfig,
-        Dispatcher, Frame, LinkedRow, LoadedDoor, NoSink, Plugin,
+        in_head, load_dropped, load_linked, out_head, Bind, DispatchConfig, Dispatcher, Frame,
+        LinkedRow, LoadedDoor, NoSink, Plugin,
     };
     use serde_json::{json, Value};
 
