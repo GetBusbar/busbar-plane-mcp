@@ -84,7 +84,7 @@ pub const DECLARES: &str = include_str!("declares.json");
 /// generated table names (the build scripts of the crates that test-link this door). The door
 /// itself is [`tool_door::door`].
 pub mod plane_door {
-    pub use crate::tool_door::door;
+    pub use crate::tool_door::{door, MACRO_DOOR};
 }
 pub mod reads;
 pub mod record;
