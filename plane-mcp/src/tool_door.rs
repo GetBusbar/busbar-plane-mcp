@@ -47,10 +47,10 @@ use busbar_contract::abi::plane::{
     ArriveIn, ArriveOut, OnPieceIn, OnPieceOut, OutField, PlaneCancelIn, PlaneCancelOut,
     PlaneDriveIn, PlaneDriveOut, PlaneOpenIn, PlaneOpenOut, PlaneRefreshOut, PlaneSnapshot,
     ProjectIn, ProjectOut, RecordWrite, RefusalIn, RefusalOut, ServeIn, ServeOut, UnitCount,
-    AUDIT_APPLIED, AUDIT_REJECTED, CANCEL_ABORTED, CANCEL_OK_PARTIAL, EMIT_DONE, EMIT_TO_FAR_END,
-    FROM_CALLER, FROM_FAR_END, FROM_KERNEL, PIECE_HAS_STATUS, PIECE_LAST, PRINCIPAL_REQUIRED,
-    RECORD_AUDIT, RECORD_PUT, REFUSAL_ARRIVE, REFUSAL_GATE, REFUSAL_KERNEL, ROUTE_DIRECT,
-    ROUTE_POOL, UNITS_REPORTED, VERDICT_RETRY,
+    AUDIT_APPLIED, AUDIT_REJECTED, CANCEL_ABORTED, EMIT_DONE, EMIT_TO_FAR_END, FROM_CALLER,
+    FROM_FAR_END, FROM_KERNEL, PIECE_HAS_STATUS, PIECE_LAST, PRINCIPAL_REQUIRED, RECORD_AUDIT,
+    RECORD_PUT, REFUSAL_ARRIVE, REFUSAL_GATE, REFUSAL_KERNEL, ROUTE_DIRECT, ROUTE_POOL,
+    UNITS_REPORTED, VERDICT_RETRY,
 };
 use busbar_contract::abi::sdk::door::statement;
 use busbar_contract::abi::sdk::exchange::{REPLY_MAX, REPLY_OVER_BOUND};
@@ -451,10 +451,10 @@ slot!(
 
 slot!(
     /// `cancel`: the cancelled unit's state is dropped, found by its ticket or, cancelled before any
-    /// piece reached it, by the unit the host names; its disposition says how far it had got.
+    /// piece reached it, by the unit the host names. Answered `CANCEL_ABORTED`, as predev's door
+    /// answered every cancel.
     Cancel, PlaneCancelIn, PlaneCancelOut, |instance, input, mut out| {
         let mut stopped = Vec::new();
-        let mut disposition = CANCEL_ABORTED;
         if let Some(plane) = instance.get() {
             let ticket = input.get().cancel.ticket;
             // THE UNIT THE HOST NAMES: `arrive` keyed it, and a unit cancelled before its first
@@ -463,17 +463,6 @@ slot!(
             let unit = input.get().unit;
             let cancelled =
                 |key: &u64, u: &CallUnit| u.ticket == Some(ticket) || (unit != 0 && *key == unit);
-            // A unit the far end had answered, or whose answer to its caller had begun, is cut
-            // part way (the far end's reported units stand, billed only where its reply was
-            // streamed); one cut before that is aborted, and bills nothing.
-            let answered = plane.units.with_all(|m| {
-                m.iter()
-                    .filter(|(k, u)| cancelled(*k, *u))
-                    .any(|(_, u)| begun(u))
-            });
-            if answered {
-                disposition = CANCEL_OK_PARTIAL;
-            }
             // A task's continuation the kernel cancelled leaves its task cancelled, audited as the
             // served engine audited a task its shutdown stopped (SEAM-L(r)).
             stopped = door_tasks::cancelled(plane, ticket);
@@ -501,20 +490,10 @@ slot!(
         let (aw, _) = arena.settle(false);
         out.set(|o| &o.records_written, rw as u32);
         out.set(|o| &o.arena_written, aw as u64);
-        out.set(|o| &o.cancel.disposition, disposition);
+        out.set(|o| &o.cancel.disposition, CANCEL_ABORTED);
         Outcome::Ready
     }
 );
-
-/// Whether `unit` had got past the point a cancel aborts: the far end answered its relayed call,
-/// or its answer to its caller had begun to be written.
-fn begun(unit: &CallUnit) -> bool {
-    unit.relay.as_ref().is_some_and(|r| r.status != 0)
-        || unit
-            .pending
-            .as_ref()
-            .is_some_and(|p| p.status != 0 && p.headed)
-}
 
 slot!(
     /// `release`: this plane answers under no lease.
@@ -1947,6 +1926,8 @@ fn answer_body(
     unit: &mut CallUnit,
 ) -> Option<Step> {
     let services = plane.services;
+    // An empty caller reference is the ungoverned chain alone: the kernel never lends one to a
+    // principal it verified on a governed chain (`door_sessions::owner_of`).
     let principal = if caller.is_empty() {
         crate::ask::UNGOVERNED
     } else {
