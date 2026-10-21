@@ -72,4 +72,4 @@ url = { workspace = true }
 # The TEST-ONLY seal (#65). `busbar_contract::plugin::TestKernelSeal` is the one blessed
 # fixture implementor of the SEALED `KernelSeal` trait; this crate's test harnesses used to
 # forge their own. Dev-only and feature-gated, so it is absent from every release build.
-busbar-contract = { workspace = true, features = ["test-seal"] }
+busbar-contract = { workspace = true, features = ["test-seal", "alloc-counter"] }

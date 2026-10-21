@@ -58,8 +58,7 @@ fn walk(dir: &Path, f: &mut impl FnMut(&Path, &str)) {
 /// less the test-module directories (`src/tests/`, and each module's own `tests/`). A test module is
 /// compiled only when the tests are and the kernel never sees it; the suites that moved in from
 /// `tests/` when the crate's only public item became `door` read files, the environment and a
-/// clock, as they did out there, and the modules left unwired there (`src/tests/mod.rs`) hold the
-/// C-ABI host doubles they were written with.
+/// clock, as they did out there.
 fn walk_surface(dir: &Path, f: &mut impl FnMut(&Path, &str)) {
     for entry in std::fs::read_dir(dir)
         .expect("the source directory is readable")
@@ -124,11 +123,14 @@ fn the_crate_forbids_unsafe_and_undocumented_items() {
     assert!(lib.contains("#![deny(missing_docs)]"));
 }
 
-/// No source file contains the word the lint gate forbids.
+/// No source file contains the word the lint gate forbids: neither the shipped surface nor the
+/// crate's own test modules (`src/tests/`, and each module's `tests/`), which compile under the same
+/// literal `#![forbid(unsafe_code)]`. A test that needs `unsafe` drives the door from an integration
+/// test (`tests/*.rs`) instead.
 #[test]
 fn the_source_contains_no_unsafe_block() {
     let mut offenders = Vec::new();
-    walk_surface(&src_dir(), &mut |path, text| {
+    walk(&src_dir(), &mut |path, text| {
         for (n, line) in text.lines().enumerate() {
             let t = line.trim_start();
             if t.starts_with("//") {

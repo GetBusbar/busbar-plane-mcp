@@ -38,8 +38,7 @@ fn sibling_plane_crate_paths() -> Vec<String> {
 /// less the test-module directories (`src/tests/`, and each module's own `tests/`). A test module is
 /// compiled only when the tests are and the kernel never sees it; the suites that moved in from
 /// `tests/` when the crate's only public item became `door` read files, the environment and a
-/// clock, as they did out there, and the modules left unwired there (`src/tests/mod.rs`) hold the
-/// C-ABI host doubles they were written with.
+/// clock, as they did out there.
 fn walk_surface(dir: &Path, f: &mut impl FnMut(&Path, &str)) {
     for entry in std::fs::read_dir(dir)
         .expect("the source directory is readable")
