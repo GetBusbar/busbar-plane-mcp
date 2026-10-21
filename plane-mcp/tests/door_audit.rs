@@ -47,8 +47,8 @@ use busbar_contract::abi::mechanism::ticket::{HostCtx, HostTables, Ticket};
 use busbar_contract::abi::plane::{
     slot, ArriveIn, ArriveOut, OnPieceIn, OnPieceOut, Ops, OutField, PlaneCancelIn, PlaneCancelOut,
     PlaneDriveIn, PlaneDriveOut, PlaneOpenIn, PlaneOpenOut, RecordWrite, ServeIn, ServeOut,
-    UnitCount, AUDIT_REJECTED, CANCEL_ABORTED, CANCEL_OK_PARTIAL, EMIT_DONE, EMIT_TO_FAR_END,
-    FROM_CALLER, FROM_FAR_END, FROM_KERNEL, PIECE_HAS_STATUS, PIECE_LAST, RECORD_AUDIT,
+    UnitCount, AUDIT_REJECTED, CANCEL_ABORTED, EMIT_DONE, EMIT_TO_FAR_END, FROM_CALLER,
+    FROM_FAR_END, FROM_KERNEL, PIECE_HAS_STATUS, PIECE_LAST, RECORD_AUDIT,
 };
 use busbar_contract::abi::transport::FrameSpan;
 use busbar_plane_mcp::door;
@@ -1632,11 +1632,10 @@ fn a_unit_cancelled_before_its_first_piece_is_freed() {
     );
 }
 
-/// RED: THE DISPOSITION SAYS HOW FAR THE UNIT GOT. A relayed call cut before the far end answered
-/// is aborted (it bills nothing); one cut after the far end began its answer is a partial, so the
-/// units the far end reported stand under the contract's cancel billing rule.
+/// A CANCEL IS ABORTED, as predev's door answered every cancel: before the far end answered and
+/// after it began its answer alike (the kernel bills an aborted unit nothing).
 #[test]
-fn a_cancel_after_the_far_end_answered_is_a_partial() {
+fn a_cancel_is_aborted_before_and_after_the_far_end_answered() {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
     *upstreams() = Some(Upstreams::default());
     let d = open();
@@ -1673,7 +1672,7 @@ fn a_cancel_after_the_far_end_answered_is_a_partial() {
     d.piece(91, &first);
     assert_eq!(
         d.cancel(91),
-        (Outcome::Ready, CANCEL_OK_PARTIAL),
-        "cut after the far end answered: a partial"
+        (Outcome::Ready, CANCEL_ABORTED),
+        "cut after the far end answered: aborted, as predev answered it"
     );
 }

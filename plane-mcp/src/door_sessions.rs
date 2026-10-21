@@ -187,6 +187,12 @@ pub(super) enum SessionArrived {
 
 /// THE OWNER a unit's session is bound to: the kernel's caller reference (derived from the
 /// principal's key id), or the ungoverned chain's one constant.
+///
+/// AN EMPTY REFERENCE IS THE UNGOVERNED CHAIN, and nothing else: the kernel lends every principal
+/// it verified on a governed chain a non-empty reference derived from the deployment keyset, and
+/// never an empty one (a busbar test pins that guarantee), so an empty reference reaches the plane
+/// only where no chain governs the deployment. The plane is handed no other governance fact, and
+/// needs none.
 pub(super) fn owner_of(caller: &str) -> Owner {
     let who = if caller.is_empty() {
         crate::ask::UNGOVERNED
