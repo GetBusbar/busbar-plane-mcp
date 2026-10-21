@@ -517,16 +517,16 @@ pub const MAX_ROOTS_PRINCIPALS: usize = MAX_UNITS;
 /// table full and `principal` not in it, the shared epoch every principal is read beside, so the
 /// change is never lost (a stale roots answer sealed under the old epoch is refused either way).
 fn roots_changed(plane: &McpDoor, principal: &str) {
-    let recorded = plane.roots.with_all(|m| match m.get_mut(principal) {
-        Some(epoch) => {
+    let recorded = plane.roots.with_all(|m| {
+        if let Some(epoch) = m.get_mut(principal) {
             *epoch = epoch.wrapping_add(1);
             true
-        }
-        None if m.len() < MAX_ROOTS_PRINCIPALS => {
+        } else if m.len() < MAX_ROOTS_PRINCIPALS {
             m.insert(principal.to_string(), 1);
             true
+        } else {
+            false
         }
-        None => false,
     });
     if !recorded {
         plane
