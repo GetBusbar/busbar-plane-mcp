@@ -42,6 +42,7 @@
 //! name state the codec keeps in memory or derives from configuration, and therefore forgets on
 //! restart; declaring them here is what makes that forgetting visible.
 
+#[cfg(test)]
 use busbar_contract::ids::RecordSchemaId;
 
 /// The `call` kind — the per-call log record's tag on the store seam.
@@ -59,27 +60,35 @@ pub const KIND_TASK: &str = "task";
 
 /// The plane-record kinds this plane keeps on the store's plane-record seam — its declaration's
 /// `record_kinds`, so the administrative `plane_record_write` verb writes only these under it.
+#[cfg(test)]
 pub const RECORD_KINDS: &[&str] = &[KIND_CALL, KIND_DEMOTION, KIND_APPROVAL, KIND_TASK];
 
 /// The call log: what each caller asked for, and what they got.
+#[cfg(test)]
 pub const SCHEMA_CALL: RecordSchemaId = RecordSchemaId::new(KIND_CALL);
 
 /// The quarantine rows: which servers are not being advertised, and why.
+#[cfg(test)]
 pub const SCHEMA_DEMOTION: RecordSchemaId = RecordSchemaId::new(KIND_DEMOTION);
 
 /// The tool catalogue: what each registered server was observed to offer.
+#[cfg(test)]
 pub const SCHEMA_CATALOGUE: RecordSchemaId = RecordSchemaId::new("catalogue");
 
 /// The approvals: the one-time grants a retry must not be able to re-spend.
+#[cfg(test)]
 pub const SCHEMA_APPROVAL: RecordSchemaId = RecordSchemaId::new(KIND_APPROVAL);
 
 /// The settings: each registered server's own configuration as it was applied.
+#[cfg(test)]
 pub const SCHEMA_SETTINGS: RecordSchemaId = RecordSchemaId::new("settings");
 
 /// The long-running tasks a caller may come back for.
+#[cfg(test)]
 pub const SCHEMA_TASK: RecordSchemaId = RecordSchemaId::new(KIND_TASK);
 
 /// The record schemas this plane keeps kernel-held durable records under.
+#[cfg(test)]
 pub const RECORD_SCHEMAS: &[RecordSchemaId] = &[
     SCHEMA_CALL,
     SCHEMA_DEMOTION,

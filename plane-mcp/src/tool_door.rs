@@ -113,11 +113,6 @@ busbar_contract::statement_extensions!(
     )]
 );
 
-/// THE CLAIMS AXIS: the bytes the pure plane claims, sealed against every other plane's so a tie is
-/// refused at boot (the transport each names must be registered).
-pub const CLAIMS: &[busbar_contract::grammar::Claim] =
-    <crate::McpPlane as busbar_contract::plane::PlaneMeta>::CLAIMS;
-
 /// WHAT THE PLANE HOLDS FOR ONE GENERATION: the catalogue built from its section, and the section
 /// itself (each member's registration).
 #[derive(Debug)]
