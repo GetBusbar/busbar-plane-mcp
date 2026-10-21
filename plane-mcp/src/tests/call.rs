@@ -40,6 +40,16 @@ fn proceed(_: &ToolEntry, _: &Value) -> crate::ask::AskDecision {
     crate::ask::AskDecision::Proceed
 }
 
+/// Busbar's own exchange completed with `p`'s `inputResponses` as every round's answers.
+fn answering(p: &Value) -> impl FnMut(&ToolEntry, &Value) -> crate::ask::AskDecision {
+    let answers = p
+        .get("inputResponses")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    move |_: &ToolEntry, _: &Value| crate::ask::AskDecision::Answered(answers.clone())
+}
+
 fn no_header(_: &str) -> Option<String> {
     None
 }
@@ -318,7 +328,7 @@ fn an_answer_binds_only_what_was_asked_and_never_a_sent_argument() {
         Some(&answered),
         &no_header,
         &everyone,
-        &mut proceed,
+        &mut answering(&answered),
     ));
     assert_eq!(a.arguments, json!({ "ok": true }));
     let smuggled = json!({ "name": "fs_confirm", "arguments": {}, "inputResponses": { "amount": 1 }, "_meta": {} });
@@ -328,7 +338,7 @@ fn an_answer_binds_only_what_was_asked_and_never_a_sent_argument() {
         Some(&smuggled),
         &no_header,
         &everyone,
-        &mut proceed,
+        &mut answering(&smuggled),
     ));
     assert_eq!(r.status, 404);
     assert!(r.message.starts_with("the answer named `amount`"));
@@ -340,7 +350,7 @@ fn an_answer_binds_only_what_was_asked_and_never_a_sent_argument() {
         Some(&rewritten),
         &no_header,
         &everyone,
-        &mut proceed,
+        &mut answering(&rewritten),
     ));
 }
 
@@ -930,4 +940,484 @@ fn an_ask_of_the_caller_and_a_task_are_audited_in_the_engines_words() {
         task_line(&entry, "task_unavailable").audit,
         Some(AuditRow::tool("fs_batch", false))
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// THE INPUT-SIDE SAMPLING BOUNDS (owner ruling Q22c, BUSBAR-1.6.0 l.3951): a granted
+// `sampling/createMessage` ask is relayed only while it is within `tools.<server>.sampling_bounds`.
+// Each bound: one over the cap is refused naming the exact key (RED before this change: it relayed),
+// exactly at the cap still relays, and the default applies when the key is omitted.
+// ---------------------------------------------------------------------------------------------
+
+/// The `fs` definition with the sampling grant held and `bounds` applied.
+fn sampling_def(
+    bounds: impl FnOnce(&mut crate::tools_config::SamplingBoundsCfg),
+) -> crate::tools_config::McpServerDefCfg {
+    let mut def = section().servers.get("fs").expect("fs").clone();
+    def.grants.sampling = true;
+    bounds(&mut def.sampling_bounds);
+    def
+}
+
+/// One far-end answer asking `params` as a `sampling/createMessage`, settled under `def`.
+fn sampling_settle(def: &crate::tools_config::McpServerDefCfg, params: Value) -> Settled {
+    let far = json!({ "jsonrpc": "2.0", "id": 0, "result": {
+        "resultType": "input_required",
+        "inputRequests": { "s": { "method": "sampling/createMessage", "params": params } },
+        "requestState": "opaque"
+    }});
+    settle_call(
+        &admitted(),
+        Some(def),
+        200,
+        far.to_string().as_bytes(),
+        false,
+        0,
+    )
+}
+
+fn text_messages(n: usize, text: &str) -> Value {
+    Value::Array(
+        (0..n)
+            .map(|_| json!({ "role": "user", "content": { "type": "text", "text": text } }))
+            .collect(),
+    )
+}
+
+/// Refused: 403, `sampling_bound_exceeded`, the message names `key` and the limit.
+fn assert_bound_refused(settled: Settled, key: &str, limit: &str) {
+    let (status, body, line) = answer_of(settled);
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(
+        body["error"]["data"]["reason"],
+        json!("sampling_bound_exceeded")
+    );
+    let message = body["error"]["message"].as_str().expect("message");
+    assert!(
+        message.contains(&format!("tools.fs.sampling_bounds.{key}")),
+        "the refusal names the exact key: {message}"
+    );
+    assert!(message.contains(limit), "and its limit {limit}: {message}");
+    assert_eq!(
+        (line.outcome, line.reason.as_str()),
+        ("refused", "sampling_bound_exceeded")
+    );
+}
+
+fn assert_relayed(settled: Settled) {
+    assert!(
+        matches!(settled, Settled::Relay { .. }),
+        "within the bound the ask is relayed: {settled:?}"
+    );
+}
+
+#[test]
+fn sampling_max_messages_over_the_cap_is_refused_at_the_cap_relays() {
+    let def = sampling_def(|b| b.max_messages = 3);
+    assert_bound_refused(
+        sampling_settle(&def, json!({ "messages": text_messages(4, "") })),
+        "max_messages",
+        "3",
+    );
+    assert_relayed(sampling_settle(
+        &def,
+        json!({ "messages": text_messages(3, "") }),
+    ));
+}
+
+#[test]
+fn sampling_max_prompt_bytes_counts_the_system_prompt_and_every_message() {
+    let def = sampling_def(|b| b.max_prompt_bytes = 10);
+    // 4 (system) + 3 + 3 = 10: at the cap.
+    let at = json!({ "systemPrompt": "abcd", "messages": text_messages(2, "xyz") });
+    assert_relayed(sampling_settle(&def, at));
+    let over = json!({ "systemPrompt": "abcde", "messages": text_messages(2, "xyz") });
+    assert_bound_refused(sampling_settle(&def, over), "max_prompt_bytes", "10");
+}
+
+#[test]
+fn sampling_max_stop_sequences_over_the_cap_is_refused_at_the_cap_relays() {
+    let def = sampling_def(|b| b.max_stop_sequences = 2);
+    let stops = |n: usize| json!({ "messages": [], "stopSequences": vec!["s"; n] });
+    assert_bound_refused(sampling_settle(&def, stops(3)), "max_stop_sequences", "2");
+    assert_relayed(sampling_settle(&def, stops(2)));
+}
+
+#[test]
+fn sampling_max_stop_sequence_bytes_over_the_cap_is_refused_at_the_cap_relays() {
+    let def = sampling_def(|b| b.max_stop_sequence_bytes = 4);
+    assert_bound_refused(
+        sampling_settle(&def, json!({ "stopSequences": ["abcde"] })),
+        "max_stop_sequence_bytes",
+        "4",
+    );
+    assert_relayed(sampling_settle(&def, json!({ "stopSequences": ["abcd"] })));
+}
+
+#[test]
+fn sampling_temperature_outside_the_range_is_refused_at_the_edges_relays() {
+    let def = sampling_def(|b| {
+        b.temperature_min_milli = 200;
+        b.temperature_max_milli = 1500;
+    });
+    assert_bound_refused(
+        sampling_settle(&def, json!({ "temperature": 1.6 })),
+        "temperature_max_milli",
+        "1500",
+    );
+    assert_bound_refused(
+        sampling_settle(&def, json!({ "temperature": 0.1 })),
+        "temperature_min_milli",
+        "200",
+    );
+    assert_bound_refused(
+        sampling_settle(&def, json!({ "temperature": "hot" })),
+        "temperature_min_milli",
+        "200",
+    );
+    assert_relayed(sampling_settle(&def, json!({ "temperature": 0.2 })));
+    assert_relayed(sampling_settle(&def, json!({ "temperature": 1.5 })));
+    // Absent temperature is never a violation.
+    assert_relayed(sampling_settle(&def, json!({})));
+}
+
+/// The defaults apply when `sampling_bounds` is not written at all: 64 messages, 65536 prompt bytes,
+/// 8 stop sequences of 64 bytes, temperature 0.0..=2.0.
+#[test]
+fn sampling_bounds_default_when_the_keys_are_omitted() {
+    let def = sampling_def(|_| {});
+    assert_eq!(
+        def.sampling_bounds,
+        crate::tools_config::SamplingBoundsCfg {
+            max_messages: 64,
+            max_prompt_bytes: 65536,
+            max_stop_sequences: 8,
+            max_stop_sequence_bytes: 64,
+            temperature_min_milli: 0,
+            temperature_max_milli: 2000,
+            max_input_response_bytes: 1_048_576,
+        }
+    );
+    assert_bound_refused(
+        sampling_settle(&def, json!({ "messages": text_messages(65, "") })),
+        "max_messages",
+        "64",
+    );
+    assert_relayed(sampling_settle(
+        &def,
+        json!({ "messages": text_messages(64, "") }),
+    ));
+    assert_bound_refused(
+        sampling_settle(&def, json!({ "systemPrompt": "x".repeat(65537) })),
+        "max_prompt_bytes",
+        "65536",
+    );
+    assert_relayed(sampling_settle(
+        &def,
+        json!({ "systemPrompt": "x".repeat(65536) }),
+    ));
+    assert_bound_refused(
+        sampling_settle(&def, json!({ "stopSequences": vec!["s"; 9] })),
+        "max_stop_sequences",
+        "8",
+    );
+    assert_bound_refused(
+        sampling_settle(&def, json!({ "stopSequences": ["x".repeat(65)] })),
+        "max_stop_sequence_bytes",
+        "64",
+    );
+    assert_bound_refused(
+        sampling_settle(&def, json!({ "temperature": 2.001 })),
+        "temperature_max_milli",
+        "2000",
+    );
+    assert_relayed(sampling_settle(&def, json!({ "temperature": 2.0 })));
+}
+
+/// The bound is read where there is no definition too (the defaults), and a roots ask is never
+/// measured.
+#[test]
+fn sampling_bounds_measure_only_sampling_asks() {
+    let roots = r#"{"jsonrpc":"2.0","id":0,"result":{"resultType":"input_required","inputRequests":{"r":{"method":"roots/list","params":{"messages":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65]}}}}}"#;
+    assert_relayed(settle_far(roots));
+}
+
+/// THE CALLER'S REPLY IS BOUNDED TOO (ARCHITECT 2026-10-14): the continuation sent upstream
+/// (`inputResponses` with the `requestState` it carries) is measured as serialised; one byte over
+/// `max_input_response_bytes` is refused by name (`sampling_bound_exceeded`, 403) and not forwarded,
+/// exactly at the cap it is forwarded.
+#[test]
+fn input_responses_over_the_cap_are_refused_and_not_forwarded_at_the_cap_forwarded() {
+    let continuation = json!({
+        "inputResponses": { "s": { "action": "accept", "content": { "text": "x".repeat(40) } } },
+        "requestState": "opaque"
+    });
+    let exact = continuation.to_string().len();
+    let at = sampling_def(|b| b.max_input_response_bytes = u32::try_from(exact).expect("small"));
+    crate::call::judge_continuation("fs", &at.sampling_bounds, &continuation)
+        .expect("exactly at the cap is forwarded");
+
+    let over =
+        sampling_def(|b| b.max_input_response_bytes = u32::try_from(exact - 1).expect("small"));
+    let refusal = crate::call::judge_continuation("fs", &over.sampling_bounds, &continuation)
+        .expect_err("one byte over is refused");
+    assert!(matches!(
+        &refusal,
+        crate::call::AskRefusal::SamplingBound {
+            key: "max_input_response_bytes",
+            ..
+        }
+    ));
+    assert_eq!(refusal.audit_reason(), "sampling_bound_exceeded");
+    assert!(refusal.to_string().contains(&format!("{exact} bytes")));
+    assert_bound_refused(
+        crate::call::ask_refused(&admitted(), &refusal),
+        "max_input_response_bytes",
+        &(exact - 1).to_string(),
+    );
+}
+
+/// The default cap is 1 MiB: a reply just over it is refused, with the key unwritten.
+#[test]
+fn input_responses_default_cap_is_one_mebibyte() {
+    let def = sampling_def(|_| {});
+    assert_eq!(def.sampling_bounds.max_input_response_bytes, 1_048_576);
+    let big = json!({ "inputResponses": { "s": "y".repeat(1_048_576) } });
+    crate::call::judge_continuation("fs", &def.sampling_bounds, &big).expect_err("over");
+    let small = json!({ "inputResponses": { "s": "y" }, "requestState": "z" });
+    crate::call::judge_continuation("fs", &def.sampling_bounds, &small).expect("under");
+}
+
+// ---------------------------------------------------------------------------------------------
+// BUSBAR'S OWN ANSWERS ACROSS ROUNDS AND ACROSS A RELAYED ASK (row 159 mcp findings C-M5, C-M6):
+// what went out on the first call is what goes out on every retry of the same exchange, plus the
+// answers of the round the retry closes.
+// ---------------------------------------------------------------------------------------------
+
+/// A seal that writes the state as JSON behind a marker and spends each nonce once (the ask
+/// tests' own stand-in for the host's).
+#[derive(Default)]
+struct PlainSeal {
+    spent: std::collections::BTreeSet<String>,
+    next: u32,
+}
+
+const PLAIN: &str = "sealed:";
+
+impl crate::ask::Seal for PlainSeal {
+    fn mint(&mut self, state: &crate::ask::AskState) -> Option<String> {
+        Some(format!("{PLAIN}{}", serde_json::to_string(state).ok()?))
+    }
+    fn open(&mut self, blob: &str) -> Result<crate::ask::AskState, crate::ask::Rejected> {
+        let body = blob
+            .strip_prefix(PLAIN)
+            .ok_or(crate::ask::Rejected::BadSignature)?;
+        serde_json::from_str(body).map_err(|_| crate::ask::Rejected::Malformed)
+    }
+    fn nonce(&mut self) -> Option<String> {
+        self.next += 1;
+        Some(format!("n{}", self.next))
+    }
+    fn redeem(&mut self, nonce: &str, _: u64, _: u64) -> bool {
+        self.spent.insert(nonce.to_string())
+    }
+}
+
+/// A tool whose operator asks its caller in TWO rounds before it runs.
+const TWO_ROUNDS: &str = r#"{"fs": {"url": "https://mcp.example/fs", "pin": {"mechanism": "unpinned"},
+  "tools_allow": {
+    "pay": {"schema_hash": "sha256:dd", "ask_caller": [
+      {"confirm": {"method": "elicitation/create", "params": {"message": "sure?"}}},
+      {"really": {"method": "elicitation/create", "params": {"message": "really sure?"}}}
+    ]}
+  }}}"#;
+
+/// `p` admitted with busbar's own ask decided over `seal`, as the door decides it.
+fn admit_asking(cat: &Catalogue, seal: &mut PlainSeal, p: &Value) -> Admission {
+    let mut ask = |entry: &ToolEntry, arguments: &Value| {
+        let retry = crate::ask::Retry {
+            responses: p.get("inputResponses"),
+            state: p.get("requestState").and_then(Value::as_str),
+        };
+        let bind = crate::ask::Bind {
+            principal: "k",
+            method: crate::codec::METHOD_TOOLS_CALL,
+            capability: &entry.namespaced,
+            generation: 1,
+            now: 100,
+            roots_epoch: 0,
+        };
+        crate::ask::decide(
+            &entry.ask_caller,
+            3,
+            &json!({ "elicitation": {} }),
+            retry,
+            bind,
+            &crate::ask::digest_arguments(arguments),
+            Some(&mut *seal),
+        )
+    };
+    admit_call(cat, &json!(1), Some(p), &no_header, &everyone, &mut ask)
+}
+
+/// The `requestState` an `input_required` answer carries.
+fn asked_state(a: Admission) -> String {
+    let Admission::Asked(body, _) = a else {
+        panic!("busbar asks its caller: {a:?}");
+    };
+    let body: Value = serde_json::from_slice(&body).expect("json");
+    body["result"]["requestState"]
+        .as_str()
+        .expect("a sealed state")
+        .to_string()
+}
+
+/// C-M6: an exchange of two rounds goes out with BOTH rounds' answers. The caller's retry answers
+/// the round it was asked (MRTR: `inputResponses` answers the `inputRequests` of the result it
+/// retries), so the earlier round's answers ride in the sealed state, not in the caller's memory.
+#[test]
+fn a_two_round_exchange_goes_out_with_every_rounds_answers() {
+    let section = crate::door::read_tools_section(TWO_ROUNDS.as_bytes()).expect("reads");
+    let cat = Catalogue::build(1, &section);
+    let mut seal = PlainSeal::default();
+    let first = json!({ "name": "fs_pay", "arguments": { "amount": 5 }, "_meta": {} });
+    let s0 = asked_state(admit_asking(&cat, &mut seal, &first));
+    let mut second = first.clone();
+    second["inputResponses"] = json!({ "confirm": { "action": "accept" } });
+    second["requestState"] = json!(s0);
+    let s1 = asked_state(admit_asking(&cat, &mut seal, &second));
+    let mut last = first.clone();
+    last["inputResponses"] = json!({ "really": { "action": "accept" } });
+    last["requestState"] = json!(s1);
+    let a = go(admit_asking(&cat, &mut seal, &last));
+    assert_eq!(
+        a.arguments,
+        json!({
+            "amount": 5,
+            "confirm": { "action": "accept" },
+            "really": { "action": "accept" },
+        }),
+        "the first round's answer is lost when the last round's retry carries only its own"
+    );
+}
+
+/// C-M5: the retry of an upstream's ask relayed to the caller goes out as the first call did (the
+/// caller's arguments with busbar's own answers merged), plus the upstream's answers in the
+/// continuation. The relayed state carries busbar's own answers sealed (`a`).
+#[test]
+fn a_relayed_asks_retry_goes_out_with_busbars_own_answers_merged_again() {
+    let leg: crate::ask::UpstreamLeg = serde_json::from_value(json!({
+        "m": "fs", "s": "theirs", "r": 1, "a": { "ok": true }
+    }))
+    .expect("a leg reads");
+    let retry = json!({ "name": "fs_confirm", "arguments": { "n": 1 },
+        "inputResponses": { "u": { "action": "accept" } }, "requestState": "ours", "_meta": {} });
+    let mut relayed = |_: &ToolEntry, _: &Value| crate::ask::AskDecision::Relayed(leg.clone());
+    let a = go(admit_call(
+        &catalogue(),
+        &json!(1),
+        Some(&retry),
+        &no_header,
+        &everyone,
+        &mut relayed,
+    ));
+    assert_eq!(
+        a.arguments,
+        json!({ "n": 1, "ok": true }),
+        "the retry must be the same request as the first call: busbar's own answer is merged again"
+    );
+    let relay = a.relay.expect("the relayed retry");
+    assert_eq!(
+        relay.continuation["inputResponses"],
+        json!({ "u": { "action": "accept" } }),
+        "the caller's answers go to the upstream, not into the arguments"
+    );
+}
+
+/// C-M7 (owner ruling Q22c): `max_prompt_bytes` measures every content part an ask carries, not
+/// only its text: an image, an audio clip or an embedded resource is prompt the caller's model is
+/// handed, and an upstream picks its size.
+#[test]
+fn sampling_max_prompt_bytes_counts_every_content_part() {
+    let def = sampling_def(|b| b.max_prompt_bytes = 64);
+    for part in [
+        json!({ "type": "image", "data": "x".repeat(100), "mimeType": "image/png" }),
+        json!({ "type": "audio", "data": "x".repeat(100), "mimeType": "audio/wav" }),
+        json!({ "type": "resource", "resource": { "uri": "file:///a", "text": "x".repeat(100) } }),
+    ] {
+        let settled = sampling_settle(
+            &def,
+            json!({ "messages": [{ "role": "user", "content": part }] }),
+        );
+        assert!(
+            matches!(settled, Settled::Answer { .. }),
+            "a {} part past max_prompt_bytes must be refused, got {settled:?}",
+            part["type"]
+        );
+        assert_bound_refused(settled, "max_prompt_bytes", "64");
+    }
+    // In an array of parts too.
+    let mixed = json!({ "messages": [{ "role": "user", "content": [
+        { "type": "text", "text": "hi" },
+        { "type": "image", "data": "x".repeat(100), "mimeType": "image/png" }
+    ] }] });
+    let settled = sampling_settle(&def, mixed);
+    assert!(
+        matches!(settled, Settled::Answer { .. }),
+        "an image beside a text part must be measured, got {settled:?}"
+    );
+    // The control: a small image is within the bound.
+    let small = json!({ "messages": [{ "role": "user", "content":
+        { "type": "image", "data": "xx", "mimeType": "image/png" } }] });
+    assert_relayed(sampling_settle(&def, small));
+}
+
+/// C-M5, the sealing half: the relayed state's leg carries busbar's own answers the call went out
+/// with ([`own_answers`]), and its retry goes out with the first call's arguments exactly.
+#[test]
+fn the_relayed_leg_seals_the_answers_the_first_call_went_out_with() {
+    let cat = catalogue();
+    let first = json!({ "name": "fs_confirm", "arguments": { "n": 1 },
+        "inputResponses": { "ok": true }, "_meta": {} });
+    let sent = go(admit_call(
+        &cat,
+        &json!(1),
+        Some(&first),
+        &no_header,
+        &everyone,
+        &mut answering(&first),
+    ));
+    assert_eq!(sent.arguments, json!({ "n": 1, "ok": true }));
+    let answers = own_answers(&sent);
+    assert_eq!(answers, json!({ "ok": true }).as_object().cloned());
+    let leg = crate::ask::UpstreamLeg {
+        member: "fs".into(),
+        state: None,
+        round: 1,
+        child: None,
+        answers,
+    };
+    let retry = json!({ "name": "fs_confirm", "arguments": { "n": 1 },
+        "inputResponses": { "u": true }, "requestState": "ours", "_meta": {} });
+    let mut relayed = |_: &ToolEntry, _: &Value| crate::ask::AskDecision::Relayed(leg.clone());
+    let again = go(admit_call(
+        &cat,
+        &json!(1),
+        Some(&retry),
+        &no_header,
+        &everyone,
+        &mut relayed,
+    ));
+    assert_eq!(again.arguments, sent.arguments);
+    assert_eq!(again.sent_digest, sent.sent_digest);
+    // A call that went out with none seals none.
+    let plain = go(admit_call(
+        &cat,
+        &json!(1),
+        Some(&params("fs_confirm", json!({ "n": 1 }))),
+        &no_header,
+        &everyone,
+        &mut proceed,
+    ));
+    assert_eq!(own_answers(&plain), None);
 }

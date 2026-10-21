@@ -365,3 +365,78 @@ fn red_a_trim_that_frees_more_than_the_push_cost_gives_the_difference_back() {
     );
     assert_eq!(t.total_bytes(), t.owner_bytes(&owner("p")));
 }
+
+fn in_session(s: &str) -> Remembered {
+    Remembered {
+        revision: Revision::R2025_06_18,
+        session: Some(s.to_string()),
+        message_address: None,
+    }
+}
+
+/// TWO CALLERS OF ONE MEMBER NEVER SHARE A SESSION (row 159 finding 3): what busbar learns about a
+/// member is kept under the member AND the caller binding it was negotiated for, so caller B finds
+/// nothing caller A's call opened, and neither the ungoverned chain's empty binding. RED: keyed by
+/// the member alone, B reads A's session.
+#[test]
+fn red_two_callers_of_one_member_never_share_a_session() {
+    let mut u = UpstreamTable::new(16, 1 << 16);
+    let (alice, bob, open) = (
+        upstream_key("fs", "alice"),
+        upstream_key("fs", "bob"),
+        upstream_key("fs", ""),
+    );
+    assert!(alice != bob && alice != open && bob != open);
+    u.put(&alice, in_session("alice-session"));
+    assert_eq!(u.get(&alice), Some(in_session("alice-session")));
+    assert_eq!(u.get(&bob), None, "bob read alice's session");
+    assert_eq!(
+        u.get(&open),
+        None,
+        "the ungoverned chain read alice's session"
+    );
+    assert_eq!(
+        u.next_id(&bob),
+        None,
+        "bob numbered requests in alice's session"
+    );
+    // A server id holds no unit separator, so no member and caller pair spells another's key.
+    assert_ne!(upstream_key("f", "s\u{1f}x"), upstream_key("fs", "x"));
+}
+
+/// EVERY REQUEST IN A SESSION TAKES ITS OWN ID (row 159 finding 3): the session's numbering never
+/// repeats while the session is remembered, survives the session being remembered again, and
+/// starts over for a new session; a stateless memory numbers nothing. RED: a shared round id.
+#[test]
+fn red_every_request_in_a_session_takes_its_own_id() {
+    let mut u = UpstreamTable::new(16, 1 << 16);
+    let k = upstream_key("fs", "alice");
+    u.put(&k, in_session("s1"));
+    let ids: Vec<u64> = (0..50).map(|_| u.next_id(&k).unwrap()).collect();
+    let distinct: std::collections::BTreeSet<u64> = ids.iter().copied().collect();
+    assert_eq!(distinct.len(), ids.len(), "an id repeated in one session");
+    assert!(ids.iter().all(|id| *id >= SESSION_FIRST_ID));
+    // The same session remembered again keeps counting.
+    u.put(&k, in_session("s1"));
+    let next = u.next_id(&k).unwrap();
+    assert!(
+        !distinct.contains(&next),
+        "the same session reissued id {next}"
+    );
+    // A new session starts its own numbering.
+    u.put(&k, in_session("s2"));
+    assert_eq!(u.next_id(&k), Some(SESSION_FIRST_ID));
+    // A stateless upstream has no session to number.
+    let s = upstream_key("st", "alice");
+    u.put(
+        &s,
+        Remembered {
+            revision: Revision::R2026_07_28,
+            session: None,
+            message_address: None,
+        },
+    );
+    assert_eq!(u.next_id(&s), None);
+    u.forget(&k);
+    assert_eq!(u.next_id(&k), None);
+}

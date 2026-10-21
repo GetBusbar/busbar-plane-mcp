@@ -15,7 +15,7 @@
 
 #![allow(unsafe_code)]
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::os::raw::c_void;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -31,12 +31,15 @@ use busbar_contract::abi::host::service::{
 use busbar_contract::abi::mechanism::call::{
     AbiStr, Blob, Field, InHead, OutHead, Outcome, RawOutcome, BLOB_OCTETS,
 };
-use busbar_contract::abi::mechanism::lifecycle::{slot as life, OpenIn, OpenOut, OpsHead};
-use busbar_contract::abi::mechanism::ticket::{HostCtx, HostTables, Ticket};
+use busbar_contract::abi::mechanism::lifecycle::{
+    slot as life, CancelIn, DriveIn, OpenIn, OpenOut, OpsHead, TickIn, TickOut,
+};
+use busbar_contract::abi::mechanism::ticket::{CompletionHandle, HostCtx, HostTables, Ticket};
 use busbar_contract::abi::plane::{
-    slot, ArriveIn, ArriveOut, OnPieceIn, OnPieceOut, Ops, OutField, PlaneOpenIn, PlaneOpenOut,
-    RecordWrite, UnitCount, EMIT_DONE, EMIT_TO_FAR_END, FROM_CALLER, FROM_FAR_END, FROM_KERNEL,
-    PIECE_HAS_STATUS, PIECE_LAST,
+    slot, ArriveIn, ArriveOut, OnPieceIn, OnPieceOut, Ops, OutField, PlaneCancelIn, PlaneCancelOut,
+    PlaneDriveIn, PlaneDriveOut, PlaneOpenIn, PlaneOpenOut, RecordWrite, UnitCount, AUDIT_REJECTED,
+    EMIT_DONE, EMIT_TO_FAR_END, FROM_CALLER, FROM_FAR_END, FROM_KERNEL, PIECE_HAS_STATUS,
+    PIECE_LAST, RECORD_AUDIT,
 };
 use busbar_contract::abi::transport::FrameSpan;
 use busbar_plane_mcp::{door, tool_door};
@@ -50,16 +53,9 @@ fn answer(out: *mut ServiceOut, outcome: Outcome, value: u64, len: u64) -> RawOu
         out.write(ServiceOut {
             size: std::mem::size_of::<ServiceOut>() as u32,
             outcome: RawOutcome::of(outcome),
-            _reserved: [0; 3],
             value,
             len,
-            items: 0,
-            needed_bytes: 0,
-            needed_items: 0,
-            error: AbiStr {
-                ptr: std::ptr::null(),
-                len: 0,
-            },
+            ..ServiceOut::ZERO
         });
     }
     RawOutcome::of(outcome)
@@ -140,6 +136,9 @@ static HOST_SLOTS: HostSlots = HostSlots {
     trust_decide: None,
     trust_state: None,
     session_emit: None,
+    auth_call: None,
+    unit_hand_in: None,
+    unit_refuse: None,
 };
 
 // ── the upstreams behind the connector ──────────────────────────────────────────────────────────
@@ -166,10 +165,23 @@ type Reply = (u32, Vec<(String, String)>, Vec<u8>);
 #[derive(Default)]
 struct Wire {
     url: String,
+    method: String,
     head: Vec<(String, String)>,
     body: Vec<u8>,
     reply: Option<Reply>,
     step: u8,
+    /// A `2024-11-05` event stream this wire is (the legacy upstream's `GET`).
+    sse: Option<Sse>,
+}
+
+/// One legacy event stream: its session, the events not yet read, the call answers the upstream
+/// holds back, and whether it ended.
+#[derive(Default)]
+struct Sse {
+    session: String,
+    events: VecDeque<Vec<u8>>,
+    held: Vec<Vec<u8>>,
+    closed: bool,
 }
 
 #[derive(Default)]
@@ -177,6 +189,10 @@ struct Upstreams {
     next: u64,
     open: HashMap<u64, Wire>,
     seen: Vec<Seen>,
+    /// The legacy upstream holds its `tools/call` answers until the test releases them.
+    hold_calls: bool,
+    /// The legacy upstream holds its `initialize` answers until the test releases them.
+    hold_init: bool,
 }
 
 static UPSTREAMS: Mutex<Option<Upstreams>> = Mutex::new(None);
@@ -200,6 +216,116 @@ const JSON_TYPE: (&str, &str) = ("content-type", "application/json");
 
 fn json_head() -> Vec<(String, String)> {
     vec![(JSON_TYPE.0.to_string(), JSON_TYPE.1.to_string())]
+}
+
+/// The upstream that speaks only the `2024-11-05` event stream.
+const LEGACY_URL: &str = "https://up.example/legacy";
+/// The message address its stream names, before the session's token.
+const LEGACY_MESSAGES: &str = "/legacy/messages?session=";
+
+/// One event on a legacy stream.
+fn sse_event(name: &str, data: &str) -> Vec<u8> {
+    format!("event: {name}\ndata: {data}\n\n").into_bytes()
+}
+
+/// What the legacy upstream answers a message POSTed in its session, on the stream: `None` for a
+/// notification. A call's answer echoes the `path` it was asked for.
+fn legacy_answer(body: &Value) -> Option<Vec<u8>> {
+    let id = body.get("id").cloned()?;
+    let method = body.get("method").and_then(Value::as_str).unwrap_or("");
+    let result = match method {
+        "initialize" => json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "legacy", "version": "1"},
+        }),
+        "tools/list" => {
+            json!({"tools": [{"name": "read_file", "inputSchema": {"type": "object"}}]})
+        }
+        "tools/call" => {
+            let path = body
+                .pointer("/params/arguments/path")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            json!({"content": [{"type": "text", "text": format!("legacy {path}")}]})
+        }
+        _ => return None,
+    };
+    Some(sse_event(
+        "message",
+        &serde_json::to_string(&json!({"jsonrpc": "2.0", "id": id, "result": result})).unwrap(),
+    ))
+}
+
+/// THE LEGACY UPSTREAM, at the end of a request on wire `id`: a `GET` of the endpoint opens an
+/// event stream naming its message address; a POST to that address is `202` and its answer goes on
+/// the stream (a `tools/call`'s held back while the test holds them); any other POST is `405`.
+fn legacy_request(ups: &mut Upstreams, id: u64) {
+    let wire = ups.open.get_mut(&id).expect("the wire");
+    if wire.method == "GET" {
+        let session = format!("s{id}");
+        let endpoint = sse_event("endpoint", &format!("{LEGACY_MESSAGES}{session}"));
+        wire.sse = Some(Sse {
+            session,
+            events: VecDeque::from([endpoint]),
+            ..Sse::default()
+        });
+        return;
+    }
+    let Some(session) = wire.url.split(LEGACY_MESSAGES).nth(1).map(str::to_string) else {
+        wire.reply = Some((405, Vec::new(), b"Method Not Allowed".to_vec()));
+        return;
+    };
+    wire.reply = Some((202, Vec::new(), Vec::new()));
+    let body: Value = serde_json::from_slice(&wire.body).unwrap_or(Value::Null);
+    let method = body.get("method").and_then(Value::as_str);
+    let hold = (ups.hold_calls && method == Some("tools/call"))
+        || (ups.hold_init && method == Some("initialize"));
+    if let Some(answer) = legacy_answer(&body) {
+        if let Some(sse) = ups
+            .open
+            .values_mut()
+            .filter_map(|w| w.sse.as_mut())
+            .find(|s| s.session == session)
+        {
+            if hold {
+                sse.held.push(answer);
+            } else {
+                sse.events.push_back(answer);
+            }
+        }
+    }
+}
+
+/// The legacy streams open now, by session, in the order they opened.
+fn legacy_sessions() -> Vec<String> {
+    let ups = upstreams();
+    let mut open: Vec<(u64, String)> = ups
+        .as_ref()
+        .map(|u| {
+            u.open
+                .iter()
+                .filter_map(|(id, w)| w.sse.as_ref().map(|s| (*id, s.session.clone())))
+                .collect()
+        })
+        .unwrap_or_default();
+    open.sort();
+    open.into_iter().map(|(_, s)| s).collect()
+}
+
+/// Run `f` over legacy session `session`'s stream.
+fn on_stream(session: &str, f: impl FnOnce(&mut Sse)) {
+    let mut ups = upstreams();
+    let sse = ups
+        .as_mut()
+        .and_then(|u| {
+            u.open
+                .values_mut()
+                .filter_map(|w| w.sse.as_mut())
+                .find(|s| s.session == session)
+        })
+        .expect("the stream is open");
+    f(sse);
 }
 
 /// What an upstream answers one request.
@@ -263,7 +389,104 @@ fn span(buf: &[u8], s: FrameSpan) -> &[u8] {
     &buf[at..at + usize::try_from(s.len).unwrap()]
 }
 
-extern "C" fn establish(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
+// ── the replay rule, as the host keeps it on the driver ticket ──────────────────────────────────
+
+/// One kept answer: the outcome, the scalar and length, and for a read the piece and the bytes it
+/// wrote.
+#[derive(Clone)]
+struct Kept {
+    outcome: Outcome,
+    value: u64,
+    len: u64,
+    read: Option<(ReplyPiece, Vec<u8>)>,
+}
+
+/// THE DRIVER TICKET'S KEPT ANSWERS, by the handle's issue order: a handle that answered (anything
+/// but PENDING) answers the same again until the next tick starts, and the service is not made a
+/// second time, whatever service the re-issue asks for (the host checks no op).
+static KEPT: Mutex<BTreeMap<u32, Kept>> = Mutex::new(BTreeMap::new());
+
+fn kept_answers() -> MutexGuard<'static, BTreeMap<u32, Kept>> {
+    KEPT.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// `run` once per driver-ticket handle, as the host's replay rule runs a service; `read` names a
+/// read's buffer and descriptor slot, which a replay writes again.
+fn kept(
+    handle: CompletionHandle,
+    out: *mut ServiceOut,
+    read: Option<(*mut u8, *mut ReplyPiece)>,
+    run: impl FnOnce() -> RawOutcome,
+) -> RawOutcome {
+    if handle.ticket != DRIVER {
+        return run();
+    }
+    let replay = kept_answers().get(&handle.seq).cloned();
+    if let Some(k) = replay {
+        if let (Some((buf, piece)), Some((p, bytes))) = (read, k.read.as_ref()) {
+            // SAFETY: the SDK's buffer and descriptor slot, live for the call; a kept read's bytes
+            // fit the buffer they were first read into, which every read here shares the size of.
+            unsafe {
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, bytes.len());
+                piece.write(*p);
+            }
+        }
+        return answer(out, k.outcome, k.value, k.len);
+    }
+    let ret = run();
+    let outcome = ret.outcome();
+    if outcome != Outcome::Pending {
+        // SAFETY: `run` wrote the SDK's `out`.
+        let o = unsafe { out.read() };
+        let read = read.map(|(buf, piece)| {
+            let n = usize::try_from(o.len).unwrap_or(0);
+            // SAFETY: as above: the read wrote its descriptor and `n` bytes of the buffer.
+            unsafe { (piece.read(), std::slice::from_raw_parts(buf, n).to_vec()) }
+        });
+        kept_answers().insert(
+            handle.seq,
+            Kept {
+                outcome,
+                value: o.value,
+                len: o.len,
+                read,
+            },
+        );
+    }
+    ret
+}
+
+extern "C" fn establish(ctx: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
+    // SAFETY: the SDK hands an `EstablishIn`.
+    let handle = unsafe { input.cast::<EstablishIn>().read() }.head.handle;
+    kept(handle, out, None, || establish_now(ctx, input, out))
+}
+
+extern "C" fn write_request(
+    ctx: HostCtx,
+    input: *const c_void,
+    out: *mut ServiceOut,
+) -> RawOutcome {
+    // SAFETY: the SDK hands a `RequestIn`.
+    let handle = unsafe { input.cast::<RequestIn>().read() }.head.handle;
+    kept(handle, out, None, || write_request_now(ctx, input, out))
+}
+
+extern "C" fn read_reply(ctx: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
+    // SAFETY: the SDK hands a `ReplyIn`.
+    let i = unsafe { input.cast::<ReplyIn>().read() };
+    kept(i.head.handle, out, Some((i.buf, i.piece)), || {
+        read_reply_now(ctx, input, out)
+    })
+}
+
+extern "C" fn close(ctx: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
+    // SAFETY: the SDK hands a `StreamIn`.
+    let handle = unsafe { input.cast::<StreamIn>().read() }.head.handle;
+    kept(handle, out, None, || close_now(ctx, input, out))
+}
+
+fn establish_now(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
     // SAFETY: the SDK hands an `EstablishIn`.
     let i = unsafe { input.cast::<EstablishIn>().read() };
     // SAFETY: the SDK's target text, live for the call.
@@ -283,7 +506,7 @@ extern "C" fn establish(_: HostCtx, input: *const c_void, out: *mut ServiceOut) 
     answer(out, Outcome::Ready, id, 0)
 }
 
-extern "C" fn write_request(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
+fn write_request_now(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
     // SAFETY: the SDK hands a `RequestIn` over its own bytes and descriptor.
     let i = unsafe { input.cast::<RequestIn>().read() };
     // SAFETY: as above.
@@ -300,6 +523,7 @@ extern "C" fn write_request(_: HostCtx, input: *const c_void, out: *mut ServiceO
     };
     match piece.kind {
         REQUEST_HEAD => {
+            wire.method = String::from_utf8_lossy(span(bytes, piece.method)).into_owned();
             let block = String::from_utf8_lossy(span(bytes, piece.fields)).into_owned();
             wire.head = block
                 .split("\r\n")
@@ -308,6 +532,16 @@ extern "C" fn write_request(_: HostCtx, input: *const c_void, out: *mut ServiceO
                 .collect();
         }
         REQUEST_BODY => wire.body.extend_from_slice(bytes),
+        _ if wire.url.starts_with(LEGACY_URL) => {
+            let body: Value = serde_json::from_slice(&wire.body).unwrap_or(Value::Null);
+            let seen = Seen {
+                url: wire.url.clone(),
+                fields: wire.head.clone(),
+                body,
+            };
+            ups.seen.push(seen);
+            legacy_request(ups, i.stream);
+        }
         _ => {
             let body: Value = serde_json::from_slice(&wire.body).unwrap_or(Value::Null);
             wire.reply = Some(upstream_answer(&wire.url, &wire.head, &body));
@@ -322,7 +556,7 @@ extern "C" fn write_request(_: HostCtx, input: *const c_void, out: *mut ServiceO
     answer(out, Outcome::Ready, 0, i.len as u64)
 }
 
-extern "C" fn read_reply(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
+fn read_reply_now(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
     // SAFETY: the SDK hands a `ReplyIn` over its own buffer and descriptor slot.
     let i = unsafe { input.cast::<ReplyIn>().read() };
     // SAFETY: as above.
@@ -332,6 +566,49 @@ extern "C" fn read_reply(_: HostCtx, input: *const c_void, out: *mut ServiceOut)
     let Some(wire) = ups.open.get_mut(&i.stream) else {
         return answer(out, Outcome::Failed, 0, 0);
     };
+    // A LEGACY EVENT STREAM: its head, then each event as it is there, PENDING while none is, and
+    // its end once it closed.
+    if let Some(sse) = wire.sse.as_mut() {
+        let (piece, n) = if wire.step == 0 {
+            let block = "content-type: text/event-stream\r\n";
+            buf[..block.len()].copy_from_slice(block.as_bytes());
+            (
+                ReplyPiece {
+                    kind: REPLY_HEAD,
+                    code: 200,
+                    fields: FrameSpan {
+                        offset: 0,
+                        len: block.len() as u64,
+                    },
+                    ..ReplyPiece::default()
+                },
+                block.len(),
+            )
+        } else if let Some(event) = sse.events.pop_front() {
+            buf[..event.len()].copy_from_slice(&event);
+            (
+                ReplyPiece {
+                    kind: REPLY_BODY,
+                    ..ReplyPiece::default()
+                },
+                event.len(),
+            )
+        } else if sse.closed {
+            (
+                ReplyPiece {
+                    kind: REPLY_END,
+                    ..ReplyPiece::default()
+                },
+                0,
+            )
+        } else {
+            return answer(out, Outcome::Pending, 0, 0);
+        };
+        wire.step = wire.step.saturating_add(1);
+        // SAFETY: the SDK's descriptor slot.
+        unsafe { i.piece.write(piece) };
+        return answer(out, Outcome::Ready, 0, n as u64);
+    }
     let Some((status, head, body)) = wire.reply.clone() else {
         return answer(out, Outcome::Failed, 0, 0);
     };
@@ -380,7 +657,7 @@ extern "C" fn read_reply(_: HostCtx, input: *const c_void, out: *mut ServiceOut)
     answer(out, Outcome::Ready, 0, n as u64)
 }
 
-extern "C" fn close(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
+fn close_now(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
     // SAFETY: the SDK hands a `StreamIn`.
     let i = unsafe { input.cast::<StreamIn>().read() };
     if let Some(ups) = upstreams().as_mut() {
@@ -485,11 +762,30 @@ const SECTION: &str = r#"{
 }"#;
 
 fn open() -> Door {
+    open_with(SECTION)
+}
+
+/// The section with one registration that speaks only the `2024-11-05` event stream.
+const LEGACY_SECTION: &str = r#"{
+    "lg": {"url": "https://up.example/legacy", "pin": {"mechanism": "unpinned"}, "verify_ttl": "1h", "tools_allow": {"read_file": {}}}
+}"#;
+
+/// The instance's driver ticket, as the kernel lends it.
+const DRIVER: Ticket = Ticket {
+    slot: u32::MAX - 1,
+    generation: 1,
+};
+
+/// The tick clock, on from every earlier tick.
+static TICKS: AtomicU64 = AtomicU64::new(1);
+
+fn open_with(section: &str) -> Door {
+    kept_answers().clear();
     let mut i: PlaneOpenIn = z();
     i.open = OpenIn {
         head: head::<PlaneOpenIn>(life::OPEN, Ticket::NONE),
         host: &TABLES.0,
-        settings: octets(SECTION.as_bytes()),
+        settings: octets(section.as_bytes()),
         generation: 1,
         ..z()
     };
@@ -527,6 +823,128 @@ fn claim(verb: &str) -> u32 {
 }
 
 impl Door {
+    /// The kernel's tick, on the driver ticket.
+    fn tick(&self) {
+        // A tick starts: the host forgets what the driver ticket kept.
+        kept_answers().clear();
+        let now = TICKS.fetch_add(1, Ordering::Relaxed);
+        let i = TickIn {
+            head: head::<TickIn>(life::TICK, DRIVER),
+            now_ns: now,
+        };
+        let mut o = TickOut {
+            head: out_head::<TickOut>(),
+            next_tick_ns: 0,
+        };
+        let f = lifecycle().tick.expect("tick");
+        let ret = f(
+            self.instance,
+            std::ptr::from_ref(&i).cast(),
+            std::ptr::from_mut(&mut o).cast(),
+        );
+        assert_eq!(ret.outcome(), Outcome::Ready);
+    }
+
+    /// The driver ticket woke: `drive`.
+    fn drive(&self) {
+        let mut sessions = [0_u64; 16];
+        let i = PlaneDriveIn {
+            drive: DriveIn {
+                head: head::<PlaneDriveIn>(life::DRIVE, DRIVER),
+                driver: DRIVER,
+            },
+            sessions_buf: sessions.as_mut_ptr(),
+            sessions_cap: sessions.len(),
+        };
+        let mut o: PlaneDriveOut = z();
+        o.head = out_head::<PlaneDriveOut>();
+        let f = lifecycle().drive.expect("drive");
+        let ret = f(
+            self.instance,
+            std::ptr::from_ref(&i).cast(),
+            std::ptr::from_mut(&mut o).cast(),
+        );
+        assert_eq!(ret.outcome(), Outcome::Ready);
+    }
+
+    /// A tick and the drive it wakes: every held stream read as far as it goes.
+    fn turn(&self) {
+        self.tick();
+        self.drive();
+    }
+
+    /// `unit`'s piece re-called while it pends, the driver woken between WITHOUT a tick (one tick
+    /// cycle throughout, as a driver woken by its streams' readiness runs): what it came to.
+    fn steady(&self, unit: u64, given: &Given<'_>) -> Answered {
+        let mut got = Answered::default();
+        for _ in 0..32 {
+            got = self.piece(unit, given);
+            if got.outcome != Some(Outcome::Pending) {
+                return got;
+            }
+            self.drive();
+        }
+        got
+    }
+
+    /// `unit`'s piece re-called while it pends, the driver turning between, at most 32 times:
+    /// what it came to (still PENDING when it never stopped).
+    fn settle(&self, unit: u64, given: &Given<'_>) -> Answered {
+        let mut got = Answered::default();
+        for _ in 0..32 {
+            got = self.piece(unit, given);
+            if got.outcome != Some(Outcome::Pending) {
+                return got;
+            }
+            self.turn();
+        }
+        got
+    }
+
+    /// The kernel cancels the op on `unit`'s ticket.
+    fn cancel(&self, unit: u64) {
+        let ticket = Ticket {
+            slot: u32::try_from(unit).unwrap(),
+            generation: 1,
+        };
+        let mut records = [z::<RecordWrite>(); 8];
+        let mut arena = vec![0_u8; 1 << 12];
+        let i = PlaneCancelIn {
+            cancel: CancelIn {
+                head: head::<PlaneCancelIn>(life::CANCEL, ticket),
+                ticket,
+            },
+            records_buf: records.as_mut_ptr(),
+            records_cap: records.len(),
+            arena_buf: arena.as_mut_ptr(),
+            arena_cap: arena.len(),
+            // The host's own cancel of a unit names the unit as arrive keyed it.
+            unit,
+        };
+        let mut o: PlaneCancelOut = z();
+        o.cancel.head = out_head::<PlaneCancelOut>();
+        let f = lifecycle().cancel.expect("cancel");
+        let ret = f(
+            self.instance,
+            std::ptr::from_ref(&i).cast(),
+            std::ptr::from_mut(&mut o).cast(),
+        );
+        assert_eq!(ret.outcome(), Outcome::Ready);
+    }
+
+    /// `unit`'s piece re-called (as the kernel does when the door wakes its ticket) while it pends,
+    /// the driver turning between: what it came to.
+    fn pump(&self, unit: u64, given: &Given<'_>) -> Answered {
+        for _ in 0..32 {
+            let got = self.piece(unit, given);
+            if got.outcome != Some(Outcome::Pending) {
+                return got;
+            }
+            self.turn();
+        }
+        panic!("unit {unit} never stopped pending");
+    }
+
     fn arrive(
         &self,
         unit: u64,
@@ -637,6 +1055,12 @@ impl Door {
             }
             got.far |= o.flags & EMIT_TO_FAR_END != 0;
             got.done |= o.flags & EMIT_DONE != 0;
+            got.audits.extend(
+                records[..o.records_written as usize]
+                    .iter()
+                    .filter(|r| r.op == RECORD_AUDIT)
+                    .map(|r| (at(r.key), at(r.value), r.kind == AUDIT_REJECTED)),
+            );
             got.bytes
                 .extend_from_slice(&reply[..usize::try_from(o.emitted).unwrap()]);
             if ret.outcome() != Outcome::Ready || o.more == 0 {
@@ -727,6 +1151,8 @@ struct Answered {
     far: bool,
     done: bool,
     request: String,
+    /// The audit rows written: action, resource, rejected.
+    audits: Vec<(String, String, bool)>,
 }
 
 impl Answered {
@@ -1016,9 +1442,20 @@ fn an_upstream_that_requires_a_session_is_reached_by_negotiation() {
         ],
         "the verify fetch probed statelessly, was refused, and negotiated"
     );
-    let far_ok =
-        br#"{"jsonrpc":"2.0","id":0,"result":{"content":[{"type":"text","text":"in-session"}]}}"#;
-    let answered = d.piece(40, &Given::far(ALICE, 200, vec![JSON_TYPE], far_ok));
+    // A call in the session carries the session's own id, never the stateless round's `0` every
+    // call shares (row 159 finding 3); the upstream answers under the id the call carried.
+    assert_ne!(
+        sent["id"],
+        json!(0),
+        "the call in the session carried the round's id: {sent}"
+    );
+    let far_ok = serde_json::to_vec(&json!({
+        "jsonrpc": "2.0",
+        "id": sent["id"],
+        "result": {"content": [{"type": "text", "text": "in-session"}]},
+    }))
+    .expect("an answer");
+    let answered = d.piece(40, &Given::far(ALICE, 200, vec![JSON_TYPE], &far_ok));
     assert_eq!(answered.status, 200, "{}", answered.text());
     let body = answered.json();
     assert_eq!(body["id"], json!(30));
@@ -1179,4 +1616,709 @@ fn a_session_subscription_hears_the_upstreams_resource_update() {
             && delivered.contains("file:///readme"),
         "the subscriber hears the update: {delivered:?}"
     );
+}
+
+// ── the `2024-11-05` rung: busbar as a client of a legacy-only server (row 159 finding 1) ───────
+
+/// A `tools/call` of the legacy registration's `read_file`, asking for `path`, under JSON-RPC id
+/// `id`.
+fn legacy_call(id: u64, path: &str) -> (Vec<u8>, [(&'static str, &'static str); 3]) {
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "tools/call",
+        "params": {
+            "name": "lg_read_file",
+            "arguments": {"path": path},
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": {},
+            },
+        },
+    });
+    let fields = [
+        ("mcp-protocol-version", "2026-07-28"),
+        ("mcp-method", "tools/call"),
+        ("mcp-name", "lg_read_file"),
+    ];
+    (serde_json::to_vec(&body).unwrap(), fields)
+}
+
+/// The walk's answer to a relayed call's stateless first hop, as the legacy server gives it.
+const REFUSED: &[u8] = b"Method Not Allowed";
+
+/// `caller`'s call `body` relayed on `unit`: admitted, verified against the legacy server (over
+/// its held stream), and its stateless first hop handed to the walk.
+fn relayed(d: &Door, unit: u64, caller: &str, body: &[u8], fields: &[(&str, &str)]) {
+    assert_eq!(
+        d.arrive(unit, "POST", "/mcp", body, fields).outcome,
+        Outcome::Ready
+    );
+    d.piece(unit, &Given::attempt(caller, "lg"));
+    let send = d.pump(unit, &Given::caller(caller, body));
+    assert!(
+        send.far,
+        "the call is relayed, not refused: {} {}",
+        send.status,
+        send.text()
+    );
+}
+
+/// The walk refused the stateless hop (the server speaks only `2024-11-05`): the call goes to the
+/// held stream. One entry: what it came to (PENDING while its answer is not on the stream).
+fn walk_refused<'a>(caller: &'a str) -> Given<'a> {
+    Given::far(caller, 405, Vec::new(), REFUSED)
+}
+
+/// The `tools/call` POSTs the legacy server received, by the session they were POSTed in and the
+/// path they asked for.
+fn legacy_calls() -> Vec<(String, String)> {
+    seen()
+        .into_iter()
+        .filter(|s| s.body["method"] == json!("tools/call"))
+        .filter_map(|s| {
+            let session = s.url.split(LEGACY_MESSAGES).nth(1)?.to_string();
+            let path = s
+                .body
+                .pointer("/params/arguments/path")?
+                .as_str()?
+                .to_string();
+            Some((session, path))
+        })
+        .collect()
+}
+
+/// The one legacy server's text answer to `answered`, with the caller's own id.
+fn legacy_text(answered: &Answered) -> (Value, String) {
+    let body = answered.json();
+    let text = body
+        .pointer("/result/content/0/text")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("a tool result: {body}"))
+        .to_string();
+    (body["id"].clone(), text)
+}
+
+/// A REGISTERED SERVER THAT SPEAKS ONLY `2024-11-05` IS REACHED END TO END: busbar opens its event
+/// stream, `initialize`s on it, and POSTs each call to the message address it names. Two calls of
+/// ONE caller in flight at once, answered on the stream in the reverse order, each reach the call
+/// that asked: correlated by the JSON-RPC id busbar gave each, never by order.
+#[test]
+fn a_legacy_only_server_is_reached_and_its_answers_reach_their_callers() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open_with(LEGACY_SECTION);
+    let (a, fields) = legacy_call(30, "a.txt");
+    relayed(&d, 70, ALICE, &a, &fields);
+    assert_eq!(
+        legacy_sessions().len(),
+        1,
+        "the verify fetch opened the held stream"
+    );
+    upstreams().as_mut().unwrap().hold_calls = true;
+    let first = d.piece(70, &walk_refused(ALICE));
+    assert_eq!(first.outcome, Some(Outcome::Pending), "{}", first.text());
+    let (b, fields) = legacy_call(31, "b.txt");
+    relayed(&d, 71, ALICE, &b, &fields);
+    let second = d.piece(71, &walk_refused(ALICE));
+    assert_eq!(second.outcome, Some(Outcome::Pending), "{}", second.text());
+    let session = legacy_sessions()[0].clone();
+    assert_eq!(
+        legacy_calls(),
+        [
+            (session.clone(), "a.txt".to_string()),
+            (session.clone(), "b.txt".to_string())
+        ],
+        "both calls POSTed in the one caller's session"
+    );
+
+    // The server answers the second call first.
+    on_stream(&session, |s| {
+        let held = std::mem::take(&mut s.held);
+        s.events.extend(held.into_iter().rev());
+    });
+    d.turn();
+    let answered_b = d.pump(71, &walk_refused(ALICE));
+    let answered_a = d.pump(70, &walk_refused(ALICE));
+    assert_eq!(answered_a.status, 200, "{}", answered_a.text());
+    assert_eq!(answered_b.status, 200, "{}", answered_b.text());
+    assert_eq!(
+        legacy_text(&answered_a),
+        (json!(30), "legacy a.txt".to_string()),
+        "the first call's own answer, under its own id"
+    );
+    assert_eq!(
+        legacy_text(&answered_b),
+        (json!(31), "legacy b.txt".to_string()),
+        "the second call's own answer, under its own id"
+    );
+    let methods: Vec<String> = seen()
+        .iter()
+        .filter(|s| s.url.contains(LEGACY_MESSAGES))
+        .map(|s| s.body["method"].as_str().unwrap_or("").to_string())
+        .collect();
+    assert_eq!(
+        methods[..2],
+        ["initialize", "notifications/initialized"],
+        "the stream's handshake ran first, once: {methods:?}"
+    );
+    assert_eq!(
+        methods.iter().filter(|m| *m == "initialize").count(),
+        1,
+        "one handshake per stream: {methods:?}"
+    );
+}
+
+/// RED (a): A REPLY WHOSE ID NO CALL WAITS FOR is dropped, never delivered to the call waiting on
+/// the stream, and the next answer on that caller's stream carries one rejected
+/// `mcp_upstream.reply` audit row for it.
+#[test]
+fn a_legacy_reply_no_call_waits_for_is_dropped_and_audited() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open_with(LEGACY_SECTION);
+    let (a, fields) = legacy_call(30, "a.txt");
+    relayed(&d, 72, ALICE, &a, &fields);
+    upstreams().as_mut().unwrap().hold_calls = true;
+    assert_eq!(
+        d.piece(72, &walk_refused(ALICE)).outcome,
+        Some(Outcome::Pending)
+    );
+    let session = legacy_sessions()[0].clone();
+    // A reply under an id busbar never sent, ahead of the call's own.
+    let stray = sse_event(
+        "message",
+        r#"{"jsonrpc":"2.0","id":999,"result":{"content":[{"type":"text","text":"stolen"}]}}"#,
+    );
+    on_stream(&session, |s| s.events.push_back(stray));
+    d.turn();
+    assert_eq!(
+        d.piece(72, &walk_refused(ALICE)).outcome,
+        Some(Outcome::Pending),
+        "the stray reply is never the waiting call's answer"
+    );
+    on_stream(&session, |s| {
+        let held = std::mem::take(&mut s.held);
+        s.events.extend(held);
+    });
+    d.turn();
+    let answered = d.pump(72, &walk_refused(ALICE));
+    assert_eq!(
+        legacy_text(&answered),
+        (json!(30), "legacy a.txt".to_string())
+    );
+    assert!(!answered.text().contains("stolen"), "{}", answered.text());
+    let dropped: Vec<&(String, String, bool)> = answered
+        .audits
+        .iter()
+        .filter(|(action, _, _)| action == "mcp_upstream.reply")
+        .collect();
+    assert_eq!(
+        dropped,
+        [&(
+            "mcp_upstream.reply".to_string(),
+            "mcp_server:lg".to_string(),
+            true
+        )],
+        "one rejected row for the one reply dropped: {:?}",
+        answered.audits
+    );
+}
+
+/// RED (b): THE HELD STREAM DROPPING fails every call waiting on it with the upstream-failure
+/// answer every relayed call gets when its server does not complete it, and the next call opens a
+/// new stream.
+#[test]
+fn a_legacy_stream_that_drops_fails_every_waiting_call() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open_with(LEGACY_SECTION);
+    upstreams().as_mut().unwrap().hold_calls = true;
+    let (a, fields) = legacy_call(30, "a.txt");
+    relayed(&d, 73, ALICE, &a, &fields);
+    assert_eq!(
+        d.piece(73, &walk_refused(ALICE)).outcome,
+        Some(Outcome::Pending)
+    );
+    let (b, fields) = legacy_call(31, "b.txt");
+    relayed(&d, 74, ALICE, &b, &fields);
+    assert_eq!(
+        d.piece(74, &walk_refused(ALICE)).outcome,
+        Some(Outcome::Pending)
+    );
+    let session = legacy_sessions()[0].clone();
+    on_stream(&session, |s| {
+        s.held.clear();
+        s.closed = true;
+    });
+    d.turn();
+    for (unit, id) in [(73, 30), (74, 31)] {
+        let failed = d.pump(unit, &walk_refused(ALICE));
+        assert_eq!(failed.status, 200, "{}", failed.text());
+        let body = failed.json();
+        assert_eq!(body["id"], json!(id));
+        assert_eq!(body["result"]["isError"], json!(true), "{body}");
+        let text = body["result"]["content"][0]["text"].as_str().unwrap_or("");
+        assert_eq!(
+            text,
+            "The MCP server `lg` did not complete this tool call: the MCP server's 2024-11-05 \
+             event stream closed before it answered this call",
+            "the upstream-failure answer, in the stream's words"
+        );
+    }
+
+    upstreams().as_mut().unwrap().hold_calls = false;
+    let (c, fields) = legacy_call(32, "c.txt");
+    relayed(&d, 75, ALICE, &c, &fields);
+    let answered = d.pump(75, &walk_refused(ALICE));
+    assert_eq!(
+        legacy_text(&answered),
+        (json!(32), "legacy c.txt".to_string())
+    );
+    let fresh = legacy_sessions();
+    assert!(
+        fresh.len() == 1 && fresh[0] != session,
+        "the next call opened a new stream: {fresh:?} after {session}"
+    );
+}
+
+/// RED (c): TWO CALLERS' BINDINGS NEVER SHARE A STREAM (the H3 per-caller rule): a second caller's
+/// call to the same member opens its own stream, and its POSTs go to that stream's session.
+#[test]
+fn two_callers_of_one_legacy_member_never_share_a_stream() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open_with(LEGACY_SECTION);
+    let (a, fields) = legacy_call(30, "a.txt");
+    relayed(&d, 76, ALICE, &a, &fields);
+    let alice = d.pump(76, &walk_refused(ALICE));
+    assert_eq!(legacy_text(&alice), (json!(30), "legacy a.txt".to_string()));
+    let (b, fields) = legacy_call(30, "b.txt");
+    relayed(&d, 77, BOB, &b, &fields);
+    let bob = d.pump(77, &walk_refused(BOB));
+    assert_eq!(legacy_text(&bob), (json!(30), "legacy b.txt".to_string()));
+    let sessions = legacy_sessions();
+    assert_eq!(sessions.len(), 2, "one stream per caller: {sessions:?}");
+    assert_eq!(
+        legacy_calls(),
+        [
+            (sessions[0].clone(), "a.txt".to_string()),
+            (sessions[1].clone(), "b.txt".to_string())
+        ],
+        "each caller's call POSTed in its own stream's session"
+    );
+}
+
+// ── row 159 legacy-rung, ladder, session and subscription findings (lane q128) ──────────────────
+
+/// The largest integer a JavaScript peer reads back exactly (`Number.MAX_SAFE_INTEGER`).
+const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
+
+/// RED B-H1: TWO LEGACY LINKS NEVER READ EACH OTHER'S STREAM. Bob's link reads its stream in a tick
+/// cycle; Alice's link, whose key sorts ahead of Bob's, opens in the same cycle. The host answers a
+/// re-issued `(ticket, seq)` from what it kept, whatever the service, so a link numbered by its place
+/// in the table would be handed Bob's answers. Alice's call is answered on her own stream.
+#[test]
+fn two_legacy_links_never_read_each_others_stream() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open_with(LEGACY_SECTION);
+    let (b, fields) = legacy_call(30, "b.txt");
+    relayed(&d, 90, BOB, &b, &fields);
+    let bob = d.pump(90, &walk_refused(BOB));
+    assert_eq!(legacy_text(&bob), (json!(30), "legacy b.txt".to_string()));
+    let bob_session = legacy_sessions()[0].clone();
+    // A new tick cycle in which Bob's link reads two events: answered, so the host keeps them.
+    let note = sse_event(
+        "message",
+        r#"{"jsonrpc":"2.0","method":"notifications/message","params":{"level":"info","data":"x"}}"#,
+    );
+    on_stream(&bob_session, |s| {
+        s.events.push_back(note.clone());
+        s.events.push_back(note.clone());
+    });
+    d.tick();
+    d.drive();
+    // Alice's call opens her link in the same cycle.
+    let (a, fields) = legacy_call(31, "a.txt");
+    assert_eq!(
+        d.arrive(91, "POST", "/mcp", &a, &fields).outcome,
+        Outcome::Ready
+    );
+    d.piece(91, &Given::attempt(ALICE, "lg"));
+    let send = d.steady(91, &Given::caller(ALICE, &a));
+    assert!(send.far, "{} {}", send.status, send.text());
+    let answered = d.steady(91, &walk_refused(ALICE));
+    let body = answered.json();
+    assert_eq!(
+        body.pointer("/result/content/0/text"),
+        Some(&json!("legacy a.txt")),
+        "Alice's call is answered on her own stream: {body}"
+    );
+    let sessions = legacy_sessions();
+    assert_eq!(sessions.len(), 2, "one stream per caller: {sessions:?}");
+    let alice_posts: Vec<String> = legacy_calls()
+        .into_iter()
+        .filter(|(_, path)| path == "a.txt")
+        .map(|(session, _)| session)
+        .collect();
+    assert!(
+        !alice_posts.is_empty() && alice_posts.iter().all(|s| *s != bob_session),
+        "Alice's call is POSTed in her own stream's session, never Bob's: {alice_posts:?}"
+    );
+}
+
+/// RED B-H2: THE `initialize` ID ROUND-TRIPS A JAVASCRIPT SERVER: on the held stream and on a session
+/// upstream, the id busbar's own `initialize` carries is an integer a JavaScript peer reads back
+/// exactly.
+#[test]
+fn busbars_own_initialize_id_round_trips_a_javascript_server() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open_with(LEGACY_SECTION);
+    let (a, fields) = legacy_call(30, "a.txt");
+    relayed(&d, 92, ALICE, &a, &fields);
+    let d2 = open();
+    assert_eq!(
+        d2.arrive(93, "POST", "/mcp", CALL, CALL_FIELDS).outcome,
+        Outcome::Ready
+    );
+    d2.piece(93, &Given::attempt(ALICE, "fs"));
+    assert!(d2.piece(93, &Given::caller(ALICE, CALL)).far);
+    let ids: Vec<(String, Value)> = seen()
+        .into_iter()
+        .filter(|s| s.body["method"] == json!("initialize"))
+        .filter(|s| s.url.contains(LEGACY_MESSAGES) || s.url.starts_with(SESSION_URL))
+        .map(|s| (s.url.clone(), s.body["id"].clone()))
+        .collect();
+    assert_eq!(
+        ids.len(),
+        2,
+        "one legacy and one session initialize: {ids:?}"
+    );
+    for (url, id) in &ids {
+        assert!(
+            id.as_u64().is_some_and(|n| n <= MAX_SAFE_INTEGER),
+            "the initialize to {url} carries id {id}, past what a JavaScript server reads back"
+        );
+    }
+}
+
+/// RED B-H3: A CANCELLED INITIALIZING CALL NEVER WEDGES THE STREAM: the call running the stream's
+/// `initialize` is cancelled before the answer comes; the caller's next call runs it again and is
+/// answered.
+#[test]
+fn a_cancelled_legacy_initialize_never_wedges_the_stream() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open_with(LEGACY_SECTION);
+    upstreams().as_mut().unwrap().hold_init = true;
+    let (a, fields) = legacy_call(30, "a.txt");
+    assert_eq!(
+        d.arrive(94, "POST", "/mcp", &a, &fields).outcome,
+        Outcome::Ready
+    );
+    d.piece(94, &Given::attempt(ALICE, "lg"));
+    for _ in 0..6 {
+        let got = d.piece(94, &Given::caller(ALICE, &a));
+        assert_eq!(got.outcome, Some(Outcome::Pending), "{}", got.text());
+        d.turn();
+    }
+    d.cancel(94);
+    upstreams().as_mut().unwrap().hold_init = false;
+    let session = legacy_sessions()[0].clone();
+    on_stream(&session, |s| s.held.clear());
+    let (b, fields) = legacy_call(31, "b.txt");
+    assert_eq!(
+        d.arrive(95, "POST", "/mcp", &b, &fields).outcome,
+        Outcome::Ready
+    );
+    d.piece(95, &Given::attempt(ALICE, "lg"));
+    let send = d.settle(95, &Given::caller(ALICE, &b));
+    assert_ne!(
+        send.outcome,
+        Some(Outcome::Pending),
+        "the next call is wedged behind the cancelled initialize"
+    );
+    assert!(send.far, "{} {}", send.status, send.text());
+    let answered = d.settle(95, &walk_refused(ALICE));
+    assert_eq!(
+        answered.json().pointer("/result/content/0/text"),
+        Some(&json!("legacy b.txt")),
+        "{}",
+        answered.text()
+    );
+}
+
+/// RED B-H4: A LEGACY SERVER'S OWN REQUESTS ARE ANSWERED, never left hanging: `ping` gets its empty
+/// result, an ungranted `sampling/createMessage` is refused (`-32001`), a request busbar does not
+/// know is `-32601`, each POSTed to the stream's message address while the call waits.
+#[test]
+fn a_legacy_servers_own_requests_are_answered_on_its_message_address() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open_with(LEGACY_SECTION);
+    let (a, fields) = legacy_call(30, "a.txt");
+    relayed(&d, 96, ALICE, &a, &fields);
+    upstreams().as_mut().unwrap().hold_calls = true;
+    assert_eq!(
+        d.piece(96, &walk_refused(ALICE)).outcome,
+        Some(Outcome::Pending)
+    );
+    let session = legacy_sessions()[0].clone();
+    on_stream(&session, |s| {
+        for data in [
+            r#"{"jsonrpc":"2.0","id":"p-1","method":"ping"}"#,
+            r#"{"jsonrpc":"2.0","id":"s-1","method":"sampling/createMessage","params":{"messages":[],"maxTokens":1}}"#,
+            r#"{"jsonrpc":"2.0","id":"x-1","method":"vendor/thing"}"#,
+        ] {
+            s.events.push_back(sse_event("message", data));
+        }
+    });
+    d.turn();
+    assert_eq!(
+        d.piece(96, &walk_refused(ALICE)).outcome,
+        Some(Outcome::Pending),
+        "the call still waits for its own answer"
+    );
+    on_stream(&session, |s| {
+        let held = std::mem::take(&mut s.held);
+        s.events.extend(held);
+    });
+    d.turn();
+    let answered = d.settle(96, &walk_refused(ALICE));
+    let replies: Vec<Value> = seen()
+        .into_iter()
+        .filter(|s| s.url.contains(LEGACY_MESSAGES) && s.body.get("method").is_none())
+        .map(|s| s.body)
+        .collect();
+    let by = |id: &str| {
+        replies
+            .iter()
+            .find(|r| r["id"] == json!(id))
+            .cloned()
+            .unwrap_or(Value::Null)
+    };
+    assert_eq!(by("p-1")["result"], json!({}), "ping answered: {replies:?}");
+    assert_eq!(
+        by("s-1")["error"]["code"],
+        json!(-32001),
+        "the ungranted ask refused: {replies:?}"
+    );
+    assert_eq!(
+        by("x-1")["error"]["code"],
+        json!(-32601),
+        "the unknown request answered -32601: {replies:?}"
+    );
+    assert_eq!(
+        answered.json().pointer("/result/content/0/text"),
+        Some(&json!("legacy a.txt")),
+        "{}",
+        answered.text()
+    );
+}
+
+/// RED B-H5: A FLOOD OF REPLIES NO CALL WAITS FOR is audited in a small bounded number of rows on
+/// the next answer, never one row per reply.
+#[test]
+fn a_flood_of_unawaited_legacy_replies_is_audited_in_bounded_rows() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open_with(LEGACY_SECTION);
+    let (a, fields) = legacy_call(30, "a.txt");
+    relayed(&d, 97, ALICE, &a, &fields);
+    upstreams().as_mut().unwrap().hold_calls = true;
+    assert_eq!(
+        d.piece(97, &walk_refused(ALICE)).outcome,
+        Some(Outcome::Pending)
+    );
+    let session = legacy_sessions()[0].clone();
+    on_stream(&session, |s| {
+        for id in 900..910 {
+            s.events.push_back(sse_event(
+                "message",
+                &format!(r#"{{"jsonrpc":"2.0","id":{id},"result":{{}}}}"#),
+            ));
+        }
+        let held = std::mem::take(&mut s.held);
+        s.events.extend(held);
+    });
+    d.turn();
+    let answered = d.settle(97, &walk_refused(ALICE));
+    let rows = answered
+        .audits
+        .iter()
+        .filter(|(action, _, _)| action == "mcp_upstream.reply")
+        .count();
+    assert!(
+        (1..=4).contains(&rows),
+        "ten dropped replies are audited in a bounded number of rows, not {rows}: {:?}",
+        answered.audits
+    );
+}
+
+/// RED B-M6: AN IDLE HELD STREAM IS LET GO: once no call has used it for the idle bound, its
+/// connection is closed at the connector.
+#[test]
+fn an_idle_legacy_stream_is_let_go() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open_with(LEGACY_SECTION);
+    let (a, fields) = legacy_call(30, "a.txt");
+    relayed(&d, 98, ALICE, &a, &fields);
+    let answered = d.pump(98, &walk_refused(ALICE));
+    assert_eq!(
+        legacy_text(&answered),
+        (json!(30), "legacy a.txt".to_string())
+    );
+    assert_eq!(legacy_sessions().len(), 1);
+    // An hour of tick clock passes with no call on the stream.
+    TICKS.fetch_add(3_600_000_000_000, Ordering::Relaxed);
+    d.turn();
+    d.turn();
+    assert!(
+        legacy_sessions().is_empty(),
+        "the idle stream is closed: {:?}",
+        legacy_sessions()
+    );
+}
+
+/// RED B-M7: ONE OWNER HOLDS A BOUNDED NUMBER OF SESSION STREAMS: past the quota the next GET is
+/// refused `429`, as a subscription past its quota is.
+#[test]
+fn one_owner_holds_a_bounded_number_of_session_streams() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open();
+    let init = initialize(&d, 200, ALICE);
+    let session = init
+        .field("mcp-session-id")
+        .expect("the answer names its session")
+        .to_string();
+    let stream = [
+        ("accept", "text/event-stream"),
+        ("mcp-session-id", session.as_str()),
+        ("mcp-protocol-version", "2025-06-18"),
+    ];
+    let mut statuses = Vec::new();
+    for unit in 201..=265 {
+        assert_eq!(
+            d.arrive(unit, "GET", "/mcp", b"", &stream).outcome,
+            Outcome::Ready
+        );
+        statuses.push(d.piece(unit, &Given::stream_open(ALICE, unit)).status);
+    }
+    assert!(
+        statuses[..64].iter().all(|s| *s == 200),
+        "the first 64 streams open: {statuses:?}"
+    );
+    assert_eq!(
+        statuses[64], 429,
+        "the 65th stream of one owner is refused at the quota"
+    );
+}
+
+/// RED P-M5: AN UPSTREAM'S OWN ERROR IS HANDED ON, NOT RENEGOTIATED: a stateless upstream not yet
+/// remembered for this caller answers `-32602` (its own words about the call); busbar sends it no
+/// `initialize` and hands the caller the upstream's answer.
+#[test]
+fn an_upstreams_own_error_is_handed_on_not_renegotiated() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open();
+    // Alice's call verifies `st`; Bob's, inside its verify_ttl, fetches nothing, so `st` is not
+    // remembered for Bob.
+    assert_eq!(
+        d.arrive(54, "POST", "/mcp", ST_CALL, ST_FIELDS).outcome,
+        Outcome::Ready
+    );
+    d.piece(54, &Given::attempt(ALICE, "st"));
+    assert!(d.piece(54, &Given::caller(ALICE, ST_CALL)).far);
+    assert_eq!(
+        d.arrive(55, "POST", "/mcp", ST_CALL, ST_FIELDS).outcome,
+        Outcome::Ready
+    );
+    d.piece(55, &Given::attempt(BOB, "st"));
+    assert!(d.piece(55, &Given::caller(BOB, ST_CALL)).far);
+    let before = seen().len();
+    let own =
+        br#"{"jsonrpc":"2.0","id":0,"error":{"code":-32602,"message":"Unknown tool: read_file"}}"#;
+    let answered = d.settle(55, &Given::far(BOB, 200, vec![JSON_TYPE], own));
+    let after: Vec<Seen> = seen().into_iter().skip(before).collect();
+    assert!(
+        after
+            .iter()
+            .all(|s| s.body["method"] != json!("initialize")),
+        "no initialize follows the upstream's own error: {after:?}"
+    );
+    let text = answered.text();
+    assert!(
+        text.contains("Unknown tool: read_file") && !text.contains("refused the stateless"),
+        "the upstream's own error reaches the caller: {text}"
+    );
+}
+
+/// RED P-M10: A `subscriptions/listen` THAT ASKED FOR A RESOURCE HEARS ITS UPDATE: the announcing
+/// server's `notifications/resources/updated`, heard beside a relayed call's answer, reaches the
+/// held subscription.
+#[test]
+fn a_listen_subscription_hears_the_upstreams_resource_update() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open();
+    let listen = br#"{"jsonrpc":"2.0","id":80,"method":"subscriptions/listen","params":{"notifications":{"resourceSubscriptions":["file:///readme"]},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#;
+    let fields = [
+        ACCEPT_BOTH,
+        ("mcp-protocol-version", "2026-07-28"),
+        ("mcp-method", "subscriptions/listen"),
+    ];
+    let arrived = d.arrive(110, "POST", "/mcp", listen, &fields);
+    assert_eq!(arrived.outcome, Outcome::Ready, "{arrived:?}");
+    let opened = d.piece(110, &Given::stream_open(ALICE, 110));
+    assert!(
+        opened.text().contains("acknowledged"),
+        "the subscription is acknowledged: {} {}",
+        opened.status,
+        opened.text()
+    );
+    assert_eq!(
+        d.arrive(111, "POST", "/mcp", ST_CALL, ST_FIELDS).outcome,
+        Outcome::Ready
+    );
+    d.piece(111, &Given::attempt(BOB, "st"));
+    assert!(d.piece(111, &Given::caller(BOB, ST_CALL)).far);
+    let far = b"event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/resources/updated\",\"params\":{\"uri\":\"file:///readme\"}}\n\nevent: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{\"content\":[],\"resultType\":\"complete\"}}\n\n";
+    let answered = d.piece(
+        111,
+        &Given::far(BOB, 200, vec![("content-type", "text/event-stream")], far),
+    );
+    assert_eq!(answered.status, 200);
+    let delivered = d.piece(110, &Given::collect(ALICE, 110)).text();
+    assert!(
+        delivered.contains(r#""method":"notifications/resources/updated""#)
+            && delivered.contains("file:///readme"),
+        "the subscription hears the update: {delivered:?}"
+    );
+}
+
+/// RED B-L12: THE LEGACY GET CARRIES NO STATELESS MIRROR HEADERS: the stream's `GET` names no
+/// `mcp-protocol-version`, `mcp-method` or `mcp-name` (a `2024-11-05` server reads none of them).
+#[test]
+fn the_legacy_get_carries_no_stateless_mirror_headers() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open_with(LEGACY_SECTION);
+    let (a, fields) = legacy_call(30, "a.txt");
+    relayed(&d, 99, ALICE, &a, &fields);
+    let get = seen()
+        .into_iter()
+        .find(|s| s.url == LEGACY_URL && s.body.is_null())
+        .expect("the stream's GET");
+    for name in ["mcp-protocol-version", "mcp-method", "mcp-name"] {
+        assert!(
+            field_of(&get.fields, name).is_none(),
+            "the GET carries `{name}`: {:?}",
+            get.fields
+        );
+    }
 }

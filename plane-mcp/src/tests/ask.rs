@@ -166,7 +166,10 @@ fn the_exchange_asks_then_proceeds_once() {
         "d",
         Some(&mut seal),
     );
-    assert_eq!(d, AskDecision::Proceed);
+    assert_eq!(
+        d,
+        AskDecision::Answered(answers.as_object().cloned().unwrap_or_default())
+    );
     let AskDecision::Refuse(r) = decide(
         &confirm(),
         3,
@@ -372,6 +375,7 @@ fn a_relayed_asks_retry_is_pinned_spent_once_and_bound_to_its_caller() {
         state: Some(json!("upstream-state")),
         round: 1,
         child: None,
+        answers: None,
     };
     let state = relay_state(bind("k"), "d", leg.clone(), &mut seal).expect("sealed");
     let answers = json!({ "r": { "roots": [] } });
@@ -452,6 +456,7 @@ fn child_leg() -> UpstreamLeg {
             asks: vec![("srv-1".into(), json!("srv-1")), ("9".into(), json!(9))],
             work: Some("ab".repeat(16)),
         }),
+        answers: None,
     }
 }
 
@@ -518,6 +523,7 @@ fn a_tasks_relayed_state_opens_once_for_its_caller_and_call() {
         state: Some(json!("theirs")),
         round: 1,
         child: None,
+        answers: None,
     };
     let state = relay_state_for(bind("k"), "d", leg.clone(), 86_400, &mut seal).expect("sealed");
     // A day later the state still stands: a task waits on a human.
@@ -556,6 +562,7 @@ fn a_tasks_relayed_state_opens_once_for_its_caller_and_call() {
             ttl_secs: 300,
             roots_epoch: None,
             upstream: None,
+            answers: None,
         })
         .expect("sealed");
     assert_eq!(
@@ -616,6 +623,9 @@ fn the_final_rounds_state_re_sent_without_answers_does_not_proceed() {
             "d",
             Some(&mut seal),
         );
-        assert_eq!(d, AskDecision::Proceed);
+        assert_eq!(
+            d,
+            AskDecision::Answered(answered.as_object().cloned().unwrap_or_default())
+        );
     }
 }

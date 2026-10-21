@@ -625,6 +625,110 @@ impl ServerRequestGrants {
     }
 }
 
+/// The DEFAULT ceiling on the messages of one sampling ask.
+pub const DEFAULT_MAX_SAMPLING_MESSAGES: u32 = 64;
+/// The DEFAULT ceiling on the prompt bytes (system prompt plus every message's content parts) of one ask.
+pub const DEFAULT_MAX_SAMPLING_PROMPT_BYTES: u32 = 64 * 1024;
+/// The DEFAULT ceiling on the stop sequences of one ask.
+pub const DEFAULT_MAX_STOP_SEQUENCES: u32 = 8;
+/// The DEFAULT ceiling on the bytes of each stop sequence.
+pub const DEFAULT_MAX_STOP_SEQUENCE_BYTES: u32 = 64;
+/// The DEFAULT floor of an ask's temperature, in thousandths.
+pub const DEFAULT_TEMPERATURE_MIN_MILLI: u32 = 0;
+/// The DEFAULT ceiling of an ask's temperature, in thousandths (the protocol's own `0.0..=2.0`).
+pub const DEFAULT_TEMPERATURE_MAX_MILLI: u32 = 2000;
+/// The DEFAULT cap on the caller's reply to an ask (its `inputResponses` and the `requestState` it
+/// carries), in serialised bytes: 1 MiB.
+pub const DEFAULT_MAX_INPUT_RESPONSE_BYTES: u32 = 1024 * 1024;
+
+/// `tools.<server>.sampling_bounds` — the INPUT-SIDE bounds on a relayed `sampling/createMessage`
+/// ask (owner ruling Q22c).
+///
+/// A granted sampling ask is relayed to the caller, who runs the completion on the caller's own
+/// budget. The ask arrives on an UPSTREAM, the least trusted input this plane handles, and nothing
+/// else limits how large one is, so its size is bounded here. Every key is a COUNT or a RANGE,
+/// never a price. An ask past any bound is refused by name (`sampling_bound_exceeded`), never
+/// relayed. Absent keys take the defaults below.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SamplingBoundsCfg {
+    /// The most `messages` one ask may carry. Default 64; zero is refused.
+    pub max_messages: u32,
+    /// The most bytes the system prompt plus every message's content (a text part's text, any other
+    /// part as serialised) may total. Default 65536; zero is refused.
+    pub max_prompt_bytes: u32,
+    /// The most `stopSequences` one ask may name. Default 8.
+    pub max_stop_sequences: u32,
+    /// The most bytes any one stop sequence may be. Default 64.
+    pub max_stop_sequence_bytes: u32,
+    /// The lowest `temperature` an ask may name, in thousandths. Default 0.
+    pub temperature_min_milli: u32,
+    /// The highest `temperature` an ask may name, in thousandths. Default 2000 (`2.0`).
+    pub temperature_max_milli: u32,
+    /// The most serialised bytes the caller's reply to an ask (its `inputResponses`, with the
+    /// `requestState` it carries) may total before it is forwarded to the upstream. Default
+    /// 1048576; zero is refused.
+    pub max_input_response_bytes: u32,
+}
+
+impl Default for SamplingBoundsCfg {
+    fn default() -> Self {
+        Self {
+            max_messages: DEFAULT_MAX_SAMPLING_MESSAGES,
+            max_prompt_bytes: DEFAULT_MAX_SAMPLING_PROMPT_BYTES,
+            max_stop_sequences: DEFAULT_MAX_STOP_SEQUENCES,
+            max_stop_sequence_bytes: DEFAULT_MAX_STOP_SEQUENCE_BYTES,
+            temperature_min_milli: DEFAULT_TEMPERATURE_MIN_MILLI,
+            temperature_max_milli: DEFAULT_TEMPERATURE_MAX_MILLI,
+            max_input_response_bytes: DEFAULT_MAX_INPUT_RESPONSE_BYTES,
+        }
+    }
+}
+
+impl SamplingBoundsCfg {
+    /// Whether every bound is at its default (so a serialised definition omits the block).
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// The bounds well-formed, or the offending key named.
+    pub fn validate(&self, at: &str) -> Result<(), String> {
+        if self.max_messages == 0 {
+            return Err(format!(
+                "{at}: `sampling_bounds.max_messages: 0` would refuse every sampling ask. Set a \
+                 positive count (default {DEFAULT_MAX_SAMPLING_MESSAGES}), or leave \
+                 `grants.sampling` unset to refuse the ask kind outright."
+            ));
+        }
+        if self.max_prompt_bytes == 0 {
+            return Err(format!(
+                "{at}: `sampling_bounds.max_prompt_bytes: 0` would refuse every sampling ask. Set \
+                 a positive byte count (default {DEFAULT_MAX_SAMPLING_PROMPT_BYTES}), or leave \
+                 `grants.sampling` unset to refuse the ask kind outright."
+            ));
+        }
+        if self.max_input_response_bytes == 0 {
+            return Err(format!(
+                "{at}: `sampling_bounds.max_input_response_bytes: 0` (the key \
+                 `tools.<server>.sampling_bounds.max_input_response_bytes`) would refuse every \
+                 reply to an ask, so no ask could be answered. Set a positive byte count (default \
+                 {DEFAULT_MAX_INPUT_RESPONSE_BYTES}), or leave the grants unset to refuse the ask \
+                 kinds outright."
+            ));
+        }
+        if self.temperature_min_milli > self.temperature_max_milli {
+            return Err(format!(
+                "{at}: `sampling_bounds.temperature_min_milli: {}` is greater than \
+                 `sampling_bounds.temperature_max_milli: {}`; the range (in thousandths) is \
+                 empty and every ask naming a temperature would be refused.",
+                self.temperature_min_milli, self.temperature_max_milli
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// The DEFAULT cap on input-required rounds per logical dispatch.
 ///
 /// A hard cap, refused past it, not a warning. Three is chosen because it is enough for a real
@@ -878,6 +982,11 @@ pub struct McpServerDefCfg {
     /// This cap is what that index is compared against.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_caller_ask_rounds: Option<u32>,
+    /// `tools.<server>.sampling_bounds` — how LARGE one relayed `sampling/createMessage` ask may be.
+    /// Absent ⇒ the shipped defaults of [`SamplingBoundsCfg`]; an ask past a bound is refused by
+    /// name, never relayed (see [`SamplingBoundsCfg`]).
+    #[serde(default, skip_serializing_if = "SamplingBoundsCfg::is_default")]
+    pub sampling_bounds: SamplingBoundsCfg,
     /// OutboundCall credential mode. Same vocabulary as the pool plane's, and DISTINCT from it: every
     /// MCP server authenticates independently, so this plane deliberately has no all-plane
     /// `tools.upstream_credentials` default at all. The reserved word space is
@@ -1289,8 +1398,13 @@ pub fn validate_server(name: &str, def: &McpServerDefCfg) -> Result<(), String> 
             name.replace(NAMESPACE_SEP, "-")
         ));
     }
+    // THE ROUTING KEY'S SPELLING (row 159 finding P-M11): a server id, and each `tools_allow` name
+    // under it, is the one spelling a relayed call is built under ([`crate::identity::ToolKey`]),
+    // so a name it refuses would make the tool silently undispatchable. Refused here, in its words.
+    let id = crate::identity::ServerId::new(name).map_err(|e| format!("{at}: {e}"))?;
 
     validate_endpoint(&at, def)?;
+    def.sampling_bounds.validate(&at)?;
 
     // THE PIN and the `verify_ttl:` bound are not judged here: they are the kernel's trust keys
     // ([`TRUST_KEYS`]), judged by the kernel before the section reaches this validator.
@@ -1301,6 +1415,8 @@ pub fn validate_server(name: &str, def: &McpServerDefCfg) -> Result<(), String> 
 
     for (tool, allow) in &def.tools_allow {
         validate_capability_name(&at, "tools_allow", tool)?;
+        crate::identity::ToolKey::new(id.clone(), tool)
+            .map_err(|e| format!("{at}: `tools_allow.{tool}`: {e}"))?;
         refuse_unknown_ask_methods(&at, "tools_allow", tool, "ask_caller", &allow.ask_caller)?;
         refuse_unknown_ask_methods(
             &at,

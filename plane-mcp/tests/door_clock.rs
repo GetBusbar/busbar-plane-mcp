@@ -122,6 +122,9 @@ const fn host(clock: Option<ServiceFn>) -> HostSlots {
         trust_decide: None,
         trust_state: None,
         session_emit: None,
+        auth_call: None,
+        unit_hand_in: None,
+        unit_refuse: None,
     }
 }
 
@@ -241,6 +244,7 @@ fn a_relayed_state_is_refused_when_the_clock_fails() {
         state: None,
         round: 1,
         child: None,
+        answers: None,
     };
     let state = with_seal(&MINTS, &spent, |seal| {
         let bind = ask::Bind {
@@ -280,6 +284,7 @@ fn relayed_under_failed_clock(ttl_secs: u64) -> busbar_plane_mcp::call::AskRefus
         state: None,
         round: 1,
         child: None,
+        answers: None,
     };
     let bind = |now| ask::Bind {
         principal: "k",
