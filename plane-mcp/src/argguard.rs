@@ -366,14 +366,13 @@ fn judge_string(
 /// destination guard reads with): leading and trailing C0 controls and spaces stripped, every tab
 /// and newline removed, a backslash read as a slash under a web scheme and any run of slashes after
 /// it skipped, the authority ended at `/`, `?`, `#` or `\`, the host percent-decoded.
+/// A host outside ASCII is the reader's own: it maps it through UTS-46 to the punycode name a
+/// fetching client dials, as 1.5.5 dialled it, so the judge is asked about that name.
 /// `Some(Some(host))`: the value is a URL naming `host`, lower-cased. `Some(None)`: it begins with
-/// a web scheme and a slash but names no host the reader accepts, or names one outside ASCII (a
-/// fetching client maps such a name through IDNA to a host this guard cannot see, so none is
-/// judged and it is refused). `None`: it names no host.
+/// a web scheme and a slash but names no host the reader accepts. `None`: it names no host.
 fn whatwg_host(value: &str) -> Option<Option<String>> {
     match busbar_contract::net::parse_url(value) {
-        Ok(parts) if parts.host.is_ascii() => Some(Some(parts.host.to_ascii_lowercase())),
-        Ok(_) => Some(None),
+        Ok(parts) => Some(Some(parts.host.to_ascii_lowercase())),
         Err(_) => names_web_scheme(value).then_some(None),
     }
 }
