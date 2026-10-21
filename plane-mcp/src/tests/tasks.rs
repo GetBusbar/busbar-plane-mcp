@@ -521,6 +521,9 @@ fn a_live_tasks_state_reads_back_from_its_records() {
     let requests: Map<String, Value> =
         serde_json::from_value(json!({"r": {"method": "roots/list"}})).unwrap();
     relayed.park_relay(&requests, "sealed".into(), json!({"name": "fs_x"}), T0 + 3);
+    // The relayed task is parked on an ask its caller has not answered, so `take_relay` is `None`
+    // on both sides below; the park itself is what must read back.
+    assert!(relayed.relay.is_some(), "the relayed task is parked");
     for held in [own, relayed] {
         let parts = live_parts(&held.id, &held.live()).expect("a state the records keep");
         assert!(parts
@@ -532,6 +535,11 @@ fn a_live_tasks_state_reads_back_from_its_records() {
         assert_eq!(read.detailed(), held.detailed());
         assert_eq!(read.answers(), held.answers());
         assert_eq!(read.asked, held.asked);
+        assert_eq!(
+            read.relay, held.relay,
+            "the upstream ask it is parked on reads back"
+        );
+        assert_eq!(read.live(), held.live(), "the whole live state reads back");
         assert_eq!(read.take_relay(), held.clone().take_relay());
     }
 }
