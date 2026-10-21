@@ -87,7 +87,7 @@ fn str_bytes(s: AbiStr) -> Vec<u8> {
 
 /// The bytes a `Blob` names.
 fn blob_bytes(b: Blob) -> Vec<u8> {
-    if b.ptr().is_null() || b.len() == 0 {
+    if b.is_absent() || b.is_empty() {
         return Vec::new();
     }
     // SAFETY: the SDK's bytes, live for the call.

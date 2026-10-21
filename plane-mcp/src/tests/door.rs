@@ -110,7 +110,7 @@ fn the_tail_declares_the_task_kind_as_terminal_only() {
         )]
     );
     // The tail points at that table, not a copy.
-    assert_eq!(TAIL.record_retentions, RECORD_RETENTIONS.as_ptr());
+    assert_eq!(TAIL.record_retentions_ptr(), RECORD_RETENTIONS.as_ptr());
     assert_eq!(TAIL.record_retentions_len(), RECORD_RETENTIONS.len());
 }
 
