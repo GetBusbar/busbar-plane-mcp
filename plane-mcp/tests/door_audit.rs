@@ -41,14 +41,14 @@ use busbar_contract::abi::mechanism::call::{
     AbiStr, Blob, Field, InHead, OutHead, Outcome, RawOutcome, BLOB_OCTETS, FLAG_RESUME,
 };
 use busbar_contract::abi::mechanism::lifecycle::{
-    slot as life, DriveIn, OpenIn, OpenOut, OpsHead, TickIn, TickOut,
+    slot as life, CancelIn, DriveIn, OpenIn, OpenOut, OpsHead, TickIn, TickOut,
 };
 use busbar_contract::abi::mechanism::ticket::{HostCtx, HostTables, Ticket};
 use busbar_contract::abi::plane::{
-    slot, ArriveIn, ArriveOut, OnPieceIn, OnPieceOut, Ops, OutField, PlaneDriveIn, PlaneDriveOut,
-    PlaneOpenIn, PlaneOpenOut, RecordWrite, ServeIn, ServeOut, UnitCount, AUDIT_REJECTED,
-    EMIT_DONE, EMIT_TO_FAR_END, FROM_CALLER, FROM_FAR_END, FROM_KERNEL, PIECE_HAS_STATUS,
-    PIECE_LAST, RECORD_AUDIT,
+    slot, ArriveIn, ArriveOut, OnPieceIn, OnPieceOut, Ops, OutField, PlaneCancelIn, PlaneCancelOut,
+    PlaneDriveIn, PlaneDriveOut, PlaneOpenIn, PlaneOpenOut, RecordWrite, ServeIn, ServeOut,
+    UnitCount, AUDIT_REJECTED, CANCEL_ABORTED, CANCEL_OK_PARTIAL, EMIT_DONE, EMIT_TO_FAR_END,
+    FROM_CALLER, FROM_FAR_END, FROM_KERNEL, PIECE_HAS_STATUS, PIECE_LAST, RECORD_AUDIT,
 };
 use busbar_contract::abi::transport::FrameSpan;
 use busbar_plane_mcp::door;
@@ -1561,5 +1561,119 @@ fn a_kernel_refusal_with_no_unit_answers_the_baseline_json_rpc_bytes() {
             br#"{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"request body exceeds the maximum allowed size"}}"#
                 .to_vec()
         )
+    );
+}
+
+// ── cancel: a unit no piece reached is freed; the disposition says how far a unit got ──────────
+
+impl Door {
+    /// The host's own cancel of `unit` (deadline, reload, shutdown), naming it as `arrive` keyed it,
+    /// on its ticket: the outcome and the disposition the door answered.
+    fn cancel(&self, unit: u64) -> (Outcome, u32) {
+        let ticket = Ticket {
+            slot: u32::try_from(unit).unwrap(),
+            generation: 1,
+        };
+        let mut records = [z::<RecordWrite>(); 8];
+        let mut arena = vec![0_u8; 1 << 12];
+        let i = PlaneCancelIn {
+            cancel: CancelIn {
+                head: head::<PlaneCancelIn>(life::CANCEL, ticket),
+                ticket,
+            },
+            records_buf: records.as_mut_ptr(),
+            records_cap: records.len(),
+            arena_buf: arena.as_mut_ptr(),
+            arena_cap: arena.len(),
+            unit,
+        };
+        let mut o: PlaneCancelOut = z();
+        o.cancel.head = out_head::<PlaneCancelOut>();
+        let f = lifecycle().cancel.expect("cancel");
+        let ret = f(
+            self.instance,
+            std::ptr::from_ref(&i).cast(),
+            std::ptr::from_mut(&mut o).cast(),
+        );
+        (ret.outcome(), o.cancel.disposition)
+    }
+}
+
+/// RED: A UNIT CANCELLED BEFORE ITS FIRST PIECE IS FREED. `arrive` keeps a unit with no ticket
+/// until a piece reaches it; the host's cancel names the unit (`PlaneCancelIn::unit`), so a unit
+/// cut between its arrival and its first piece leaves nothing behind. With the table at its cap,
+/// cancelling one such unit frees its place: the next arrival is admitted, not refused `429`.
+#[test]
+fn a_unit_cancelled_before_its_first_piece_is_freed() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open();
+    let mut filler = 5000_u64;
+    loop {
+        let arrived = d.arrive(filler, "POST", "/mcp", FILLER, FILLER_FIELDS);
+        if arrived.outcome != Outcome::Ready {
+            assert_eq!(
+                (arrived.outcome, arrived.refusal_status),
+                (Outcome::Refused, 429),
+                "only the cap refuses a filler"
+            );
+            break;
+        }
+        filler += 1;
+        assert!(filler < 5000 + 8192, "the table has a cap");
+    }
+    // The first filler is cut before any piece reached it.
+    assert_eq!(d.cancel(5000), (Outcome::Ready, CANCEL_ABORTED));
+    let next = d.arrive(filler + 1, "POST", "/mcp", FILLER, FILLER_FIELDS);
+    assert_eq!(
+        next.outcome,
+        Outcome::Ready,
+        "the cancelled unit still holds its place in the table: {next:?}"
+    );
+}
+
+/// RED: THE DISPOSITION SAYS HOW FAR THE UNIT GOT. A relayed call cut before the far end answered
+/// is aborted (it bills nothing); one cut after the far end began its answer is a partial, so the
+/// units the far end reported stand under the contract's cancel billing rule.
+#[test]
+fn a_cancel_after_the_far_end_answered_is_a_partial() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open();
+    let relayed = |unit: u64| {
+        assert_eq!(
+            d.arrive(unit, "POST", "/mcp", ST_CALL, ST_FIELDS).outcome,
+            Outcome::Ready
+        );
+        d.piece(unit, &Given::attempt(ALICE, "st"));
+        let sent = d.pump(unit, &Given::caller(ALICE, ST_CALL));
+        assert!(
+            sent.far,
+            "the call is relayed: {} {}",
+            sent.status,
+            sent.text()
+        );
+    };
+    relayed(90);
+    assert_eq!(
+        d.cancel(90),
+        (Outcome::Ready, CANCEL_ABORTED),
+        "cut before the far end answered: aborted"
+    );
+    relayed(91);
+    let first = Given {
+        flags: PIECE_HAS_STATUS,
+        ..Given::far(
+            ALICE,
+            200,
+            vec![("content-type", "application/json")],
+            br#"{"jsonrpc":"2.0","id":31,"result":"#,
+        )
+    };
+    d.piece(91, &first);
+    assert_eq!(
+        d.cancel(91),
+        (Outcome::Ready, CANCEL_OK_PARTIAL),
+        "cut after the far end answered: a partial"
     );
 }
