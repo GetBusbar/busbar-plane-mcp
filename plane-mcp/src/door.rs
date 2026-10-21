@@ -23,7 +23,9 @@ use busbar_contract::abi::host::conn::connector::{
     Need, DIRECTION_OUTBOUND, EGRESS_OPERATOR_INFRASTRUCTURE, EGRESS_PROVIDER, KEEP_NAMED,
 };
 use busbar_contract::abi::mechanism::call::{AbiStr, Blob, BLOB_ABSENT};
-use busbar_contract::abi::mechanism::door::{KindTailHead, Section, SECTION_DECLARING};
+use busbar_contract::abi::mechanism::door::{
+    KindTailHead, Section, SECTION_DECLARING, SECTION_SELECTS,
+};
 use busbar_contract::abi::plane::{
     AdminRoute, BillableClass, OpClass, PinMechanism, PlaneTail, RecordChain, TrustKey,
     ANSWER_LAYOUT, CHAIN_DIGESTS_SCOPE, CHAIN_LENGTH_PREFIXED, INGRESS_REQUEST_RESPONSE,
@@ -77,7 +79,8 @@ const NONE: AbiStr = AbiStr {
 };
 
 /// THE SECTIONS THE PLANE'S STATEMENT DECLARES: `tools:`, which it owns and judges, and its endpoint
-/// block beside it.
+/// block beside it. The endpoint block also SELECTS the plane (Law 7): a document that states the
+/// MCP endpoint (`mcp:`) uses the plane, with or without a `tools:` section.
 /// The names are literals (the config-schema census reads a door-only plane's sections off this
 /// table); a test holds them equal to the grammar's `tools_config::SECTION` and [`ENDPOINT_SECTION`].
 pub const SECTIONS: &[Section] = &[
@@ -88,7 +91,7 @@ pub const SECTIONS: &[Section] = &[
     },
     Section {
         name: abi_str("mcp"),
-        flags: 0,
+        flags: SECTION_SELECTS,
         _reserved: 0,
     },
 ];
