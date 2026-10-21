@@ -11,12 +11,18 @@
 //!
 //! This suite drives the door over its C ABI with a host it stands up itself, so it needs
 //! `unsafe`, and it reaches the crate through `door` alone (the crate's only public item). The
-//! route table it claims against is spelled below and pinned to the crate's own in
+//! door facts it needs are `tests/support/door_facts.rs`, pinned to the crate's own items in
 //! `src/tests/door_facts_tests.rs`.
 //! Its two pure checks (a name the routing key cannot spell, and the event stream carrying the
 //! answer's own bytes) read crate functions and moved to `src/tests/door_facts_tests.rs`.
 
 #![allow(unsafe_code, dead_code)]
+
+// The door's private constants these tests need, restated and held to the crate's own items by the
+// crate's unit test `door_facts_tests`. Each test binary reads only some of them.
+#[path = "support/door_facts.rs"]
+#[allow(dead_code)]
+mod door_facts;
 
 use std::collections::{HashMap, VecDeque};
 use std::os::raw::c_void;
@@ -751,24 +757,8 @@ struct Arrived {
     refusal_status: u32,
 }
 
-/// THE DOOR'S ROUTE TABLE, `(verb, target, carrier)` in claim order: the claim an arrival carries is
-/// its row's index. Spelled here because this test reaches the door and nothing else; the logic
-/// crate pins it to its own table (`src/tests/door_facts_tests.rs`).
-const ROUTES: &[(&str, &str, &str)] = &[
-    ("GET", "/.well-known/oauth-protected-resource/mcp", "http"),
-    ("POST", "/mcp", "http"),
-    ("GET", "/mcp", "http"),
-    ("DELETE", "/mcp", "http"),
-    ("POST", "/mcp", "sse"),
-    ("POST", "/mcp/tasks/run", "http"),
-    ("POST", "/mcp", "stdio"),
-];
-
-/// The line carrier's route: the row of [`ROUTES`] on the `stdio` carrier.
-const LINE_ROUTE: usize = 6;
-
 fn claim(verb: &str) -> u32 {
-    let i = ROUTES
+    let i = door_facts::ROUTES
         .iter()
         .position(|&(v, t, c)| v == verb && t == "/mcp" && c == "http")
         .expect("the door routes it");
@@ -1272,11 +1262,11 @@ impl Door {
             name: str_of(busbar_contract::abi::host::service::CARRIER_SESSION_FIELD),
             value: str_of(&session),
         }];
-        let route = ROUTES[LINE_ROUTE];
+        let route = door_facts::ROUTES[door_facts::LINE_ROUTE];
         let mut i: ArriveIn = z();
         i.head = head::<ArriveIn>(slot::ARRIVE, Ticket::NONE);
         i.unit = unit;
-        i.claim = u32::try_from(LINE_ROUTE).unwrap();
+        i.claim = u32::try_from(door_facts::LINE_ROUTE).unwrap();
         i.target = str_of(route.1);
         i.method = str_of(route.0);
         i.body = octets(body);

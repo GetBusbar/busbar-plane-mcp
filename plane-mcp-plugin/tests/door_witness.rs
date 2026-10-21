@@ -4,11 +4,17 @@
 //! The plane's door driven both ways: linked and dropped in, one script through every plane op.
 //!
 //! The dropped-in door is this crate's own cdylib. This file reaches the logic crate through
-//! `door` alone (its only public item, BUSBAR-1.6.0.md l.3567): the wire facts it sends and reads
-//! answers by are spelled here and pinned to the crate's own tables in the logic crate
-//! (`plane-mcp/src/tests/door_facts_tests.rs`). The checks that read the plane's own functions (the
+//! `door` alone (its only public item, BUSBAR-1.6.0.md l.3567): the door's private constants it
+//! needs are `plane-mcp/tests/support/door_facts.rs`, held to the crate's own items by the logic
+//! crate's unit test `door_facts_tests`. The checks that read the plane's own functions (the
 //! vocabulary against the battery, and the transcript against what the plane's pure functions say)
 //! live in the logic crate (`plane-mcp/src/tests/`).
+
+// The door's private constants this file needs, restated and held to the crate's own items by
+// the logic crate's unit test `door_facts_tests`.
+#[path = "../../plane-mcp/tests/support/door_facts.rs"]
+#[allow(dead_code)]
+mod door_facts;
 
 /// THE MCP PLANE'S CONFORMANCE RIG, BOTH WAYS (BUSBAR-1.6.0.md, the plane driver's "Proven by":
 /// the plane conformance suite, compiled-in and dropped-in through one table).
@@ -40,6 +46,7 @@ mod both_ways {
     };
     use busbar_contract::abi::sdk::capture::{CaptureHome, CaptureSlot};
     use busbar_contract::abi::sdk::door::{abi_str, kind_op};
+    use busbar_contract::abi::sdk::publish::ServedRoute;
     use busbar_contract::abi::sdk::{Instance, Lent, Out, Safe, SafeSlot};
     use busbar_plugin_loader::dispatch::kinds::plane::{OwnedSnapshot, Plane};
     use busbar_plugin_loader::dispatch::{
@@ -51,31 +58,11 @@ mod both_ways {
     // The door: this plugin's one public item.
     use busbar_plane_mcp::door;
 
-    /// The wire facts this script sends and reads answers by, spelled here because the test reaches
-    /// the door and nothing else; the logic crate pins each to its own table
-    /// (`plane-mcp/src/tests/door_facts_tests.rs`).
-    pub(crate) const H_PROTOCOL_VERSION: &str = "mcp-protocol-version";
-    pub(crate) const H_MCP_METHOD: &str = "mcp-method";
-    const H_MCP_NAME: &str = "mcp-name";
-    pub(crate) const PROTOCOL_VERSION: &str = "2026-07-28";
-    const DEFAULT_METADATA: &str = "/.well-known/oauth-protected-resource/mcp";
-    const TOOLS_SECTION: &str = "tools";
-    const ENDPOINT_SECTION: &str = "mcp";
-    const CODE_REFUSED: i64 = -32000;
-    const CODE_INTERNAL: i64 = -32603;
-    const CODE_HEADER_MISMATCH: i64 = -32020;
-    /// The fee unit's class index in the door's tail.
-    const CLASS_FEE_INDEX: u32 = 2;
-    /// The door's route table, `(verb, target, carrier)` in claim order.
-    pub(crate) const ROUTES: &[(&str, &str, &str)] = &[
-        ("GET", DEFAULT_METADATA, "http"),
-        ("POST", "/mcp", "http"),
-        ("GET", "/mcp", "http"),
-        ("DELETE", "/mcp", "http"),
-        ("POST", "/mcp", "sse"),
-        ("POST", "/mcp/tasks/run", "http"),
-        ("POST", "/mcp", "stdio"),
-    ];
+    use crate::door_facts::{
+        self, claim as route_of, CLASS_FEE_INDEX, CODE_HEADER_MISMATCH, CODE_INTERNAL,
+        CODE_REFUSED, DEFAULT_METADATA, ENDPOINT_SECTION, H_MCP_METHOD, H_MCP_NAME,
+        H_PROTOCOL_VERSION, PROTOCOL_VERSION, TOOLS_SECTION,
+    };
 
     fn z<T>() -> T {
         // SAFETY: every `in`/`out` here is plain C data; all-zero is a valid value of each.
@@ -116,8 +103,7 @@ mod both_ways {
     // ── the fixtures ─────────────────────────────────────────────────────────────────────────────────
 
     /// One fronted server, the section the door's own tests read.
-    const SECTION: &[u8] =
-        br#"{"fs": {"url": "https://mcp.example/fs", "pin": {"mechanism": "unpinned"}}}"#;
+    const SECTION: &[u8] = door_facts::WITNESS_SECTION;
     /// [`SECTION`] as stage 3g deals it to `validate` (`{tools: <section>}`), and a dealt section
     /// the grammar refuses: a server id holding the routing-key separator.
     const DEALT: &[u8] =
@@ -156,11 +142,7 @@ mod both_ways {
     /// The route index of `(verb, target)` in the door's route table (its first such row), the claim
     /// an arrival carries.
     fn claim(verb: &str, target: &str) -> u32 {
-        let i = ROUTES
-            .iter()
-            .position(|&(v, t, _)| v == verb && t == target)
-            .expect("the door routes it");
-        u32::try_from(i).expect("a small table")
+        route_of(verb, target, "http")
     }
 
     // ── one step of the transcript ───────────────────────────────────────────────────────────────────
@@ -586,6 +568,16 @@ mod both_ways {
         t
     }
 
+    /// The head field of a JSON answer.
+    fn json_type() -> (String, String) {
+        ("content-type".to_string(), "application/json".to_string())
+    }
+
+    /// A whole answer's stated length (the served engine's JSON answers stated theirs).
+    fn length_of(reply: &[u8]) -> (String, String) {
+        ("content-length".to_string(), reply.len().to_string())
+    }
+
     fn step<'a>(t: &'a [Step], what: &str) -> &'a Step {
         t.iter()
             .find(|s| s.what == what)
@@ -621,6 +613,211 @@ mod both_ways {
         let served = linked(&d).served();
         assert_eq!(served.section, TOOLS_SECTION);
         assert_eq!(served.owns, vec![ENDPOINT_SECTION]);
+    }
+
+    /// The linked transcript is the one the plane's own pure functions say the door answers: each
+    /// expectation those functions build is restated in `door_facts` and held to them in the crate.
+    #[test]
+    fn the_door_answers_what_the_plane_says() {
+        let d = Dispatcher::new(DispatchConfig::default());
+        let t = script(&linked(&d));
+
+        // Lifecycle: the grammar judges the section; the snapshot is the door's own.
+        assert_eq!(step(&t, "validate refused").outcome, Outcome::Refused);
+        assert_eq!(step(&t, "validate").outcome, Outcome::Ready);
+        let open = step(&t, "open");
+        assert_eq!(open.outcome, Outcome::Ready);
+        let snapshot = open.snapshot.as_ref().expect("open publishes a snapshot");
+        assert_eq!(snapshot.generation, 1);
+        let claims: Vec<_> = snapshot
+            .claims
+            .iter()
+            .map(|c| {
+                (
+                    c.verb.as_str(),
+                    c.target.as_str(),
+                    c.carrier.as_str(),
+                    c.flags,
+                )
+            })
+            .collect();
+        // The door's routes as the contract states a route's claim (`ServedRoute::claim_spec`).
+        let specs: Vec<_> = door_facts::ROUTES
+            .iter()
+            .zip(door_facts::ROUTES_OPEN)
+            .map(|(&(verb, target, carrier), &open)| {
+                ServedRoute {
+                    verb,
+                    target,
+                    carrier,
+                    open,
+                }
+                .claim_spec()
+            })
+            .collect();
+        let want: Vec<_> = specs
+            .iter()
+            .map(|c| {
+                (
+                    c.verb.as_str(),
+                    c.target.as_str(),
+                    c.carrier.as_str(),
+                    c.flags,
+                )
+            })
+            .collect();
+        assert_eq!(claims, want, "the claims are the door's routes");
+        assert_eq!(claims.len(), door_facts::ROUTES.len());
+        let admin: Vec<_> = snapshot
+            .admin_routes
+            .iter()
+            .map(|r| (r.verb.as_str(), r.target.as_str(), r.flags))
+            .collect();
+        let want: Vec<_> = door_facts::ADMIN_VERBS
+            .iter()
+            .map(|&(verb, target)| (verb, target, 0))
+            .collect();
+        assert_eq!(admin, want, "the admin routes are the door's");
+        // The endpoint mounted under the public base URL `open` was lent (`door::under_public_url`).
+        let audience = Some(format!("{PUBLIC_URL}/mcp"));
+        assert_eq!(snapshot.audience, audience);
+        assert_eq!(
+            snapshot.resource_metadata,
+            Some(format!("{PUBLIC_URL}{DEFAULT_METADATA}"))
+        );
+        assert_eq!(
+            snapshot.audience.as_deref(),
+            Some("https://busbar.example/mcp")
+        );
+
+        // A request answered from what the plane holds: the catalogue's answer, written whole.
+        let a = step(&t, "arrive tools/list");
+        assert_eq!(a.outcome, Outcome::Ready);
+        assert_eq!(
+            a.detail,
+            format!(
+                "op_class={} principal_required=true dialect=0 refusal=0",
+                door_facts::OP_CLASS_TOOLS_LIST
+            )
+        );
+        let answer = step(&t, "answer tools/list");
+        assert_eq!((answer.outcome, answer.status), (Outcome::Ready, 200));
+        assert!(
+            answer.detail.starts_with("calls=")
+                && answer
+                    .detail
+                    .ends_with("done=true far=false more=0 request="),
+            "{}",
+            answer.detail
+        );
+        let calls: usize = answer.detail["calls=".len()..]
+            .split(' ')
+            .next()
+            .and_then(|n| n.parse().ok())
+            .expect("a call count");
+        assert!(
+            calls > 1,
+            "a 32-byte buffer takes the answer over several calls"
+        );
+        assert_eq!(
+            answer.reply,
+            door_facts::WITNESS_TOOLS_LIST_ANSWER,
+            "the catalogue's own bytes"
+        );
+        assert_eq!(document(&answer.reply)["id"], json!(9));
+        assert_eq!(
+            answer.fields,
+            vec![json_type(), length_of(&answer.reply)],
+            "a JSON document says so, and states its length"
+        );
+
+        // A notification: acknowledged, no body.
+        let a = step(&t, "arrive notice");
+        assert_eq!(a.outcome, Outcome::Ready);
+        assert!(a
+            .detail
+            .starts_with(&format!("op_class={} ", door_facts::OP_CLASS_NOTIFICATION)));
+        let n = step(&t, "answer notice");
+        assert_eq!(
+            (n.outcome, n.status, n.reply.as_slice()),
+            (Outcome::Ready, 202, &b""[..])
+        );
+
+        // A call naming a tool the section does not approve is the catalogue's refusal, written
+        // here; a far end's piece for a unit the plane answered itself is declined.
+        assert_eq!(step(&t, "arrive tools/call").outcome, Outcome::Ready);
+        let c = step(&t, "answer tools/call");
+        assert_eq!((c.outcome, c.status), (Outcome::Ready, 404));
+        assert_eq!(
+            document(&c.reply)["error"]["data"]["reason"],
+            json!("unknown_tool")
+        );
+        assert_eq!(step(&t, "far end").outcome, Outcome::Refused);
+
+        // Refused arrivals: the plane's own words at its own status.
+        let a = step(&t, "arrive not json");
+        assert_eq!((a.outcome, a.status), (Outcome::Refused, 400));
+        let r = step(&t, "refusal not json");
+        assert_eq!((r.outcome, r.status), (Outcome::Ready, 400));
+        let body = document(&r.reply);
+        assert_eq!(body["error"]["code"], json!(-32700));
+        assert_eq!(body["error"]["message"], json!(door_facts::NOT_JSON));
+        assert_eq!(body["id"], Value::Null);
+
+        let a = step(&t, "arrive GET /mcp");
+        assert_eq!((a.outcome, a.status), (Outcome::Refused, 405));
+        let r = step(&t, "refusal GET /mcp");
+        assert_eq!((r.outcome, r.status), (Outcome::Ready, 405));
+        let (error, description) = door_facts::METHOD_NOT_ALLOWED;
+        assert_eq!(
+            r.reply,
+            serde_json::to_vec(&json!({ "error": error, "error_description": description }))
+                .expect("a JSON document")
+        );
+        assert_eq!(
+            r.fields,
+            vec![("allow".to_string(), "POST".to_string()), json_type()]
+        );
+
+        let a = step(&t, "arrive metadata");
+        assert_eq!((a.outcome, a.status), (Outcome::Refused, 404));
+        assert!(a
+            .detail
+            .ends_with(&format!("refusal={}", door_facts::UNSERVED)));
+
+        let r = step(&t, "refusal gate");
+        assert_eq!((r.outcome, r.status), (Outcome::Ready, 0));
+        let body = document(&r.reply);
+        assert_eq!(body["error"]["code"], json!(CODE_REFUSED));
+        assert_eq!(body["error"]["message"], json!("denied"));
+
+        // The ops the driver does not call on this door yet, and the rest of the lifecycle.
+        // Nothing to restore and no background work; no admin route is served yet, and a body that
+        // carries no invocation projects an empty view (no entry, no body: no hook fires on it).
+        for what in ["hydrate", "start"] {
+            assert_eq!(step(&t, what).outcome, Outcome::Ready, "{what}");
+        }
+        let serve = step(&t, "serve");
+        assert_eq!((serve.outcome, serve.status), (Outcome::Ready, 404));
+        assert_eq!(step(&t, "project").outcome, Outcome::Ready, "project");
+        // The tick is the clock of the subscriptions held as sessions (ARCHITECT round 5
+        // Q-L3B-K6-HTTP (a)): it asks to run again a poll interval on (250 ms).
+        assert_eq!(
+            step(&t, "tick").detail,
+            format!("next={}", 1_000 + 250_000_000)
+        );
+        assert_eq!(
+            step(&t, "cancel").detail,
+            format!("disposition={}", plane::CANCEL_ABORTED)
+        );
+        let refresh = step(&t, "refresh");
+        assert_eq!(refresh.outcome, Outcome::Ready);
+        let snapshot = refresh.snapshot.as_ref().expect("refresh publishes");
+        assert_eq!(snapshot.generation, 2);
+        assert_eq!(snapshot.audience, audience, "the base URL `open` was lent");
+        for what in ["retire", "close"] {
+            assert_eq!(step(&t, what).outcome, Outcome::Ready, "{what}");
+        }
     }
 
     #[test]
@@ -921,7 +1118,7 @@ mod both_ways {
     const RELAY_SECTION: &[u8] = br#"{"fs": {"url": "https://mcp.example/fs/rpc?v=1", "pin": {"mechanism": "pinned_pubkey", "key": "sha256/K="}, "grants": {"roots": true}, "tools_allow": {"read_file": {"schema_hash": "sha256:aa", "input_schema": {"type": "object", "properties": {"path": {"type": "string", "x-mcp-header": "Path"}}}}, "draft": {}}}}"#;
 
     /// A relayed call, its path argument mirrored.
-    const RELAY_CALL: &[u8] = br#"{"jsonrpc":"2.0","id":30,"method":"tools/call","params":{"name":"fs_read_file","arguments":{"path":"/a"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#;
+    const RELAY_CALL: &[u8] = door_facts::RELAY_CALL;
     const RELAY_FIELDS: &[Field] = &[
         field(H_PROTOCOL_VERSION, PROTOCOL_VERSION),
         field(H_MCP_METHOD, "tools/call"),
@@ -1119,6 +1316,35 @@ mod both_ways {
         s
     }
 
+    /// `project`: a call is one turn of tool arguments named by the plane, with its
+    /// `{tool, arguments}` body, its view's entry the registered server the tool is served by (the
+    /// entry a gate-first plane's hooks are attached to); a listing carries no invocation and
+    /// projects an empty view.
+    #[test]
+    fn a_call_projects_its_invocation_for_the_hooks() {
+        let t = relay_script(&linked(&served(ALL)));
+        let call = step(&t, "project call");
+        assert_eq!(call.outcome, Outcome::Ready);
+        assert_eq!(
+            call.detail,
+            format!(
+                "messages=1 chars={} flags={} pool=\"fs\" dialect=mcp",
+                door_facts::RELAY_CALL_TEXT_CHARS,
+                busbar_contract::abi::hook::REQUEST_HAS_TOOLS
+            )
+        );
+        assert_eq!(
+            document(&call.reply),
+            json!({ "tool": "fs_read_file", "arguments": { "path": "/a" } })
+        );
+        let list = step(&t, "project list");
+        assert_eq!(list.outcome, Outcome::Ready);
+        assert!(
+            list.reply.is_empty() && list.fields.is_empty(),
+            "a listing projects no invocation and no turn: {list:?}"
+        );
+    }
+
     /// `project`'s PROMPT VIEW is the served engine's projection of an invocation: one `user` turn,
     /// the arguments as JSON text (what a content-granted gate or rewrite hook screens).
     #[test]
@@ -1178,6 +1404,90 @@ mod both_ways {
             relay_script(&dropped(&d)),
             want,
             "the dropped-in door, entitled to nothing"
+        );
+    }
+
+    /// The relayed call, as the door states it on the wire: the ATTEMPT is taken, the caller's body
+    /// becomes a request bound for the member at the path of the member's URL, and the far end's
+    /// answer is settled in JSON, metered, logged and audited. (That the request and the settled
+    /// answers are byte for byte what the plane's own builders say is checked in the logic crate.)
+    #[test]
+    fn a_relayed_call_is_sent_on_settled_metered_logged_and_audited() {
+        let t = relay_script(&linked(&served(ALL)));
+        let attempt = step(&t, "attempt");
+        assert_eq!((attempt.outcome, attempt.reply.len()), (Outcome::Ready, 0));
+        let send = step(&t, "send");
+        assert_eq!(send.outcome, Outcome::Ready);
+        assert!(
+            send.detail
+                .ends_with("done=false far=true more=0 request=POST /fs/rpc?v=1"),
+            "{}",
+            send.detail
+        );
+        assert_eq!(document(&send.reply)["params"]["name"], json!("read_file"));
+
+        let ok = step(&t, "answer ok");
+        assert_eq!((ok.outcome, ok.status), (Outcome::Ready, 200));
+        assert_eq!(document(&ok.reply)["id"], json!(30));
+        assert_eq!(
+            document(&ok.reply)["result"]["resultType"],
+            json!("complete")
+        );
+        assert_eq!(ok.fields, vec![json_type(), length_of(&ok.reply)]);
+        assert!(ok.detail.contains("done=true far=false"), "{}", ok.detail);
+        // THE METER: a call the server answered is counted, once, as one tool call (tail class 0)
+        // and the bytes of the document it answered with (tail class 1, a Response class: "the
+        // length of the document it just read back"), and the success earns its fee unit (tail
+        // class 2, `per_request`). The plane states its counts; the kernel prices them.
+        assert_eq!(
+            ok.units,
+            vec![
+                (CLASS_FEE_INDEX, 1),
+                (0, 1),
+                (1, u64::try_from(FAR_OK.len()).expect("a small answer"))
+            ],
+            "the one tool call the server answered, its answer's bytes, and its fee unit"
+        );
+        // THE CALL LOG (RULE-CHECK 2026-09-30): the answer carries the call's one chained record,
+        // keyed by the caller's chain scope (no caller reference: the ungoverned scope), its suffix
+        // the plane's own fields at the host clock's reading (this HOST's clock reads 0).
+        assert_eq!(
+            ok.records,
+            vec![(
+                door_facts::RECORD_CALL,
+                door_facts::UNGOVERNED.as_bytes().to_vec(),
+                door_facts::call_suffix(0, "fs", "fs_read_file", "dispatched", "", "sha256:aa", 1),
+            )],
+            "one call record"
+        );
+        // THE AUDIT ROW (SEAM-L(k)): the dispatched call's one `mcp_tool.call` row, applied, on the
+        // published tool; and THE LEDGER LANE (SEAM-L(j)): the published tool, as the served engine
+        // priced and ledgered a call.
+        assert_eq!(
+            ok.audits,
+            vec![(
+                busbar_contract::abi::plane::AUDIT_APPLIED,
+                "mcp_tool.call".to_string(),
+                "mcp_tool:fs_read_file".to_string()
+            )],
+            "one applied audit row"
+        );
+        assert_eq!(
+            send.lane.as_deref(),
+            Some("fs_read_file"),
+            "the call's lane"
+        );
+
+        let error = step(&t, "answer error");
+        assert_eq!(document(&error.reply)["result"]["isError"], json!(true));
+
+        // A GRANTED ASK IS RELAYED under busbar's sealed state (Law 11); a host that signs nothing
+        // cannot seal it, so the ask is refused, never answered by busbar.
+        let ask = step(&t, "answer ask");
+        assert_eq!(ask.status, 403);
+        assert_eq!(
+            document(&ask.reply)["error"]["data"]["reason"],
+            json!("ask_no_sealer")
         );
     }
 
@@ -1406,7 +1716,7 @@ mod bounds {
     use busbar_contract::abi::sdk::door::abi_str;
     use busbar_plane_mcp::door;
 
-    use super::both_ways::{H_MCP_METHOD, H_PROTOCOL_VERSION, PROTOCOL_VERSION, ROUTES};
+    use crate::door_facts::{claim, H_MCP_METHOD, H_PROTOCOL_VERSION, PROTOCOL_VERSION};
     use busbar_plugin_loader::dispatch::kinds::plane::Plane;
     use busbar_plugin_loader::dispatch::{
         in_head, load_linked, out_head, Bind, DispatchConfig, Dispatcher, Frame, LinkedRow, NoSink,
@@ -1483,14 +1793,11 @@ mod bounds {
 
     /// A `tools/list` of `unit` arrives (the plane answers it from what it holds).
     fn arrive_list(p: &Plugin<Plane>, unit: u64) {
-        let route = ROUTES
-            .iter()
-            .position(|&(v, t, _)| v == "POST" && t == "/mcp")
-            .expect("the door routes it");
+        let route = claim("POST", "/mcp", "http");
         let mut a: Frame<ArriveIn, ArriveOut> = Frame::new(z(), z());
         (a.input.head, a.out.head) = (in_head(), out_head());
         a.input.unit = unit;
-        a.input.claim = u32::try_from(route).expect("a small table");
+        a.input.claim = route;
         (a.input.method, a.input.target) = (text(b"POST"), text(b"/mcp"));
         a.input.body = octets(TOOLS_LIST);
         (a.input.fields, a.input.fields_len) = (LIST_FIELDS.as_ptr(), LIST_FIELDS.len());
@@ -1631,14 +1938,11 @@ mod bounds {
                 value: abi_str("subscriptions/listen"),
             },
         ];
-        let route = ROUTES
-            .iter()
-            .position(|&(v, t, _)| v == "POST" && t == "/mcp")
-            .expect("the door routes it");
+        let route = claim("POST", "/mcp", "http");
         let mut a: Frame<ArriveIn, ArriveOut> = Frame::new(z(), z());
         (a.input.head, a.out.head) = (in_head(), out_head());
         a.input.unit = unit;
-        a.input.claim = u32::try_from(route).expect("a small table");
+        a.input.claim = route;
         (a.input.method, a.input.target) = (text(b"POST"), text(b"/mcp"));
         a.input.body = octets(LISTEN);
         (a.input.fields, a.input.fields_len) = (FIELDS.as_ptr(), FIELDS.len());
@@ -1723,14 +2027,11 @@ mod bounds {
 
     /// A `tools/list` of `unit` arrives: its outcome and the status the plane refused it with.
     fn arrival(p: &Plugin<Plane>, unit: u64) -> (Outcome, u32) {
-        let route = ROUTES
-            .iter()
-            .position(|&(v, t, _)| v == "POST" && t == "/mcp")
-            .expect("the door routes it");
+        let route = claim("POST", "/mcp", "http");
         let mut a: Frame<ArriveIn, ArriveOut> = Frame::new(z(), z());
         (a.input.head, a.out.head) = (in_head(), out_head());
         a.input.unit = unit;
-        a.input.claim = u32::try_from(route).expect("a small table");
+        a.input.claim = route;
         (a.input.method, a.input.target) = (text(b"POST"), text(b"/mcp"));
         a.input.body = octets(TOOLS_LIST);
         (a.input.fields, a.input.fields_len) = (LIST_FIELDS.as_ptr(), LIST_FIELDS.len());

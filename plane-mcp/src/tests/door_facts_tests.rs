@@ -7,37 +7,98 @@
 //! The suites that drive the door over its C ABI (`tests/sessions.rs`, `tests/door_audit.rs`,
 //! `tests/tasks.rs`, the plugin crate's `tests/door_witness.rs`) need `unsafe` for the host they
 //! stand up, so they stay integration tests and reach the crate through `door` alone (this crate
-//! forbids `unsafe`, BUSBAR-1.6.0.md l.273). What they must know about the wire they spell: the
-//! route table and its named rows, the header fields a client mirrors, the task rows' bytes, the
-//! error codes. Each spelling is held to the crate's own table here, so a change on one side is a
-//! red test, not two answers.
+//! forbids `unsafe`, BUSBAR-1.6.0.md l.273). The door's private constants they need are restated in
+//! `tests/support/door_facts.rs`; this module includes that same file and holds each value to the
+//! item it restates. `tests/tasks.rs` also spells two readers of its own (the header fields a client
+//! mirrors and the task rows' bytes), held to the crate's below.
 
 use serde_json::{json, Value};
 
 use crate::door;
 
-/// The route table the door-only suites claim against, `(verb, target, carrier)` in claim order.
-const SPELLED_ROUTES: &[(&str, &str, &str)] = &[
-    ("GET", "/.well-known/oauth-protected-resource/mcp", "http"),
-    ("POST", "/mcp", "http"),
-    ("GET", "/mcp", "http"),
-    ("DELETE", "/mcp", "http"),
-    ("POST", "/mcp", "sse"),
-    ("POST", "/mcp/tasks/run", "http"),
-    ("POST", "/mcp", "stdio"),
-];
+#[path = "../../tests/support/door_facts.rs"]
+#[allow(dead_code)] // `claim` is the door-driven tests' reader, not this check's
+mod stated;
 
 #[test]
-fn the_suites_route_table_is_the_doors() {
+fn the_door_driven_tests_restate_the_doors_own_constants() {
     let routes: Vec<(&str, &str, &str)> = door::ROUTES
         .iter()
         .map(|r| (r.verb, r.target, r.carrier))
         .collect();
-    assert_eq!(routes, SPELLED_ROUTES);
-    assert_eq!(door::LINE_ROUTE, 6, "tests/door_audit.rs's LINE_ROUTE");
-    assert_eq!(door::TASK_RUN_ROUTE, 5, "tests/tasks.rs's TASK_RUN_ROUTE");
-    assert_eq!(crate::tool_claims::TASK_RUN_MOUNT, "/mcp/tasks/run");
-    assert_eq!(door::RECORD_TASK, 3, "tests/tasks.rs's RECORD_TASK");
+    assert_eq!(stated::ROUTES, &routes[..]);
+    assert_eq!(stated::LINE_ROUTE, door::LINE_ROUTE);
+    assert_eq!(stated::TASK_RUN_ROUTE, door::TASK_RUN_ROUTE);
+    assert_eq!(stated::TASK_RUN_MOUNT, crate::tool_claims::TASK_RUN_MOUNT);
+    assert_eq!(stated::RECORD_TASK, door::RECORD_TASK);
+    assert_eq!(stated::CLASS_FEE_INDEX, door::CLASS_FEE_INDEX);
+    assert_eq!(stated::H_PROTOCOL_VERSION, crate::codec::H_PROTOCOL_VERSION);
+    assert_eq!(stated::H_MCP_METHOD, crate::codec::H_MCP_METHOD);
+    assert_eq!(stated::H_MCP_NAME, crate::codec::H_MCP_NAME);
+    assert_eq!(stated::PROTOCOL_VERSION, crate::codec::PROTOCOL_VERSION);
+    assert_eq!(
+        stated::DEFAULT_METADATA,
+        crate::tool_claims::DEFAULT_METADATA
+    );
+    assert_eq!(stated::TOOLS_SECTION, crate::tools_config::SECTION);
+    assert_eq!(stated::ENDPOINT_SECTION, door::ENDPOINT_SECTION);
+    assert_eq!(stated::CODE_REFUSED, crate::codec::CODE_REFUSED);
+    assert_eq!(stated::CODE_INTERNAL, crate::codec::CODE_INTERNAL);
+    assert_eq!(
+        stated::CODE_HEADER_MISMATCH,
+        crate::codec::CODE_HEADER_MISMATCH
+    );
+    assert_eq!(stated::RECORD_CALL, door::RECORD_CALL);
+    assert_eq!(stated::UNGOVERNED, crate::ask::UNGOVERNED);
+    let open: Vec<bool> = door::ROUTES.iter().map(|r| r.open).collect();
+    assert_eq!(stated::ROUTES_OPEN, &open[..]);
+    assert_eq!(stated::ADMIN_VERBS, door::ADMIN_VERBS);
+    assert_eq!(
+        Some(stated::OP_CLASS_TOOLS_LIST),
+        door::op_class_index(crate::tool_ops::OP_TOOLS_LIST)
+    );
+    assert_eq!(
+        Some(stated::OP_CLASS_NOTIFICATION),
+        door::op_class_index(crate::tool_ops::OP_NOTIFICATION)
+    );
+    assert_eq!(stated::NOT_JSON, crate::tool_arrival::NOT_JSON);
+    assert_eq!(stated::UNSERVED, crate::tool_door::UNSERVED);
+    let (error, description) = stated::METHOD_NOT_ALLOWED;
+    assert_eq!(
+        door::method_not_allowed_body(),
+        serde_json::to_vec(&json!({ "error": error, "error_description": description })).unwrap()
+    );
+}
+
+/// The door witness's expectations of the plane's own functions (`plane-mcp-plugin/tests/
+/// door_witness.rs`, which reaches only `door`): the catalogue's answer for its section, the endpoint
+/// under its public base URL, the size of its relayed call's projection, and the call record's framing.
+#[test]
+fn the_door_witness_restates_what_the_planes_functions_answer() {
+    let section = door::read_tools_section(stated::WITNESS_SECTION).expect("the section reads");
+    let catalogue = crate::catalogue::Catalogue::build(1, &section);
+    assert_eq!(
+        catalogue.tools_list(&json!(9), &|_: &str, _: &str| false, |_| false),
+        stated::WITNESS_TOOLS_LIST_ANSWER
+    );
+    assert_eq!(
+        door::under_public_url("https://busbar.example"),
+        (
+            "https://busbar.example/mcp".to_string(),
+            format!("https://busbar.example{}", stated::DEFAULT_METADATA)
+        ),
+        "the witness's audience and metadata document under its public base URL"
+    );
+    let invocation = crate::call::invocation(stated::RELAY_CALL).expect("a call is an invocation");
+    assert_eq!(
+        busbar_contract::ir::facts::IrFacts::shape(&invocation).text_chars,
+        stated::RELAY_CALL_TEXT_CHARS
+    );
+    let args = (0, "fs", "fs_read_file", "dispatched", "", "sha256:aa", 1);
+    assert_eq!(
+        stated::call_suffix(args.0, args.1, args.2, args.3, args.4, args.5, args.6),
+        crate::record::call_suffix(args.0, args.1, args.2, args.3, args.4, args.5, args.6)
+    );
 }
 
 /// The fields `tests/tasks.rs`'s `mirrored` spells, for each of its branches, are the plane's.
@@ -104,26 +165,6 @@ fn the_suites_task_rows_are_the_planes() {
         index_key(principal, "t"),
         format!("o/{}/t", &owner[..32]).into_bytes()
     );
-}
-
-/// The wire facts the plugin crate's door witness spells (`plane-mcp-plugin/tests/door_witness.rs`):
-/// the header names, the revision, the metadata path, the sections, the codes it reads answers by.
-#[test]
-fn the_witness_spelled_wire_facts_are_the_planes() {
-    assert_eq!(crate::codec::H_PROTOCOL_VERSION, "mcp-protocol-version");
-    assert_eq!(crate::codec::H_MCP_METHOD, "mcp-method");
-    assert_eq!(crate::codec::H_MCP_NAME, "mcp-name");
-    assert_eq!(crate::codec::PROTOCOL_VERSION, "2026-07-28");
-    assert_eq!(
-        crate::tool_claims::DEFAULT_METADATA,
-        "/.well-known/oauth-protected-resource/mcp"
-    );
-    assert_eq!(crate::tools_config::SECTION, "tools");
-    assert_eq!(door::ENDPOINT_SECTION, "mcp");
-    assert_eq!(crate::codec::CODE_REFUSED, -32000);
-    assert_eq!(crate::codec::CODE_INTERNAL, -32603);
-    assert_eq!(crate::codec::CODE_HEADER_MISMATCH, -32020);
-    assert_eq!(door::CLASS_FEE_INDEX, 2);
 }
 
 // ── P-M11: a name the routing key cannot spell ──────────────────────────────────────────────────

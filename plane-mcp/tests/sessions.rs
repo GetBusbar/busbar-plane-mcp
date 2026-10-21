@@ -15,10 +15,16 @@
 //!
 //! This suite drives the door over its C ABI with a host it stands up itself, so it needs
 //! `unsafe`, and it reaches the crate through `door` alone (the crate's only public item). The
-//! route table it claims against is spelled below and pinned to the crate's own in
+//! door facts it needs are `tests/support/door_facts.rs`, pinned to the crate's own items in
 //! `src/tests/door_facts_tests.rs`.
 
 #![allow(unsafe_code)]
+
+// The door's private constants these tests need, restated and held to the crate's own items by the
+// crate's unit test `door_facts_tests`. Each test binary reads only some of them.
+#[path = "support/door_facts.rs"]
+#[allow(dead_code)]
+mod door_facts;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::os::raw::c_void;
@@ -826,21 +832,8 @@ struct Arrived {
     refusal_status: u32,
 }
 
-/// THE DOOR'S ROUTE TABLE, `(verb, target, carrier)` in claim order: the claim an arrival carries is
-/// its row's index. Spelled here because this test reaches the door and nothing else; the logic
-/// crate pins it to its own table (`src/tests/door_facts_tests.rs`).
-const ROUTES: &[(&str, &str, &str)] = &[
-    ("GET", "/.well-known/oauth-protected-resource/mcp", "http"),
-    ("POST", "/mcp", "http"),
-    ("GET", "/mcp", "http"),
-    ("DELETE", "/mcp", "http"),
-    ("POST", "/mcp", "sse"),
-    ("POST", "/mcp/tasks/run", "http"),
-    ("POST", "/mcp", "stdio"),
-];
-
 fn claim(verb: &str) -> u32 {
-    let i = ROUTES
+    let i = door_facts::ROUTES
         .iter()
         .position(|&(v, t, c)| v == verb && t == "/mcp" && c == "http")
         .expect("the door routes it");

@@ -21,12 +21,18 @@
 //!
 //! This suite drives the door over its C ABI with a host it stands up itself, so it needs
 //! `unsafe`, and it reaches the crate through `door` alone (the crate's only public item). The
-//! route table it claims against is spelled below and pinned to the crate's own in
+//! door facts it needs are `tests/support/door_facts.rs`, pinned to the crate's own items in
 //! `src/tests/door_facts_tests.rs`.
 //! Its two pure checks of a task's own answers (C-H1) read crate functions and moved to
 //! `src/tests/door_facts_tests.rs`.
 
 #![allow(unsafe_code)]
+
+// The door's private constants these tests need, restated and held to the crate's own items by the
+// crate's unit test `door_facts_tests`. Each test binary reads only some of them.
+#[path = "support/door_facts.rs"]
+#[allow(dead_code)]
+mod door_facts;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::os::raw::c_void;
@@ -796,26 +802,6 @@ struct Arrived {
     outcome: Outcome,
 }
 
-/// THE DOOR'S ROUTE TABLE, `(verb, target, carrier)` in claim order: the claim an arrival carries is
-/// its row's index. Spelled here because this test reaches the door and nothing else; the logic
-/// crate pins it to its own table (`src/tests/door_facts_tests.rs`).
-const ROUTES: &[(&str, &str, &str)] = &[
-    ("GET", "/.well-known/oauth-protected-resource/mcp", "http"),
-    ("POST", "/mcp", "http"),
-    ("GET", "/mcp", "http"),
-    ("DELETE", "/mcp", "http"),
-    ("POST", "/mcp", "sse"),
-    ("POST", "/mcp/tasks/run", "http"),
-    ("POST", "/mcp", "stdio"),
-];
-
-/// The task-run claim: the row of [`ROUTES`] on `/mcp/tasks/run`.
-const TASK_RUN_ROUTE: usize = 5;
-/// Its target.
-const TASK_RUN_MOUNT: &str = "/mcp/tasks/run";
-/// The record kind a task's row is written under (the index of `task` in the door's record kinds).
-const RECORD_TASK: u32 = 3;
-
 /// The header fields a client mirrors from a JSON-RPC body (the plane's `codec::mirrored`, pinned to
 /// it in `src/tests/door_facts_tests.rs`): `accept`, the method, the name it names, the revision.
 fn mirrored(value: &Value) -> Vec<(String, String)> {
@@ -880,7 +866,7 @@ fn index_key(principal: &str, id: &str) -> Vec<u8> {
 
 /// The index of the claim `verb` `target` on the HTTP carrier.
 fn claim(verb: &str, target: &str) -> u32 {
-    let i = ROUTES
+    let i = door_facts::ROUTES
         .iter()
         .position(|&(v, t, c)| v == verb && t == target && c == "http")
         .expect("the door routes it");
@@ -1008,8 +994,8 @@ impl Door {
     fn arrive_run(&self, unit: u64, body: &[u8]) -> Arrived {
         self.arrive_on(
             unit,
-            u32::try_from(TASK_RUN_ROUTE).unwrap(),
-            TASK_RUN_MOUNT,
+            u32::try_from(door_facts::TASK_RUN_ROUTE).unwrap(),
+            door_facts::TASK_RUN_MOUNT,
             body,
         )
     }
@@ -1081,7 +1067,7 @@ impl Door {
             );
             let writes: Vec<(Vec<u8>, Vec<u8>)> = records[..o.records_written as usize]
                 .iter()
-                .filter(|r| r.op == RECORD_PUT && r.kind == RECORD_TASK)
+                .filter(|r| r.op == RECORD_PUT && r.kind == door_facts::RECORD_TASK)
                 .map(|r| (bytes_at(r.key), bytes_at(r.value)))
                 .collect();
             with_book(|b| {

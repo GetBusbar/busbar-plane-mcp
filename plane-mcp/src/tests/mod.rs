@@ -5,19 +5,26 @@
 //! public item became `door` (BUSBAR-1.6.0.md l.3567, Crate shape), because they read the plane's
 //! own tables and functions, which only the crate itself can see. Each kept its name, its tests and
 //! its assertions. None holds `unsafe`: the crate forbids it (ARCHITECT addendum 2026-10-21 08:30Z).
-//! (The per-module unit tests beside them in this directory are wired from their own modules.)
-//!
-//! NOT WIRED, and so not compiled or run: `alloc_gate_tests` (until busbar-contract's
-//! `alloc-counter` feature is at the pin), and `door_clock_tests`, `program_tests` and
-//! `door_witness_unwired`, which need the crate's internals and `unsafe` both.
+//! The suites that drive the door over its C ABI are integration tests (`tests/*.rs`), reaching the
+//! crate through `door` alone. (The per-module unit tests beside these in this directory are wired
+//! from their own modules.)
 
+/// The crate's one `#[global_allocator]`, every allocation gate's count: busbar-contract's
+/// test-only `alloc-counter` (a dev-dependency feature), so this crate holds no `unsafe`.
+#[global_allocator]
+static A: busbar_contract::alloc_counter::Counting =
+    busbar_contract::alloc_counter::Counting::new();
+
+/// What reading a stdio child's message may allocate (`tests/alloc_gate.rs`).
+mod alloc_gate_tests;
 /// The plane's vocabulary against the conformance battery (the plugin crate's `tests/door_witness.rs`).
 mod battery_vocabulary_tests;
 /// The plane's own declarations agree with each other (`tests/declarations_agree.rs`).
 mod declarations_agree_tests;
 /// The approval digest, pinned (`tests/digest_pin.rs`).
 mod digest_pin_tests;
-/// The facts the door-only suites spell, pinned to the crate's own, and their pure checks.
+/// The door's facts the door-driven tests restate (`tests/support/door_facts.rs`), held to the
+/// crate's own items, and those tests' pure checks.
 mod door_facts_tests;
 /// The stdio client leg against busbar's method inventory (`tests/method_inventory.rs`).
 mod method_inventory_tests;
