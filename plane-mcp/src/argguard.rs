@@ -43,9 +43,9 @@
 //!    `fetch` most MCP servers use) reads the whole value as a URL naming a host, however it is
 //!    spelled: `http:/h`, `https:\\h`, `ftp:h`, `file:\\h\x`, a scheme split by a tab or led by a
 //!    control character all name `h` to the upstream, so `h` is judged; all six WHATWG special
-//!    schemes (`http`, `https`, `ws`, `wss`, `ftp`, `file`) are read so. A value that opens with a
-//!    special scheme and `:`, or with any `scheme://`, but names no host a reader accepts is refused
-//!    rather than passed. Nothing narrower is
+//!    schemes (`http`, `https`, `ws`, `wss`, `ftp`, `file`) are read so. A value that opens with any
+//!    `scheme://`, or with a special scheme and `:` and holds no whitespace or control character,
+//!    but names no host a reader accepts is refused rather than passed. Nothing narrower is
 //!    sniffed — a bare `localhost` in an untyped `query` field stays untouched, because refusing a
 //!    hostname-shaped word in free text breaks real tools and buys nothing an attacker cannot
 //!    restate.
@@ -376,8 +376,10 @@ const SPECIAL_SCHEMES: [&str; 6] = ["http", "https", "ws", "wss", "ftp", "file"]
 /// All six WHATWG special schemes are read so: the contract reads `http`, `https`, `ws` and `wss`
 /// itself, `ftp` is read as `http` is, and `file` by [`file_host`].
 /// `Some(Some(host))`: the value is a URL naming `host`, lower-cased. `Some(None)`: a URL no reader
-/// accepts, refused rather than passed: it opens with a special scheme and `:`, or with any
-/// `scheme://`, and no host could be read from it. `None`: it names no host.
+/// accepts, refused rather than passed: it opens with any `scheme://`, or with a special scheme
+/// and `:` and holds no ASCII whitespace or control character (a raw URL holds none, so prose such
+/// as `http: the protocol` is not one), and no host could be read from it. `None`: it names no
+/// host.
 fn whatwg_host(value: &str) -> Option<Option<String>> {
     let cleaned = whatwg_cleaned(value);
     let special = special_scheme(&cleaned);
@@ -396,7 +398,12 @@ fn whatwg_host(value: &str) -> Option<Option<String>> {
     };
     match read {
         Some(host) => Some(Some(host.to_ascii_lowercase())),
-        None => (special.is_some() || opens_with_authority(&cleaned)).then_some(None),
+        None => {
+            let raw_url = !cleaned
+                .chars()
+                .any(|c| c.is_ascii_whitespace() || c.is_ascii_control());
+            ((special.is_some() && raw_url) || opens_with_authority(&cleaned)).then_some(None)
+        }
     }
 }
 
