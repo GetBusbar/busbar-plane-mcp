@@ -373,6 +373,15 @@ impl Negotiator {
                     self.fail(Refusal::Unreachable(Some(answer)))
                 }
             }
+            // A NOTIFICATION posted on the held link has no answer on the stream: its POST's
+            // status is the whole of it.
+            Phase::StreamCallPosted if self.original_id.is_none() => {
+                if answer.ok() {
+                    self.finish(answer)
+                } else {
+                    self.fail(Refusal::StreamLost)
+                }
+            }
             Phase::StreamInitPosted | Phase::StreamCallPosted => {
                 if answer.ok() {
                     Action::AwaitEvent
@@ -406,7 +415,8 @@ impl Negotiator {
                 }
                 self.send(Phase::StreamCallPosted, request)
             }
-            // A notification has no answer on the stream: its POST's status is the whole of it.
+            // A notification has no answer on the stream: its POST's status is the whole of it
+            // ([`Self::on_answer`] finishes on it).
             None => self.send(Phase::StreamCallPosted, request),
         }
     }

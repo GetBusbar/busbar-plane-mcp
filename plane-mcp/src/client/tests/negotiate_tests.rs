@@ -316,3 +316,38 @@ fn red_a_stateless_400_moves_the_ladder_and_is_never_remembered() {
     assert!(matches!(fin, Action::Finish(ref a) if a.status == 200));
     assert_eq!(n.remembered().unwrap().revision, Revision::R2025_06_18);
 }
+
+/// RED: a NOTIFICATION posted on the held `2024-11-05` link is finished by its POST's status: no
+/// answer comes for it on the stream, so the negotiation does not wait for one.
+#[test]
+fn red_a_notification_on_the_held_link_finishes_on_its_post() {
+    let note = envelope(
+        URL,
+        "notifications/cancelled",
+        None,
+        json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":5}}),
+        Some("tok"),
+    );
+    let mut n = Negotiator::new(note, None, "1.6.0");
+    n.start();
+    n.on_answer(answer(404, json!({})));
+    let open = n.on_answer(answer(404, json!({})));
+    assert!(matches!(open, Action::OpenStream { .. }), "{open:?}");
+    assert_eq!(n.on_answer(answer(200, json!(null))), Action::AwaitEvent);
+    let init = n.on_event(&event(Some("endpoint"), "/messages?sessionId=s1"));
+    let id = sent(&init).1["id"].clone();
+    assert_eq!(n.on_answer(accepted()), Action::AwaitEvent);
+    let initialized = n.on_event(&event(
+        Some("message"),
+        &result(id, json!({"protocolVersion":"2024-11-05"})).to_string(),
+    ));
+    assert_eq!(sent(&initialized).1["method"], "notifications/initialized");
+    let posted = n.on_answer(accepted());
+    let (_, body) = sent(&posted);
+    assert_eq!(body["method"], "notifications/cancelled");
+    let fin = n.on_answer(accepted());
+    assert!(
+        matches!(fin, Action::Finish(ref a) if a.status == 202),
+        "a notification waited for an answer the stream never sends: {fin:?}"
+    );
+}
