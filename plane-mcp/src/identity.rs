@@ -34,6 +34,9 @@
 //! and not the key, so a tool whose schema drifted under a live cache is refused even though its
 //! name is unchanged. The digest lives in the engine's client catalogue; this module owns the naming.
 
+// The crate's only public item is `door`: the accessors and variants below were this module's public API; the tests hold them, the door does not reach them (BUSBAR-1.6.0.md l.3560).
+#![cfg_attr(not(test), allow(dead_code))]
+
 use std::fmt;
 
 /// Why a server id or tool name was refused. Both arms are construction-time refusals: a malformed

@@ -21,6 +21,9 @@
 //! NOTIFICATION is neither: it carries no identifier, obliges no answer, and the specification
 //! forbids replying to one.
 
+// The crate's only public item is `door`: the accessors and variants below were this module's public API; the tests hold them, the door does not reach them (BUSBAR-1.6.0.md l.3560).
+#![cfg_attr(not(test), allow(dead_code))]
+
 use busbar_contract::ids::OpClassId;
 
 /// Ask the server what it is and what it supports.

@@ -18,6 +18,9 @@
 //!   `SubscriptionsListenResult`, correlated to the request that opened it.
 //! - QUIET IS NOT NOTHING: an idle stream says it is alive every [`KEEPALIVE_NS`].
 
+// The crate's only public item is `door`: the accessors and variants below were this module's public API; the tests hold them, the door does not reach them (BUSBAR-1.6.0.md l.3560).
+#![cfg_attr(not(test), allow(dead_code))]
+
 use std::collections::BTreeSet;
 
 use serde_json::{json, Map, Value};

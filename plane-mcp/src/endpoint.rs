@@ -8,6 +8,9 @@
 //! words. The composition root registers the block on the plane axis and lowers it through
 //! [`McpResource::from_cfg`] at boot.
 
+// The crate's only public item is `door`: the accessors and variants below were this module's public API; the tests hold them, the door does not reach them (BUSBAR-1.6.0.md l.3560).
+#![cfg_attr(not(test), allow(dead_code))]
+
 use serde::{Deserialize, Serialize};
 
 /// The top-level `mcp:` config block. Its mere PRESENCE mounts the MCP plane; its absence means the
