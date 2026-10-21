@@ -239,6 +239,136 @@ pub fn lower_result(result: &mut Value) -> Result<(), NotExpressible> {
     Ok(())
 }
 
+/// What lowering one JSON-RPC answer came to ([`lower_answer`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Lowered {
+    /// Nothing is lowered: the answer goes on as its own bytes.
+    Unchanged,
+    /// The answer's own bytes with only the stateless-only members' spans cut out of its result.
+    Spliced(Vec<u8>),
+    /// The result is not a complete one ([`NotExpressible`]): the caller answers an error instead.
+    Inexpressible,
+}
+
+/// LOWERS one JSON-RPC answer as BYTES, never parsed and printed again (Law 11, as
+/// `framing::event_stream` relays the stateless answer): an answer [`lower_result`] would change
+/// nothing in is [`Lowered::Unchanged`], and otherwise only the removed members' spans are cut out
+/// of the answer's own text, so every other member keeps its order, its spacing and its numbers'
+/// spelling. `None` for a body that is not one JSON document.
+#[must_use]
+pub fn lower_answer(answer: &[u8]) -> Option<Lowered> {
+    let text = std::str::from_utf8(answer).ok()?;
+    let mut value: Value = serde_json::from_str(text).ok()?;
+    let Some(result) = value.get_mut("result") else {
+        return Some(Lowered::Unchanged);
+    };
+    let before = result.as_object().map(Map::len);
+    if lower_result(result).is_err() {
+        return Some(Lowered::Inexpressible);
+    }
+    if result.as_object().map(Map::len) == before {
+        return Some(Lowered::Unchanged);
+    }
+    // A document serde_json read is one this reader walks; were it not, the lowered value is
+    // still the right answer, printed.
+    let spliced =
+        splice_result(text).unwrap_or_else(|| serde_json::to_vec(&value).unwrap_or_default());
+    Some(Lowered::Spliced(spliced))
+}
+
+/// `text` (one JSON-RPC answer) with every stateless-only member of its `result` cut out, with the
+/// one comma that joined it: `None` when `text` is not one object with an object `result`.
+fn splice_result(text: &str) -> Option<Vec<u8>> {
+    let (top, end) = object_members(text, 0)?;
+    if ws(text, end) != text.len() {
+        return None;
+    }
+    // serde_json reads the last of two same-named members: so does the splice.
+    let result = top.iter().rev().find(|m| m.key == "result")?;
+    let (inner, _) = object_members(text, result.value_start)?;
+    let removed: Vec<bool> = inner
+        .iter()
+        .map(|m| STATELESS_ONLY_MEMBERS.contains(&m.key.as_str()))
+        .collect();
+    let last_kept = (0..inner.len()).rev().find(|&i| !removed[i]);
+    let mut cuts: Vec<(usize, usize)> = Vec::new();
+    for (i, m) in inner.iter().enumerate().filter(|(i, _)| removed[*i]) {
+        cuts.push(match last_kept {
+            // A member before the last kept one goes with the comma after it.
+            Some(k) if i < k => (m.start, inner[i + 1].start),
+            // A member after it goes with the comma before it.
+            Some(k) => (inner[k].end, m.end),
+            // Every member goes.
+            None => (inner[0].start, m.end),
+        });
+    }
+    cuts.sort_unstable();
+    let mut out = Vec::with_capacity(text.len());
+    let mut at = 0;
+    for (from, to) in cuts {
+        if from > at {
+            out.extend_from_slice(&text.as_bytes()[at..from]);
+        }
+        at = at.max(to);
+    }
+    out.extend_from_slice(&text.as_bytes()[at..]);
+    Some(out)
+}
+
+/// One member of a JSON object as its text holds it: its key, where the member starts (its key's
+/// opening quote), where its value starts, and where its value ends.
+struct Member {
+    key: String,
+    start: usize,
+    value_start: usize,
+    end: usize,
+}
+
+/// The first byte at or after `at` that is not JSON whitespace.
+fn ws(text: &str, at: usize) -> usize {
+    text.len() - text[at..].trim_start_matches([' ', '\t', '\n', '\r']).len()
+}
+
+/// The members of the JSON object that starts at (or after whitespace from) `at` in `text`, each
+/// value read and its extent taken, never written again, and the byte after the object's `}`.
+fn object_members(text: &str, at: usize) -> Option<(Vec<Member>, usize)> {
+    let mut at = ws(text, at);
+    if text.as_bytes().get(at) != Some(&b'{') {
+        return None;
+    }
+    at = ws(text, at + 1);
+    let mut members = Vec::new();
+    if text.as_bytes().get(at) == Some(&b'}') {
+        return Some((members, at + 1));
+    }
+    loop {
+        let start = at;
+        let mut keys = serde_json::Deserializer::from_str(&text[at..]).into_iter::<String>();
+        let key = keys.next()?.ok()?;
+        at = ws(text, at + keys.byte_offset());
+        if text.as_bytes().get(at) != Some(&b':') {
+            return None;
+        }
+        let value_start = ws(text, at + 1);
+        let mut values = serde_json::Deserializer::from_str(&text[value_start..])
+            .into_iter::<serde::de::IgnoredAny>();
+        values.next()?.ok()?;
+        let end = value_start + values.byte_offset();
+        members.push(Member {
+            key,
+            start,
+            value_start,
+            end,
+        });
+        at = ws(text, end);
+        match text.as_bytes().get(at)? {
+            b',' => at = ws(text, at + 1),
+            b'}' => return Some((members, at + 1)),
+            _ => return None,
+        }
+    }
+}
+
 /// Builds the `initialize` result from the stateless discovery document, for `revision`.
 ///
 /// Only the capability groups the session revisions define are carried, and only when discovery

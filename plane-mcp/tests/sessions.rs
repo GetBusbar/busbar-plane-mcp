@@ -362,6 +362,9 @@ fn upstream_answer(url: &str, fields: &[(String, String)], body: &Value) -> Repl
                     json!({"content": [{"type": "text", "text": "stateless"}], "resultType": "complete"}),
                 ),
             ),
+            "resources/subscribe" | "resources/unsubscribe" => {
+                (200, json_head(), rpc_result(&id, json!({})))
+            }
             _ => (404, Vec::new(), b"no such method".to_vec()),
         };
     }
@@ -1079,6 +1082,7 @@ impl Door {
                     .filter(|r| r.op == RECORD_AUDIT)
                     .map(|r| (at(r.key), at(r.value), r.kind == AUDIT_REJECTED)),
             );
+            got.diags += o.head.envelope.diags_len;
             got.bytes
                 .extend_from_slice(&reply[..usize::try_from(o.emitted).unwrap()]);
             if ret.outcome() != Outcome::Ready || o.more == 0 {
@@ -1171,6 +1175,8 @@ struct Answered {
     request: String,
     /// The audit rows written: action, resource, rejected.
     audits: Vec<(String, String, bool)>,
+    /// The diagnostics the reply's envelope carried.
+    diags: usize,
 }
 
 impl Answered {
@@ -1598,7 +1604,7 @@ fn a_session_subscription_hears_the_upstreams_resource_update() {
         d.arrive(61, "POST", "/mcp", subscribe, &in_session).outcome,
         Outcome::Ready
     );
-    let subscribed = d.piece(61, &Given::caller(ALICE, subscribe));
+    let subscribed = d.settle(61, &Given::caller(ALICE, subscribe));
     assert_eq!(subscribed.status, 200, "{}", subscribed.text());
     assert_eq!(subscribed.json()["result"], json!({}));
 
@@ -2208,18 +2214,22 @@ fn one_owner_holds_a_bounded_number_of_session_streams() {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
     *upstreams() = Some(Upstreams::default());
     let d = open();
-    let init = initialize(&d, 200, ALICE);
-    let session = init
-        .field("mcp-session-id")
-        .expect("the answer names its session")
-        .to_string();
-    let stream = [
-        ("accept", "text/event-stream"),
-        ("mcp-session-id", session.as_str()),
-        ("mcp-protocol-version", "2025-06-18"),
-    ];
+    // Five sessions (a session keeps sixteen streams), thirteen streams on each.
+    let sessions: Vec<String> = (0..5)
+        .map(|n| {
+            initialize(&d, 190 + n, ALICE)
+                .field("mcp-session-id")
+                .expect("the answer names its session")
+                .to_string()
+        })
+        .collect();
     let mut statuses = Vec::new();
-    for unit in 201..=265 {
+    for (n, unit) in (201..=265).enumerate() {
+        let stream = [
+            ("accept", "text/event-stream"),
+            ("mcp-session-id", sessions[n / 13].as_str()),
+            ("mcp-protocol-version", "2025-06-18"),
+        ];
         assert_eq!(
             d.arrive(unit, "GET", "/mcp", b"", &stream).outcome,
             Outcome::Ready
@@ -2339,4 +2349,376 @@ fn the_legacy_get_carries_no_stateless_mirror_headers() {
             get.fields
         );
     }
+}
+
+/// RED: A SESSION REVISION'S ANSWER IS THE UPSTREAM'S OWN BYTES: a `tools/call` in a `2025-06-18`
+/// session reaches its caller with the upstream's result members in the upstream's order and its
+/// numbers as the upstream spelt them (`1.0`, `1e3`), only the stateless-only members cut out.
+/// RED: the answer was parsed and printed again, its members sorted and `1e3` re-spelt `1000.0`.
+#[test]
+fn a_session_answer_is_relayed_byte_for_byte() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open();
+    let init = initialize(&d, 120, ALICE);
+    let session = init
+        .field("mcp-session-id")
+        .expect("the answer names its session")
+        .to_string();
+    let call = br#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"st_read_file","arguments":{}}}"#;
+    let fields = [
+        ACCEPT_BOTH,
+        ("mcp-session-id", session.as_str()),
+        ("mcp-protocol-version", "2025-06-18"),
+    ];
+    let arrived = d.arrive(121, "POST", "/mcp", call, &fields);
+    assert_eq!(arrived.outcome, Outcome::Ready, "{arrived:?}");
+    d.piece(121, &Given::attempt(ALICE, "st"));
+    let send = d.pump(121, &Given::caller(ALICE, call));
+    assert!(
+        send.far,
+        "the call is relayed: {} {}",
+        send.status,
+        send.text()
+    );
+    let far = br#"{"jsonrpc":"2.0","id":0,"result":{"zeta":1.0,"content":[{"type":"text","text":"x"}],"resultType":"complete","alpha":1e3,"ttlMs":5}}"#;
+    let answered = d.settle(121, &Given::far(ALICE, 200, vec![JSON_TYPE], far));
+    assert_eq!(answered.status, 200, "{}", answered.text());
+    assert_eq!(
+        answered.text(),
+        r#"{"id":5,"jsonrpc":"2.0","result":{"zeta":1.0,"content":[{"type":"text","text":"x"}],"alpha":1e3}}"#,
+        "the upstream's own bytes, only the stateless-only members cut"
+    );
+}
+
+/// RED: A `2024-11-05` UPSTREAM'S ANSWER IS ITS OWN BYTES even when its log records ride ahead of
+/// it: the caller reads the result's members in the upstream's order and its numbers as spelt.
+/// RED: with a frame riding, the answer was parsed and printed again.
+#[test]
+fn a_legacy_answer_with_frames_is_relayed_byte_for_byte() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open_with(LEGACY_SECTION);
+    let (a, fields) = legacy_call(30, "a.txt");
+    relayed(&d, 122, ALICE, &a, &fields);
+    upstreams().as_mut().unwrap().hold_calls = true;
+    assert_eq!(
+        d.piece(122, &walk_refused(ALICE)).outcome,
+        Some(Outcome::Pending)
+    );
+    let session = legacy_sessions()[0].clone();
+    on_stream(&session, |s| {
+        let held = std::mem::take(&mut s.held);
+        let text = String::from_utf8(held[0].clone()).unwrap();
+        let data = text
+            .lines()
+            .find_map(|l| l.strip_prefix("data: "))
+            .expect("the held answer");
+        let id = serde_json::from_str::<Value>(data).unwrap()["id"].clone();
+        s.events.push_back(sse_event(
+            "message",
+            r#"{"jsonrpc":"2.0","method":"notifications/message","params":{"level":"info","data":"working"}}"#,
+        ));
+        s.events.push_back(sse_event(
+            "message",
+            &format!(
+                r#"{{"jsonrpc":"2.0","id":{id},"result":{{"zeta":1.0,"content":[{{"type":"text","text":"legacy a.txt"}}],"alpha":1e3}}}}"#
+            ),
+        ));
+    });
+    d.turn();
+    let answered = d.pump(122, &walk_refused(ALICE));
+    assert_eq!(answered.status, 200, "{}", answered.text());
+    assert!(
+        answered.text().contains(
+            r#""zeta":1.0,"content":[{"type":"text","text":"legacy a.txt"}],"alpha":1e3}"#
+        ),
+        "the upstream's own bytes: {}",
+        answered.text()
+    );
+}
+
+/// A `tools/call` of `name` asking for progress under the caller's token `p`.
+fn progress_call(name: &str) -> Vec<u8> {
+    serde_json::to_vec(&json!({
+        "jsonrpc": "2.0",
+        "id": 31,
+        "method": "tools/call",
+        "params": {
+            "name": name,
+            "arguments": {},
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": {},
+                "progressToken": "p",
+            },
+        },
+    }))
+    .unwrap()
+}
+
+/// RED: TWO CALLS IN FLIGHT NEVER SHARE A PROGRESS TOKEN: two first-round calls to a stateless
+/// upstream carry two tokens, and a call lowered into a session carries the token of the id it is
+/// sent under. RED: every first round carried `busbar-0`, the round's id.
+#[test]
+fn calls_in_flight_never_share_a_progress_token() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open();
+    let call = progress_call("st_read_file");
+    let mut tokens = Vec::new();
+    for unit in [130, 131] {
+        assert_eq!(
+            d.arrive(unit, "POST", "/mcp", &call, ST_FIELDS).outcome,
+            Outcome::Ready
+        );
+        d.piece(unit, &Given::attempt(ALICE, "st"));
+        let send = d.pump(unit, &Given::caller(ALICE, &call));
+        assert!(send.far, "{} {}", send.status, send.text());
+        let sent: Value = serde_json::from_slice(&send.bytes).expect("a JSON-RPC request");
+        assert_eq!(sent["id"], json!(0), "the stateless round's id: {sent}");
+        tokens.push(sent["params"]["_meta"]["progressToken"].clone());
+    }
+    assert!(
+        tokens
+            .iter()
+            .all(|t| t.as_str().is_some_and(|t| t.starts_with("busbar-"))),
+        "busbar's own tokens: {tokens:?}"
+    );
+    assert_ne!(tokens[0], tokens[1], "two calls in flight shared a token");
+
+    let call = progress_call("fs_read_file");
+    assert_eq!(
+        d.arrive(132, "POST", "/mcp", &call, CALL_FIELDS).outcome,
+        Outcome::Ready
+    );
+    d.piece(132, &Given::attempt(ALICE, "fs"));
+    let send = d.pump(132, &Given::caller(ALICE, &call));
+    assert!(send.far, "{} {}", send.status, send.text());
+    let sent: Value = serde_json::from_slice(&send.bytes).expect("a JSON-RPC request");
+    assert_eq!(
+        send.field("mcp-session-id"),
+        Some(UPSTREAM_SESSION),
+        "lowered into the session"
+    );
+    assert_eq!(
+        sent["params"]["_meta"]["progressToken"],
+        json!(format!("busbar-{}", sent["id"])),
+        "the token of the id the call is sent under: {sent}"
+    );
+    assert!(!tokens.contains(&sent["params"]["_meta"]["progressToken"]));
+}
+
+/// RED: A HELD STREAM IS NEVER ENDED TO MAKE ROOM: past the streams one session keeps, the next GET
+/// is refused `429`, and the first stream still collects what its session buffers. RED: the next
+/// GET dropped the first stream's cursor, and that stream ended at its next collection.
+#[test]
+fn a_held_stream_is_never_ended_for_another() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open();
+    let session = initialize(&d, 140, ALICE)
+        .field("mcp-session-id")
+        .expect("the answer names its session")
+        .to_string();
+    let stream = [
+        ("accept", "text/event-stream"),
+        ("mcp-session-id", session.as_str()),
+        ("mcp-protocol-version", "2025-06-18"),
+    ];
+    let mut statuses = Vec::new();
+    for unit in 141..=157 {
+        assert_eq!(
+            d.arrive(unit, "GET", "/mcp", b"", &stream).outcome,
+            Outcome::Ready
+        );
+        statuses.push(d.piece(unit, &Given::stream_open(ALICE, unit)).status);
+    }
+    assert!(
+        statuses[..16].iter().all(|s| *s == 200),
+        "a session keeps sixteen streams: {statuses:?}"
+    );
+    assert_eq!(
+        statuses[16], 429,
+        "the seventeenth is refused: {statuses:?}"
+    );
+    // The first stream is still live: a collection writes no end of stream.
+    d.turn();
+    let collected = d.piece(141, &Given::collect(ALICE, 141));
+    assert!(
+        !collected.done,
+        "the first stream was ended for the seventeenth: {}",
+        collected.text()
+    );
+}
+
+/// Opens a `2024-11-05` stream on `unit` as `caller`: the message address its endpoint event names.
+fn legacy_stream(d: &Door, unit: u64, caller: &str) -> String {
+    let opened = d.arrive(unit, "GET", "/mcp", b"", &[("accept", "text/event-stream")]);
+    assert_eq!(opened.outcome, Outcome::Ready, "{opened:?}");
+    let text = d.piece(unit, &Given::stream_open(caller, unit)).text();
+    text.strip_prefix("event: endpoint\ndata: ")
+        .and_then(|rest| rest.split('\n').next())
+        .unwrap_or_else(|| panic!("the stream opens with the endpoint event: {text:?}"))
+        .to_string()
+}
+
+/// RED: A `2024-11-05` SESSION ENDS WITH ITS STREAM: once the caller's stream ended (or its op was
+/// cancelled), a message POSTed to its address is told the session is unknown (`404`) and is not
+/// run. RED: the session outlived its stream, the message ran, and it was answered `202` with its
+/// answer dropped.
+#[test]
+fn a_legacy_session_ends_with_its_stream() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open();
+    let list = br#"{"jsonrpc":"2.0","id":9,"method":"tools/list"}"#;
+    let json_type = [("content-type", "application/json")];
+
+    // The caller's side of the stream ends.
+    let address = legacy_stream(&d, 150, ALICE);
+    let ended = d.piece(
+        150,
+        &Given {
+            stream: 150,
+            ..Given::caller(ALICE, b"")
+        },
+    );
+    assert!(ended.done, "the stream ends: {}", ended.text());
+    assert_eq!(
+        d.arrive(151, "POST", &address, list, &json_type).outcome,
+        Outcome::Ready
+    );
+    let posted = d.piece(151, &Given::caller(ALICE, list));
+    assert_eq!(posted.status, 404, "{}", posted.text());
+
+    // The stream's op is cancelled.
+    let address = legacy_stream(&d, 152, ALICE);
+    d.cancel(152);
+    assert_eq!(
+        d.arrive(153, "POST", &address, list, &json_type).outcome,
+        Outcome::Ready
+    );
+    let posted = d.piece(153, &Given::caller(ALICE, list));
+    assert_eq!(posted.status, 404, "{}", posted.text());
+}
+
+/// The resource subscriptions busbar sent an upstream: `(method, uri)`, in order.
+fn subscriptions_seen() -> Vec<(String, String)> {
+    seen()
+        .into_iter()
+        .filter_map(|s| {
+            let method = s.body["method"].as_str()?.to_string();
+            method.starts_with("resources/").then(|| {
+                (
+                    method,
+                    s.body["params"]["uri"].as_str().unwrap_or("").to_string(),
+                )
+            })
+        })
+        .collect()
+}
+
+/// RED: A RESOURCE SUBSCRIPTION DELIVERS: the uri's first subscriber in a session revision has
+/// busbar send `resources/subscribe` to the member that declares it; a second subscriber sends
+/// nothing more; the last unsubscribe sends `resources/unsubscribe`. RED: the subscription was
+/// acknowledged and recorded, and no upstream was ever asked to send its updates.
+#[test]
+fn a_subscription_subscribes_the_declaring_member_upstream() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open();
+    let in_session = |unit: u64, caller: &str, body: &[u8]| {
+        let session = initialize(&d, unit, caller)
+            .field("mcp-session-id")
+            .expect("the answer names its session")
+            .to_string();
+        let fields = [
+            ACCEPT_BOTH,
+            ("mcp-session-id", session.as_str()),
+            ("mcp-protocol-version", "2025-06-18"),
+        ];
+        assert_eq!(
+            d.arrive(unit + 1, "POST", "/mcp", body, &fields).outcome,
+            Outcome::Ready
+        );
+        let answered = d.settle(unit + 1, &Given::caller(caller, body));
+        (session, answered)
+    };
+    let subscribe =
+        br#"{"jsonrpc":"2.0","id":3,"method":"resources/subscribe","params":{"uri":"file:///readme"}}"#;
+    let unsubscribe =
+        br#"{"jsonrpc":"2.0","id":4,"method":"resources/unsubscribe","params":{"uri":"file:///readme"}}"#;
+    let (alice, answered) = in_session(160, ALICE, &subscribe[..]);
+    assert_eq!(answered.status, 200, "{}", answered.text());
+    assert_eq!(answered.json()["result"], json!({}), "{}", answered.text());
+    assert_eq!(
+        subscriptions_seen(),
+        [(
+            "resources/subscribe".to_string(),
+            "file:///readme".to_string()
+        )],
+        "the declaring member is asked for the uri's updates"
+    );
+    let (bob, answered) = in_session(162, BOB, &subscribe[..]);
+    assert_eq!(answered.json()["result"], json!({}), "{}", answered.text());
+    assert_eq!(
+        subscriptions_seen().len(),
+        1,
+        "one upstream subscription serves both"
+    );
+
+    let drop_in = |unit: u64, session: &str, caller: &str| {
+        let fields = [
+            ACCEPT_BOTH,
+            ("mcp-session-id", session),
+            ("mcp-protocol-version", "2025-06-18"),
+        ];
+        assert_eq!(
+            d.arrive(unit, "POST", "/mcp", unsubscribe, &fields).outcome,
+            Outcome::Ready
+        );
+        d.settle(unit, &Given::caller(caller, unsubscribe))
+    };
+    assert_eq!(
+        drop_in(164, alice.as_str(), ALICE).json()["result"],
+        json!({})
+    );
+    assert_eq!(subscriptions_seen().len(), 1, "bob still watches it");
+    assert_eq!(drop_in(165, bob.as_str(), BOB).json()["result"], json!({}));
+    assert_eq!(
+        subscriptions_seen().last(),
+        Some(&(
+            "resources/unsubscribe".to_string(),
+            "file:///readme".to_string()
+        )),
+        "the last subscriber gone, the member is told"
+    );
+}
+
+/// THE UNGOVERNED CHAIN'S DIAGNOSTIC IS REPORTED ONCE PER INSTANCE, on its first `2024-11-05`
+/// stream: that stream's reply carries it, and the latch is set only by a carried report, so the
+/// next ungoverned stream carries none. A governed caller's stream never carries it.
+#[test]
+fn the_ungoverned_legacy_diagnostic_is_reported_once_when_carried() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open();
+    let opened = |unit: u64, caller: &str| {
+        let arrived = d.arrive(unit, "GET", "/mcp", b"", &[("accept", "text/event-stream")]);
+        assert_eq!(arrived.outcome, Outcome::Ready, "{arrived:?}");
+        d.piece(unit, &Given::stream_open(caller, unit))
+    };
+    assert_eq!(
+        opened(170, ALICE).diags,
+        0,
+        "a governed caller's stream says nothing"
+    );
+    let first = opened(171, "");
+    assert_eq!(first.status, 200, "{}", first.text());
+    assert_eq!(
+        first.diags, 1,
+        "the first ungoverned stream carries the diagnostic"
+    );
+    assert_eq!(opened(172, "").diags, 0, "latched: said once per instance");
 }

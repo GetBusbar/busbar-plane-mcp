@@ -203,10 +203,10 @@ impl Listen {
                 return Err(invalid(
                     &id,
                     &format!(
-                        "`params.notifications.resourceSubscriptions` names {} distinct uris; a \
-                         `subscriptions/listen` call may watch at most {MAX_SUBSCRIBED_URIS} at \
-                         once. Open a second subscription for the rest.",
-                        uris.len()
+                        "`params.notifications.resourceSubscriptions` names more than \
+                         {MAX_SUBSCRIBED_URIS} distinct uris; a `subscriptions/listen` call may \
+                         watch at most {MAX_SUBSCRIBED_URIS} at once. Open a second subscription \
+                         for the rest."
                     ),
                 ));
             }
