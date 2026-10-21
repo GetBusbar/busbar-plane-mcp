@@ -25,16 +25,15 @@ use busbar_contract::abi::host::conn::connector::{
 use busbar_contract::abi::mechanism::call::{AbiStr, Blob};
 use busbar_contract::abi::mechanism::door::{Section, SECTION_DECLARING};
 use busbar_contract::abi::plane::{
-    AdminRoute, BillableClass, OpClass, PinMechanism, PlaneTail, RecordChain, RecordRetention,
-    TrustKey, ANSWER_LAYOUT, CHAIN_DIGESTS_SCOPE, CHAIN_LENGTH_PREFIXED, INGRESS_REQUEST_RESPONSE,
+    AdminRoute, BillableClass, OpClass, PinMechanism, PlaneTail, RecordChain, TrustKey,
+    ANSWER_LAYOUT, CHAIN_DIGESTS_SCOPE, CHAIN_LENGTH_PREFIXED, INGRESS_REQUEST_RESPONSE,
     INGRESS_RESPONSE_STREAM, MECHANISM_PEER_KEY, MECHANISM_ROOT, SHAPE_PIECEWISE, TRUST_PIN,
     TRUST_PRIVATE_REACH, TRUST_REVERIFY_TTL,
 };
 use busbar_contract::abi::sdk::door::abi_str;
 use busbar_contract::abi::sdk::publish::{
-    admin_route, class_index, record_retention, AdminRouteSpec, ServedRoute, SnapshotSpec,
+    admin_route, class_index, AdminRouteSpec, ServedRoute, SnapshotSpec,
 };
-use busbar_contract::records::Retention;
 
 use crate::tool_claims::{
     CARRIER_HTTP, CARRIER_SSE, CARRIER_STDIO, DEFAULT_METADATA, DEFAULT_MOUNT, TASK_RUN_MOUNT,
@@ -196,12 +195,6 @@ const RECORD_KINDS: &[AbiStr] = &[
     abi_str(crate::tool_records::KIND_APPROVAL),
     abi_str(crate::tool_records::KIND_TASK),
 ];
-
-/// The retention rule of each record kind that is not purged by age ([`RECORD_KINDS`] indexes): a
-/// task's record is kept while it is active, so a purge drops only the terminal ones. Every other
-/// kind lists no rule and is purged by age.
-const RECORD_RETENTIONS: &[RecordRetention] =
-    &[record_retention(RECORD_TASK, Retention::TerminalOnly)];
 
 /// The kind a completed ask exchange's approval is claimed under, once ([`RECORD_KINDS`]): the
 /// spent-approval ledger is the host's one-time `records.claim` (ARCHITECT Q-L3B-ASK).
@@ -386,8 +379,7 @@ const TAIL_VALUE: PlaneTail = {
         .with_record_kinds(RECORD_KINDS)
         .with_record_chains(RECORD_CHAINS)
         .with_trust_keys(TRUST_KEYS)
-        .with_admin_routes(ADMIN_ROUTES)
-        .with_record_retentions(RECORD_RETENTIONS);
+        .with_admin_routes(ADMIN_ROUTES);
     // THE GATE-FIRST HOOK ORDER (spec Part 3 section 12 "Hooks"; ARCHITECT ruling on the mcp
     // fold): the served engine ran an entry's decision gates over the invocation BEFORE its
     // rewrite chain (`tools.hooks` / `tools.<server>.hooks`), and the door's units keep that order.
