@@ -1082,6 +1082,7 @@ impl Door {
                     .filter(|r| r.op == RECORD_AUDIT)
                     .map(|r| (at(r.key), at(r.value), r.kind == AUDIT_REJECTED)),
             );
+            got.diags += o.head.envelope.diags_len;
             got.bytes
                 .extend_from_slice(&reply[..usize::try_from(o.emitted).unwrap()]);
             if ret.outcome() != Outcome::Ready || o.more == 0 {
@@ -1174,6 +1175,8 @@ struct Answered {
     request: String,
     /// The audit rows written: action, resource, rejected.
     audits: Vec<(String, String, bool)>,
+    /// The diagnostics the reply's envelope carried.
+    diags: usize,
 }
 
 impl Answered {
@@ -2688,4 +2691,31 @@ fn a_subscription_subscribes_the_declaring_member_upstream() {
         )),
         "the last subscriber gone, the member is told"
     );
+}
+
+/// THE UNGOVERNED CHAIN'S DIAGNOSTIC IS REPORTED ONCE PER INSTANCE, on its first `2024-11-05`
+/// stream: that stream's reply carries it, and the latch is set only by a carried report, so the
+/// next ungoverned stream carries none. A governed caller's stream never carries it.
+#[test]
+fn the_ungoverned_legacy_diagnostic_is_reported_once_when_carried() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open();
+    let opened = |unit: u64, caller: &str| {
+        let arrived = d.arrive(unit, "GET", "/mcp", b"", &[("accept", "text/event-stream")]);
+        assert_eq!(arrived.outcome, Outcome::Ready, "{arrived:?}");
+        d.piece(unit, &Given::stream_open(caller, unit))
+    };
+    assert_eq!(
+        opened(170, ALICE).diags,
+        0,
+        "a governed caller's stream says nothing"
+    );
+    let first = opened(171, "");
+    assert_eq!(first.status, 200, "{}", first.text());
+    assert_eq!(
+        first.diags, 1,
+        "the first ungoverned stream carries the diagnostic"
+    );
+    assert_eq!(opened(172, "").diags, 0, "latched: said once per instance");
 }

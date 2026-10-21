@@ -203,10 +203,9 @@ pub fn tools_call(
     envelope(url, "tools/call", Some(name), body, authorization)
 }
 
-/// Build a `tools/list` for one server.
-/// The CONNECT-path request. Nothing fetches a live tool list yet — that is the gap named in
-/// `client::catalogue`.
-#[allow(dead_code)]
+/// Build a `tools/list` for one server: the request an operator `connect` and a call's
+/// verify-on-call fetch send a member over HTTP (`crate::tool_door`), and the one a stdio child is
+/// asked over its pipe (`crate::tool_door`'s program leg).
 pub fn tools_list(url: &str, request_id: u64, authorization: Option<&str>) -> OutboundRequest {
     let body = serde_json::json!({
         "jsonrpc": "2.0",
