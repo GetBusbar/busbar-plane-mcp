@@ -77,6 +77,15 @@ const MAX_INFLIGHT: u32 = 64;
 /// The version the Statement names: the crate's (a test pins the two equal).
 pub const VERSION: &str = "1.6.0";
 
+/// The names of the diagnostics the door raises, as its Statement's diagnostic ids spell them
+/// (`door_sessions::DIAG_NAMES`): what the tests hold `declares.json` to.
+#[cfg(test)]
+pub(crate) const DIAG_NAMES: &[&str] = door_sessions::DIAG_NAMES;
+
+/// How many diagnostic ids the Statement states.
+#[cfg(test)]
+pub(crate) const DIAG_IDS_LEN: usize = door_sessions::DIAG_IDS.len();
+
 /// THE STATEMENT: the plane's name and version, the settings sections it declares
 /// ([`door::SECTIONS`]), its outbound needs ([`door::NEEDS`]) and its tail ([`door::TAIL`]).
 pub const STATEMENT: Statement = Statement {

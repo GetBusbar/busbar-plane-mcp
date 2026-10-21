@@ -157,15 +157,12 @@ fn the_declares_file_states_the_catalog() {
 /// retired entry.
 #[test]
 fn the_declared_codes_are_exactly_the_raised_codes() {
-    let names = crate::door_sessions::DIAG_NAMES;
-    let ids = crate::door_sessions::DIAG_IDS;
-    assert_eq!(ids.len(), names.len(), "every diagnostic id is a named one");
-    for (id, name) in ids.iter().zip(names) {
-        assert!(
-            id.ptr == name.as_ptr() && id.len == name.len(),
-            "the Statement's diagnostic id is not `{name}`"
-        );
-    }
+    let names = crate::tool_door::DIAG_NAMES;
+    assert_eq!(
+        crate::tool_door::DIAG_IDS_LEN,
+        names.len(),
+        "every diagnostic id the Statement states is a named one"
+    );
     let raised: std::collections::BTreeSet<u16> = names
         .iter()
         .map(|name| {

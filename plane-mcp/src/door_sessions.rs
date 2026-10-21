@@ -67,11 +67,13 @@ use busbar_contract::abi::sdk::{Instance, Lent, Out, Services};
 /// first `2024-11-05` stream (the index of its id in the Statement's diagnostic ids).
 pub(super) const UNGOVERNED_LEGACY_STREAM: u32 = 0;
 
-/// The Statement's diagnostic ids, in index order.
+/// The names of the Statement's diagnostic ids, in index order: each the `BUSBAR-NNNN` banner of
+/// the catalog code it raises (`declares.json`), so the host's log resolves its entry.
+pub(super) const DIAG_NAMES: &[&str] = &["BUSBAR-7106"];
+
+/// The Statement's diagnostic ids, in index order ([`DIAG_NAMES`]).
 pub(super) const DIAG_IDS: &[busbar_contract::abi::mechanism::call::AbiStr] =
-    &[busbar_contract::abi::sdk::door::abi_str(
-        "mcp-legacy-stream-ungoverned",
-    )];
+    &[busbar_contract::abi::sdk::door::abi_str(DIAG_NAMES[0])];
 
 /// The words of [`UNGOVERNED_LEGACY_STREAM`].
 const UNGOVERNED_WORDS: &str =
