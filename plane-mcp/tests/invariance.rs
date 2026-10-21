@@ -57,8 +57,9 @@ fn walk(dir: &Path, f: &mut impl FnMut(&Path, &str)) {
 /// Walk every source file on the SURFACE, the code a shipped build compiles: every one under `dir`
 /// less the test-module directories (`src/tests/`, and each module's own `tests/`). A test module is
 /// compiled only when the tests are and the kernel never sees it; the suites that moved in from
-/// `tests/` when the crate's only public item became `door` drive the door over its C ABI
-/// (`unsafe`), hold host doubles (`Mutex`, atomics) and read files, as they did out there.
+/// `tests/` when the crate's only public item became `door` read files, the environment and a
+/// clock, as they did out there, and the modules left unwired there (`src/tests/mod.rs`) hold the
+/// C-ABI host doubles they were written with.
 fn walk_surface(dir: &Path, f: &mut impl FnMut(&Path, &str)) {
     for entry in std::fs::read_dir(dir)
         .expect("the source directory is readable")
@@ -115,15 +116,11 @@ fn no_item_is_conditionally_compiled() {
     );
 }
 
-/// The crate carries the two lint gates the design requires of a plugin. A shipped build forbids
-/// `unsafe`; the test build denies it, so the crate's one allocation counter
-/// (`src/tests/alloc_counter.rs`) may allow it for that module alone (ARCHITECT ruling 2026-10-21,
-/// allocation-counting gates).
+/// The crate carries the two lint gates the design requires of a plugin.
 #[test]
 fn the_crate_forbids_unsafe_and_undocumented_items() {
     let lib = std::fs::read_to_string(src_dir().join("lib.rs")).expect("the root is readable");
-    assert!(lib.contains("#![cfg_attr(not(test), forbid(unsafe_code))]"));
-    assert!(lib.contains("#![cfg_attr(test, deny(unsafe_code))]"));
+    assert!(lib.contains("#![forbid(unsafe_code)]"));
     assert!(lib.contains("#![deny(missing_docs)]"));
 }
 

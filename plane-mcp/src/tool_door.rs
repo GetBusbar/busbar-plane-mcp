@@ -107,12 +107,8 @@ busbar_contract::statement_extensions!(
     )]
 );
 
-/// THE CLAIMS AXIS: the pure plane the boot seal registers under its key, and the bytes it claims,
-/// sealed against every other plane's so a tie is refused at boot (the transport each names must be
-/// registered).
-#[cfg(test)]
-pub const PLANE: crate::McpPlane = crate::McpPlane::EMPTY;
-/// The bytes [`PLANE`] claims.
+/// THE CLAIMS AXIS: the bytes the pure plane claims, sealed against every other plane's so a tie is
+/// refused at boot (the transport each names must be registered).
 pub const CLAIMS: &[busbar_contract::grammar::Claim] =
     <crate::McpPlane as busbar_contract::plane::PlaneMeta>::CLAIMS;
 

@@ -38,8 +38,7 @@
 //! that cannot hold a named identifier, the arena that cannot hold a span table, and the
 //! introspection verb that takes no argument.
 
-#![cfg_attr(not(test), forbid(unsafe_code))]
-#![cfg_attr(test, deny(unsafe_code))]
+#![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
 /// The session revisions raised into, and lowered out of, the one dispatch.

@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
+//! NOT WIRED: this module is not declared in `src/tests/mod.rs`, so it does not compile or run. It
+//! drives the crate's own `ProgramExchange` over a host connector table of `extern "C"` stubs: it
+//! needs the crate's internals and `unsafe` both. The crate keeps the literal
+//! `#![forbid(unsafe_code)]` (ARCHITECT addendum 2026-10-21 08:30Z), which a test module cannot
+//! lift, and an integration test cannot reach `ProgramExchange`; it has no door-only form today.
+//!
 //! THE DOOR'S OWN EXCHANGES WITH A STDIO CHILD (ARCHITECT round 5 Q-L3B-STDIO-UPSTREAM (A)), driven
 //! over a host connector table that stands in for the host's one long-lived program per member: a
 //! scripted child every lease shares, whose messages reach every open lease, and whose generation
