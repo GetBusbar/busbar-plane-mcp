@@ -4,13 +4,16 @@
 //! here is something the plane READ off the bytes, reported under a key it declared up front so the
 //! kernel's fact maps can be sized before the first frame arrives.
 
+#[cfg(test)]
 use busbar_contract::bounded::PlaneAlloc;
+#[cfg(test)]
 use busbar_contract::ids::{CorrelationRef, CorrelationValue};
 
 /// The request identifier, as the raw bytes it arrived as.
 ///
 /// This is also the correlation's declared key. The bytes are kept as well as the reference because
 /// the reference cannot carry them: see [`correlation_for`].
+#[cfg(test)]
 pub const FACT_RPC_ID: &str = "rpc_id";
 
 /// Which revision of the protocol the caller asked to be answered under.
@@ -53,6 +56,7 @@ pub const CONTENT_FACTS: &[&str] = &[
 // THE TWO `_meta` KEYS ARE THE DIALECT'S, AND THERE IS ONE OF EACH. Same reasoning as the error
 // codes in `jsonrpc`: restated here while the dialect lived one crate away, re-exported now that it
 // does not. A key spelled twice in one crate is a key that can come to differ in one of them.
+#[cfg(test)]
 pub use crate::codec::{META_CLIENT_CAPABILITIES, META_PROTOCOL_VERSION};
 
 /// The metadata key naming a token progress should be reported under.
@@ -105,6 +109,7 @@ pub fn correlation_for<'u>(raw_id: &[u8], arena: &'u dyn PlaneAlloc) -> Option<C
 /// calls of one principal on one session answer to each other — the collision the digest was removed
 /// for, arriving by a different road. The canonical spelling is the number; every other spelling of
 /// it is carried as the text it is, and text never equals a number.
+#[cfg(test)]
 fn is_canonical_number(raw: &[u8]) -> bool {
     match raw.first() {
         // A single zero is the only number that may begin with one.
@@ -115,6 +120,7 @@ fn is_canonical_number(raw: &[u8]) -> bool {
 }
 
 /// The value one raw request identifier stands for.
+#[cfg(test)]
 fn correlation_value<'u>(raw_id: &[u8], arena: &'u dyn PlaneAlloc) -> Option<CorrelationValue<'u>> {
     if is_canonical_number(raw_id) {
         let mut n: u64 = 0;

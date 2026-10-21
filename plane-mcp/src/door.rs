@@ -732,6 +732,7 @@ pub fn resource_facts(owned: &[u8]) -> Result<Option<Vec<u8>>, String> {
 /// ONE GENERATION'S SNAPSHOT under `admitted` (the endpoint's audience and metadata document,
 /// [`admitted`]); with none it claims nothing.
 #[must_use]
+#[cfg(test)]
 pub fn snapshot_spec_for(admitted: Option<(String, String)>) -> SnapshotSpec {
     snapshot_spec_with(admitted, None)
 }

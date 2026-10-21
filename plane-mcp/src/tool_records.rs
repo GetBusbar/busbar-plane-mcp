@@ -90,21 +90,27 @@ pub const RECORD_SCHEMAS: &[RecordSchemaId] = &[
 ];
 
 /// Read one record back by key.
+#[cfg(test)]
 pub const OP_GET: &str = "get";
 
 /// Write one record, replacing any earlier one under the same key.
+#[cfg(test)]
 pub const OP_PUT: &str = "put";
 
 /// Read every record of a schema under one parent.
+#[cfg(test)]
 pub const OP_SCAN: &str = "scan";
 
 /// Add one record to a schema's append-only side.
+#[cfg(test)]
 pub const OP_APPEND: &str = "append";
 
 /// Remove one record.
+#[cfg(test)]
 pub const OP_DELETE: &str = "delete";
 
 /// Spend a one-time grant, exactly once, and say whether this caller is the one who spent it.
+#[cfg(test)]
 pub const OP_REDEEM: &str = "redeem";
 
 /// Every operation any of this plane's schemas declares.

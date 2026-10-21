@@ -201,7 +201,6 @@ pub const MCP_CALLER_ASK_REFUSED: Diagnostic = Diagnostic {
 
 /// MCP'S PLANE-CONTRIBUTED DIAGNOSTICS — the `&'static [&'static Diagnostic]` the composition
 /// root installs via `install_diagnostics`. Ascending by code, mirroring the neutral `REGISTRY`.
-#[cfg(test)]
 pub static DIAGNOSTICS: &[&Diagnostic] = &[
     &MCP_CALLLOG_CHAIN_VERIFY_FAILED,
     &MCP_CALLLOG_EMPTY_CHAINS,
