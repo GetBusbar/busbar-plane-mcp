@@ -685,21 +685,31 @@ fn distinct_capability_names_across_families_still_validate() {
     validate_published_names(&cfg).expect("four names, four capabilities");
 }
 
-/// EVERY ROOT IS A PEER-KEY PIN. The host seals a registration's pin into its member route only
-/// under a mechanism declared `peer_key`, and the connector enforces only what is sealed: RED on the
-/// grammar that declared the three roots `peer_key: false`.
+/// EVERY PIN OF THE FAR END'S KEY IS A PEER-KEY PIN. The host seals a registration's pin into its
+/// member route only under a mechanism declared `peer_key`, and the connector enforces only what is
+/// sealed: RED on the grammar that declared `cert_spki` and `mtls` `peer_key: false`.
+/// `pinned_pubkey` stays a root whose key is a manifest issuer's (predev's posture).
 #[test]
-fn every_root_mechanism_is_declared_a_peer_key_pin() {
-    for m in TRUST_KEYS[0].mechanisms {
-        assert_eq!(m.peer_key, m.root, "{}", m.token);
-    }
+fn every_far_end_pin_mechanism_is_declared_a_peer_key_pin() {
     let roots: Vec<&str> = TRUST_KEYS[0]
+        .mechanisms
+        .iter()
+        .filter(|m| m.root)
+        .map(|m| m.token)
+        .collect();
+    assert_eq!(roots, ["pinned_pubkey", "cert_spki", "mtls"]);
+    let peer: Vec<&str> = TRUST_KEYS[0]
         .mechanisms
         .iter()
         .filter(|m| m.peer_key)
         .map(|m| m.token)
         .collect();
-    assert_eq!(roots, ["pinned_pubkey", "cert_spki", "mtls"]);
+    assert_eq!(
+        peer,
+        ["cert_spki", "mtls"],
+        "the two pins of the far end's key are sealed and enforced; a manifest issuer's key is not \
+         the far end's"
+    );
 }
 
 /// `mtls` NEEDS A CLIENT IDENTITY: a registration that says its server is behind mutual TLS and
