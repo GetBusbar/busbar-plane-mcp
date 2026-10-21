@@ -34,7 +34,7 @@ use busbar_contract::abi::host::conn::connector::{
     REPLY_BODY, REPLY_END, REPLY_HEAD, REQUEST_BODY, REQUEST_HEAD, SERVICES as CONN_SERVICES,
 };
 use busbar_contract::abi::host::service::{
-    ClockNowIn, HostSlots, RandomFillIn, ServiceOut, DISTRUST_NONE, ENTITLED,
+    ClockNowIn, HostSlots, RandomFillIn, ServiceOut, SessionEmitIn, DISTRUST_NONE, ENTITLED,
     SERVICES as HOST_SERVICES, TRUST_NEW,
 };
 use busbar_contract::abi::mechanism::call::{
@@ -142,6 +142,21 @@ extern "C" fn sighted(_: HostCtx, _: *const c_void, out: *mut ServiceOut) -> Raw
     answer(out, Outcome::Ready, TRUST_NEW, 0)
 }
 
+/// What the plane wrote unsolicited on carrier sessions (`session.emit`): `(session, bytes)`.
+static EMITTED: Mutex<Vec<(u64, Vec<u8>)>> = Mutex::new(Vec::new());
+
+extern "C" fn session_emit(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
+    // SAFETY: the SDK hands a `SessionEmitIn` over its own bytes, live for the call.
+    let i = unsafe { input.cast::<SessionEmitIn>().read() };
+    // SAFETY: as above.
+    let bytes = unsafe { std::slice::from_raw_parts(i.bytes.ptr, i.bytes.len) }.to_vec();
+    EMITTED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .push((i.session, bytes));
+    answer(out, Outcome::Ready, 0, 0)
+}
+
 static HOST_SLOTS: HostSlots = HostSlots {
     size: std::mem::size_of::<HostSlots>() as u32,
     slots: HOST_SERVICES,
@@ -173,7 +188,7 @@ static HOST_SLOTS: HostSlots = HostSlots {
     trust_serves: Some(serves),
     trust_decide: None,
     trust_state: None,
-    session_emit: None,
+    session_emit: Some(session_emit),
     auth_call: None,
     unit_hand_in: None,
     unit_refuse: None,
@@ -1497,6 +1512,90 @@ fn a_line_refused_at_the_unit_cap_moves_nothing_on_its_session() {
         after.outcome,
         Outcome::Refused,
         "the refused `initialize` kept no revision for session 9: {after:?}"
+    );
+}
+
+// ── a member's resource update reaches a line subscriber once ──────────────────────────────────
+
+/// The stateless member's `notifications/resources/updated` for the readme, as the member spells
+/// it: members out of the usual order and a number in an unusual spelling, so bytes handed on
+/// unread could be told from bytes re-encoded.
+const MEMBER_UPDATE: &str = r#"{"params":{"uri":"file:///readme","revision":1.50E+1},"method":"notifications/resources/updated","jsonrpc":"2.0"}"#;
+
+/// A `subscriptions/listen` line of the readme.
+const LINE_LISTEN: &[u8] = br#"{"jsonrpc":"2.0","id":5,"method":"subscriptions/listen","params":{"notifications":{"resourceSubscriptions":["file:///readme"]},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#;
+
+/// A MEMBER'S RESOURCE UPDATE REACHES A LINE SUBSCRIBER EXACTLY ONCE, as predev relayed it on the
+/// line carrier (gh/predev crates/busbar-plane-mcp/src/door_line.rs: the tick steps the kept
+/// subscription and emits its frames as lines on the carrier session; the relay is subscribe.rs
+/// l.328-345 and `notification` l.249-256): one line emitted on the subscriber's carrier session,
+/// predev's frame byte for byte (re-encoded under the subscription's id, not the member's bytes),
+/// and no further tick emits it again.
+#[test]
+fn a_members_update_reaches_a_line_subscriber_exactly_once() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    EMITTED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clear();
+    let d = open();
+    let arrived = d.line(310, 13, LINE_LISTEN);
+    assert_eq!(arrived.outcome, Outcome::Ready, "{arrived:?}");
+    let opened = d.piece(310, &Given::caller(ALICE, LINE_LISTEN));
+    assert!(
+        opened.text().contains("acknowledged"),
+        "the line subscription is acknowledged: {} {}",
+        opened.status,
+        opened.text()
+    );
+
+    call_st(&d, 311);
+    let far = format!(
+        "event: message\ndata: {MEMBER_UPDATE}\n\nevent: message\ndata: {{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{{\"content\":[],\"resultType\":\"complete\"}}}}\n\n"
+    )
+    .into_bytes();
+    let answered = d.piece(
+        311,
+        &Given::far(
+            ALICE,
+            200,
+            vec![("content-type", "text/event-stream")],
+            &far,
+        ),
+    );
+    assert_eq!(answered.status, 200, "{}", answered.text());
+    for _ in 0..5 {
+        d.turn();
+    }
+
+    let predev = serde_json::to_vec(&json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/resources/updated",
+        "params": {
+            "uri": "file:///readme",
+            "_meta": { "io.modelcontextprotocol/subscriptionId": 5 },
+        },
+    }))
+    .unwrap();
+    let emitted = EMITTED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    let updates: Vec<&(u64, Vec<u8>)> = emitted
+        .iter()
+        .filter(|(_, bytes)| {
+            String::from_utf8_lossy(bytes).contains("notifications/resources/updated")
+        })
+        .collect();
+    assert_eq!(
+        updates,
+        [&(13, predev)],
+        "one line, predev's relay, on the subscriber's session: {:?}",
+        emitted
+            .iter()
+            .map(|(s, b)| (s, String::from_utf8_lossy(b).into_owned()))
+            .collect::<Vec<_>>()
     );
 }
 
