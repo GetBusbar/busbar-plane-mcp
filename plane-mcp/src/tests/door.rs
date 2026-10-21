@@ -24,7 +24,7 @@ const BAD: &[u8] =
 /// A tail string read back through the `&'static str` it was built from: the tail's strings are
 /// constants of this crate, so a string this test knows is found by address and length.
 fn text(a: AbiStr) -> String {
-    if a.ptr.is_null() {
+    if a.is_absent() {
         return String::new();
     }
     [
@@ -47,7 +47,7 @@ fn text(a: AbiStr) -> String {
         FEE_PER_REQUEST,
     ]
     .into_iter()
-    .find(|c| c.as_ptr() == a.ptr && c.len() == a.len)
+    .find(|c| c.as_ptr() == a.ptr() && c.len() == a.len())
     .expect("a tail string this test knows")
     .to_string()
 }
@@ -73,12 +73,12 @@ fn the_tails_trust_keys_are_the_grammars() {
         };
         assert_eq!(abi.role, role, "{}", decl.key);
         assert_eq!(
-            (!abi.default.ptr.is_null()).then(|| text(abi.default)),
+            (!abi.default.is_absent()).then(|| text(abi.default)),
             decl.default.map(str::to_string),
             "{}",
             decl.key
         );
-        assert_eq!(abi.mechanisms_len, decl.mechanisms.len(), "{}", decl.key);
+        assert_eq!(abi.mechanisms_len(), decl.mechanisms.len(), "{}", decl.key);
     }
     for (abi, decl) in PIN_MECHANISMS
         .iter()
@@ -110,8 +110,8 @@ fn the_tail_declares_the_task_kind_as_terminal_only() {
         )]
     );
     // The tail points at that table, not a copy.
-    assert_eq!(TAIL.record_retentions, RECORD_RETENTIONS.as_ptr());
-    assert_eq!(TAIL.record_retentions_len, RECORD_RETENTIONS.len());
+    assert_eq!(TAIL.record_retentions_ptr(), RECORD_RETENTIONS.as_ptr());
+    assert_eq!(TAIL.record_retentions_len(), RECORD_RETENTIONS.len());
 }
 
 /// The record kinds and billable classes are the plane's own symbols, stated once.
@@ -229,11 +229,11 @@ fn the_tail_states_every_operation_class() {
         assert_eq!(op_class_index(*op), Some(i as u32));
         let abi = OP_CLASS_TABLE[i].op;
         assert_eq!(
-            (abi.ptr, abi.len),
+            (abi.ptr(), abi.len()),
             (op.as_str().as_ptr(), op.as_str().len())
         );
     }
-    assert_eq!(TAIL.op_classes_len, OP_CLASS_TABLE.len());
+    assert_eq!(TAIL.op_classes_len(), OP_CLASS_TABLE.len());
 }
 
 /// THE DNS-REBINDING ALLOWLIST is the `mcp:` block's `allowed_origins` (none without a block), and

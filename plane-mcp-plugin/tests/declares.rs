@@ -28,7 +28,7 @@ fn signed() -> (String, Vec<u8>) {
 
 /// The `declares` document the door's Statement states, read back as the loader reads a linked row.
 fn stated() -> Vec<u8> {
-    let row = busbar_plugin_loader::dispatch::LinkedRow::of(busbar_plane_mcp::door)
+    let row = busbar_plugin_loader::dispatch::LinkedRow::of_loaded(loaded_door())
         .expect("the linked door states its Statement");
     let read = busbar_contract::abi::mechanism::rendering::read(&row.statement)
         .expect("the Statement renders");
@@ -42,7 +42,7 @@ fn the_statement_states_the_whole_declares_document() {
     assert_eq!(
         busbar_contract::abi::mechanism::extensions::declares(
             &busbar_contract::abi::mechanism::rendering::read(
-                &busbar_plugin_loader::dispatch::LinkedRow::of(busbar_plane_mcp::door)
+                &busbar_plugin_loader::dispatch::LinkedRow::of_loaded(loaded_door())
                     .unwrap()
                     .statement
             )
@@ -81,4 +81,14 @@ fn the_signed_declaration_states_the_breaker_and_the_diagnostics_and_no_contract
         doc.get("breaker").is_some() && doc.get("diagnostics").is_some(),
         "the signed declaration does not state the plane's breaker posture and its diagnostics"
     );
+}
+
+/// This plugin's own door, named for the loader.
+fn loaded_door() -> busbar_plugin_loader::dispatch::LoadedDoor {
+    // SAFETY: `busbar_plane_mcp::door` is this crate's own door: it answers the `'static` door of
+    // this plugin.
+    #[allow(unused_unsafe)]
+    let loaded =
+        unsafe { busbar_plugin_loader::dispatch::LoadedDoor::from_raw(busbar_plane_mcp::door) };
+    loaded
 }
