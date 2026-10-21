@@ -135,6 +135,16 @@ fn every_malformed_canonical_uri_is_refused_with_its_own_diagnosis() {
                 "https://gateway.example.com/mcp#frag".into(),
             ),
         ),
+        // A query or fragment straight after the authority is diagnosed as such, not as a host
+        // that swallowed it and left no path.
+        (
+            "https://gateway.example.com?x",
+            McpCfgError::CanonicalUriHasQueryOrFragment("https://gateway.example.com?x".into()),
+        ),
+        (
+            "https://gateway.example.com#x",
+            McpCfgError::CanonicalUriHasQueryOrFragment("https://gateway.example.com#x".into()),
+        ),
         (
             "https://gateway.example.com",
             McpCfgError::CanonicalUriHasNoPath("https://gateway.example.com".into()),

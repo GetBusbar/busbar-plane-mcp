@@ -266,9 +266,9 @@ fn split_absolute(uri: &str) -> Option<(&str, &str)> {
     let rest = uri
         .strip_prefix("https://")
         .or_else(|| uri.strip_prefix("http://"))?;
-    // The authority must be non-empty, must not itself contain a scheme separator, and must not be
-    // the whole string's remainder only because the string ended at the scheme.
-    let authority_len = rest.find('/').unwrap_or(rest.len());
+    // The authority must be non-empty, and ends at the first `/`, `?` or `#` (a query or fragment
+    // straight after the authority is that, never part of the host).
+    let authority_len = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     if authority_len == 0 {
         return None;
     }
@@ -287,12 +287,6 @@ fn normalise_path(path: &str) -> String {
     }
     format!("/{trimmed}")
 }
-
-// THE ENGINE BINDING for the plane's test binary: the one module that names the engine crate. Every
-// App-needing test below reaches the engine through it (the neutral `testkit::engine_kit` seam).
-// Gated on `test-support` alone (never bare `cfg(test)`, where no engine is in the closure): that is
-// also the feature a dependent crate's test binary compiles the plane batteries in under
-// (`admin_view::adminverbs_tests`), so those reach it too; in that feature-only build its helpers
 
 #[cfg(test)]
 #[path = "tests/endpoint.rs"]
