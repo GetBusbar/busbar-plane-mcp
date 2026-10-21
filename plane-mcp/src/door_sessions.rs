@@ -61,7 +61,7 @@ use crate::tool_sessions::{Carriage, OpenRefused, Owner, Remembered, SessionTabl
 use busbar_contract::abi::mechanism::call::{Outcome, SEVERITY_WARN};
 use busbar_contract::abi::mechanism::ticket::{CompletionHandle, Ticket};
 use busbar_contract::abi::plane::{OnPieceIn, OnPieceOut, FROM_CALLER, FROM_KERNEL, PIECE_LAST};
-use busbar_contract::abi::sdk::{Instance, Lent, Out, Services};
+use busbar_contract::abi::sdk::{Instance, Lent, Out, StaticServices};
 
 /// THE INSTANCE'S DIAGNOSTIC that an ungoverned chain's sessions are unisolated, latched on its
 /// first `2024-11-05` stream (the index of its id in the Statement's diagnostic ids).
@@ -430,7 +430,11 @@ fn handle(ticket: Ticket, issued: &mut u32) -> CompletionHandle {
 
 /// The kernel's wall clock in milliseconds; `None` with no clock or a failed read, which is never a
 /// time (row 159 finding P-M4): its caller refuses or stamps nothing.
-pub(super) fn wall_ms(services: Option<Services>, ticket: Ticket, issued: &mut u32) -> Option<u64> {
+pub(super) fn wall_ms(
+    services: Option<StaticServices>,
+    ticket: Ticket,
+    issued: &mut u32,
+) -> Option<u64> {
     let s = services?;
     s.clock_now(handle(ticket, issued))
         .ok()
@@ -1170,13 +1174,9 @@ pub(super) fn piece(
     input: Lent<'_, OnPieceIn>,
     out: &mut Out<'_, OnPieceOut>,
 ) -> Outcome {
-    let given = input.get();
-    let (key, ticket) = (given.unit, given.head.ticket);
-    let caller = input
-        .field(|i| &i.caller_ref)
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
+    let given = input;
+    let (key, ticket) = (given.unit(), given.head().ticket());
+    let caller = input.caller_ref().as_str().unwrap_or_default().to_string();
     let owner = owner_of(&caller);
     let mut say_ungoverned = false;
     let step = plane.units.with(&key, |unit| {
@@ -1185,8 +1185,8 @@ pub(super) fn piece(
         if unit.pending.is_some() {
             return Some(true);
         }
-        match given.from {
-            FROM_CALLER if given.flags & PIECE_LAST != 0 => {
+        match given.from() {
+            FROM_CALLER if given.flags() & PIECE_LAST != 0 => {
                 end_stream(plane, key);
                 unit.pending = Some(door_listen::frame(Vec::new(), true, true));
                 Some(true)
@@ -1196,7 +1196,7 @@ pub(super) fn piece(
                 say_ungoverned = legacy_ungoverned;
                 Some(wrote)
             }
-            FROM_KERNEL if given.attempt_no == 0 => step_stream(plane, ticket, unit),
+            FROM_KERNEL if given.attempt_no() == 0 => step_stream(plane, ticket, unit),
             FROM_KERNEL => Some(false),
             _ => None,
         }

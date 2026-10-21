@@ -26,7 +26,7 @@ const MEMBER_TARGET: &str = "settings.*.url";
 const CLIENT_IDENTITY_FROM: &str = "settings.*.client_identity";
 
 fn linked(d: &Dispatcher) -> Plugin<Plane> {
-    let row = LinkedRow::of(busbar_plane_mcp::door).expect("the linked door states its Statement");
+    let row = LinkedRow::of_loaded(loaded_door()).expect("the linked door states its Statement");
     load_linked(
         &row,
         Bind {
@@ -101,7 +101,7 @@ fn the_http_member_need_names_the_client_identity_and_its_secret_references() {
     }
 
     // The Statement's rendering (what a dropped-in plane's signed manifest carries) states the same.
-    let row = LinkedRow::of(busbar_plane_mcp::door).expect("the linked door states its Statement");
+    let row = LinkedRow::of_loaded(loaded_door()).expect("the linked door states its Statement");
     let read = rendering::read(&row.statement).expect("the Statement renders");
     let need = read
         .needs
@@ -113,4 +113,14 @@ fn the_http_member_need_names_the_client_identity_and_its_secret_references() {
         let path = format!("{CLIENT_IDENTITY_FROM}.{half}");
         assert!(read.secret_refs.contains(&path), "{:?}", read.secret_refs);
     }
+}
+
+/// This plugin's own door, named for the loader.
+fn loaded_door() -> busbar_plugin_loader::dispatch::LoadedDoor {
+    // SAFETY: `busbar_plane_mcp::door` is this crate's own door: it answers the `'static` door of
+    // this plugin.
+    #[allow(unused_unsafe)]
+    let loaded =
+        unsafe { busbar_plugin_loader::dispatch::LoadedDoor::from_raw(busbar_plane_mcp::door) };
+    loaded
 }

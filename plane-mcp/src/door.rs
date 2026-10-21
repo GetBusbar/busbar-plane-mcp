@@ -22,8 +22,8 @@
 use busbar_contract::abi::host::conn::connector::{
     Need, DIRECTION_OUTBOUND, EGRESS_OPERATOR_INFRASTRUCTURE, EGRESS_PROVIDER, KEEP_NAMED,
 };
-use busbar_contract::abi::mechanism::call::{AbiStr, Blob, BLOB_ABSENT};
-use busbar_contract::abi::mechanism::door::{KindTailHead, Section, SECTION_DECLARING};
+use busbar_contract::abi::mechanism::call::{AbiStr, Blob};
+use busbar_contract::abi::mechanism::door::{Section, SECTION_DECLARING};
 use busbar_contract::abi::plane::{
     AdminRoute, BillableClass, OpClass, PinMechanism, PlaneTail, RecordChain, RecordRetention,
     TrustKey, ANSWER_LAYOUT, CHAIN_DIGESTS_SCOPE, CHAIN_LENGTH_PREFIXED, INGRESS_REQUEST_RESPONSE,
@@ -70,12 +70,6 @@ pub const CALLS_FAMILY: &str = "count";
 pub const BYTES_FAMILY: &str = "byte";
 /// The fee unit this plane declares: one per request.
 pub const FEE_PER_REQUEST: &str = busbar_contract::plane::PER_REQUEST;
-
-/// An absent string.
-const NONE: AbiStr = AbiStr {
-    ptr: std::ptr::null(),
-    len: 0,
-};
 
 /// THE SECTIONS THE PLANE'S STATEMENT DECLARES: `tools:`, which it owns and judges, and its endpoint
 /// block beside it.
@@ -135,13 +129,6 @@ pub const MEMBER_PROGRAM: &str = busbar_contract::section::MEMBER_PROGRAM;
 pub const KEEP_PROGRAM_HEADERS: &[AbiStr] =
     &[abi_str(busbar_contract::conn::PROGRAM_GENERATION_FIELD)];
 
-const NO_DETAILS: Blob = Blob {
-    ptr: std::ptr::null(),
-    len: 0,
-    fmt: BLOB_ABSENT,
-    flags: 0,
-};
-
 /// THE PLANE'S CONNECTION NEEDS: outbound over http to the servers the operator registered at a URL,
 /// governed as upstreams a plane reaches (no auth style is named here: each member's credential is
 /// the binding the kernel seals for it, and it adds the fields when it sends), each held to its
@@ -150,39 +137,26 @@ const NO_DETAILS: Blob = Blob {
 /// operator's own infrastructure with no credential (a pipe carries none), one long-lived child
 /// per server.
 pub const NEEDS: &[Need] = &[
-    Need {
-        direction: DIRECTION_OUTBOUND,
-        egress_class: EGRESS_PROVIDER,
-        transport: abi_str(CARRIER_HTTP),
-        auth: NONE,
+    {
+        let mut n = Need::EMPTY.with_keep_response_headers(KEEP_RESPONSE_HEADERS);
+        n.direction = DIRECTION_OUTBOUND;
+        n.egress_class = EGRESS_PROVIDER;
+        n.transport = abi_str(CARRIER_HTTP);
         // Each registered server is reached at its own `url` (ARCHITECT Q-L3B-ROUTES).
-        target_from: abi_str(MEMBER_TARGET),
+        n.target_from = abi_str(MEMBER_TARGET);
         // busbar's client identity for it, which the connector presents when the server asks.
-        trust_from: abi_str(CLIENT_IDENTITY_FROM),
-        details: NO_DETAILS,
-        keep_response_headers: KEEP_RESPONSE_HEADERS.as_ptr(),
-        keep_response_headers_len: KEEP_RESPONSE_HEADERS.len(),
-        timeout_ms: 0,
-        keep_mode: KEEP_NAMED,
-        _reserved: 0,
-        deny_response_headers: std::ptr::null(),
-        deny_response_headers_len: 0,
+        n.trust_from = abi_str(CLIENT_IDENTITY_FROM);
+        n.keep_mode = KEEP_NAMED;
+        n
     },
-    Need {
-        direction: DIRECTION_OUTBOUND,
-        egress_class: EGRESS_OPERATOR_INFRASTRUCTURE,
-        transport: abi_str(CARRIER_STDIO),
-        auth: NONE,
-        target_from: abi_str(MEMBER_PROGRAM),
-        trust_from: NONE,
-        details: NO_DETAILS,
-        keep_response_headers: KEEP_PROGRAM_HEADERS.as_ptr(),
-        keep_response_headers_len: KEEP_PROGRAM_HEADERS.len(),
-        timeout_ms: 0,
-        keep_mode: KEEP_NAMED,
-        _reserved: 0,
-        deny_response_headers: std::ptr::null(),
-        deny_response_headers_len: 0,
+    {
+        let mut n = Need::EMPTY.with_keep_response_headers(KEEP_PROGRAM_HEADERS);
+        n.direction = DIRECTION_OUTBOUND;
+        n.egress_class = EGRESS_OPERATOR_INFRASTRUCTURE;
+        n.transport = abi_str(CARRIER_STDIO);
+        n.target_from = abi_str(MEMBER_PROGRAM);
+        n.keep_mode = KEEP_NAMED;
+        n
     },
 ];
 
@@ -284,37 +258,31 @@ const PIN_MECHANISMS: &[PinMechanism] = &[
 /// declaration order is judgement order. The pin carries no fingerprint: a server here offers
 /// none an operator could approve out of band.
 const TRUST_KEYS: &[TrustKey] = &[
-    TrustKey {
-        key: abi_str("pin"),
-        role: TRUST_PIN,
-        flags: 0,
-        default: NONE,
-        mechanisms: PIN_MECHANISMS.as_ptr(),
-        mechanisms_len: PIN_MECHANISMS.len(),
+    {
+        let mut k = TrustKey::EMPTY.with_mechanisms(PIN_MECHANISMS);
+        k.key = abi_str("pin");
+        k.role = TRUST_PIN;
+        k
     },
-    TrustKey {
-        key: abi_str("verify_ttl"),
-        role: TRUST_REVERIFY_TTL,
-        flags: 0,
-        default: abi_str(DEFAULT_MCP_VERIFY_TTL),
-        mechanisms: std::ptr::null(),
-        mechanisms_len: 0,
+    {
+        let mut k = TrustKey::EMPTY;
+        k.key = abi_str("verify_ttl");
+        k.role = TRUST_REVERIFY_TTL;
+        k.default = abi_str(DEFAULT_MCP_VERIFY_TTL);
+        k
     },
-    TrustKey {
-        key: abi_str("allow_private"),
-        role: TRUST_PRIVATE_REACH,
-        flags: 0,
-        default: NONE,
-        mechanisms: std::ptr::null(),
-        mechanisms_len: 0,
+    {
+        let mut k = TrustKey::EMPTY;
+        k.key = abi_str("allow_private");
+        k.role = TRUST_PRIVATE_REACH;
+        k
     },
-    TrustKey {
-        key: abi_str(crate::tools_config::TOOL_APPROVALS_KEY),
-        role: busbar_contract::abi::plane::TRUST_ITEM_APPROVALS,
-        flags: 0,
-        default: abi_str(crate::tools_config::TOOL_APPROVAL_FIELD),
-        mechanisms: std::ptr::null(),
-        mechanisms_len: 0,
+    {
+        let mut k = TrustKey::EMPTY;
+        k.key = abi_str(crate::tools_config::TOOL_APPROVALS_KEY);
+        k.role = busbar_contract::abi::plane::TRUST_ITEM_APPROVALS;
+        k.default = abi_str(crate::tools_config::TOOL_APPROVAL_FIELD);
+        k
     },
 ];
 
@@ -408,69 +376,42 @@ pub fn allowed_origins(owned: &[u8]) -> Result<Vec<String>, String> {
     Ok(cfg.allowed_origins)
 }
 
-/// THE STATEMENT TAIL: the plane's static facts.
-pub const TAIL: &PlaneTail = &PlaneTail {
-    head: KindTailHead {
-        size: std::mem::size_of::<PlaneTail>() as u32,
-        _reserved: 0,
-    },
+const TAIL_VALUE: PlaneTail = {
+    let mut t = PlaneTail::EMPTY
+        .with_dialects(DIALECTS)
+        .with_scope_kinds(SCOPE_KINDS)
+        .with_op_classes(OP_CLASS_TABLE)
+        .with_billable_classes(BILLABLE_CLASSES)
+        .with_fee_units(FEE_UNITS)
+        .with_record_kinds(RECORD_KINDS)
+        .with_record_chains(RECORD_CHAINS)
+        .with_trust_keys(TRUST_KEYS)
+        .with_admin_routes(ADMIN_ROUTES)
+        .with_record_retentions(RECORD_RETENTIONS);
     // THE GATE-FIRST HOOK ORDER (spec Part 3 section 12 "Hooks"; ARCHITECT ruling on the mcp
     // fold): the served engine ran an entry's decision gates over the invocation BEFORE its
     // rewrite chain (`tools.hooks` / `tools.<server>.hooks`), and the door's units keep that order.
-    flags: busbar_contract::abi::plane::TAIL_HOOKS_GATED,
-    ingress: INGRESS_REQUEST_RESPONSE | INGRESS_RESPONSE_STREAM,
-    dispatch_shape: SHAPE_PIECEWISE,
-    answer_layout: ANSWER_LAYOUT,
-    scope: abi_str(SCOPE),
-    label: abi_str(LABEL),
-    subject_noun: abi_str(SUBJECT_NOUN),
-    admin_noun: abi_str(ADMIN_NOUN),
-    audit_kind: abi_str(AUDIT_KIND),
-    signing_domain: abi_str(ASK_SIGNING_DOMAIN),
-    signing_kid_prefix: abi_str(ASK_KID_PREFIX),
-    cli_help: abi_str(crate::tool_meta::HELP_FLAGS),
-    dialects: DIALECTS.as_ptr(),
-    dialects_len: DIALECTS.len(),
-    dialect_auth: std::ptr::null(),
-    dialect_auth_len: 0,
-    scope_kinds: SCOPE_KINDS.as_ptr(),
-    scope_kinds_len: SCOPE_KINDS.len(),
-    op_classes: OP_CLASS_TABLE.as_ptr(),
-    op_classes_len: OP_CLASS_TABLE.len(),
-    billable_classes: BILLABLE_CLASSES.as_ptr(),
-    billable_classes_len: BILLABLE_CLASSES.len(),
-    route_cost: std::ptr::null(),
-    route_cost_len: 0,
-    fee_units: FEE_UNITS.as_ptr(),
-    fee_units_len: FEE_UNITS.len(),
-    record_kinds: RECORD_KINDS.as_ptr(),
-    record_kinds_len: RECORD_KINDS.len(),
-    egress_targets: std::ptr::null(),
-    egress_targets_len: 0,
-    record_chains: RECORD_CHAINS.as_ptr(),
-    record_chains_len: RECORD_CHAINS.len(),
-    trust_keys: TRUST_KEYS.as_ptr(),
-    trust_keys_len: TRUST_KEYS.len(),
-    refusal_statuses: std::ptr::null(),
-    refusal_statuses_len: 0,
-    caller_credential_refusal: NONE,
-    admin_routes: ADMIN_ROUTES.as_ptr(),
-    admin_routes_len: ADMIN_ROUTES.len(),
-    admin_openapi: Blob {
-        ptr: ADMIN_OPENAPI.as_ptr(),
-        len: ADMIN_OPENAPI.len(),
-        fmt: busbar_contract::abi::mechanism::call::BLOB_JSON,
-        flags: 0,
-    },
+    t.flags = busbar_contract::abi::plane::TAIL_HOOKS_GATED;
+    t.ingress = INGRESS_REQUEST_RESPONSE | INGRESS_RESPONSE_STREAM;
+    t.dispatch_shape = SHAPE_PIECEWISE;
+    t.answer_layout = ANSWER_LAYOUT;
+    t.scope = abi_str(SCOPE);
+    t.label = abi_str(LABEL);
+    t.subject_noun = abi_str(SUBJECT_NOUN);
+    t.admin_noun = abi_str(ADMIN_NOUN);
+    t.audit_kind = abi_str(AUDIT_KIND);
+    t.signing_domain = abi_str(ASK_SIGNING_DOMAIN);
+    t.signing_kid_prefix = abi_str(ASK_KID_PREFIX);
+    t.cli_help = abi_str(crate::tool_meta::HELP_FLAGS);
+    t.admin_openapi = Blob::json(ADMIN_OPENAPI.as_bytes());
     // No stream ceiling (ARCHITECT STREAM-CEILING, 2026-10-07): predev's mcp engine put no bound on
     // a stalled consumer (its event and subscribe streams were pull-based bodies, `session_serve.rs`,
     // `subscribe.rs`), so the mcp plane states none and keeps that behaviour.
-    stream_ceiling_secs: 0,
-    metric_lanes: std::ptr::null(),
-    metric_lanes_len: 0,
-    record_retentions: RECORD_RETENTIONS.as_ptr(),
-    record_retentions_len: RECORD_RETENTIONS.len(),
+    t
 };
+
+/// THE STATEMENT TAIL: the plane's static facts.
+pub const TAIL: &PlaneTail = &TAIL_VALUE;
 
 /// EVERY ROUTE THE PLANE SERVES, in the order the engine mounts them: the discovery document, the
 /// endpoint's three verbs, and the event-framed answer on the same path.

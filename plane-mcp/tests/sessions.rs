@@ -66,14 +66,10 @@ fn answer(out: *mut ServiceOut, outcome: Outcome, value: u64, len: u64) -> RawOu
             outcome: RawOutcome::of(outcome),
             value,
             len,
-            _reserved: [0; 3],
             items: 0,
             needed_bytes: 0,
             needed_items: 0,
-            error: AbiStr {
-                ptr: std::ptr::null(),
-                len: 0,
-            },
+            ..ServiceOut::ZERO
         });
     }
     RawOutcome::of(outcome)
@@ -508,7 +504,7 @@ fn establish_now(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawO
     // SAFETY: the SDK hands an `EstablishIn`.
     let i = unsafe { input.cast::<EstablishIn>().read() };
     // SAFETY: the SDK's target text, live for the call.
-    let url = unsafe { std::slice::from_raw_parts(i.target.ptr, i.target.len) };
+    let url = unsafe { std::slice::from_raw_parts(i.target.ptr(), i.target.len()) };
     let url = String::from_utf8_lossy(url).into_owned();
     let mut ups = upstreams();
     let ups = ups.get_or_insert_with(Upstreams::default);
@@ -728,19 +724,13 @@ fn z<T>() -> T {
 }
 
 fn str_of(s: &str) -> AbiStr {
-    AbiStr {
-        ptr: s.as_ptr(),
-        len: s.len(),
-    }
+    // SAFETY: the test's own bytes, which outlive the call each `in` is built for.
+    unsafe { AbiStr::from_raw_parts(s.as_ptr(), s.len()) }
 }
 
 fn octets(b: &[u8]) -> Blob {
-    Blob {
-        ptr: b.as_ptr(),
-        len: b.len(),
-        fmt: BLOB_OCTETS,
-        flags: 0,
-    }
+    // SAFETY: the test's own bytes, which outlive the call each `in` is built for.
+    unsafe { Blob::from_raw_parts(b.as_ptr(), b.len(), BLOB_OCTETS, 0) }
 }
 
 fn head<T>(op: u32, ticket: Ticket) -> InHead {
@@ -814,11 +804,15 @@ fn open_with(section: &str) -> Door {
         ..z()
     };
     let f = lifecycle().open.expect("the door opens");
-    let ret = f(
-        std::ptr::null_mut(),
-        std::ptr::from_ref(&i).cast(),
-        std::ptr::from_mut(&mut o).cast(),
-    );
+    // SAFETY: the slot is the door's own, called with an in and an out of the types it declares.
+    #[allow(unused_unsafe)]
+    let ret = unsafe {
+        f(
+            std::ptr::null_mut(),
+            std::ptr::from_ref(&i).cast(),
+            std::ptr::from_mut(&mut o).cast(),
+        )
+    };
     assert_eq!(ret.outcome(), Outcome::Ready, "the door opens");
     Door {
         instance: o.open.instance,
@@ -855,11 +849,15 @@ impl Door {
             next_tick_ns: 0,
         };
         let f = lifecycle().tick.expect("tick");
-        let ret = f(
-            self.instance,
-            std::ptr::from_ref(&i).cast(),
-            std::ptr::from_mut(&mut o).cast(),
-        );
+        // SAFETY: the slot is the door's own, called with an in and an out of the types it declares.
+        #[allow(unused_unsafe)]
+        let ret = unsafe {
+            f(
+                self.instance,
+                std::ptr::from_ref(&i).cast(),
+                std::ptr::from_mut(&mut o).cast(),
+            )
+        };
         assert_eq!(ret.outcome(), Outcome::Ready);
     }
 
@@ -877,11 +875,15 @@ impl Door {
         let mut o: PlaneDriveOut = z();
         o.head = out_head::<PlaneDriveOut>();
         let f = lifecycle().drive.expect("drive");
-        let ret = f(
-            self.instance,
-            std::ptr::from_ref(&i).cast(),
-            std::ptr::from_mut(&mut o).cast(),
-        );
+        // SAFETY: the slot is the door's own, called with an in and an out of the types it declares.
+        #[allow(unused_unsafe)]
+        let ret = unsafe {
+            f(
+                self.instance,
+                std::ptr::from_ref(&i).cast(),
+                std::ptr::from_mut(&mut o).cast(),
+            )
+        };
         assert_eq!(ret.outcome(), Outcome::Ready);
     }
 
@@ -942,11 +944,15 @@ impl Door {
         let mut o: PlaneCancelOut = z();
         o.cancel.head = out_head::<PlaneCancelOut>();
         let f = lifecycle().cancel.expect("cancel");
-        let ret = f(
-            self.instance,
-            std::ptr::from_ref(&i).cast(),
-            std::ptr::from_mut(&mut o).cast(),
-        );
+        // SAFETY: the slot is the door's own, called with an in and an out of the types it declares.
+        #[allow(unused_unsafe)]
+        let ret = unsafe {
+            f(
+                self.instance,
+                std::ptr::from_ref(&i).cast(),
+                std::ptr::from_mut(&mut o).cast(),
+            )
+        };
         assert_eq!(ret.outcome(), Outcome::Ready);
     }
 
@@ -991,11 +997,15 @@ impl Door {
         let mut o: ArriveOut = z();
         o.head = out_head::<ArriveOut>();
         let f = ops().arrive.expect("arrive");
-        let ret = f(
-            self.instance,
-            std::ptr::from_ref(&i).cast(),
-            std::ptr::from_mut(&mut o).cast(),
-        );
+        // SAFETY: the slot is the door's own, called with an in and an out of the types it declares.
+        #[allow(unused_unsafe)]
+        let ret = unsafe {
+            f(
+                self.instance,
+                std::ptr::from_ref(&i).cast(),
+                std::ptr::from_mut(&mut o).cast(),
+            )
+        };
         Arrived {
             outcome: ret.outcome(),
             refusal_status: o.refusal_status,
@@ -1049,11 +1059,15 @@ impl Door {
             let mut o: OnPieceOut = z();
             o.head = out_head::<OnPieceOut>();
             let f = ops().on_piece.expect("on_piece");
-            let ret = f(
-                self.instance,
-                std::ptr::from_ref(&i).cast(),
-                std::ptr::from_mut(&mut o).cast(),
-            );
+            // SAFETY: the slot is the door's own, called with an in and an out of the types it declares.
+            #[allow(unused_unsafe)]
+            let ret = unsafe {
+                f(
+                    self.instance,
+                    std::ptr::from_ref(&i).cast(),
+                    std::ptr::from_mut(&mut o).cast(),
+                )
+            };
             first = false;
             got.outcome = Some(ret.outcome());
             if o.reply_status != 0 {

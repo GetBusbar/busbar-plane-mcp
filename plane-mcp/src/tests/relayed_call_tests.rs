@@ -70,19 +70,11 @@ fn bind(d: &Dispatcher) -> Bind {
 }
 
 fn octets(b: &'static [u8]) -> Blob {
-    Blob {
-        ptr: b.as_ptr(),
-        len: b.len(),
-        fmt: BLOB_OCTETS,
-        flags: 0,
-    }
+    Blob::of(b).with_fmt(BLOB_OCTETS)
 }
 
 fn text(b: &'static [u8]) -> AbiStr {
-    AbiStr {
-        ptr: b.as_ptr(),
-        len: b.len(),
-    }
+    AbiStr::of_bytes(b)
 }
 
 fn at(buf: &[u8], s: Span) -> String {
@@ -312,7 +304,8 @@ fn document(bytes: &[u8]) -> Value {
 }
 
 fn linked(d: &Dispatcher) -> Plugin<Plane> {
-    let row = LinkedRow::of(crate::door).expect("the linked door states its Statement");
+    let row = LinkedRow::of_macro(crate::tool_door::MACRO_DOOR)
+        .expect("the linked door states its Statement");
     load_linked(&row, bind(d)).expect("the linked door loads")
 }
 
