@@ -28,6 +28,9 @@
 //!
 //! Nothing here opens a connection, reads a clock or holds anything across calls but the value.
 
+// The crate's only public item is `door`: the accessors and variants below were this module's public API; the tests hold them, the door does not reach them (BUSBAR-1.6.0.md l.3560).
+#![cfg_attr(not(test), allow(dead_code))]
+
 use serde_json::Value;
 
 use super::compat::{

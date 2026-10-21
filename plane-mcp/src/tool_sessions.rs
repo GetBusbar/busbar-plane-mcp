@@ -69,6 +69,9 @@
 //! and intermediaries can read it): the serving side emits one operator warning per instance the
 //! first time such a stream opens without governance (reviewer follow-up 2, ARCHITECT 2026-09-29).
 
+// The crate's only public item is `door`: the accessors and variants below were this module's public API; the tests hold them, the door does not reach them (BUSBAR-1.6.0.md l.3560).
+#![cfg_attr(not(test), allow(dead_code))]
+
 use std::collections::{BTreeMap, VecDeque};
 
 use crate::revision::Revision;

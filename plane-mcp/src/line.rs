@@ -26,6 +26,9 @@
 //! - A SUBSCRIPTION is answered with its acknowledgement and kept on the session: what changes, a
 //!   keepalive and its end are emitted on the session, until the carrier ends.
 
+// The crate's only public item is `door`: the accessors and variants below were this module's public API; the tests hold them, the door does not reach them (BUSBAR-1.6.0.md l.3560).
+#![cfg_attr(not(test), allow(dead_code))]
+
 use serde_json::{json, Map, Value};
 
 use crate::codec::PROTOCOL_VERSION;
