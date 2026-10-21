@@ -1750,3 +1750,73 @@ fn a_create_settles_every_page_of_its_callers_left_behind_tasks() {
         missed.len()
     );
 }
+
+// ── the kernel's cancel of a running continuation ────────────────────────────────────────────────
+
+impl Door {
+    /// The kernel cancels the continuation running on `unit`'s ticket, lending `records_cap` record
+    /// slots: the outcome, and the audit rows written (action, resource).
+    fn cancel_with(&self, unit: u64, records_cap: usize) -> (Outcome, Vec<(String, String)>) {
+        use busbar_contract::abi::mechanism::lifecycle::CancelIn;
+        use busbar_contract::abi::plane::{PlaneCancelIn, PlaneCancelOut, RECORD_AUDIT};
+        let ticket = Ticket {
+            slot: u32::try_from(unit).unwrap(),
+            generation: 1,
+        };
+        let mut records = vec![z::<RecordWrite>(); records_cap];
+        let mut arena = vec![0_u8; 1 << 12];
+        let i = PlaneCancelIn {
+            cancel: CancelIn {
+                head: head::<PlaneCancelIn>(life::CANCEL, ticket),
+                ticket,
+            },
+            records_buf: records.as_mut_ptr(),
+            records_cap: records.len(),
+            arena_buf: arena.as_mut_ptr(),
+            arena_cap: arena.len(),
+            unit,
+        };
+        let mut o: PlaneCancelOut = z();
+        o.cancel.head = out_head::<PlaneCancelOut>();
+        let f = lifecycle().cancel.expect("cancel");
+        let ret = f(
+            self.instance,
+            std::ptr::from_ref(&i).cast(),
+            std::ptr::from_mut(&mut o).cast(),
+        );
+        let at = |s: Span| {
+            let from = s.offset as usize;
+            String::from_utf8_lossy(&arena[from..from + s.len as usize]).into_owned()
+        };
+        let rows = records[..o.records_written as usize]
+            .iter()
+            .filter(|r| r.op == RECORD_AUDIT)
+            .map(|r| (at(r.key), at(r.value)))
+            .collect();
+        (ret.outcome(), rows)
+    }
+}
+
+/// RED: THE KERNEL'S CANCEL OF A RUNNING CONTINUATION writes its task's `mcp_task.cancel` audit
+/// row, and rows the host's buffers cannot hold are a FAULT: `cancel` may not pend and is never
+/// re-called, so a short buffer is never answered READY with the row silently lost.
+#[test]
+fn a_cancel_whose_audit_row_does_not_fit_is_a_fault() {
+    let _serial = fresh();
+    let d = open(&section());
+    create(&d, 1, "st", "st_read_file");
+    let sent = run(&d, 2, "st", &last_nested());
+    assert!(sent.far, "{}", sent.text());
+    assert_eq!(
+        d.cancel_with(2, 0).0,
+        Outcome::Fault,
+        "a cancel row the buffer cannot hold was answered READY and lost"
+    );
+
+    create(&d, 3, "st", "st_read_file");
+    let sent = run(&d, 4, "st", &last_nested());
+    assert!(sent.far, "{}", sent.text());
+    let (outcome, rows) = d.cancel_with(4, 8);
+    assert_eq!(outcome, Outcome::Ready);
+    assert_eq!(rows.len(), 1, "the task's cancel is audited once: {rows:?}");
+}
