@@ -42,7 +42,7 @@ use busbar_contract::abi::mechanism::door::{KindTailHead, Statement};
 use busbar_contract::abi::mechanism::lifecycle::{
     GenIn, RefreshIn, ReleaseIn, TickIn, TickOut, ValidateIn,
 };
-use busbar_contract::abi::mechanism::ticket::{CompletionHandle, Ticket};
+use busbar_contract::abi::mechanism::ticket::{CompletionHandle, HostTables, Ticket};
 use busbar_contract::abi::plane::{
     ArriveIn, ArriveOut, OnPieceIn, OnPieceOut, OutField, PlaneCancelIn, PlaneCancelOut,
     PlaneDriveIn, PlaneDriveOut, PlaneOpenIn, PlaneOpenOut, PlaneRefreshOut, PlaneSnapshot,
@@ -268,6 +268,27 @@ macro_rules! slot {
     };
 }
 
+/// THE HOST TABLES `open` WAS LENT, IN THE FORM THE SDK TAKES THEM (status row 159, busbar
+/// #1469). Before #1469 `Services::of`, `conn::Host::of` and `Wake::of` take `&HostTables`; from
+/// it they are sealed to take the [`Lent`] the `open` `in`'s `host()` returns. The parameter's
+/// type picks the impl, so one call compiles against either contract.
+trait LentTables<'a> {
+    /// The tables `open` was lent, as the SDK's `of` takes them.
+    fn lent(tables: Lent<'a, HostTables>) -> Self;
+}
+
+impl<'a> LentTables<'a> for &'a HostTables {
+    fn lent(tables: Lent<'a, HostTables>) -> Self {
+        tables.get()
+    }
+}
+
+impl<'a> LentTables<'a> for Lent<'a, HostTables> {
+    fn lent(tables: Lent<'a, HostTables>) -> Self {
+        tables
+    }
+}
+
 slot!(
     /// `validate`: the settings read as the section, or refused in the grammar's words.
     Validate, ValidateIn, OutHead, |_, input, mut out| {
@@ -310,18 +331,18 @@ slot!(
             services: input
                 .field(|i| &i.open)
                 .host()
-                .and_then(|h| Services::of(h.get())),
+                .and_then(|h| Services::of(LentTables::lent(h))),
             host: input
                 .field(|i| &i.open)
                 .host()
-                .map(|h| busbar_contract::abi::sdk::conn::Host::of(h.get())),
+                .map(|h| busbar_contract::abi::sdk::conn::Host::of(LentTables::lent(h))),
             sightings: Keyed::new(),
             spent: Keyed::new(),
             checked: Keyed::new(),
             wake: input
                 .field(|i| &i.open)
                 .host()
-                .and_then(|h| busbar_contract::abi::sdk::services::Wake::of(h.get())),
+                .and_then(|h| busbar_contract::abi::sdk::services::Wake::of(LentTables::lent(h))),
             listens: Keyed::new(),
             driver: Keyed::new(),
             tasks: Keyed::new(),
