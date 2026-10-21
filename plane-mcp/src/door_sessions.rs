@@ -146,9 +146,8 @@ pub(super) enum SessionUnit {
         last_event_id: Option<String>,
         mount: String,
     },
-    /// DELETE of `session`; `closed` once this unit closed it (it may pend carrying what the
-    /// session's end owes its members before it answers).
-    Delete { session: String, closed: bool },
+    /// DELETE of `session`.
+    Delete { session: String },
     /// A line of a carrier session that negotiated a session revision: its answer is lowered.
     Line,
 }
@@ -242,10 +241,7 @@ pub(super) fn arrive(
         }
         "DELETE" => match session {
             Some(session) => SessionArrived::Session(Box::new(Arrival {
-                unit: SessionUnit::Delete {
-                    session,
-                    closed: false,
-                },
+                unit: SessionUnit::Delete { session },
                 dispatch: None,
                 mirror: Vec::new(),
             })),
@@ -543,7 +539,6 @@ fn id_of(kind: &Kind) -> Value {
 /// ANSWER A SESSION UNIT on its caller's piece, the session first checked against its owner:
 /// `None` for a unit the one dispatch answers (its session checked).
 pub(super) fn answer(
-    instance: &Instance<'_, McpDoor>,
     plane: &McpDoor,
     ticket: Ticket,
     caller: &str,
@@ -558,37 +553,20 @@ pub(super) fn answer(
         let body = rpc_error(&Value::Null, CODE_INTERNAL, super::CLOCK_UNREAD);
         return Some(written(unit, answer_of(STATUS_UNAVAILABLE, body)));
     };
-    // A SESSION THAT EXPIRED is let go at this unit's clock reading, its subscriptions released
-    // ([`forget`]): the unsubscribe a uri's last watcher owes its member is carried by a unit.
-    if with_sessions(plane, |t| t.sweep(now)).unwrap_or(0) > 0 {
-        forget_gone(plane);
-    }
-    if carries(&session_unit) && carry_owed(instance, plane, ticket, unit).is_pending() {
-        return Some(Step::Pending);
-    }
     let pending = match session_unit {
         SessionUnit::Line | SessionUnit::Stream { .. } => return None,
         SessionUnit::Open { id, requested } => {
             open_endpoint(plane, ticket, unit, &owner, &id, requested.as_deref(), now)
         }
-        // A SESSION ENDED BY ITS DELETE: its subscriptions are released, and the unsubscribe a
-        // uri's last watcher owes its member is carried by this unit before it answers.
-        SessionUnit::Delete { session, closed } => {
-            if !closed {
-                if with_sessions(plane, |t| t.close(&session, &owner, now)) != Some(true) {
-                    return Some(written(unit, not_found(&Value::Null)));
-                }
-                if let Some(SessionUnit::Delete { closed, .. }) = unit.session.as_mut() {
-                    *closed = true;
-                }
-                forget(plane, &session);
+        SessionUnit::Delete { session } => {
+            if with_sessions(plane, |t| t.close(&session, &owner, now)) == Some(true) {
+                plane.session_state.remove(&session);
                 // Each of its streams ends at its next collection.
                 due(plane, &session);
+                answer_of(200, Vec::new())
+            } else {
+                not_found(&Value::Null)
             }
-            if carry_owed(instance, plane, ticket, unit).is_pending() {
-                return Some(Step::Pending);
-            }
-            answer_of(200, Vec::new())
         }
         SessionUnit::Message {
             session,
@@ -627,26 +605,6 @@ pub(super) fn answer(
                     answer_of(STATUS_ACCEPTED, Vec::new())
                 }
                 Kind::Refused(r) => answer_of(r.status, r.body()),
-                // A RESOURCE SUBSCRIPTION DELIVERS: its first subscriber subscribes upstream, its
-                // last unsubscribes there ([`subscription`]); the unit pends while it does.
-                Kind::Here(v)
-                    if matches!(
-                        v.get("method").and_then(Value::as_str),
-                        Some(METHOD_SUBSCRIBE | METHOD_UNSUBSCRIBE)
-                    ) =>
-                {
-                    match subscription(
-                        instance,
-                        plane,
-                        ticket,
-                        unit,
-                        (session.as_str(), &owner),
-                        &v,
-                    ) {
-                        Poll::Pending => return Some(Step::Pending),
-                        Poll::Ready(body) => answer_of(200, body),
-                    }
-                }
                 Kind::Here(v) => {
                     let body = here(
                         plane,
@@ -750,6 +708,7 @@ fn here(
     let ok =
         |result: Value| serde_json::to_vec(&crate::line::result(&id, result)).unwrap_or_default();
     let invalid = |message: &str| rpc_error(&id, CODE_INVALID_PARAMS, message);
+    let uri = value.pointer("/params/uri").and_then(Value::as_str);
     match method {
         adapt::METHOD_PING => ok(json!({})),
         // The `2024-11-05` session opened with its stream; its `initialize` arrives inside it.
@@ -769,6 +728,50 @@ fn here(
             "this session is already open: send `initialize` without Mcp-Session-Id to open \
              another",
         ),
+        "resources/subscribe" => {
+            let Some(uri) = uri else {
+                return invalid("`params.uri` is required: the resource to watch.");
+            };
+            if uri.len() > MAX_RESOURCE_SUB_URI_BYTES {
+                return invalid(
+                    "`params.uri` is longer than a session retains: a subscription is held for \
+                     the session, so it is bounded.",
+                );
+            }
+            let Some(held) = unit.held.clone().or_else(|| plane.current()) else {
+                return invalid("this node publishes no MCP catalogue yet");
+            };
+            ask_entitlements(plane.services, ticket, unit, &held.catalogue.grants());
+            let entitled = &unit.entitled;
+            let admit = |kind: &str, name: &str| {
+                entitled
+                    .get(&format!("{kind}:{name}"))
+                    .copied()
+                    .unwrap_or(false)
+            };
+            if !matches!(held.catalogue.resource_by_uri(&admit, uri), Lookup::One(_)) {
+                return invalid("`params.uri` names no resource this caller may read.");
+            }
+            if subscribe(plane, session, owner, uri) {
+                ok(json!({}))
+            } else {
+                invalid(
+                    "this caller already holds as many resource subscriptions as this node \
+                     watches for it: unsubscribe from one before subscribing to another.",
+                )
+            }
+        }
+        "resources/unsubscribe" => {
+            let Some(uri) = uri else {
+                return invalid("`params.uri` is required: the resource to stop watching.");
+            };
+            plane.session_state.with(&session.to_string(), |s| {
+                if let Some(s) = s {
+                    s.uris.retain(|u| u != uri);
+                }
+            });
+            ok(json!({}))
+        }
         "logging/setLevel" => {
             let level = value.pointer("/params/level").and_then(Value::as_str);
             match level.filter(|l| LEVELS.contains(l)) {
@@ -809,401 +812,6 @@ fn state_of(plane: &McpDoor, session: &str, owner: &Owner, f: impl FnOnce(&mut S
         s.owner.get_or_insert_with(|| owner.clone());
         f(s);
     });
-}
-
-/// The method a session subscribes to one resource's updates with.
-const METHOD_SUBSCRIBE: &str = "resources/subscribe";
-/// The method a session drops one with.
-const METHOD_UNSUBSCRIBE: &str = "resources/unsubscribe";
-
-/// The binding busbar's own upstream subscriptions are negotiated under ([`fetch_in`]): one
-/// subscription upstream serves every session watching the uri, so it is no caller's (a caller
-/// reference is the kernel's opaque hex, never this).
-const SUBSCRIPTION_BINDING: &str = "plane:subscriptions";
-
-/// The connector handles a subscription's upstream exchange is numbered from on its unit's ticket.
-const SUBSCRIBE_SEQ: u32 = 1 << 26;
-
-/// The JSON-RPC id an upstream `resources/subscribe` or `resources/unsubscribe` carries: one
-/// request, correlated by it.
-const SUBSCRIBE_REQUEST_ID: u64 = 1;
-
-/// A RESOURCE SUBSCRIPTION, OR ITS END, in `session` (THE DESIGN section 2, the mcp bullet:
-/// subscribe stays for the old revisions, and it DELIVERS): the uri resolved under the caller's
-/// grants to the one member that declares it; on the uri's FIRST subscriber across the instance,
-/// `resources/subscribe` is sent to that member (a refusal there refuses the caller, never
-/// acknowledged); on its LAST unsubscribe, `resources/unsubscribe`. The member's updates reach the
-/// watching sessions as [`announce`] hands them on. PENDING while the upstream exchange pends.
-fn subscription(
-    instance: &Instance<'_, McpDoor>,
-    plane: &McpDoor,
-    ticket: Ticket,
-    unit: &mut CallUnit,
-    (session, owner): (&str, &Owner),
-    value: &Value,
-) -> Poll<Vec<u8>> {
-    let id = value.get("id").cloned().unwrap_or(Value::Null);
-    let subscribing = value.get("method").and_then(Value::as_str) == Some(METHOD_SUBSCRIBE);
-    let ok = || serde_json::to_vec(&crate::line::result(&id, json!({}))).unwrap_or_default();
-    let invalid = |message: &str| rpc_error(&id, CODE_INVALID_PARAMS, message);
-    let Some(uri) = value.pointer("/params/uri").and_then(Value::as_str) else {
-        return Poll::Ready(invalid(if subscribing {
-            "`params.uri` is required: the resource to watch."
-        } else {
-            "`params.uri` is required: the resource to stop watching."
-        }));
-    };
-    let Some(held) = unit.held.clone().or_else(|| plane.current()) else {
-        return Poll::Ready(invalid("this node publishes no MCP catalogue yet"));
-    };
-    // An exchange under way (this unit pended on it) is carried to its end.
-    let under_way = unit.negotiating.is_some();
-    if !subscribing {
-        let dropped = plane.session_state.with(&session.to_string(), |s| {
-            s.is_some_and(|s| {
-                let before = s.uris.len();
-                s.uris.retain(|u| u != uri);
-                s.uris.len() != before
-            })
-        });
-        if under_way || (dropped && !watched(plane, uri)) {
-            let declared = match held
-                .catalogue
-                .resource_by_uri(&|_: &str, _: &str| true, uri)
-            {
-                Lookup::One(entry) => Some(entry.server.clone()),
-                _ => None,
-            };
-            if let Some(server) = declared {
-                let verb = crate::client::verb::UpstreamVerb::ResourcesUnsubscribe {
-                    uri: uri.to_string(),
-                };
-                // The caller's subscription is gone whatever the member answers.
-                let slot = &mut unit.negotiating;
-                if upstream(instance, plane, slot, SUBSCRIBE_SEQ, &held, &server, &verb)
-                    .is_pending()
-                {
-                    return Poll::Pending;
-                }
-            }
-        }
-        return Poll::Ready(ok());
-    }
-    if uri.len() > MAX_RESOURCE_SUB_URI_BYTES {
-        return Poll::Ready(invalid(
-            "`params.uri` is longer than a session retains: a subscription is held for the \
-             session, so it is bounded.",
-        ));
-    }
-    ask_entitlements(plane.services, ticket, unit, &held.catalogue.grants());
-    let entitled = &unit.entitled;
-    let admit = |kind: &str, name: &str| {
-        entitled
-            .get(&format!("{kind}:{name}"))
-            .copied()
-            .unwrap_or(false)
-    };
-    let server = match held.catalogue.resource_by_uri(&admit, uri) {
-        Lookup::One(entry) => entry.server.clone(),
-        _ => {
-            return Poll::Ready(invalid(
-                "`params.uri` names no resource this caller may read.",
-            ))
-        }
-    };
-    let quota = || {
-        invalid(
-            "this caller already holds as many resource subscriptions as this node watches for \
-             it: unsubscribe from one before subscribing to another.",
-        )
-    };
-    if !under_way {
-        match may_subscribe(plane, session, owner, uri) {
-            Some(true) => return Poll::Ready(ok()),
-            Some(false) => {}
-            None => return Poll::Ready(quota()),
-        }
-    }
-    if under_way || !held_upstream(plane, uri) {
-        let verb = crate::client::verb::UpstreamVerb::ResourcesSubscribe {
-            uri: uri.to_string(),
-        };
-        let slot = &mut unit.negotiating;
-        match upstream(instance, plane, slot, SUBSCRIBE_SEQ, &held, &server, &verb) {
-            Poll::Pending => return Poll::Pending,
-            Poll::Ready(Err(why)) => {
-                return Poll::Ready(rpc_error(
-                    &id,
-                    CODE_INTERNAL,
-                    &format!(
-                        "MCP server `{server}` did not take the subscription to `{uri}`, so busbar \
-                         cannot watch it for this session: {why}"
-                    ),
-                ))
-            }
-            Poll::Ready(Ok(())) => {}
-        }
-    }
-    Poll::Ready(if subscribe(plane, session, owner, uri) {
-        ok()
-    } else {
-        quota()
-    })
-}
-
-/// Whether anything of the instance watches `uri` (busbar is subscribed to it upstream): a
-/// session's subscription, or a `subscriptions/listen` held on either carrier.
-pub(super) fn watched(plane: &McpDoor, uri: &str) -> bool {
-    plane
-        .session_state
-        .with_all(|m| m.values().any(|s| s.uris.iter().any(|u| u == uri)))
-        || door_listen::watches(plane, uri)
-        || super::door_line::watches(plane, uri)
-}
-
-/// Whether busbar holds a subscription to `uri` with its member: something watches it, or its last
-/// watcher went and the unsubscribe that owed has not begun ([`unowe`]).
-fn held_upstream(plane: &McpDoor, uri: &str) -> bool {
-    watched(plane, uri) || unowe(plane, uri)
-}
-
-/// A watcher came back for `uri`: an unsubscribe owed for it that no unit has begun is owed no
-/// more, so busbar's subscription upstream is kept. `true` when one was.
-pub(super) fn unowe(plane: &McpDoor, uri: &str) -> bool {
-    plane.owed.with_all(|m| {
-        let kept: Vec<(String, String)> = m
-            .iter()
-            .filter(|((_, u), carrier)| u == uri && carrier.is_none())
-            .map(|(key, _)| key.clone())
-            .collect();
-        for key in &kept {
-            m.remove(key);
-        }
-        !kept.is_empty()
-    })
-}
-
-/// The most unsubscribes busbar owes its members at once. Past it, a uri's last watcher going owes
-/// nothing: its member goes on announcing a uri no one watches, which [`announce`] hands no one.
-const MAX_OWED: usize = 256;
-
-/// The connector handles an owed unsubscribe's exchange is numbered from on the unit carrying it:
-/// clear of a subscription's own ([`SUBSCRIBE_SEQ`], [`subscribe_base`]).
-const OWED_SEQ: u32 = SUBSCRIBE_SEQ + (1 << 24);
-
-/// How many connector handles one subscription exchange of a `subscriptions/listen` may number.
-const SUBSCRIBE_SPAN: u32 = 1 << 14;
-
-/// Where the `n`th subscription exchange a `subscriptions/listen` makes on its unit's ticket numbers
-/// its connector handles from (at most [`crate::subscribe::MAX_SUBSCRIBED_URIS`] of them).
-pub(super) fn subscribe_base(n: u32) -> u32 {
-    SUBSCRIBE_SEQ.saturating_add(n.saturating_mul(SUBSCRIBE_SPAN))
-}
-
-/// THE WATCHERS OF `uris` WENT (a session ended, a subscription closed): each uri nothing else
-/// watches now owes the member that declares it `resources/unsubscribe`, carried by the next unit
-/// that carries one ([`carry_owed`]). A stdio member is owed nothing: busbar holds no subscription
-/// with it ([`upstream`]).
-pub(super) fn release(plane: &McpDoor, uris: Vec<String>) {
-    if uris.is_empty() {
-        return;
-    }
-    let Some(held) = plane.current() else {
-        return;
-    };
-    for uri in uris {
-        if watched(plane, &uri) {
-            continue;
-        }
-        let server = match held
-            .catalogue
-            .resource_by_uri(&|_: &str, _: &str| true, &uri)
-        {
-            Lookup::One(entry) => entry.server.clone(),
-            _ => continue,
-        };
-        let reached = held
-            .section
-            .servers
-            .get(&server)
-            .is_some_and(|def| !super::door_program::is_program(def) && !def.url.is_empty());
-        if !reached {
-            continue;
-        }
-        plane.owed.with_all(|m| {
-            if m.len() < MAX_OWED {
-                m.entry((server, uri)).or_default();
-            }
-        });
-    }
-}
-
-/// THE STATE OF A SESSION THAT ENDED, dropped, and its subscriptions released ([`release`]).
-fn forget(plane: &McpDoor, session: &str) {
-    if let Some(state) = plane.session_state.remove(&session.to_string()) {
-        release(plane, state.uris);
-    }
-}
-
-/// The state of every session the table no longer holds (closed, expired, evicted) dropped, and
-/// its subscriptions released.
-fn forget_gone(plane: &McpDoor) {
-    let ids: Vec<String> = plane
-        .session_state
-        .with_all(|m| m.keys().cloned().collect());
-    for id in ids {
-        if with_sessions(plane, |t| !t.holds(&id)).unwrap_or(true) {
-            forget(plane, &id);
-        }
-    }
-}
-
-/// Whether a session unit carries an owed unsubscribe before its own answer: one answered here
-/// that makes no upstream exchange of its own (a dispatched message's relay and a subscription's own
-/// exchange number theirs on the same ticket). A DELETE carries one after it closes its session.
-fn carries(unit: &SessionUnit) -> bool {
-    match unit {
-        SessionUnit::Open { .. }
-        | SessionUnit::Message {
-            kind: Kind::Accept(_) | Kind::Refused(_),
-            ..
-        } => true,
-        SessionUnit::Message {
-            kind: Kind::Here(v),
-            ..
-        } => !matches!(
-            v.get("method").and_then(Value::as_str),
-            Some(METHOD_SUBSCRIBE | METHOD_UNSUBSCRIBE)
-        ),
-        _ => false,
-    }
-}
-
-/// THE NEXT UNSUBSCRIBE BUSBAR OWES, carried by this unit on its own ticket before its own answer
-/// (at most one per unit, its handles numbered from [`OWED_SEQ`]): the member that declares the uri
-/// is sent `resources/unsubscribe` over the plane's own reach ([`upstream`]), unless a watcher came
-/// back for the uri before the exchange began. Nothing more is owed whatever the member answers.
-/// PENDING while the exchange does.
-fn carry_owed(
-    instance: &Instance<'_, McpDoor>,
-    plane: &McpDoor,
-    ticket: Ticket,
-    unit: &mut CallUnit,
-) -> Poll<()> {
-    let claimed = plane.owed.with_all(|m| {
-        let mine = m
-            .iter()
-            .find(|(_, carrier)| **carrier == Some(ticket))
-            .map(|(key, _)| key.clone());
-        mine.or_else(|| {
-            let free = m
-                .iter()
-                .find(|(_, carrier)| carrier.is_none())
-                .map(|(key, _)| key.clone())?;
-            m.insert(free.clone(), Some(ticket));
-            Some(free)
-        })
-    });
-    let Some((server, uri)) = claimed else {
-        return Poll::Ready(());
-    };
-    let begun = unit.negotiating.is_some();
-    let held = unit.held.clone().or_else(|| plane.current());
-    if let Some(held) = held.filter(|_| begun || !watched(plane, &uri)) {
-        let verb = crate::client::verb::UpstreamVerb::ResourcesUnsubscribe { uri: uri.clone() };
-        let slot = &mut unit.negotiating;
-        if upstream(instance, plane, slot, OWED_SEQ, &held, &server, &verb).is_pending() {
-            return Poll::Pending;
-        }
-    }
-    plane.owed.remove(&(server, uri));
-    Poll::Ready(())
-}
-
-/// Whether `session` may subscribe to `uri`: `Some(true)` when it already does, `Some(false)` when
-/// it may, `None` past its owner's subscription quota.
-fn may_subscribe(plane: &McpDoor, session: &str, owner: &Owner, uri: &str) -> Option<bool> {
-    plane.session_state.with_all(|m| {
-        if m.get(session)
-            .is_some_and(|s| s.uris.iter().any(|u| u == uri))
-        {
-            return Some(true);
-        }
-        let held: usize = m
-            .values()
-            .filter(|s| s.owner.as_ref() == Some(owner))
-            .map(|s| s.uris.len())
-            .sum();
-        (held < MAX_OWNER_SUBSCRIPTIONS).then_some(false)
-    })
-}
-
-/// ONE REQUEST busbar sends `server` for its subscriptions, over the plane's own reach of a member
-/// ([`fetch_in`]: the stateless request first, negotiated into a session or onto the `2024-11-05`
-/// stream as the member needs, every hop on the connector), on the unit's ticket, its handles
-/// numbered from `base` and its conversation kept in `slot` while it pends: READY with whether the
-/// member answered it with a JSON-RPC result.
-///
-/// A STDIO MEMBER is sent nothing and the subscription stands: busbar keeps no subscription with a
-/// child, and what the child announces beside an exchange busbar relays to it reaches the uri's
-/// watchers ([`announce`]).
-pub(super) fn upstream(
-    instance: &Instance<'_, McpDoor>,
-    plane: &McpDoor,
-    slot: &mut Option<Box<Negotiating>>,
-    base: u32,
-    held: &Held,
-    server: &str,
-    verb: &crate::client::verb::UpstreamVerb,
-) -> Poll<Result<(), String>> {
-    let Some(def) = held.section.servers.get(server) else {
-        return Poll::Ready(Err(format!("MCP server `{server}` is not registered")));
-    };
-    if super::door_program::is_program(def) {
-        return Poll::Ready(Ok(()));
-    }
-    if def.url.is_empty() {
-        return Poll::Ready(Err(format!(
-            "MCP server `{server}` registers no `url:` busbar can reach it at"
-        )));
-    }
-    let mut request = verb.build(&def.url, SUBSCRIBE_REQUEST_ID, None);
-    // A token_exchange member's token is asked for under the registration's own scope, as its
-    // verify fetch's is.
-    if crate::tool_scope::exchanges(def, held.section.effective_upstream_credentials(server)) {
-        request.headers.push((
-            busbar_contract::abi::auth::SCOPE_REQUEST_FIELD.to_string(),
-            crate::tool_scope::registration_scope(server, def),
-        ));
-    }
-    let answered = fetch_in(
-        instance,
-        plane,
-        slot,
-        (base, server, SUBSCRIPTION_BINDING, def.timeout_ms()),
-        request,
-    );
-    let Poll::Ready(answered) = answered else {
-        return Poll::Pending;
-    };
-    Poll::Ready(match answered {
-        Err(why) => Err(why),
-        Ok(response) => {
-            use crate::client::jsonrpc::{parse_response, RpcOutcome};
-            match parse_response(&response.body, SUBSCRIBE_REQUEST_ID) {
-                RpcOutcome::Result(_) => Ok(()),
-                RpcOutcome::Error { code, message } => {
-                    Err(format!("it answered JSON-RPC error {code}: {message}"))
-                }
-                RpcOutcome::InputRequired { .. }
-                | RpcOutcome::Malformed(_)
-                | RpcOutcome::Uncorrelated(_) => Err(format!(
-                    "it answered HTTP {} with no JSON-RPC result",
-                    response.status
-                )),
-            }
-        }
-    })
 }
 
 /// Subscribes `session` to `uri`: `false` past the owner's subscription quota.
@@ -1495,8 +1103,7 @@ pub(super) fn taken(plane: &McpDoor, named: &[u64]) {
 }
 
 /// THE TICK: every held stream owes a collection (its keepalive, or its end once its session is
-/// gone), and the state of every session the table no longer holds is dropped, its subscriptions
-/// released ([`forget_gone`]).
+/// gone), and the state of every session the table no longer holds is dropped.
 pub(super) fn tick(plane: &McpDoor) {
     let any = plane.streams.with_all(|m| {
         for s in m.values_mut() {
@@ -1504,22 +1111,25 @@ pub(super) fn tick(plane: &McpDoor) {
         }
         !m.is_empty()
     });
-    forget_gone(plane);
+    let gone: Vec<String> = plane
+        .session_state
+        .with_all(|m| m.keys().cloned().collect());
+    let gone: Vec<String> = gone
+        .into_iter()
+        .filter(|id| with_sessions(plane, |t| !t.holds(id)).unwrap_or(true))
+        .collect();
+    plane.session_state.with_all(|m| {
+        for id in &gone {
+            m.remove(id);
+        }
+    });
     if any {
         door_listen::wake_driver(plane);
     }
 }
 
-/// The op on `ticket` was cancelled: the stream it carried is ended, and an owed unsubscribe it was
-/// carrying is owed again, for the next unit to carry.
+/// The op on `ticket` was cancelled: the stream it carried is ended.
 pub(super) fn cancelled(plane: &McpDoor, ticket: Ticket) {
-    plane.owed.with_all(|m| {
-        for carrier in m.values_mut() {
-            if *carrier == Some(ticket) {
-                *carrier = None;
-            }
-        }
-    });
     let keys: Vec<u64> = plane.streams.with_all(|m| {
         m.iter()
             .filter(|(_, s)| s.ticket == ticket)
@@ -1544,9 +1154,8 @@ fn end_stream(plane: &McpDoor, key: u64) -> Option<Stream> {
             t.end(&ended.session);
         }
     });
-    // Its subscriptions are released: what their last watcher owes is carried by the next unit.
     if ended.legacy {
-        forget(plane, &ended.session);
+        plane.session_state.remove(&ended.session);
     }
     Some(ended)
 }

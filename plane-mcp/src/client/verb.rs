@@ -20,9 +20,9 @@
 //!   other request (`crate::tool_program::initialize`, `initialized_notification`). Over streamable
 //!   HTTP the stateless revision deleted the handshake; a session revision's is the client
 //!   ladder's (`super::compat`).
-//! - `resources/subscribe` and `resources/unsubscribe`: a caller's resource subscription in a
-//!   session revision, carried to the member that declares the resource on the uri's first
-//!   subscriber and dropped on its last (`crate::tool_door`'s session machinery).
+//!
+//! A caller's resource subscription is never carried upstream: busbar records the uri and relays
+//! what the member announces, so `resources/subscribe` and `resources/unsubscribe` are not issued.
 //!
 //! `tools/call` and `tools/list` are built by `super::jsonrpc` on the dispatch and verify paths.
 //! Every other client-originated method of the inventory is one busbar does not send an upstream
@@ -65,16 +65,6 @@ pub enum UpstreamVerb {
     /// The handshake's acknowledgement. A NOTIFICATION: it has no reply, and a client that waited
     /// for one would hang against every conformant server.
     NotificationsInitialized,
-    /// Subscribe to one resource's updates.
-    ResourcesSubscribe {
-        /// The resource URI.
-        uri: String,
-    },
-    /// Drop one resource subscription.
-    ResourcesUnsubscribe {
-        /// The resource URI.
-        uri: String,
-    },
 }
 
 impl UpstreamVerb {
@@ -84,8 +74,6 @@ impl UpstreamVerb {
         match self {
             UpstreamVerb::Initialize { .. } => "initialize",
             UpstreamVerb::NotificationsInitialized => "notifications/initialized",
-            UpstreamVerb::ResourcesSubscribe { .. } => "resources/subscribe",
-            UpstreamVerb::ResourcesUnsubscribe { .. } => "resources/unsubscribe",
         }
     }
 
@@ -116,10 +104,6 @@ impl UpstreamVerb {
                 "clientInfo": { "name": CLIENT_NAME, "version": client_version },
             }),
             UpstreamVerb::NotificationsInitialized => serde_json::json!({}),
-            UpstreamVerb::ResourcesSubscribe { uri }
-            | UpstreamVerb::ResourcesUnsubscribe { uri } => {
-                serde_json::json!({ "uri": uri })
-            }
         }
     }
 
@@ -194,12 +178,6 @@ impl UpstreamVerb {
                 client_version: "0.0.0",
             },
             UpstreamVerb::NotificationsInitialized,
-            UpstreamVerb::ResourcesSubscribe {
-                uri: "file:///a".to_string(),
-            },
-            UpstreamVerb::ResourcesUnsubscribe {
-                uri: "file:///a".to_string(),
-            },
         ]
     }
 }

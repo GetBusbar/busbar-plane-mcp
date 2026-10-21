@@ -256,9 +256,6 @@ pub struct McpDoor {
     /// fetch, kept while it pends (an operator verb has no unit to keep it on). One per server: a
     /// newer `connect` of the same server takes its place.
     connecting: Keyed<String, (Ticket, Box<door_sessions::Negotiating>)>,
-    /// THE UNSUBSCRIBES BUSBAR OWES its members, by `(server, uri)`: the ticket of the unit carrying
-    /// each, while one is ([`door_sessions::release`]).
-    owed: Keyed<(String, String), Option<Ticket>>,
 }
 
 impl McpDoor {
@@ -373,7 +370,6 @@ slot!(
             said_ungoverned: Keyed::new(),
             line_revisions: Keyed::new(),
             connecting: Keyed::new(),
-            owed: Keyed::new(),
         };
         plane.sessions.insert(
             (),
@@ -1942,7 +1938,7 @@ fn answer_body(
     door_line::reconfirm(plane, ticket, principal, unit);
     // A SESSION REVISION'S UNIT: its session checked against its owner first (a mismatch is `404`
     // on every path); what the session answers itself is answered here.
-    if let Some(step) = door_sessions::answer(instance, plane, ticket, caller, unit) {
+    if let Some(step) = door_sessions::answer(plane, ticket, caller, unit) {
         return Some(step);
     }
     // A LINE the carrier answers itself (an era verb, an answer busbar asked for), and a line's
@@ -1951,13 +1947,9 @@ fn answer_body(
         unit.pending = Some(pending);
         return Some(Step::Write);
     }
-    match door_line::listen(instance, plane, ticket, principal, unit) {
-        Some(std::task::Poll::Ready(pending)) => {
-            unit.pending = Some(pending);
-            return Some(Step::Write);
-        }
-        Some(std::task::Poll::Pending) => return Some(Step::Pending),
-        None => {}
+    if let Some(pending) = door_line::listen(plane, ticket, principal, unit) {
+        unit.pending = Some(pending);
+        return Some(Step::Write);
     }
     // A TASK'S CONTINUATION runs its own phases; a `tasks/*` verb is answered from the task.
     if door_tasks::is_run(unit) {
@@ -3047,7 +3039,7 @@ slot!(
             if door_sessions::holds(plane, piece.unit) {
                 return door_sessions::piece(plane, input, &mut out);
             }
-            return door_listen::piece(&instance, plane, input, &mut out);
+            return door_listen::piece(plane, input, &mut out);
         }
         let key = piece.unit;
         let ticket = piece.head.ticket;
