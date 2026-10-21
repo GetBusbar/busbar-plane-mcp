@@ -172,8 +172,13 @@ pub struct McpDoor {
     generations: Generations<PlaneSnapshot, Held>,
     units: Keyed<u64, CallUnit>,
     /// Each principal's roots epoch: moved by its `notifications/roots/list_changed`, sealed into
-    /// an exchange that asks for roots.
+    /// an exchange that asks for roots. Bounded at [`MAX_ROOTS_PRINCIPALS`]; past it a principal's
+    /// change moves the shared epoch ([`Self::roots_shared`]) instead.
     roots: Keyed<String, u64>,
+    /// The epoch every principal's roots epoch is read beside: moved by a change the full
+    /// [`Self::roots`] table could not record for its own principal, so that change invalidates
+    /// every sealed exchange rather than none.
+    roots_shared: Keyed<(), u64>,
     /// The host tables `open` handed it: the connector a `connect` reaches its server through.
     host: Option<busbar_contract::abi::sdk::conn::Host>,
     /// Each registered server's last sighting (`connect`): what the trust views and the dispatch
@@ -339,6 +344,7 @@ slot!(
             generations: Generations::new(),
             units: Keyed::new(),
             roots: Keyed::new(),
+            roots_shared: Keyed::new(),
             greeted: Keyed::new(),
             answered: Keyed::new(),
             relaying: Arc::default(),
@@ -515,6 +521,38 @@ slot!(
 
 /// The most units the instance keeps state for at once; past it, a new arrival is refused.
 pub const MAX_UNITS: usize = 4096;
+
+/// The most principals the instance keeps a roots epoch of its own for ([`McpDoor::roots`]).
+pub const MAX_ROOTS_PRINCIPALS: usize = MAX_UNITS;
+
+/// `principal`'s roots changed (`notifications/roots/list_changed`): its epoch moves, or, the
+/// table full and `principal` not in it, the shared epoch every principal is read beside, so the
+/// change is never lost (a stale roots answer sealed under the old epoch is refused either way).
+fn roots_changed(plane: &McpDoor, principal: &str) {
+    let recorded = plane.roots.with_all(|m| match m.get_mut(principal) {
+        Some(epoch) => {
+            *epoch = epoch.wrapping_add(1);
+            true
+        }
+        None if m.len() < MAX_ROOTS_PRINCIPALS => {
+            m.insert(principal.to_string(), 1);
+            true
+        }
+        None => false,
+    });
+    if !recorded {
+        plane
+            .roots_shared
+            .with_all(|m| *m.entry(()).or_insert(0) += 1);
+    }
+}
+
+/// `principal`'s roots epoch, as an exchange seals it: its own, beside the shared one.
+fn roots_epoch(plane: &McpDoor, principal: &str) -> u64 {
+    let own = plane.roots.get(&principal.to_string()).unwrap_or(0);
+    let shared = plane.roots_shared.get(&()).unwrap_or(0);
+    own.wrapping_add(shared.wrapping_shl(32))
+}
 
 /// The open breaker's reason as the kernel spells it (`RefusalCode::BreakerOpen`'s word): the words
 /// this door says a walk's exhaustion in where it repeats them, as predev's door said it.
@@ -1964,12 +2002,10 @@ fn answer_body(
     }
     if let Disposition::Notice { method } = &disposition {
         if method == crate::ask::NOTIFY_ROOTS_LIST_CHANGED {
-            plane
-                .roots
-                .with_all(|m| *m.entry(principal.to_string()).or_insert(0) += 1);
+            roots_changed(plane, principal);
         }
     }
-    let roots_epoch = plane.roots.get(&principal.to_string()).unwrap_or(0);
+    let roots_epoch = roots_epoch(plane, principal);
     let generation = held.catalogue.generation();
     let named_tool = match &disposition {
         Disposition::Request { row, id } if row.op == crate::tool_ops::OP_TOOL_CALL => {
