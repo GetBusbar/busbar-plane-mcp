@@ -404,7 +404,7 @@ fn red_two_callers_of_one_member_never_share_a_session() {
     assert_ne!(upstream_key("f", "s\u{1f}x"), upstream_key("fs", "x"));
 }
 
-/// EVERY REQUEST IN A SESSION TAKES ITS OWN ID (row 159 finding 3): the numbering never repeats
+/// EVERY REQUEST IN A SESSION TAKES ITS OWN ID: the numbering never repeats
 /// while the session is remembered and survives the session being remembered again; a stateless
 /// memory numbers nothing. RED: a shared round id.
 #[test]
