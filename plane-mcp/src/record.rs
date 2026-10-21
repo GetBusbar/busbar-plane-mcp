@@ -8,8 +8,9 @@
 //! store plugins persist it with. The neutral crates name none of these types.
 
 #[cfg(test)]
-use busbar_contract::records::{PlaneDisposition, PlaneRecord};
-use busbar_contract::records::{RecordStoreError, RecordStoreResult};
+use busbar_contract::records::{
+    PlaneDisposition, PlaneRecord, RecordStoreError, RecordStoreResult,
+};
 
 // THE TWO KIND STRINGS ARE THE PLANE'S, AND ARE READ FROM IT. A record kind is the name the plane
 // declares its schema under (`busbar_plane_mcp::tool_records::SCHEMA_CALL`), so it is named once, there,
@@ -22,7 +23,9 @@ use crate::tool_records::KIND_DEMOTION;
 /// evidence the audit claim rests on. The chain is scoped to the PRINCIPAL. A store persists these
 /// verbatim and returns them verbatim: the digest is computed and verified engine-side, and a backend
 /// never interprets or recomputes it. Plain data, never a credential — arguments and results are
-/// deliberately ABSENT.
+/// deliberately ABSENT. Read by the tests alone: the plane writes the call record's content suffix
+/// ([`call_suffix`]) and never this row.
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct McpCallRecord {
     /// The authenticated caller this chain belongs to. THE CHAIN SCOPE.
@@ -51,6 +54,7 @@ pub struct McpCallRecord {
     pub hash: String,
 }
 
+#[cfg(test)]
 impl McpCallRecord {
     // NB: there is deliberately NO plane-side `to_plane_record` WRITER for the call record. The
     // engine owns the append: a `call` chain is persisted ONLY as the neutral `{seq, prev_hash, hash,
@@ -204,6 +208,8 @@ fn parse_call_suffix(
 /// ONE RECORDED DEMOTION of an upstream MCP server, as it crosses the store seam. Written when a
 /// server is demoted, cleared when a later observation agrees with the approval again, and read back
 /// at boot so the demotion is in force before the first request is served. Keyed by `server`.
+/// Read by the tests alone.
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct McpDemotionRow {
     /// The registered upstream's local id — the row's primary key.
@@ -214,6 +220,7 @@ pub struct McpDemotionRow {
     pub recorded_at: u64,
 }
 
+#[cfg(test)]
 impl McpDemotionRow {
     /// Serialize this row into the opaque `demotion` [`PlaneRecord`] envelope (kind `demotion`),
     /// keyed by its server. Demotions are never purged by age, so the disposition is left `Active`.
@@ -239,11 +246,13 @@ impl McpDemotionRow {
 }
 
 /// Serialize a typed plane row into an opaque `PlaneRecord::body`. `serde_json`.
+#[cfg(test)]
 fn encode<T: serde::Serialize>(row: &T) -> RecordStoreResult<Vec<u8>> {
     serde_json::to_vec(row).map_err(|e| RecordStoreError(format!("plane body encode: {e}")))
 }
 
 /// Decode an opaque `PlaneRecord::body` back into its typed plane row — the inverse of [`encode`].
+#[cfg(test)]
 fn decode_record<T: serde::de::DeserializeOwned>(body: &[u8]) -> RecordStoreResult<T> {
     serde_json::from_slice(body).map_err(|e| RecordStoreError(format!("plane body decode: {e}")))
 }

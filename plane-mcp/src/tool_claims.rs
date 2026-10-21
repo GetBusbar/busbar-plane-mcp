@@ -13,6 +13,7 @@
 //! is refused at validation (CG-17), so no deployment is served at a path these claims do not
 //! cover.
 
+#[cfg(test)]
 use busbar_contract::grammar::{Claim, Selector};
 
 /// The request transport this plane's document claims are made against.
@@ -31,6 +32,7 @@ pub const CARRIER_STDIO: &str = "stdio";
 ///
 /// One scheme with alternatives, not several schemes: which alternative a unit uses is the
 /// authenticate step's answer, and a plane may only narrow within the set declared here.
+#[cfg(test)]
 const SCHEME: &str = "mcp-inbound";
 
 /// The alternatives a unit may be narrowed to.
@@ -43,6 +45,7 @@ const SCHEME: &str = "mcp-inbound";
 /// alternative meaning "none" is exactly what makes the authenticate step's narrowing check
 /// toothless, because narrowing DOWN to it would pass. The discovery document says it in the one
 /// place it belongs instead: its own claim declares no scheme.
+#[cfg(test)]
 const SCHEME_ALTS: &[&str] = &["bearer", "environment"];
 
 /// The ONE path this protocol is served at. It is fixed, not operator-configurable: a plane's
@@ -63,9 +66,11 @@ pub const DEFAULT_METADATA: &str = "/.well-known/oauth-protected-resource/mcp";
 pub const TASK_RUN_MOUNT: &str = "/mcp/tasks/run";
 
 /// The named stream a locally launched server's frames arrive on.
+#[cfg(test)]
 pub const STDIO_STREAM: &str = "mcp";
 
 /// Build one claim over a selector on a named transport.
+#[cfg(test)]
 const fn claim(transport: &'static str, selector: Selector) -> Claim {
     Claim {
         transport,
@@ -83,6 +88,7 @@ const fn claim(transport: &'static str, selector: Selector) -> Claim {
 ///
 /// Not "a scheme called anonymous": no scheme. The claim admits the anonymous principal without
 /// consulting one, which is what a deliberately open surface actually is.
+#[cfg(test)]
 const fn open(transport: &'static str, selector: Selector) -> Claim {
     Claim {
         transport,
@@ -98,6 +104,7 @@ const fn open(transport: &'static str, selector: Selector) -> Claim {
 /// The discovery document sits above the request surface because it is a longer, exact path and
 /// because it is the one surface here that carries no credential; ordering it first is what keeps a
 /// looser claim from swallowing it.
+#[cfg(test)]
 pub const CLAIMS: &[Claim] = &[
     // The discovery document is deliberately open: it is what a caller reads to find out how to
     // authenticate, so requiring a credential for it would be a closed loop.

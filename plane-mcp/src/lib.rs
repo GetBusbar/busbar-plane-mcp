@@ -115,27 +115,34 @@ mod trust;
 /// called" start to differ.
 const PLANE_KEY: &str = "mcp";
 
+#[cfg(test)]
 use busbar_contract::plugin::{AbiVersion, Kind, Plugin};
 
 /// The MCP plane.
 ///
 /// It carries no field: it is the type the plane's declarations (`PlaneMeta`) and its identity
-/// (`Plugin`) hang on, and the served door reads those. There is no cell here, no lock and no
-/// atomic: the purity test asserts that by walking the source, not by trusting this sentence.
+/// (`Plugin`) hang on. The served door reads neither (its Statement carries what busbar reads), so
+/// the type and its declarations are compiled for the tests that hold them to the Statement. There
+/// is no cell here, no lock and no atomic: the purity test asserts that by walking the source, not
+/// by trusting this sentence.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct McpPlane;
 
+#[cfg(test)]
 impl McpPlane {
     /// The plane. Nothing varies per instance, so there is one value of it.
     pub(crate) const EMPTY: Self = Self;
 }
 
+#[cfg(test)]
 impl Default for McpPlane {
     fn default() -> Self {
         Self::EMPTY
     }
 }
 
+#[cfg(test)]
 impl Plugin for McpPlane {
     fn key(&self) -> &'static str {
         <Self as busbar_contract::plane::PlaneMeta>::KEY

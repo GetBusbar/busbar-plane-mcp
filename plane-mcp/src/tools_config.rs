@@ -75,11 +75,9 @@
 //! `mcp_tool` grant on the PUBLISHED name, would silently change who can call what. That is why a
 //! collision is a LOUD BOOT REFUSAL and never an automatic rename.
 
-use busbar_contract::{
-    config::UpstreamCreds,
-    plane::{PinMechanismDecl, TrustKeyDecl, TrustRole},
-    section::split_section,
-};
+#[cfg(test)]
+use busbar_contract::plane::{PinMechanismDecl, TrustKeyDecl, TrustRole};
+use busbar_contract::{config::UpstreamCreds, section::split_section};
 use serde::{Deserialize, Serialize};
 
 /// The separator between a server id and a tool name in the `{server}_{tool}` namespaced routing
@@ -783,6 +781,10 @@ pub const TOOL_APPROVAL_FIELD: &str = "schema_hash";
 /// registration's private reach, `allow_private:` (the connector admits that server's own private
 /// address for its need, never a metadata one), and its tool approvals, `tools_allow:`'s
 /// `schema_hash`. There is no recovery-backoff key; the kernel reads its absence as zero.
+///
+/// The door states these as its ABI trust keys (`door::TRUST_KEYS`); this declaration is what the
+/// tests hold that ABI spelling to, so it is compiled for the tests alone.
+#[cfg(test)]
 pub const TRUST_KEYS: &[TrustKeyDecl] = &[
     TrustKeyDecl {
         key: "pin",
