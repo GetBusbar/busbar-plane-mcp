@@ -2649,7 +2649,7 @@ fn a_subscription_subscribes_the_declaring_member_upstream() {
         br#"{"jsonrpc":"2.0","id":3,"method":"resources/subscribe","params":{"uri":"file:///readme"}}"#;
     let unsubscribe =
         br#"{"jsonrpc":"2.0","id":4,"method":"resources/unsubscribe","params":{"uri":"file:///readme"}}"#;
-    let (alice, answered) = in_session(160, ALICE, subscribe);
+    let (alice, answered) = in_session(160, ALICE, &subscribe[..]);
     assert_eq!(answered.status, 200, "{}", answered.text());
     assert_eq!(answered.json()["result"], json!({}), "{}", answered.text());
     assert_eq!(
@@ -2660,7 +2660,7 @@ fn a_subscription_subscribes_the_declaring_member_upstream() {
         )],
         "the declaring member is asked for the uri's updates"
     );
-    let (bob, answered) = in_session(162, BOB, subscribe);
+    let (bob, answered) = in_session(162, BOB, &subscribe[..]);
     assert_eq!(answered.json()["result"], json!({}), "{}", answered.text());
     assert_eq!(
         subscriptions_seen().len(),
@@ -2680,9 +2680,12 @@ fn a_subscription_subscribes_the_declaring_member_upstream() {
         );
         d.settle(unit, &Given::caller(caller, unsubscribe))
     };
-    assert_eq!(drop_in(164, &alice, ALICE).json()["result"], json!({}));
+    assert_eq!(
+        drop_in(164, alice.as_str(), ALICE).json()["result"],
+        json!({})
+    );
     assert_eq!(subscriptions_seen().len(), 1, "bob still watches it");
-    assert_eq!(drop_in(165, &bob, BOB).json()["result"], json!({}));
+    assert_eq!(drop_in(165, bob.as_str(), BOB).json()["result"], json!({}));
     assert_eq!(
         subscriptions_seen().last(),
         Some(&(
