@@ -385,9 +385,6 @@ fn upstream_answer(url: &str, fields: &[(String, String)], body: &Value) -> Repl
                     json!({"content": [{"type": "text", "text": "stateless"}], "resultType": "complete"}),
                 ),
             ),
-            "resources/subscribe" | "resources/unsubscribe" => {
-                (200, json_head(), rpc_result(&id, json!({})))
-            }
             _ => (404, Vec::new(), b"no such method".to_vec()),
         };
     }
@@ -1500,47 +1497,6 @@ fn a_line_refused_at_the_unit_cap_moves_nothing_on_its_session() {
         after.outcome,
         Outcome::Refused,
         "the refused `initialize` kept no revision for session 9: {after:?}"
-    );
-}
-
-// ── a line subscription's uris reach the member ────────────────────────────────────────────────
-
-/// A `subscriptions/listen` line of the stateless member's readme.
-const LINE_LISTEN: &[u8] = br#"{"jsonrpc":"2.0","id":5,"method":"subscriptions/listen","params":{"notifications":{"resourceSubscriptions":["file:///readme"]},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#;
-
-/// RED: A LINE CARRIER'S LISTEN SUBSCRIBES UPSTREAM, as the HTTP carrier's does: before its
-/// acknowledgement busbar sends `resources/subscribe` to the member that declares the uri. RED: the
-/// line's listen was acknowledged and the member was never asked for the uri's updates.
-#[test]
-fn a_line_listen_subscribes_the_declaring_member_upstream() {
-    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
-    *upstreams() = Some(Upstreams::default());
-    let d = open();
-    let arrived = d.line(300, 12, LINE_LISTEN);
-    assert_eq!(arrived.outcome, Outcome::Ready, "{arrived:?}");
-    let mut answered = d.piece(300, &Given::caller(ALICE, LINE_LISTEN));
-    for _ in 0..32 {
-        if answered.outcome != Some(Outcome::Pending) {
-            break;
-        }
-        d.turn();
-        answered = d.piece(300, &Given::caller(ALICE, LINE_LISTEN));
-    }
-    assert!(
-        answered.text().contains("acknowledged"),
-        "the line subscription is acknowledged: {} {}",
-        answered.status,
-        answered.text()
-    );
-    let subscribed: Vec<String> = seen()
-        .iter()
-        .filter(|s| s.body["method"] == json!("resources/subscribe"))
-        .map(|s| s.body["params"]["uri"].as_str().unwrap_or("").to_string())
-        .collect();
-    assert_eq!(
-        subscribed,
-        ["file:///readme"],
-        "the declaring member is asked for the uri's updates"
     );
 }
 

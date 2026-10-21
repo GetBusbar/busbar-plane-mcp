@@ -19,18 +19,9 @@
 //!   after which the session is done. A new generation (`refresh`) names them at once ([`wake_all`]).
 //! - Every frame is one `message` event (`event: message`, `data: <json>`), as predev wrote them.
 //! - THE SESSION'S ONE LINE carries the request's fee unit, reported with the acknowledgement.
-//! - A `resourceSubscriptions` uri DELIVERS: before the acknowledgement, each accepted uri no
-//!   watcher of the instance holds yet has busbar send `resources/subscribe` to the member that
-//!   declares it ([`subscribe_upstream`]); a uri its member does not take is narrowed out of the
-//!   acknowledgement. When the last watcher of a uri goes, its member is owed
-//!   `resources/unsubscribe` ([`super::door_sessions::release`]).
 
-use std::task::Poll;
-
-use super::{
-    ask_entitlements, door_sessions, write, CallUnit, Held, McpDoor, Pending, Written, MAX_UNITS,
-};
-use crate::catalogue::{Catalogue, Lookup};
+use super::{ask_entitlements, write, CallUnit, Held, McpDoor, Pending, Written, MAX_UNITS};
+use crate::catalogue::Lookup;
 use crate::framing::{events, CACHE_CONTROL, CONTENT_TYPE, EVENT_STREAM, NO_STORE};
 use crate::subscribe::{Listen, Standing, Step as ListenStep, KEEPALIVE_NS, MAX_LIFETIME_NS};
 use crate::tool_arrival::Disposition;
@@ -40,7 +31,7 @@ use busbar_contract::abi::plane::{
     OnPieceIn, OnPieceOut, PlaneDriveIn, PlaneDriveOut, UnitCount, FROM_CALLER, FROM_KERNEL,
     PIECE_LAST, UNITS_REPORTED,
 };
-use busbar_contract::abi::sdk::{Instance, Lent, Out, Services};
+use busbar_contract::abi::sdk::{Lent, Out, Services};
 use serde_json::Value;
 
 /// How often the instance's tick steps its held subscriptions (predev re-read the generation and
@@ -65,10 +56,6 @@ const STATUS_QUOTA: u32 = 429;
 /// The status a `subscriptions/listen` is refused with when the host's clock cannot be read.
 const STATUS_CLOCK: u32 = 503;
 
-/// The status a `subscriptions/listen` is refused with when it asked only for resources and no
-/// member that declares them took busbar's subscription.
-pub(super) const STATUS_UNTAKEN: u32 = 502;
-
 /// One held subscription, by its session's stream.
 #[derive(Debug, Clone)]
 pub(super) struct Listening {
@@ -90,64 +77,6 @@ pub(super) struct Listening {
     /// The upstream announcements `(server, uri)` heard since its last step: its next step relays
     /// those it watches, under the grant it re-asks that frame.
     updates: Vec<(String, String)>,
-    /// The members busbar subscribes to for its uris before it is acknowledged, as
-    /// `(server, uri)`, one exchange at a time on its caller-side ticket (empty once it is).
-    subscribing: Vec<(String, String)>,
-    /// How many of those exchanges it made: each numbers its connector handles apart.
-    exchanged: u32,
-}
-
-/// The uris `listen` watches: its accepted `resourceSubscriptions`.
-pub(super) fn uris(listen: &Listen) -> Vec<String> {
-    listen.accepted().resources.clone().unwrap_or_default()
-}
-
-/// Whether `listen` watches `uri`.
-pub(super) fn watching(listen: &Listen, uri: &str) -> bool {
-    listen
-        .accepted()
-        .resources
-        .as_ref()
-        .is_some_and(|r| r.iter().any(|u| u == uri))
-}
-
-/// Whether a subscription held on the HTTP carrier watches `uri`.
-pub(super) fn watches(plane: &McpDoor, uri: &str) -> bool {
-    plane
-        .listens
-        .with_all(|m| m.values().any(|l| watching(&l.listen, uri)))
-}
-
-/// THE FIRST WATCHERS: the uris `listen` accepted that nothing of the instance watches yet, each
-/// with the member that declares it under the caller's grants `admit` (as the narrowing resolved
-/// it): those busbar subscribes to upstream before the acknowledgement.
-pub(super) fn unwatched(
-    plane: &McpDoor,
-    listen: &Listen,
-    catalogue: &Catalogue,
-    admit: &impl Fn(&str, &str) -> bool,
-) -> Vec<(String, String)> {
-    uris(listen)
-        .into_iter()
-        .filter(|uri| !door_sessions::watched(plane, uri))
-        .filter_map(|uri| match catalogue.resource_by_uri(admit, &uri) {
-            Lookup::One(entry) => Some((entry.server.clone(), uri)),
-            _ => None,
-        })
-        .collect()
-}
-
-/// The refusal of subscription `id` that asked only for resources no member took busbar's
-/// subscription to: it has nothing to deliver.
-pub(super) fn untaken(id: Value) -> Vec<u8> {
-    let body = busbar_contract::jsonrpc::error_body(
-        id,
-        crate::codec::CODE_INTERNAL,
-        "no MCP server that declares the uris in `params.notifications.resourceSubscriptions` \
-         took busbar's subscription to them, so this subscription has nothing to deliver",
-        None,
-    );
-    serde_json::to_vec(&body).unwrap_or_default()
 }
 
 /// The most announcements one held subscription keeps between two of its steps (the oldest go).
@@ -214,7 +143,6 @@ pub(super) fn frame(bytes: Vec<u8>, done: bool, headed: bool) -> Pending {
 /// ONE PIECE OF A LISTEN SESSION (`stream != 0`): the caller's piece opens it, a collection steps
 /// it, and the caller's side ending ends it. A re-call after `more = 1` writes what is pending.
 pub(super) fn piece(
-    instance: &Instance<'_, McpDoor>,
     plane: &McpDoor,
     input: Lent<'_, OnPieceIn>,
     out: &mut Out<'_, OnPieceOut>,
@@ -235,31 +163,30 @@ pub(super) fn piece(
         let unit = unit?;
         unit.ticket = Some(ticket);
         if unit.pending.is_some() {
-            return Some(Poll::Ready(true));
+            return Some(true);
         }
         match given.from {
             // The caller went away: the session ends with nothing more to say.
             FROM_CALLER if given.flags & PIECE_LAST != 0 => {
                 unit.pending = Some(frame(Vec::new(), true, true));
-                Some(Poll::Ready(true))
+                Some(true)
             }
-            FROM_CALLER => open(instance, plane, ticket, principal, unit),
+            FROM_CALLER => open(plane, ticket, principal, unit),
             FROM_KERNEL if given.attempt_no == 0 => {
                 if plane.listens.with(&key, |l| l.is_none()) {
-                    return Some(Poll::Ready(false));
+                    return Some(false);
                 }
-                step(plane, ticket, principal, unit).map(Poll::Ready)
+                step(plane, ticket, principal, unit)
             }
             // A listen session dials nothing: an ATTEMPT carries nothing.
-            FROM_KERNEL => Some(Poll::Ready(false)),
+            FROM_KERNEL => Some(false),
             _ => None,
         }
     });
     match step {
         None => Outcome::Refused,
-        Some(Poll::Pending) => Outcome::Pending,
-        Some(Poll::Ready(false)) => Outcome::Ready,
-        Some(Poll::Ready(true)) => {
+        Some(false) => Outcome::Ready,
+        Some(true) => {
             let written = plane.units.with(&key, |unit| {
                 let pending = unit?.pending.as_mut()?;
                 Some(write(&input, out, pending))
@@ -277,10 +204,7 @@ pub(super) fn piece(
                 }
                 Some(Ok(Written::Done)) => {
                     plane.units.remove(&key);
-                    // Its uris are released: what their last watcher owes is carried by a unit.
-                    if let Some(l) = plane.listens.remove(&key) {
-                        door_sessions::release(plane, uris(&l.listen));
-                    }
+                    plane.listens.remove(&key);
                     Outcome::Ready
                 }
             }
@@ -288,39 +212,20 @@ pub(super) fn piece(
     }
 }
 
-/// OPEN the subscription the unit's request asks for: refused `400` in its own words, or held,
-/// subscribed upstream for the uris no watcher holds yet ([`subscribe_upstream`], PENDING while an
-/// exchange does), and stepped once (the acknowledgement). `None` for a unit that is not a
-/// `subscriptions/listen`.
-fn open(
-    instance: &Instance<'_, McpDoor>,
-    plane: &McpDoor,
-    ticket: Ticket,
-    principal: &str,
-    unit: &mut CallUnit,
-) -> Option<Poll<bool>> {
+/// OPEN the subscription the unit's request asks for: refused `400` in its own words, or held and
+/// stepped once (the acknowledgement). `None` for a unit that is not a `subscriptions/listen`.
+fn open(plane: &McpDoor, ticket: Ticket, principal: &str, unit: &mut CallUnit) -> Option<bool> {
     let Disposition::Request { row, id } = &unit.disposition else {
         return None;
     };
     if row.op != crate::tool_ops::OP_SUBSCRIPTIONS_LISTEN {
         return None;
     }
+    if plane.listens.with(&unit.key, |l| l.is_some()) {
+        return Some(false);
+    }
     let id = id.clone();
     let held = plane.current().or_else(|| unit.held.clone())?;
-    // AN OPEN UNDER WAY goes on with its subscriptions upstream; one held and acknowledged has
-    // nothing more to open.
-    match plane
-        .listens
-        .with(&unit.key, |l| l.map(|l| !l.subscribing.is_empty()))
-    {
-        Some(true) => {
-            return Some(subscribe_upstream(
-                instance, plane, ticket, principal, unit, &held,
-            ))
-        }
-        Some(false) => return Some(Poll::Ready(false)),
-        None => {}
-    }
     entitled_afresh(plane, ticket, unit, &held);
     // A subscription opened at a clock read that failed is refused, never opened at the epoch
     // (row 159 finding P-M4): its lifetime and keepalive are judged against this reading.
@@ -333,7 +238,7 @@ fn open(
             data: None,
         };
         unit.pending = Some(Pending::answer(refusal.status, refusal.body(), None, &[]));
-        return Some(Poll::Ready(true));
+        return Some(true);
     };
     let opened = {
         let entitled = &unit.entitled;
@@ -346,18 +251,14 @@ fn open(
         Listen::open(unit.params.as_ref(), id, now, |uri| {
             matches!(held.catalogue.resource_by_uri(&admit, uri), Lookup::One(_))
         })
-        .map(|listen| {
-            let first = unwatched(plane, &listen, &held.catalogue, &admit);
-            (listen, first)
-        })
     };
     match opened {
         Err(refusal) => {
             let body = serde_json::to_vec(&refusal).unwrap_or_default();
             unit.pending = Some(Pending::answer(STATUS_INVALID, body, None, &[]));
-            Some(Poll::Ready(true))
+            Some(true)
         }
-        Ok((listen, first)) => {
+        Ok(listen) => {
             let id = listen.id.clone();
             let listening = Listening {
                 owner: principal.to_string(),
@@ -367,8 +268,6 @@ fn open(
                 due: false,
                 headed: false,
                 updates: Vec::new(),
-                subscribing: Vec::new(),
-                exchanged: 0,
             };
             // THE QUOTA REFUSES THE NEW STREAM, never evicts a held one: this caller at its own
             // bound, or the instance at its total, is told so.
@@ -384,73 +283,11 @@ fn open(
             if !admitted {
                 let refusal = quota_refusal(id);
                 unit.pending = Some(Pending::answer(refusal.status, refusal.body(), None, &[]));
-                return Some(Poll::Ready(true));
+                return Some(true);
             }
-            // A uri whose last watcher went while its unsubscribe was still owed keeps busbar's
-            // subscription: nothing is sent for it.
-            let owing: Vec<(String, String)> = first
-                .into_iter()
-                .filter(|(_, uri)| !door_sessions::unowe(plane, uri))
-                .collect();
-            plane.listens.with(&unit.key, |l| {
-                if let Some(l) = l {
-                    l.subscribing = owing;
-                }
-            });
-            Some(subscribe_upstream(
-                instance, plane, ticket, principal, unit, &held,
-            ))
+            step(plane, ticket, principal, unit)
         }
     }
-}
-
-/// BUSBAR'S SUBSCRIPTIONS UPSTREAM for the subscription the unit is opening: for each
-/// `(server, uri)` it still owes, `resources/subscribe` sent to that member over the plane's own
-/// reach ([`door_sessions::upstream`]) on the unit's ticket, one exchange at a time; a uri its
-/// member does not take is narrowed out of the acknowledgement, never acknowledged as watched. Then
-/// the acknowledgement, or, with nothing left to deliver, the refusal ([`untaken`]). PENDING while
-/// an exchange does.
-fn subscribe_upstream(
-    instance: &Instance<'_, McpDoor>,
-    plane: &McpDoor,
-    ticket: Ticket,
-    principal: &str,
-    unit: &mut CallUnit,
-    held: &Held,
-) -> Poll<bool> {
-    let key = unit.key;
-    loop {
-        let next = plane.listens.with(&key, |l| {
-            let l = l?;
-            Some((l.subscribing.first().cloned()?, l.exchanged))
-        });
-        let Some(((server, uri), exchanged)) = next else {
-            break;
-        };
-        let verb = crate::client::verb::UpstreamVerb::ResourcesSubscribe { uri: uri.clone() };
-        let base = door_sessions::subscribe_base(exchanged);
-        let slot = &mut unit.negotiating;
-        let Poll::Ready(taken) =
-            door_sessions::upstream(instance, plane, slot, base, held, &server, &verb)
-        else {
-            return Poll::Pending;
-        };
-        let delivers = plane.listens.with(&key, |l| {
-            let l = l?;
-            l.subscribing.remove(0);
-            l.exchanged = l.exchanged.saturating_add(1);
-            Some(taken.is_ok() || l.listen.drop_resource(&uri))
-        });
-        if delivers == Some(false) {
-            if let Some(l) = plane.listens.remove(&key) {
-                let id = l.listen.id.clone();
-                door_sessions::release(plane, uris(&l.listen));
-                unit.pending = Some(Pending::answer(STATUS_UNTAKEN, untaken(id), None, &[]));
-                return Poll::Ready(true);
-            }
-        }
-    }
-    Poll::Ready(step(plane, ticket, principal, unit).unwrap_or(false))
 }
 
 /// THE QUOTA'S REFUSAL of subscription `id`, on either carrier: its caller holds the most open
@@ -471,13 +308,6 @@ pub(super) fn quota_refusal(id: Value) -> crate::tool_arrival::Refusal {
 /// ONE STEP of the unit's subscription over the live catalogue, its permission re-asked: what it
 /// writes, if anything. `Some(false)` when it has nothing to say.
 fn step(plane: &McpDoor, ticket: Ticket, principal: &str, unit: &mut CallUnit) -> Option<bool> {
-    // One still subscribing upstream says nothing yet: its acknowledgement comes first.
-    if plane
-        .listens
-        .with(&unit.key, |l| l.is_some_and(|l| !l.subscribing.is_empty()))
-    {
-        return Some(false);
-    }
     let held = plane.current().or_else(|| unit.held.clone())?;
     entitled_afresh(plane, ticket, unit, &held);
     // A step whose clock read failed says nothing: the next one reads it again.
@@ -525,7 +355,7 @@ fn step(plane: &McpDoor, ticket: Ticket, principal: &str, unit: &mut CallUnit) -
 pub(super) fn tick(plane: &McpDoor, driver: Ticket, now_ns: u64) -> u64 {
     plane.driver.insert((), (driver, now_ns));
     let stale = MAX_LIFETIME_NS.saturating_add(KEEPALIVE_NS);
-    let (gone, released, any) = plane.listens.with_all(|m| {
+    let (gone, any) = plane.listens.with_all(|m| {
         let mut gone = Vec::new();
         for (key, l) in m.iter_mut() {
             if l.first_tick == 0 {
@@ -536,18 +366,14 @@ pub(super) fn tick(plane: &McpDoor, driver: Ticket, now_ns: u64) -> u64 {
             }
             l.due = true;
         }
-        let mut released = Vec::new();
         for key in &gone {
-            if let Some(l) = m.remove(key) {
-                released.extend(uris(&l.listen));
-            }
+            m.remove(key);
         }
-        (gone, released, !m.is_empty())
+        (gone, !m.is_empty())
     });
     for key in gone {
         plane.units.remove(&key);
     }
-    door_sessions::release(plane, released);
     // A held 2024-11-05 stream is read on the driver ticket too.
     if any || super::door_legacy::any(plane) {
         wake_driver(plane);
@@ -575,10 +401,9 @@ pub(super) fn drive(
     input: Lent<'_, PlaneDriveIn>,
     out: &mut Out<'_, PlaneDriveOut>,
 ) -> Outcome {
-    // One still subscribing upstream is not collected: its own piece pends on the exchange.
     let mut due: Vec<u64> = plane.listens.with_all(|m| {
         m.iter()
-            .filter(|(_, l)| l.due && l.subscribing.is_empty())
+            .filter(|(_, l)| l.due)
             .map(|(stream, _)| *stream)
             .collect()
     });
@@ -605,20 +430,11 @@ pub(super) fn drive(
     Outcome::Ready
 }
 
-/// The op on `ticket` was cancelled: the subscription it carried is dropped, its uris released.
+/// The op on `ticket` was cancelled: the subscription it carried is dropped.
 pub(super) fn cancelled(plane: &McpDoor, ticket: Ticket) {
-    let released: Vec<String> = plane.listens.with_all(|m| {
-        let gone: Vec<u64> = m
-            .iter()
-            .filter(|(_, l)| l.ticket == ticket)
-            .map(|(key, _)| *key)
-            .collect();
-        gone.iter()
-            .filter_map(|key| m.remove(key))
-            .flat_map(|l| uris(&l.listen))
-            .collect()
-    });
-    door_sessions::release(plane, released);
+    plane
+        .listens
+        .with_all(|m| m.retain(|_, l| l.ticket != ticket));
 }
 
 /// Name the instance's driver ticket (as its last tick handed it): a held subscription owes a step.

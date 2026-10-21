@@ -245,19 +245,6 @@ impl Listen {
         &self.accepted
     }
 
-    /// `uri` NARROWED OUT of the accepted `resourceSubscriptions` before the acknowledgement (the
-    /// member that declares it did not take busbar's subscription, so nothing could be delivered for
-    /// it): `false` when the subscription is left opting in to nothing deliverable.
-    pub fn drop_resource(&mut self, uri: &str) -> bool {
-        if let Some(uris) = self.accepted.resources.as_mut() {
-            uris.retain(|u| u != uri);
-            if uris.is_empty() {
-                self.accepted.resources = None;
-            }
-        }
-        self.accepted.lists.iter().any(|on| *on) || self.accepted.resources.is_some()
-    }
-
     /// One notification tagged with this subscription.
     fn notification(&self, method: &str, extra: Value) -> Value {
         let mut params = match extra {
