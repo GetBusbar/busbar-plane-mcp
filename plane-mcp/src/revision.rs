@@ -14,8 +14,9 @@
 //! | `2024-11-05` | `initialize`                    | yes      | none           | an event stream that names a message address |
 //!
 //! `2025-03-26` is not implemented: it is the only revision that allows batched bodies, and a
-//! client that asks for it is offered `2025-06-18` in the `initialize` answer, which the spec's
-//! negotiation rule permits (the client disconnects if it cannot speak what it is offered).
+//! client that asks for it (or for any revision this plane does not implement) is offered the
+//! latest session revision, `2025-11-25`, in the `initialize` answer ([`negotiate`]), which the
+//! spec's negotiation rule permits (the client disconnects if it cannot speak what it is offered).
 //!
 //! OWNER RULING 2026-09-29: 1.6.0 interoperates with all four, in both directions. The revision
 //! negotiation below is the spec's own: the client names the revision it wants in `initialize`; a
@@ -51,10 +52,6 @@ pub const ALL: &[Revision] = &[
     Revision::R2025_06_18,
     Revision::R2024_11_05,
 ];
-
-/// The revision a session request is read as when it carries no version header and no session
-/// names one: the spec's stated default for a server that cannot otherwise tell.
-pub const HEADERLESS_DEFAULT: &str = "2025-03-26";
 
 impl Revision {
     /// The revision's wire string.
@@ -98,6 +95,7 @@ impl Revision {
 
     /// Whether a disconnected server stream may be resumed with `Last-Event-ID`.
     #[must_use]
+    #[cfg(test)]
     pub const fn resumable(self) -> bool {
         matches!(self, Self::R2025_06_18 | Self::R2025_11_25)
     }
@@ -167,6 +165,7 @@ pub fn sessionless_get(version_header: Option<&str>) -> SessionlessGet {
 /// THE CLIENT LADDER: the order in which busbar, as a client, tries to open a conversation with an
 /// upstream whose revision it does not yet know.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(test)]
 pub enum ClientStep {
     /// A stateless `2026-07-28` request.
     Stateless,
@@ -193,6 +192,7 @@ pub enum StepOutcome {
 /// The next rung after `step` observed `outcome`. `None` means stop: either the rung answered, or
 /// there is nothing left to try, or the failure says nothing about the revision.
 #[must_use]
+#[cfg(test)]
 pub fn next_step(step: ClientStep, outcome: StepOutcome) -> Option<ClientStep> {
     match (step, outcome) {
         (_, StepOutcome::Answered | StepOutcome::Unreachable) => None,

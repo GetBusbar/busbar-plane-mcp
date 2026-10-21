@@ -526,7 +526,7 @@ fn every_ask_list_is_validated_and_the_three_legal_methods_still_parse() {
 /// Whether `stated` is the tail string built from `word` (the tail's strings are constants of this
 /// crate, so a word is found by address and length, as `tests/door.rs` reads them).
 fn spells(stated: AbiStr, word: &str) -> bool {
-    stated.ptr == word.as_ptr() && stated.len == word.len()
+    stated.ptr() == word.as_ptr() && stated.len() == word.len()
 }
 
 /// THE WORDS THE ROOT BATTERY READS OFF THE STATEMENT ARE THE GRAMMAR'S: the declaring section is
@@ -557,7 +557,7 @@ fn the_statement_names_the_grammars_section_noun_and_endpoint() {
             crate::door::ENDPOINT_SECTION
         )
     );
-    assert_eq!(crate::door::TAIL.dialects_len, 1, "one wire dialect");
+    assert_eq!(crate::door::TAIL.dialects_len(), 1, "one wire dialect");
 }
 
 /// RED (ARCHITECT timeout ruling): a server's `timeout:` is the kernel's reserved per-entry key, and
@@ -596,5 +596,188 @@ fn a_servers_timeout_bounds_the_doors_own_fetches_and_the_kernel_owns_its_judgem
     assert!(
         door_validate(&json!({ "zero": server(json!({ "timeout": "0s" })) })).is_ok(),
         "the zero timeout is the kernel's to refuse, not the door's"
+    );
+}
+
+/// EVERY CAPABILITY'S PUBLISHED NAME IS IN THE ONE SET. A prompt, a resource and a template are
+/// published under `{server}_{name}` and admitted by an `mcp_tool:` grant on that name, exactly as a
+/// tool is: a tool published as `bar_greet` on `foo` and the prompt `greet` on `bar` would make one
+/// `mcp_tool: bar_greet` grant admit both. RED on a check that walked `tools_allow` alone.
+#[test]
+fn a_tool_override_colliding_with_another_servers_prompt_refuses_the_config() {
+    let section = json!({
+        "foo": {
+            "url": "https://foo/",
+            "pin": { "mechanism": "unpinned" },
+            "tools_allow": { "hello": { "publish_as": "bar_greet" } }
+        },
+        "bar": {
+            "url": "https://bar/",
+            "pin": { "mechanism": "unpinned" },
+            "prompts_allow": { "greet": { "template": "hi" } }
+        }
+    });
+    let cfg = grammar(section.clone()).expect("each server is well-formed on its own");
+    let err = validate_published_names(&cfg)
+        .expect_err("one published name may not mean a tool and a prompt");
+    assert!(err.contains("published as `bar_greet`"), "{err}");
+    assert!(
+        err.contains("tools.foo.tools_allow.hello.publish_as"),
+        "{err}"
+    );
+    assert!(
+        err.contains("the default `{server}_{tool}` name of `tools.bar.prompts_allow.greet`"),
+        "{err}"
+    );
+    assert_eq!(
+        door_validate(&section).expect_err("the door refuses it"),
+        err,
+        "the door's validate over the whole section refuses it in the same words"
+    );
+}
+
+/// The same set holds resources and resource templates: a tool override shadowing another
+/// server's resource URI, or its template, is refused in turn.
+#[test]
+fn a_tool_override_colliding_with_a_resource_or_a_template_refuses_the_config() {
+    for (family, key, published) in [
+        ("resources_allow", "file:///readme", "bar_file:///readme"),
+        (
+            "resource_templates_allow",
+            "file:///logs/{date}",
+            "bar_file:///logs/{date}",
+        ),
+    ] {
+        let mut bar = json!({ "url": "https://bar/", "pin": { "mechanism": "unpinned" } });
+        bar[family] = json!({ key: { "text": "log {date}" } });
+        let cfg = grammar(json!({
+            "foo": {
+                "url": "https://foo/",
+                "pin": { "mechanism": "unpinned" },
+                "tools_allow": { "hello": { "publish_as": published } }
+            },
+            "bar": bar
+        }))
+        .expect("each server is well-formed on its own");
+        let err = validate_published_names(&cfg)
+            .expect_err("one published name may not mean a tool and a resource");
+        assert!(
+            err.contains(&format!("`tools.bar.{family}.{key}`")),
+            "{err}"
+        );
+    }
+}
+
+/// Distinct capabilities on distinct names still boot: the widened set refuses collisions only.
+#[test]
+fn distinct_capability_names_across_families_still_validate() {
+    let cfg = grammar(json!({
+        "fs": {
+            "url": "https://fs/",
+            "pin": { "mechanism": "unpinned" },
+            "tools_allow": { "read_file": {} },
+            "prompts_allow": { "summarise": { "template": "hi" } },
+            "resources_allow": { "file:///readme": { "text": "hi" } },
+            "resource_templates_allow": { "file:///logs/{date}": { "text": "log {date}" } }
+        }
+    }))
+    .expect("a well-formed server");
+    validate_published_names(&cfg).expect("four names, four capabilities");
+}
+
+/// EVERY PIN OF THE FAR END'S KEY IS A PEER-KEY PIN. The host seals a registration's pin into its
+/// member route only under a mechanism declared `peer_key`, and the connector enforces only what is
+/// sealed: RED on the grammar that declared `cert_spki` and `mtls` `peer_key: false`.
+/// `pinned_pubkey` stays a root whose key is a manifest issuer's (predev's posture).
+#[test]
+fn every_far_end_pin_mechanism_is_declared_a_peer_key_pin() {
+    let roots: Vec<&str> = TRUST_KEYS[0]
+        .mechanisms
+        .iter()
+        .filter(|m| m.root)
+        .map(|m| m.token)
+        .collect();
+    assert_eq!(roots, ["pinned_pubkey", "cert_spki", "mtls"]);
+    let peer: Vec<&str> = TRUST_KEYS[0]
+        .mechanisms
+        .iter()
+        .filter(|m| m.peer_key)
+        .map(|m| m.token)
+        .collect();
+    assert_eq!(
+        peer,
+        ["cert_spki", "mtls"],
+        "the two pins of the far end's key are sealed and enforced; a manifest issuer's key is not \
+         the far end's"
+    );
+}
+
+/// `mtls` NEEDS A CLIENT IDENTITY: a registration that says its server is behind mutual TLS and
+/// names nothing to present is refused at boot, not at the server's handshake.
+#[test]
+fn mtls_without_a_client_identity_is_refused_and_with_one_reads() {
+    let identity = json!({
+        "cert": { "env": "MCP_CLIENT_CERT" },
+        "key": { "env": "MCP_CLIENT_KEY" }
+    });
+    let bare = json!({
+        "fs": { "url": "https://fs/", "pin": { "mechanism": "mtls", "key": "AAAA" } }
+    });
+    let err = grammar(bare).expect_err("mtls with nothing to present");
+    assert!(
+        err.contains("`pin.mechanism: mtls` needs `client_identity:`"),
+        "{err}"
+    );
+
+    let cfg = grammar(json!({
+        "fs": {
+            "url": "https://fs/",
+            "pin": { "mechanism": "mtls", "key": "AAAA" },
+            "client_identity": identity
+        }
+    }))
+    .expect("mtls with an identity reads");
+    assert!(
+        cfg.servers["fs"].client_identity.is_some(),
+        "the identity is read"
+    );
+
+    // Optional under the other roots: a server may ask for a client certificate whatever its pin.
+    grammar(json!({
+        "fs": {
+            "url": "https://fs/",
+            "pin": { "mechanism": "cert_spki", "key": "AAAA" },
+            "client_identity": identity
+        }
+    }))
+    .expect("an identity beside a cert_spki pin reads");
+}
+
+/// A client certificate is a TLS-handshake object: refused where there is no handshake, on an
+/// `http://` url and on `transport: stdio`.
+#[test]
+fn a_client_identity_with_no_handshake_to_present_it_in_is_refused() {
+    let identity = json!({ "cert": { "env": "C" }, "key": { "env": "K" } });
+    let err = grammar(json!({
+        "fs": {
+            "url": "http://fs.internal/",
+            "pin": { "mechanism": "unpinned" },
+            "client_identity": identity
+        }
+    }))
+    .expect_err("an identity over plaintext");
+    assert!(err.contains("`url:` is `http://`"), "{err}");
+    let err = grammar(json!({
+        "s": {
+            "pin": { "mechanism": "unpinned" },
+            "transport": "stdio",
+            "command": ABS_PROGRAM,
+            "client_identity": identity
+        }
+    }))
+    .expect_err("an identity on a pipe");
+    assert!(
+        err.contains("`transport: stdio` makes no handshake"),
+        "{err}"
     );
 }

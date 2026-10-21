@@ -2,28 +2,21 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE DOOR'S OWN EXCHANGES WITH A STDIO CHILD (ARCHITECT round 5 Q-L3B-STDIO-UPSTREAM (A)), driven
-//! over a host connector table that stands in for the host's one long-lived program per member: a
-//! scripted child every lease shares, whose messages reach every open lease, and whose generation
-//! the test moves (a crash and a restart).
-
-#![allow(unsafe_code)]
+//! over a connector that stands in for the host's one long-lived program per member: a scripted
+//! child every lease shares, whose messages reach every open lease, and whose generation the test
+//! moves (a crash and a restart). The stand-in is the exchange's own seam (`ProgramConn`), a plain
+//! Rust value, so this module needs no raw ABI call.
 
 use std::collections::{HashMap, VecDeque};
-use std::os::raw::c_void;
 use std::sync::Mutex;
 use std::task::Poll;
 
-use busbar_contract::abi::host::conn::connector::{
-    ConnectorSlots, EstablishIn, IoIn, ReplyIn, ReplyPiece, StreamIn, REPLY_BODY, REPLY_HEAD,
-    SERVICES,
-};
-use busbar_contract::abi::host::service::ServiceOut;
-use busbar_contract::abi::mechanism::call::{Outcome, RawOutcome};
-use busbar_contract::abi::mechanism::ticket::{HostCtx, HostTables, Ticket};
-use busbar_contract::abi::sdk::conn::Host;
+use crate::client::jsonrpc::ServerRequestGrants;
+use crate::tool_program::{list_id, AskOwner, Exchanged, Peer, ProgramConn, ProgramExchange};
+use busbar_contract::abi::host::conn::connector::{ReplyPiece, REPLY_BODY, REPLY_HEAD};
+use busbar_contract::abi::mechanism::ticket::Ticket;
+use busbar_contract::abi::sdk::conn::Replied;
 use busbar_contract::abi::transport::FrameSpan;
-use busbar_plane_mcp::client::jsonrpc::ServerRequestGrants;
-use busbar_plane_mcp::tool_program::{list_id, AskOwner, Exchanged, Peer, ProgramExchange};
 use serde_json::{json, Value};
 
 /// THE STAND-IN CHILD: its generation, every message it received, the messages each open lease has
@@ -73,124 +66,82 @@ fn with<R>(f: impl FnOnce(&mut Child) -> R) -> R {
 /// One test at a time: the stand-in child is the process's.
 static SERIAL: Mutex<()> = Mutex::new(());
 
-fn answer(out: *mut ServiceOut, outcome: Outcome, value: u64, len: u64) -> RawOutcome {
-    // SAFETY: the SDK's `out`, live for the call.
-    unsafe {
-        out.write(ServiceOut {
-            size: std::mem::size_of::<ServiceOut>() as u32,
-            outcome: RawOutcome::of(outcome),
-            value,
-            len,
-            ..ServiceOut::ZERO
+/// THE HOST'S CONNECTOR, standing in for the member's one long-lived program: every lease reads
+/// the stand-in child's messages.
+struct ChildConn;
+
+impl ProgramConn for ChildConn {
+    fn establish(&self, _: Ticket, _: u32, _: u32, _: &str, _: u32) -> Poll<Result<u64, String>> {
+        let lease = with(|c| {
+            c.next += 1;
+            let id = c.next;
+            c.leases.insert(id, (true, VecDeque::new()));
+            id
         });
+        Poll::Ready(Ok(lease))
     }
-    RawOutcome::of(outcome)
-}
 
-extern "C" fn establish(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
-    // SAFETY: the SDK hands an `EstablishIn`.
-    let _ = unsafe { input.cast::<EstablishIn>().read() };
-    let lease = with(|c| {
-        c.next += 1;
-        let id = c.next;
-        c.leases.insert(id, (true, VecDeque::new()));
-        id
-    });
-    answer(out, Outcome::Ready, lease, 0)
-}
-
-extern "C" fn write(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
-    // SAFETY: the SDK hands an `IoIn` over its live bytes.
-    let i = unsafe { input.cast::<IoIn>().read() };
-    let bytes = unsafe { std::slice::from_raw_parts(i.buf, i.len) }.to_vec();
-    with(|c| {
-        let message: Value = serde_json::from_slice(&bytes).expect("one JSON message");
-        c.received.push(message.clone());
-        for said in c.answer(&message) {
-            let said = serde_json::to_vec(&said).unwrap();
-            for (_, inbox) in c.leases.values_mut() {
-                inbox.push_back(said.clone());
+    fn read_reply(
+        &self,
+        _: Ticket,
+        _: u32,
+        stream: u64,
+        buf: &mut [u8],
+        slot: &mut ReplyPiece,
+    ) -> Poll<Result<Replied, String>> {
+        let got = with(|c| {
+            let generation = c.generation;
+            let (headed, inbox) = c.leases.get_mut(&stream)?;
+            if *headed {
+                *headed = false;
+                return Some((
+                    REPLY_HEAD,
+                    format!("generation: {generation}\r\n").into_bytes(),
+                ));
             }
-        }
-    });
-    answer(out, Outcome::Ready, 0, i.len as u64)
-}
-
-extern "C" fn read_reply(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
-    // SAFETY: the SDK hands a `ReplyIn` over its live buffer and descriptor slot.
-    let i = unsafe { input.cast::<ReplyIn>().read() };
-    let buf = unsafe { std::slice::from_raw_parts_mut(i.buf, i.len) };
-    let got = with(|c| {
-        let generation = c.generation;
-        let (headed, inbox) = c.leases.get_mut(&i.stream)?;
-        if *headed {
-            *headed = false;
-            return Some((
-                REPLY_HEAD,
-                format!("generation: {generation}\r\n").into_bytes(),
-            ));
-        }
-        inbox.pop_front().map(|b| (REPLY_BODY, b))
-    });
-    let Some((kind, bytes)) = got else {
-        return answer(out, Outcome::Pending, 0, 0);
-    };
-    buf[..bytes.len()].copy_from_slice(&bytes);
-    let fields = if kind == REPLY_HEAD {
-        FrameSpan {
-            offset: 0,
-            len: bytes.len() as u64,
-        }
-    } else {
-        FrameSpan::default()
-    };
-    // SAFETY: the SDK's descriptor slot.
-    unsafe {
-        i.piece.write(ReplyPiece {
+            inbox.pop_front().map(|b| (REPLY_BODY, b))
+        });
+        let Some((kind, bytes)) = got else {
+            return Poll::Pending;
+        };
+        buf[..bytes.len()].copy_from_slice(&bytes);
+        let fields = if kind == REPLY_HEAD {
+            FrameSpan {
+                offset: 0,
+                len: bytes.len() as u64,
+            }
+        } else {
+            FrameSpan::default()
+        };
+        *slot = ReplyPiece {
             kind,
             fields,
             ..ReplyPiece::default()
-        });
+        };
+        Poll::Ready(Ok(Replied {
+            piece: *slot,
+            len: bytes.len(),
+        }))
     }
-    answer(out, Outcome::Ready, 0, bytes.len() as u64)
-}
 
-extern "C" fn close(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
-    // SAFETY: the SDK hands a `StreamIn`.
-    let i = unsafe { input.cast::<StreamIn>().read() };
-    with(|c| c.leases.remove(&i.stream));
-    answer(out, Outcome::Ready, 0, 0)
-}
+    fn write(&self, _: Ticket, _: u32, _: u64, bytes: &[u8]) -> Poll<Result<usize, String>> {
+        with(|c| {
+            let message: Value = serde_json::from_slice(bytes).expect("one JSON message");
+            c.received.push(message.clone());
+            for said in c.answer(&message) {
+                let said = serde_json::to_vec(&said).unwrap();
+                for (_, inbox) in c.leases.values_mut() {
+                    inbox.push_back(said.clone());
+                }
+            }
+        });
+        Poll::Ready(Ok(bytes.len()))
+    }
 
-static SLOTS: ConnectorSlots = ConnectorSlots {
-    size: std::mem::size_of::<ConnectorSlots>() as u32,
-    slots: SERVICES,
-    establish: Some(establish),
-    reject_endpoint: None,
-    side_stream: None,
-    read: None,
-    write: Some(write),
-    upgrade_secure: None,
-    facts: None,
-    checkout: None,
-    checkin: None,
-    close: Some(close),
-    random: None,
-    identity: None,
-    read_reply: Some(read_reply),
-    write_request: None,
-};
-
-fn host() -> Host {
-    Host::of(&HostTables {
-        size: std::mem::size_of::<HostTables>() as u32,
-        _reserved: 0,
-        ctx: HostCtx::NONE,
-        wake: None,
-        conns: &SLOTS,
-        services: std::ptr::null(),
-        io: std::ptr::null(),
-    })
+    fn close(&self, _: Ticket, _: u32, stream: u64) -> Poll<()> {
+        with(|c| c.leases.remove(&stream));
+        Poll::Ready(())
+    }
 }
 
 /// The door's record, as these tests keep it: the generation it greeted, what it answered.
@@ -228,11 +179,11 @@ impl Peer for Door {
 
 /// A `tools/list` exchange with the member, under `id`, driven to its end.
 fn list(door: &mut Door, id: u64, ticket: u32) -> Exchanged {
-    let host = host();
-    let request = busbar_plane_mcp::client::jsonrpc::tools_list("", id, None).body;
+    let host = ChildConn;
+    let request = crate::client::jsonrpc::tools_list("", id, None).body;
     let mut exchange = ProgramExchange::new(
         "srv",
-        busbar_plane_mcp::door::NEED_PROGRAM,
+        crate::door::NEED_PROGRAM,
         vec![(request, Some(id))],
         true,
     );
@@ -326,6 +277,8 @@ fn an_exchange_takes_its_own_answer_and_handles_the_childs_messages() {
         1,
         vec![
             json!({"jsonrpc": "2.0", "id": 424242, "result": {"tools": []}}),
+            json!({"jsonrpc": "2.0", "method": "notifications/progress",
+                "params": {"progressToken": "busbar-7", "progress": 1}}),
             json!({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}),
             json!({"jsonrpc": "2.0", "id": "srv-ping", "method": "ping"}),
         ],
@@ -339,7 +292,11 @@ fn an_exchange_takes_its_own_answer_and_handles_the_childs_messages() {
     let answer: Value = serde_json::from_slice(&done.answer.expect("an answer")).unwrap();
     assert_eq!(answer["id"], json!(id), "its own id, not 424242");
     assert_eq!(answer["result"]["tools"][0]["name"], json!("echo"));
-    assert_eq!(door.noticed, 1);
+    // The progress note is dropped: it is no list-changed notice and nothing answers it.
+    assert_eq!(
+        door.noticed, 1,
+        "only the list-changed notice is brought forward"
+    );
     let received = with(|c| c.received.clone());
     assert_eq!(methods(&received), vec!["tools/list", "<reply>"]);
     assert_eq!(

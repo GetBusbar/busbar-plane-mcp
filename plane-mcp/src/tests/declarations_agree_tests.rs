@@ -10,10 +10,10 @@
 //! kernel. (The record-leg pin that read legs off the unserved `Plane::verify`/`route` was retired
 //! with that impl, finding 12.)
 
+use crate::tool_meta::CLASS_TOOL_CALLS;
+use crate::{tool_records as records, McpPlane};
 use busbar_contract::ids::ClassDirection;
 use busbar_contract::plane::PlaneMeta;
-use busbar_plane_mcp::tool_meta::CLASS_TOOL_CALLS;
-use busbar_plane_mcp::{tool_records as records, McpPlane};
 
 /// Every schema the plane declares carries at least one operation — a schema with none is one no
 /// leg can ever reach, and a record written under it is a record nothing reads back.

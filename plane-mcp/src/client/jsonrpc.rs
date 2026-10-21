@@ -88,6 +88,7 @@ impl OutboundRequest {
     /// Used by the tests that scan the whole wire for a leaked caller credential; the dispatch
     /// path hands the body to the transport directly.
     #[allow(dead_code)]
+    #[cfg(test)]
     pub fn wire_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(self.url.as_bytes());
@@ -148,8 +149,11 @@ pub fn tools_call(
     let name = key.tool();
     // BUSBAR'S OWN TOKEN, not the caller's. Sent only when the caller asked for progress at all —
     // a server MUST NOT emit progress without a token, so sending none is how busbar says "this
-    // caller did not ask". Derived from `request_id`, which is already unique per outbound call, so
-    // two concurrent calls cannot be told apart by the upstream as one conversation.
+    // caller did not ask". Written here from `request_id`, which is NOT unique across calls (on the
+    // HTTP carrier it is the round, `0` on every first round): the relayed call's negotiation
+    // replaces it with a token no other request of the instance carries (the instance's one id
+    // counter, `door_sessions::Negotiating::begin`, or the id a session or a held stream sends it
+    // under), and a stdio child's call carries the unit's own id.
     let progress_token: Option<String> = advertise.progress.then(|| format!("busbar-{request_id}"));
     // busbar declares NO client capabilities BY DEFAULT. Every ask kind is deny-by-default per
     // server, and declaring a capability we then refuse to honour invites an upstream to build a
@@ -199,10 +203,9 @@ pub fn tools_call(
     envelope(url, "tools/call", Some(name), body, authorization)
 }
 
-/// Build a `tools/list` for one server.
-/// The CONNECT-path request. Nothing fetches a live tool list yet — that is the gap named in
-/// `client::catalogue`.
-#[allow(dead_code)]
+/// Build a `tools/list` for one server: the request an operator `connect` and a call's
+/// verify-on-call fetch send a member over HTTP (`crate::tool_door`), and the one a stdio child is
+/// asked over its pipe (`crate::tool_door`'s program leg).
 pub fn tools_list(url: &str, request_id: u64, authorization: Option<&str>) -> OutboundRequest {
     let body = serde_json::json!({
         "jsonrpc": "2.0",

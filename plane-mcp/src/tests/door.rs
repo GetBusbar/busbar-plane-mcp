@@ -24,7 +24,7 @@ const BAD: &[u8] =
 /// A tail string read back through the `&'static str` it was built from: the tail's strings are
 /// constants of this crate, so a string this test knows is found by address and length.
 fn text(a: AbiStr) -> String {
-    if a.ptr.is_null() {
+    if a.is_absent() {
         return String::new();
     }
     [
@@ -47,7 +47,7 @@ fn text(a: AbiStr) -> String {
         FEE_PER_REQUEST,
     ]
     .into_iter()
-    .find(|c| c.as_ptr() == a.ptr && c.len() == a.len)
+    .find(|c| c.as_ptr() == a.ptr() && c.len() == a.len())
     .expect("a tail string this test knows")
     .to_string()
 }
@@ -73,12 +73,12 @@ fn the_tails_trust_keys_are_the_grammars() {
         };
         assert_eq!(abi.role, role, "{}", decl.key);
         assert_eq!(
-            (!abi.default.ptr.is_null()).then(|| text(abi.default)),
+            (!abi.default.is_absent()).then(|| text(abi.default)),
             decl.default.map(str::to_string),
             "{}",
             decl.key
         );
-        assert_eq!(abi.mechanisms_len, decl.mechanisms.len(), "{}", decl.key);
+        assert_eq!(abi.mechanisms_len(), decl.mechanisms.len(), "{}", decl.key);
     }
     for (abi, decl) in PIN_MECHANISMS
         .iter()
@@ -93,25 +93,6 @@ fn the_tails_trust_keys_are_the_grammars() {
             decl.token
         );
     }
-}
-
-/// The tail declares exactly the task kind as TerminalOnly: every other kind is purged by age.
-#[test]
-fn the_tail_declares_the_task_kind_as_terminal_only() {
-    let retentions: Vec<(String, u32)> = RECORD_RETENTIONS
-        .iter()
-        .map(|r| (text(RECORD_KINDS[r.kind as usize]), r.rule))
-        .collect();
-    assert_eq!(
-        retentions,
-        [(
-            crate::tool_records::KIND_TASK.to_string(),
-            Retention::TerminalOnly.code()
-        )]
-    );
-    // The tail points at that table, not a copy.
-    assert_eq!(TAIL.record_retentions, RECORD_RETENTIONS.as_ptr());
-    assert_eq!(TAIL.record_retentions_len, RECORD_RETENTIONS.len());
 }
 
 /// The record kinds and billable classes are the plane's own symbols, stated once.
@@ -229,11 +210,11 @@ fn the_tail_states_every_operation_class() {
         assert_eq!(op_class_index(*op), Some(i as u32));
         let abi = OP_CLASS_TABLE[i].op;
         assert_eq!(
-            (abi.ptr, abi.len),
+            (abi.ptr(), abi.len()),
             (op.as_str().as_ptr(), op.as_str().len())
         );
     }
-    assert_eq!(TAIL.op_classes_len, OP_CLASS_TABLE.len());
+    assert_eq!(TAIL.op_classes_len(), OP_CLASS_TABLE.len());
 }
 
 /// THE DNS-REBINDING ALLOWLIST is the `mcp:` block's `allowed_origins` (none without a block), and
@@ -423,4 +404,19 @@ fn the_task_run_path_is_claimed_and_a_second_claimant_ties() {
     assert!(!task
         .selector
         .overlaps(&Selector::ExactPath("/mcp/tasks/other")));
+}
+
+/// THE CALL LOG CANNOT BE REWRITTEN: the call kind is the one record chain the door declares, so
+/// the host hash-chains every call record (its prelude length-prefixed, the scope in the digest)
+/// and a record whose middle is replaced breaks the chain. This is what production declares; no
+/// operation table of the plane's own stands in for it.
+#[test]
+fn the_call_log_is_the_one_chain_the_host_keeps() {
+    assert_eq!(RECORD_CHAINS.len(), 1);
+    let chain = RECORD_CHAINS[0];
+    assert_eq!(chain.kind, RECORD_CALL);
+    assert_eq!(chain.framing, CHAIN_LENGTH_PREFIXED);
+    assert_eq!(chain.flags, CHAIN_DIGESTS_SCOPE);
+    let kind = RECORD_KINDS[RECORD_CALL as usize];
+    assert_eq!(text(kind), crate::tool_records::KIND_CALL);
 }

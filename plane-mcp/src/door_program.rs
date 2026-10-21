@@ -109,7 +109,7 @@ pub(super) struct ProgramRelay {
     /// Its place in the line ([`Relaying`]), left when it is dropped.
     open: (Relaying, u64),
     /// The host's wake, for the call behind it when it leaves the line.
-    wake: Option<busbar_contract::abi::sdk::services::Wake>,
+    wake: Option<busbar_contract::abi::sdk::StaticWake>,
     /// Its asks went to its caller: dropped, it holds its place until this instant (ms).
     hold: u64,
 }

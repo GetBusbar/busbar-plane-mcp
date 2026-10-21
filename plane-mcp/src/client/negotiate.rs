@@ -28,6 +28,9 @@
 //!
 //! Nothing here opens a connection, reads a clock or holds anything across calls but the value.
 
+// The crate's only public item is `door`: the accessors and variants below were this module's public API; the tests hold them, the door does not reach them (BUSBAR-1.6.0.md l.3560).
+#![cfg_attr(not(test), allow(dead_code))]
+
 use serde_json::Value;
 
 use super::compat::{
@@ -243,6 +246,16 @@ impl Negotiator {
             if let Ok(mut body) = serde_json::from_slice::<Value>(&request.body) {
                 if let Some(obj) = body.as_object_mut() {
                     obj.insert("id".to_string(), Value::from(id));
+                    // A progress token the request carries is derived from the id it is sent
+                    // under, so two requests in flight never share one.
+                    if let Some(token) = obj
+                        .get_mut("params")
+                        .and_then(|p| p.get_mut("_meta"))
+                        .and_then(|m| m.get_mut("progressToken"))
+                        .filter(|t| !t.is_null())
+                    {
+                        *token = Value::from(format!("busbar-{id}"));
+                    }
                     if let Ok(bytes) = serde_json::to_vec(&body) {
                         request.body = bytes;
                         self.sent_id = Some(id);
@@ -373,6 +386,15 @@ impl Negotiator {
                     self.fail(Refusal::Unreachable(Some(answer)))
                 }
             }
+            // A NOTIFICATION posted on the held link has no answer on the stream: its POST's
+            // status is the whole of it.
+            Phase::StreamCallPosted if self.original_id.is_none() => {
+                if answer.ok() {
+                    self.finish(answer)
+                } else {
+                    self.fail(Refusal::StreamLost)
+                }
+            }
             Phase::StreamInitPosted | Phase::StreamCallPosted => {
                 if answer.ok() {
                     Action::AwaitEvent
@@ -406,7 +428,8 @@ impl Negotiator {
                 }
                 self.send(Phase::StreamCallPosted, request)
             }
-            // A notification has no answer on the stream: its POST's status is the whole of it.
+            // A notification has no answer on the stream: its POST's status is the whole of it
+            // ([`Self::on_answer`] finishes on it).
             None => self.send(Phase::StreamCallPosted, request),
         }
     }
@@ -450,14 +473,6 @@ impl Negotiator {
             }),
             _ => Action::AwaitEvent,
         }
-    }
-
-    /// Whether a notification's call is complete: a notification POSTed on the stream is finished
-    /// by its POST's status, which [`Self::on_answer`] reports as [`Action::AwaitEvent`]; the driver
-    /// asks this instead of waiting for an answer that never comes.
-    #[must_use]
-    pub fn expects_no_answer(&self) -> bool {
-        self.phase == Phase::StreamCallPosted && self.original_id.is_none()
     }
 }
 

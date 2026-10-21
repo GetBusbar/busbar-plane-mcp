@@ -34,6 +34,9 @@
 //! and not the key, so a tool whose schema drifted under a live cache is refused even though its
 //! name is unchanged. The digest lives in the engine's client catalogue; this module owns the naming.
 
+// The crate's only public item is `door`: the accessors and variants below were this module's public API; the tests hold them, the door does not reach them (BUSBAR-1.6.0.md l.3560).
+#![cfg_attr(not(test), allow(dead_code))]
+
 use std::fmt;
 
 /// Why a server id or tool name was refused. Both arms are construction-time refusals: a malformed
@@ -188,22 +191,6 @@ impl fmt::Display for ToolKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}{SEP}{}", self.server.0, self.tool)
     }
-}
-
-/// THE BOUND IDENTITY, all three components of it: the registered server, the namespaced tool, and
-/// the schema/description digest the operator approved.
-///
-/// Every one of the three is authenticated state — an id the operator registered, a name derived
-/// from it, and a digest the operator approved. None of them is free text an upstream chose the
-/// content of at refresh time. That is the whole property, and it is why this struct has no
-/// `description` field: a routing decision made over this value cannot read one.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BoundIdentity {
-    /// The routing key: the registered server and its tool.
-    pub key: ToolKey,
-    /// The approved `sha256:…` digest over the tool's name, description and input schema. Computed by the
-    /// engine's client catalogue (`tool_digest`).
-    pub digest: String,
 }
 
 #[cfg(test)]

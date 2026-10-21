@@ -4,19 +4,29 @@
 //! into policy. A plane that could vary its own declarations at run time would make the claims a
 //! boot proved non-overlapping stop being the claims in force.
 
+// THE PLANE'S `PlaneMeta` DECLARATIONS ARE READ BY THE TESTS ALONE: the door's Statement carries
+// everything busbar reads of this plane, so the declarations below (and `McpPlane`, the type they
+// hang on) are compiled for the tests that hold them equal to the Statement. The class keys and the
+// help text the door states are the only items here a build reads.
+use busbar_contract::ids::MeterClassId;
+#[cfg(test)]
 use busbar_contract::ids::{
-    AdminVerbId, ClassDirection, MeterClassDecl, MeterClassId, OpClassId, RecordSchemaId,
+    AdminVerbId, ClassDirection, MeterClassDecl, OpClassId, RecordSchemaId,
 };
+#[cfg(test)]
 use busbar_contract::plane::PlaneMeta;
 
+#[cfg(test)]
 use crate::{
     tool_claims as claims, tool_facts as facts, tool_ops as ops, tool_records as records, McpPlane,
 };
 
 /// The family the count-shaped class rolls up into.
+#[cfg(test)]
 const COUNT_FAMILY: &str = "count";
 
 /// The family the byte-shaped class rolls up into.
+#[cfg(test)]
 const BYTE_FAMILY: &str = "byte";
 
 /// The two classes this plane meters.
@@ -34,6 +44,7 @@ const BYTE_FAMILY: &str = "byte";
 /// caller's answer earns (Q35). A call that never left reports no fee unit either: one whose
 /// deadline passed in its queue (`call::never_sent`), or one whose server the live tool-list check
 /// could not reach.
+#[cfg(test)]
 const METER_CLASSES: &[MeterClassDecl] = &[
     MeterClassDecl {
         key: MeterClassId::new("tool_calls"),
@@ -64,9 +75,11 @@ pub const CLASS_TOOL_CALLS: MeterClassId = MeterClassId::new("tool_calls");
 pub const CLASS_BYTES: MeterClassId = MeterClassId::new("bytes");
 
 /// The read-only verb that lists the registered servers.
+#[cfg(test)]
 pub const VERB_TOOLS: AdminVerbId = AdminVerbId::new("tools");
 
 /// The read-only verb that answers for the ONE registration the subject names.
+#[cfg(test)]
 pub const VERB_SERVER: AdminVerbId = AdminVerbId::new("server");
 
 /// The verbs this plane answers.
@@ -82,6 +95,7 @@ pub const VERB_SERVER: AdminVerbId = AdminVerbId::new("server");
 /// plane's record schemas, and the plane contributes the shape rather than the action. Liveness is
 /// not here either, for a different reason — a plane holds a registration table and no runtime
 /// state, so a health answer would be a guess wearing a fact's clothes.
+#[cfg(test)]
 const INTROSPECTION_VERBS: &[AdminVerbId] = &[VERB_TOOLS, VERB_SERVER];
 
 /// The schema of this plane's own configuration block.
@@ -90,6 +104,7 @@ const INTROSPECTION_VERBS: &[AdminVerbId] = &[VERB_TOOLS, VERB_SERVER];
 /// naming what this deployment IS, and a registry block naming the servers it fronts. Nothing here
 /// is a credential — the credential members name a REFERENCE that the secret plugin resolves, and
 /// this plane never sees what is behind one — and nothing here is a price.
+#[cfg(test)]
 const CONFIG_SCHEMA: &str = r#"{
   "type": "object",
   "additionalProperties": false,
@@ -128,6 +143,7 @@ const CONFIG_SCHEMA: &str = r#"{
 /// The command-line flag that serves this plane on the process's own stdin/stdout instead of a
 /// listener. Operator-facing and frozen (1.6.0 CHANGELOG, `busbar --help`); the plane owns the
 /// spelling (#47/#49) and the composition root reads it from here.
+#[cfg(test)]
 pub const STDIO_SERVE_FLAG: &str = "--mcp-stdio";
 
 /// This plane's lines in the `Flags:` block of `busbar --help`, byte for byte as the binary has
@@ -141,6 +157,7 @@ pub const HELP_FLAGS: &str =
                         credential the chain admits (audience-bound to mcp.canonical_uri), and the
                         whole session runs as that key — budgets, audit and hooks apply";
 
+#[cfg(test)]
 impl PlaneMeta for McpPlane {
     const KEY: &'static str = "mcp";
     const CLAIMS: &'static [busbar_contract::grammar::Claim] = claims::CLAIMS;

@@ -38,7 +38,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use busbar_contract::abi::mechanism::call::{InHead, OutHead, Outcome};
-use busbar_contract::abi::mechanism::door::{KindTailHead, Statement};
+use busbar_contract::abi::mechanism::door::Statement;
 use busbar_contract::abi::mechanism::lifecycle::{
     GenIn, RefreshIn, ReleaseIn, TickIn, TickOut, ValidateIn,
 };
@@ -57,14 +57,14 @@ use busbar_contract::abi::sdk::exchange::{REPLY_MAX, REPLY_OVER_BOUND};
 use busbar_contract::abi::sdk::life::Refusal;
 use busbar_contract::abi::sdk::publish::{Generations, Keyed};
 use busbar_contract::abi::sdk::services::ServiceError;
-use busbar_contract::abi::sdk::{Instance, Lent, Out, Safe, SafeSlot, Services};
+use busbar_contract::abi::sdk::{Instance, Lent, Out, Safe, SafeSlot, Services, StaticServices};
 use serde_json::Value;
 
 use crate::answer::Answer;
 use crate::ask::AskDecision;
 use crate::call::{Admission, AdmittedCall, Settled};
 use crate::catalogue::Catalogue;
-use crate::door;
+use crate::door::{self};
 use crate::framing::{
     Framing, CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE, EVENT_STREAM, JSON, NO_STORE,
 };
@@ -77,30 +77,41 @@ const MAX_INFLIGHT: u32 = 64;
 /// The version the Statement names: the crate's (a test pins the two equal).
 pub const VERSION: &str = "1.6.0";
 
+/// The names of the diagnostics the door raises, as its Statement's diagnostic ids spell them
+/// (`door_sessions::DIAG_NAMES`): what the tests hold `declares.json` to.
+#[cfg(test)]
+pub(crate) const DIAG_NAMES: &[&str] = door_sessions::DIAG_NAMES;
+
+/// How many diagnostic ids the Statement states.
+#[cfg(test)]
+pub(crate) const DIAG_IDS_LEN: usize = door_sessions::DIAG_IDS.len();
+
 /// THE STATEMENT: the plane's name and version, the settings sections it declares
 /// ([`door::SECTIONS`]), its outbound needs ([`door::NEEDS`]) and its tail ([`door::TAIL`]).
-pub const STATEMENT: Statement = Statement {
-    kind_tail: (door::TAIL as *const busbar_contract::abi::plane::PlaneTail).cast::<KindTailHead>(),
-    sections: door::SECTIONS.as_ptr(),
-    sections_len: door::SECTIONS.len(),
-    needs: door::NEEDS.as_ptr(),
-    needs_len: door::NEEDS.len(),
-    secret_refs: door::SECRET_REFS.as_ptr(),
-    secret_refs_len: door::SECRET_REFS.len(),
-    // The instance's own diagnostic: an ungoverned chain's sessions are unisolated
-    // ([`door_sessions::UNGOVERNED_LEGACY_STREAM`]).
-    diag_ids: door_sessions::DIAG_IDS.as_ptr(),
-    diag_ids_len: door_sessions::DIAG_IDS.len(),
-    ..statement(crate::PLANE_KEY, VERSION, MAX_INFLIGHT)
+pub const STATEMENT: Statement = {
+    let mut s = statement(crate::PLANE_KEY, VERSION, MAX_INFLIGHT)
+        .with_sections(door::SECTIONS)
+        .with_needs(door::NEEDS)
+        .with_secret_refs(door::SECRET_REFS)
+        // The instance's own diagnostic: an ungoverned chain's sessions are unisolated
+        // ([`door_sessions::UNGOVERNED_LEGACY_STREAM`]).
+        .with_diag_ids(door_sessions::DIAG_IDS)
+        .with_kind_tail(door::TAIL);
+    s.extensions = EXTENSIONS;
+    s
 };
 
-/// THE CLAIMS AXIS: the pure plane the boot seal registers under its key, and the bytes it claims,
-/// sealed against every other plane's so a tie is refused at boot (the transport each names must be
-/// registered).
-pub const PLANE: crate::McpPlane = crate::McpPlane::EMPTY;
-/// The bytes [`PLANE`] claims.
-pub const CLAIMS: &[busbar_contract::grammar::Claim] =
-    <crate::McpPlane as busbar_contract::plane::PlaneMeta>::CLAIMS;
+busbar_contract::statement_extensions!(
+    /// The Statement's extensions: this plugin's whole `declares` document (BUSBAR-1.6.0.md l.246),
+    /// the one `declares.json` the release also signs into a dropped-in plane's manifest. It states
+    /// the plane's breaker fact (ARCHITECT Q4: one transient failure below the trip threshold never
+    /// benches a member, the posture ruled for this plane, which 1.5.5 did not have), the codes it
+    /// raises (`diagnostics::DIAGNOSTICS`; the tests hold the two equal) and the carriers it needs.
+    EXTENSIONS: [(
+        busbar_contract::abi::mechanism::extensions::EXT_DECLARES,
+        include_bytes!("../declares.json")
+    )]
+);
 
 /// WHAT THE PLANE HOLDS FOR ONE GENERATION: the catalogue built from its section, and the section
 /// itself (each member's registration).
@@ -158,14 +169,19 @@ pub struct McpDoor {
     facts: Option<Vec<u8>>,
     /// The browser origins it admits beyond loopback ([`door::allowed_origins`]).
     origins: Vec<String>,
-    services: Option<Services>,
+    services: Option<StaticServices>,
     generations: Generations<PlaneSnapshot, Held>,
     units: Keyed<u64, CallUnit>,
     /// Each principal's roots epoch: moved by its `notifications/roots/list_changed`, sealed into
-    /// an exchange that asks for roots.
+    /// an exchange that asks for roots. Bounded at [`MAX_ROOTS_PRINCIPALS`]; past it a principal's
+    /// change moves the shared epoch ([`Self::roots_shared`]) instead.
     roots: Keyed<String, u64>,
+    /// The epoch every principal's roots epoch is read beside: moved by a change the full
+    /// [`Self::roots`] table could not record for its own principal, so that change invalidates
+    /// every sealed exchange rather than none.
+    roots_shared: Keyed<(), u64>,
     /// The host tables `open` handed it: the connector a `connect` reaches its server through.
-    host: Option<busbar_contract::abi::sdk::conn::Host>,
+    host: Option<busbar_contract::abi::sdk::conn::StaticHost>,
     /// Each registered server's last sighting (`connect`): what the trust views and the dispatch
     /// gate judge against the section's approval.
     sightings: Keyed<String, crate::trust::Sighting>,
@@ -178,7 +194,7 @@ pub struct McpDoor {
     checked: Keyed<String, u64>,
     /// The host's wake (`HostTables::wake`): a task's continuation and a held subscription are woken
     /// through it when what they wait for moves.
-    wake: Option<busbar_contract::abi::sdk::services::Wake>,
+    wake: Option<busbar_contract::abi::sdk::StaticWake>,
     /// The subscriptions held as K6 sessions on the HTTP carrier, by stream ([`door_listen`]).
     listens: Keyed<u64, door_listen::Listening>,
     /// The instance's driver ticket and the tick clock, as its last `tick` handed them.
@@ -271,7 +287,7 @@ macro_rules! slot {
 slot!(
     /// `validate`: the settings read as the section, or refused in the grammar's words.
     Validate, ValidateIn, OutHead, |_, input, mut out| {
-        match section(input.field(|i| &i.settings).bytes()) {
+        match section(input.settings().bytes()) {
             Ok(_) => Outcome::Ready,
             Err(refusal) => out.fail(refusal),
         }
@@ -282,14 +298,14 @@ slot!(
     /// `open`: the instance over the section, the public base URL and the host services, and the
     /// first generation's snapshot.
     Open, PlaneOpenIn, PlaneOpenOut, |instance, input, mut out| {
-        let (cfg, pools) = match opened_section(input.field(|i| &i.open.settings).bytes()) {
+        let (cfg, pools) = match opened_section(input.open().settings().bytes()) {
             Ok(opened) => opened,
             Err(refusal) => return out.fail(refusal),
         };
-        let generation = input.get().open.generation;
-        let owned = input.field(|i| &i.owned).bytes();
+        let generation = input.open().generation();
+        let owned = input.owned().bytes();
         let admitted = match door::admitted_endpoint(
-            input.field(|i| &i.public_url).stated().as_deref(),
+            input.public_url().stated().as_deref(),
             owned,
         ) {
             Ok(admitted) => admitted,
@@ -308,18 +324,18 @@ slot!(
             facts,
             origins,
             services: input
-                .field(|i| &i.open)
+                .open()
                 .host()
                 .and_then(|h| Services::of(&h)),
             host: input
-                .field(|i| &i.open)
+                .open()
                 .host()
                 .map(|h| busbar_contract::abi::sdk::conn::Host::of(&h)),
             sightings: Keyed::new(),
             spent: Keyed::new(),
             checked: Keyed::new(),
             wake: input
-                .field(|i| &i.open)
+                .open()
                 .host()
                 .and_then(|h| busbar_contract::abi::sdk::services::Wake::of(&h)),
             listens: Keyed::new(),
@@ -329,6 +345,7 @@ slot!(
             generations: Generations::new(),
             units: Keyed::new(),
             roots: Keyed::new(),
+            roots_shared: Keyed::new(),
             greeted: Keyed::new(),
             answered: Keyed::new(),
             relaying: Arc::default(),
@@ -369,11 +386,11 @@ slot!(
         let Some(plane) = instance.get() else {
             return Outcome::Failed;
         };
-        let (cfg, pools) = match opened_section(input.field(|i| &i.settings).bytes()) {
+        let (cfg, pools) = match opened_section(input.settings().bytes()) {
             Ok(opened) => opened,
             Err(refusal) => return out.fail(refusal),
         };
-        let generation = input.get().generation;
+        let generation = input.generation();
         let spec = door::snapshot_spec_with(plane.admitted.clone(), plane.facts.clone());
         let held = Held::pooled(generation, cfg, pools);
         out.publish_with(|o| &o.snapshot, &plane.generations, generation, &spec, held);
@@ -387,7 +404,7 @@ slot!(
     /// `retire`: the generation's snapshot is dropped.
     Retire, GenIn, OutHead, |instance, input, _| {
         if let Some(plane) = instance.get() {
-            plane.generations.retire(input.get().generation);
+            plane.generations.retire(input.generation());
         }
         Outcome::Ready
     }
@@ -397,10 +414,10 @@ slot!(
     /// `tick`: the clock of the subscriptions held as sessions ([`door_listen::tick`]), every
     /// [`door_listen::POLL_NS`].
     Tick, TickIn, TickOut, |instance, input, mut out| {
-        let given = input.get();
+        let given = input;
         let next = instance.get().map_or(0, |plane| {
-            door_line::tick(plane, given.head.ticket, given.now_ns);
-            let next = door_listen::tick(plane, given.head.ticket, given.now_ns);
+            door_line::tick(plane, given.head().ticket(), given.now_ns());
+            let next = door_listen::tick(plane, given.head().ticket(), given.now_ns());
             door_sessions::tick(plane);
             next
         });
@@ -425,20 +442,29 @@ slot!(
 );
 
 slot!(
-    /// `cancel`: the cancelled unit's state is dropped; nothing it holds had moved.
+    /// `cancel`: the cancelled unit's state is dropped, found by its ticket or, cancelled before any
+    /// piece reached it, by the unit the host names. Answered `CANCEL_ABORTED`, as predev's door
+    /// answered every cancel.
     Cancel, PlaneCancelIn, PlaneCancelOut, |instance, input, mut out| {
         let mut stopped = Vec::new();
         if let Some(plane) = instance.get() {
-            let ticket = input.get().cancel.ticket;
+            let ticket = input.cancel().ticket();
+            // THE UNIT THE HOST NAMES: `arrive` keyed it, and a unit cancelled before its first
+            // piece (a deadline, a reload, a shutdown) carries no ticket yet, so it is found by
+            // its key alone (`0`: the driver ticket, or an op in flight that names its own unit).
+            let unit = input.unit();
+            let cancelled =
+                |key: &u64, u: &CallUnit| u.ticket == Some(ticket) || (unit != 0 && *key == unit);
             // A task's continuation the kernel cancelled leaves its task cancelled, audited as the
             // served engine audited a task its shutdown stopped (SEAM-L(r)).
             stopped = door_tasks::cancelled(plane, ticket);
-            plane.units.with_all(|m| m.retain(|_, u| u.ticket != Some(ticket)));
+            plane.units.with_all(|m| m.retain(|k, u| !cancelled(k, &*u)));
             door_listen::cancelled(plane, ticket);
             door_sessions::cancelled(plane, ticket);
             door_legacy::cancelled(plane, ticket);
         }
-        // The rows ride the one cancel answer (it is never re-called): what fits is written.
+        // The rows ride the one cancel answer: it may not pend and is never re-called, so rows the
+        // host's buffers cannot hold are a FAULT the host is told of, never dropped unsaid.
         let (mut records, mut arena) = (input.records_buf(), input.arena_buf());
         for id in &stopped {
             let row = crate::call::AuditRow::task_cancel(id);
@@ -449,9 +475,11 @@ slot!(
                 value: arena.span(row.resource.as_bytes()),
             });
         }
-        let short = !(records.fits() && arena.fits());
-        let (rw, _) = records.settle(short);
-        let (aw, _) = arena.settle(short);
+        if !(records.fits() && arena.fits()) {
+            return Outcome::Fault;
+        }
+        let (rw, _) = records.settle(false);
+        let (aw, _) = arena.settle(false);
         out.set(|o| &o.records_written, rw as u32);
         out.set(|o| &o.arena_written, aw as u64);
         out.set(|o| &o.cancel.disposition, CANCEL_ABORTED);
@@ -473,6 +501,38 @@ slot!(
 
 /// The most units the instance keeps state for at once; past it, a new arrival is refused.
 pub const MAX_UNITS: usize = 4096;
+
+/// The most principals the instance keeps a roots epoch of its own for ([`McpDoor::roots`]).
+pub const MAX_ROOTS_PRINCIPALS: usize = MAX_UNITS;
+
+/// `principal`'s roots changed (`notifications/roots/list_changed`): its epoch moves, or, the
+/// table full and `principal` not in it, the shared epoch every principal is read beside, so the
+/// change is never lost (a stale roots answer sealed under the old epoch is refused either way).
+fn roots_changed(plane: &McpDoor, principal: &str) {
+    let recorded = plane.roots.with_all(|m| {
+        if let Some(epoch) = m.get_mut(principal) {
+            *epoch = epoch.wrapping_add(1);
+            true
+        } else if m.len() < MAX_ROOTS_PRINCIPALS {
+            m.insert(principal.to_string(), 1);
+            true
+        } else {
+            false
+        }
+    });
+    if !recorded {
+        plane
+            .roots_shared
+            .with_all(|m| *m.entry(()).or_insert(0) += 1);
+    }
+}
+
+/// `principal`'s roots epoch, as an exchange seals it: its own, beside the shared one.
+fn roots_epoch(plane: &McpDoor, principal: &str) -> u64 {
+    let own = plane.roots.get(&principal.to_string()).unwrap_or(0);
+    let shared = plane.roots_shared.get(&()).unwrap_or(0);
+    own.wrapping_add(shared.wrapping_shl(32))
+}
 
 /// The open breaker's reason as the kernel spells it (`RefusalCode::BreakerOpen`'s word): the words
 /// this door says a walk's exhaustion in where it repeats them, as predev's door said it.
@@ -613,7 +673,7 @@ struct Pending {
 /// The host's clock, for the call log's `ts`: the kernel's one clock (`clock.now`), whole Unix
 /// seconds, on a fresh handle of the unit's ticket. `None` when the host serves no clock, and then
 /// no call record is written (a record never carries a time the plane made up).
-fn clock_s(services: Option<Services>, ticket: Ticket, unit: &mut CallUnit) -> Option<u64> {
+fn clock_s(services: Option<StaticServices>, ticket: Ticket, unit: &mut CallUnit) -> Option<u64> {
     let services = services?;
     let handle = CompletionHandle {
         ticket,
@@ -629,7 +689,7 @@ fn clock_s(services: Option<Services>, ticket: Ticket, unit: &mut CallUnit) -> O
 
 /// The kernel's monotonic clock (`clock.now`), whole milliseconds, on a fresh handle of the unit's
 /// ticket; `None` when the host serves no clock.
-fn mono_ms(services: Option<Services>, ticket: Ticket, unit: &mut CallUnit) -> Option<u64> {
+fn mono_ms(services: Option<StaticServices>, ticket: Ticket, unit: &mut CallUnit) -> Option<u64> {
     let services = services?;
     let handle = CompletionHandle {
         ticket,
@@ -648,7 +708,7 @@ fn mono_ms(services: Option<Services>, ticket: Ticket, unit: &mut CallUnit) -> O
 /// own attempt bound has passed since — the member was dialled and did not answer within it. A walk
 /// that refused at its first pick dispatched nothing (no request was handed over), and a dial that
 /// failed fails at once, well inside the bound: both keep the not-dispatched words.
-fn timed_out(services: Option<Services>, ticket: Ticket, unit: &mut CallUnit) -> bool {
+fn timed_out(services: Option<StaticServices>, ticket: Ticket, unit: &mut CallUnit) -> bool {
     let Some((sent, server)) = unit
         .relay
         .as_ref()
@@ -935,8 +995,8 @@ slot!(
         let Some(plane) = instance.get() else {
             return Outcome::Failed;
         };
-        let claim = door::ROUTES.get(input.get().claim as usize);
-        let body = input.field(|i| &i.body).bytes();
+        let claim = door::ROUTES.get(input.claim() as usize);
+        let body = input.body().bytes();
         let fields = input.fields();
         if claim.is_some_and(|r| r.open) {
             // The discovery document is not answered on the request path.
@@ -950,11 +1010,11 @@ slot!(
         let origin = fields
             .iter()
             .find(|f| {
-                f.field(|f| &f.name)
+                f.name()
                     .as_str()
                     .is_ok_and(|n| n.eq_ignore_ascii_case(ORIGIN))
             })
-            .and_then(|f| f.field(|f| &f.value).as_str().ok());
+            .and_then(|f| f.value().as_str().ok());
         if origin.is_some_and(|o| !busbar_contract::jsonrpc::origin_admitted(o, &plane.origins)) {
             return refused_arrival(
                 &mut out,
@@ -974,11 +1034,11 @@ slot!(
             fields
                 .iter()
                 .find(|f| {
-                    f.field(|f| &f.name)
+                    f.name()
                         .as_str()
                         .is_ok_and(|n| n.eq_ignore_ascii_case(name))
                 })
-                .and_then(|f| f.field(|f| &f.value).as_str().ok())
+                .and_then(|f| f.value().as_str().ok())
                 .map(str::to_string)
         };
         let arrived = if endpoint {
@@ -986,7 +1046,7 @@ slot!(
             door_sessions::arrive(
                 held.as_deref(),
                 claim.map_or("POST", |r| r.verb),
-                input.field(|i| &i.target).as_str().unwrap_or_default(),
+                input.target().as_str().unwrap_or_default(),
                 body,
                 &head_field,
             )
@@ -1013,7 +1073,7 @@ slot!(
         let session_local = session_unit.is_some() && session_body.is_none();
         // A TASK'S CONTINUATION (ARCHITECT round 5 Q-L3B-TASKS (b) → (A)): the task it runs, and the
         // call it carries, decided below as the `tools/call` it is.
-        let task_run = (input.get().claim as usize == door::TASK_RUN_ROUTE)
+        let task_run = (input.claim() as usize == door::TASK_RUN_ROUTE)
             .then(|| door_tasks::run_arrival(body));
         if let Some(None) = task_run {
             let refusal = door_tasks::unknown_arrival();
@@ -1036,7 +1096,7 @@ slot!(
         // nothing (row 159 finding A-M3).
         let at_cap = plane
             .units
-            .with_all(|held| held.len() >= MAX_UNITS && !held.contains_key(&input.get().unit));
+            .with_all(|held| held.len() >= MAX_UNITS && !held.contains_key(&input.unit()));
         if at_cap {
             let refusal = crate::tool_arrival::Refusal {
                 status: STATUS_BUSY,
@@ -1052,18 +1112,27 @@ slot!(
         }
         // A LINE OF THE LINE CARRIER (ARCHITECT Q1a): what it is to the carrier session it arrived
         // over, and the bytes the one dispatch decides on (none: the unit answers its preset).
-        let line_route = input.get().claim as usize == door::LINE_ROUTE;
+        let line_route = input.claim() as usize == door::LINE_ROUTE;
+        // A SHORT ANSWER APPLIES NOTHING, and the re-call reads what was stored: reading a line
+        // moves its carrier session (a live ask's answer is taken, a revision kept, a cancel
+        // applied), so the one buffer a line's arrival can come up short on (the units buffer its
+        // admission estimate rides) is judged before the line is read.
+        if line_route && input.units_cap() < 1 {
+            out.set(|o| &o.units_written, 0);
+            out.set(|o| &o.units_needed, 1);
+            return Outcome::Failed;
+        }
         let line_arrival = line_route.then(|| {
             let session = fields
                 .iter()
                 .find(|f| {
-                    f.field(|f| &f.name).as_str().is_ok_and(|n| {
+                    f.name().as_str().is_ok_and(|n| {
                         n.eq_ignore_ascii_case(
                             busbar_contract::abi::host::service::CARRIER_SESSION_FIELD,
                         )
                     })
                 })
-                .and_then(|f| f.field(|f| &f.value).as_str().ok()?.trim().parse::<u64>().ok())
+                .and_then(|f| f.value().as_str().ok()?.trim().parse::<u64>().ok())
                 .unwrap_or(0);
             door_line::arrive(plane, session, body)
         });
@@ -1101,11 +1170,11 @@ slot!(
                     fields
                         .iter()
                         .find(|f| {
-                            f.field(|f| &f.name)
+                            f.name()
                                 .as_str()
                                 .is_ok_and(|n| n.eq_ignore_ascii_case(name))
                         })
-                        .and_then(|f| f.field(|f| &f.value).as_str().ok())
+                        .and_then(|f| f.value().as_str().ok())
                 })
                 .or_else(|| {
                     mirrored
@@ -1163,8 +1232,8 @@ slot!(
         let mut param_fields: Vec<(String, String)> = fields
             .iter()
             .filter_map(|f| {
-                let name = f.field(|f| &f.name).as_str().ok()?.to_ascii_lowercase();
-                let value = f.field(|f| &f.value).as_str().ok()?;
+                let name = f.name().as_str().ok()?.to_ascii_lowercase();
+                let value = f.value().as_str().ok()?;
                 name.starts_with(PARAM_FIELD_PREFIX).then(|| (name, value.to_string()))
             })
             .collect();
@@ -1250,7 +1319,7 @@ slot!(
             }
         }
         let unit = CallUnit {
-            key: input.get().unit,
+            key: input.unit(),
             held,
             disposition,
             params: value.and_then(|v| v.get("params").cloned()),
@@ -1275,7 +1344,7 @@ slot!(
             session: session_unit,
             negotiating: None,
         };
-        plane.units.insert(input.get().unit, unit);
+        plane.units.insert(input.unit(), unit);
         Outcome::Ready
     }
 );
@@ -1284,7 +1353,7 @@ slot!(
 /// asked: `entitlement.check` of `"<kind>:<name>"`. Every handle the unit issues on its ticket is
 /// fresh. No host services, a refused or failed call: not entitled.
 fn ask_entitlements(
-    services: Option<Services>,
+    services: Option<StaticServices>,
     ticket: Ticket,
     unit: &mut CallUnit,
     grants: &[(&'static str, &str)],
@@ -1314,7 +1383,7 @@ fn ask_entitlements(
 /// it never pends (the B.2 row: "may pend: no"); a host that serves no judge, pends or fails
 /// gives no verdict, and the argument guard refuses (fail closed).
 fn dest_verdict(
-    services: Services,
+    services: StaticServices,
     handle: CompletionHandle,
     held: &Held,
     entry: &crate::catalogue::ToolEntry,
@@ -1362,7 +1431,7 @@ enum Step {
 /// claim re-issued under the handle it was first issued under.
 #[doc(hidden)]
 pub struct DoorSeal<'a> {
-    pub services: Services,
+    pub services: StaticServices,
     pub ticket: Ticket,
     pub issued: &'a mut u32,
     pub claim: &'a mut Option<(String, u32)>,
@@ -1407,6 +1476,28 @@ impl DoorSeal<'_> {
             .clock_now(handle)
             .ok()
             .map(|r| r.wall_ns / 1_000_000_000)
+    }
+}
+
+/// THE HOST A SEALED STATE IS MINTED AND JUDGED AGAINST: its signature and its wall clock, beside
+/// the [`crate::ask::Seal`] that mints, opens, draws nonces and spends approvals. The door's is
+/// [`DoorSeal`], over the host's services; the ask decision and the relayed state's seal take any,
+/// so their logic is tested in the crate over a host that is a plain Rust value (a clock that fails
+/// is a `None` there, as it is here).
+pub trait SealHost: crate::ask::Seal {
+    /// The host's signature of `data`; `None` when it signs none.
+    fn sign(&mut self, data: &[u8]) -> Option<Vec<u8>>;
+    /// The kernel's wall clock, in Unix seconds; `None` when it cannot be read.
+    fn now(&mut self) -> Option<u64>;
+}
+
+impl SealHost for DoorSeal<'_> {
+    fn sign(&mut self, data: &[u8]) -> Option<Vec<u8>> {
+        DoorSeal::sign(self, data)
+    }
+
+    fn now(&mut self) -> Option<u64> {
+        DoorSeal::now(self)
     }
 }
 
@@ -1827,6 +1918,8 @@ fn answer_body(
     unit: &mut CallUnit,
 ) -> Option<Step> {
     let services = plane.services;
+    // An empty caller reference is the ungoverned chain alone: the kernel never lends one to a
+    // principal it verified on a governed chain (`door_sessions::owner_of`).
     let principal = if caller.is_empty() {
         crate::ask::UNGOVERNED
     } else {
@@ -1891,12 +1984,10 @@ fn answer_body(
     }
     if let Disposition::Notice { method } = &disposition {
         if method == crate::ask::NOTIFY_ROOTS_LIST_CHANGED {
-            plane
-                .roots
-                .with_all(|m| *m.entry(principal.to_string()).or_insert(0) += 1);
+            roots_changed(plane, principal);
         }
     }
-    let roots_epoch = plane.roots.get(&principal.to_string()).unwrap_or(0);
+    let roots_epoch = roots_epoch(plane, principal);
     let generation = held.catalogue.generation();
     let named_tool = match &disposition {
         Disposition::Request { row, id } if row.op == crate::tool_ops::OP_TOOL_CALL => {
@@ -2305,12 +2396,12 @@ pub struct Site<'a> {
 /// host services) or a host that signs nothing is a deployment with no sealer, and a capability that
 /// asks its caller is refused as one with no signing key refuses it.
 #[doc(hidden)]
-pub fn decide_ask(
+pub fn decide_ask<S: SealHost>(
     held: &Held,
     site: Site<'_>,
     params: Option<&Value>,
     arguments: &Value,
-    seal: Option<&mut DoorSeal<'_>>,
+    seal: Option<&mut S>,
 ) -> AskDecision {
     let cap = held
         .section
@@ -2336,7 +2427,7 @@ pub fn decide_ask(
     }
     // A state's window is stamped and judged at a time the host's clock gave: a clock that fails
     // refuses (never the epoch), in words that name the clock and not the signing key.
-    let now = match seal.as_deref_mut().map(DoorSeal::now) {
+    let now = match seal.as_deref_mut().map(SealHost::now) {
         Some(None) if !site.rounds.is_empty() || retry.state.is_some() => {
             return AskDecision::Refuse(crate::ask::AskRefusal::ClockUnavailable {
                 capability: site.capability.to_string(),
@@ -2509,7 +2600,7 @@ enum ChildOpened {
 /// re-issued under `work_slot`; an opened handle is swept with the relays once its state lapses.
 fn open_child_work(
     plane: &McpDoor,
-    (services, ticket, issued): (Services, Ticket, &mut u32),
+    (services, ticket, issued): (StaticServices, Ticket, &mut u32),
     (asked, work_slot): (
         &mut Option<(Value, u32, crate::ask::ChildLeg)>,
         &mut Option<u32>,
@@ -2577,8 +2668,8 @@ pub const CLOCK_UNAVAILABLE: &str = "the host's clock could not be read, so the 
 ///
 /// `Unavailable` naming the clock when it cannot be read, `NoSealer` when the state cannot be signed.
 #[doc(hidden)]
-pub fn seal_relayed<'b>(
-    seal: &mut DoorSeal<'_>,
+pub fn seal_relayed<'b, S: SealHost>(
+    seal: &mut S,
     server: &str,
     bind: impl FnOnce(u64) -> crate::ask::Bind<'b>,
     digest: &str,
@@ -2600,7 +2691,13 @@ pub fn seal_relayed<'b>(
 /// THE SWEEP of relayed asks' work handles, run as another is opened: each one whose state lapsed
 /// with nobody come back for it is settled (its answer is not waited on), so the live bound holds
 /// only asks a caller can still answer.
-fn sweep_relays(plane: &McpDoor, services: Services, ticket: Ticket, issued: &mut u32, now: u64) {
+fn sweep_relays(
+    plane: &McpDoor,
+    services: StaticServices,
+    ticket: Ticket,
+    issued: &mut u32,
+    now: u64,
+) {
     let lapsed: Vec<u64> = plane.relays.with_all(|m| {
         let gone: Vec<u64> = m
             .iter()
@@ -2868,7 +2965,7 @@ fn send_to_member(
 /// grant no tool name can be: only a wildcard holds it). `None` for a member that does not
 /// exchange.
 fn exchange_scope(
-    services: Option<Services>,
+    services: Option<StaticServices>,
     ticket: Ticket,
     unit: &mut CallUnit,
     held: &Held,
@@ -2933,49 +3030,49 @@ slot!(
         let Some(plane) = instance.get() else {
             return Outcome::Failed;
         };
-        let piece = input.get();
+        let piece = input;
         // A piece of a session (a subscription on the HTTP carrier, or a session revision's held
         // stream) is the session's.
-        if piece.stream != 0 {
-            if door_sessions::holds(plane, piece.unit) {
+        if piece.stream() != 0 {
+            if door_sessions::holds(plane, piece.unit()) {
                 return door_sessions::piece(plane, input, &mut out);
             }
             return door_listen::piece(plane, input, &mut out);
         }
-        let key = piece.unit;
-        let ticket = piece.head.ticket;
-        let member = input.field(|i| &i.member).as_str().unwrap_or_default().to_string();
-        let caller = input.field(|i| &i.caller_ref).as_str().unwrap_or_default().to_string();
-        let bytes = input.field(|i| &i.bytes).bytes();
+        let key = piece.unit();
+        let ticket = piece.head().ticket();
+        let member = input.member().as_str().unwrap_or_default().to_string();
+        let caller = input.caller_ref().as_str().unwrap_or_default().to_string();
+        let bytes = input.bytes().bytes();
         let far_type = input
             .head_fields()
             .iter()
             .find(|f| {
-                f.field(|f| &f.name)
+                f.name()
                     .as_str()
                     .is_ok_and(|n| n.eq_ignore_ascii_case(CONTENT_TYPE))
             })
-            .and_then(|f| f.field(|f| &f.value).as_str().ok().map(str::to_string));
+            .and_then(|f| f.value().as_str().ok().map(str::to_string));
         // A session revision's far end names its session in its head.
         let far_session = input
             .head_fields()
             .iter()
             .find(|f| {
-                f.field(|f| &f.name)
+                f.name()
                     .as_str()
                     .is_ok_and(|n| n.eq_ignore_ascii_case(crate::adapt::H_SESSION_ID))
             })
-            .and_then(|f| f.field(|f| &f.value).as_str().ok().map(str::to_string));
+            .and_then(|f| f.value().as_str().ok().map(str::to_string));
         // A stdio member's lease names the generation of the child it reached in its head.
         let far_generation = input
             .head_fields()
             .iter()
             .find(|f| {
-                f.field(|f| &f.name).as_str().is_ok_and(|n| {
+                f.name().as_str().is_ok_and(|n| {
                     n.eq_ignore_ascii_case(busbar_contract::conn::PROGRAM_GENERATION_FIELD)
                 })
             })
-            .and_then(|f| f.field(|f| &f.value).as_str().ok()?.trim().parse::<u64>().ok());
+            .and_then(|f| f.value().as_str().ok()?.trim().parse::<u64>().ok());
         let step = plane.units.with(&key, |unit| {
             let unit = unit?;
             unit.ticket = Some(ticket);
@@ -2992,17 +3089,17 @@ slot!(
             if let Some(step) = door_tasks::resume(plane, ticket, principal, unit) {
                 return Some(step);
             }
-            match piece.from {
-                FROM_KERNEL if piece.attempt_no > 0 => {
+            match piece.from() {
+                FROM_KERNEL if piece.attempt_no() > 0 => {
                     unit.member = Some(member);
-                    unit.attempt = piece.attempt_no;
+                    unit.attempt = piece.attempt_no();
                     unit.verified = None;
                     // A new attempt negotiates afresh with its own member.
                     unit.negotiating = None;
                     Some(Step::Taken)
                 }
                 FROM_KERNEL => Some(Step::Taken),
-                FROM_CALLER if piece.flags & PIECE_LAST == 0 => Some(Step::Taken),
+                FROM_CALLER if piece.flags() & PIECE_LAST == 0 => Some(Step::Taken),
                 FROM_CALLER => answer_body(&instance, plane, ticket, &caller, unit),
                 FROM_FAR_END => {
                     let held = unit.held.clone();
@@ -3031,8 +3128,8 @@ slot!(
                             let (Some(def), Some(program)) = (def, relay.program.as_mut()) else {
                                 return None;
                             };
-                            let last = piece.flags & PIECE_LAST != 0;
-                            let head = far_generation.filter(|_| piece.flags & PIECE_HAS_STATUS != 0);
+                            let last = piece.flags() & PIECE_LAST != 0;
+                            let head = far_generation.filter(|_| piece.flags() & PIECE_HAS_STATUS != 0);
                             let far = door_program::far(
                                 plane, ticket, member, def, program, head, bytes, last,
                             );
@@ -3138,8 +3235,8 @@ slot!(
                             let resumed = unit.negotiating.as_ref().is_some_and(|n| n.fed);
                             let mut over = None;
                             if !resumed {
-                                if piece.flags & PIECE_HAS_STATUS != 0 {
-                                    relay.status = piece.status_code;
+                                if piece.flags() & PIECE_HAS_STATUS != 0 {
+                                    relay.status = piece.status_code();
                                     relay.sse = far_type
                                         .as_deref()
                                         .is_some_and(|t| t.starts_with(EVENT_STREAM));
@@ -3159,7 +3256,7 @@ slot!(
                                     ));
                                 } else {
                                     relay.far.extend_from_slice(bytes);
-                                    if piece.flags & PIECE_LAST == 0 {
+                                    if piece.flags() & PIECE_LAST == 0 {
                                         return Some(Step::Taken);
                                     }
                                 }
@@ -3580,11 +3677,11 @@ slot!(
     /// `refusal`: a refused arrival's own words rendered with its own status; any other refusal
     /// rendered as the one error envelope with no id.
     RefusalSlot, RefusalIn, RefusalOut, |instance, input, mut out| {
-        let given = input.get();
+        let given = input;
         // The request id the refused unit's caller sent, where its arrival read one: an answer the
         // caller cannot correlate is not an answer.
         let unit_id = instance.get().and_then(|plane| {
-            plane.units.with(&given.unit, |unit| match unit.map(|u| &u.disposition) {
+            plane.units.with(&given.unit(), |unit| match unit.map(|u| &u.disposition) {
                 Some(Disposition::Request { id, .. }) => Some(id.clone()),
                 _ => None,
             })
@@ -3593,16 +3690,16 @@ slot!(
         // breaker, a walk out of members or out of time) the reason's own word, as predev's door said
         // it, wherever this door repeats the words (its generic error, a task's failure): the
         // kernel's text there is the walk's own sentence, which predev never handed this door.
-        let text: &[u8] = if given.cause != REFUSAL_ARRIVE
-            && given.reason == busbar_contract::abi::plane::RefusalCode::BreakerOpen.code()
+        let text: &[u8] = if given.cause() != REFUSAL_ARRIVE
+            && given.reason() == busbar_contract::abi::plane::RefusalCode::BreakerOpen.code()
         {
             BREAKER_OPEN_WORD.as_bytes()
         } else {
-            input.field(|i| &i.text).bytes()
+            input.text().bytes()
         };
         // The tool a refused `tools/call` named, where its arrival read one.
         let called = instance.get().and_then(|plane| {
-            plane.units.with(&given.unit, |unit| {
+            plane.units.with(&given.unit(), |unit| {
                 let unit = unit?;
                 matches!(&unit.disposition, Disposition::Request { row, .. }
                     if row.op == crate::tool_ops::OP_TOOL_CALL)
@@ -3621,27 +3718,29 @@ slot!(
         let (creates_task, run_reference) = instance
             .get()
             .and_then(|plane| {
-                plane.units.with(&given.unit, |unit| {
+                plane.units.with(&given.unit(), |unit| {
                     unit.map(|u| (door_tasks::creates_task(u), door_tasks::run_reference(u)))
                 })
             })
             .unwrap_or((false, None));
+        // Its failure is written to the host's records here, at the refusal.
+        let mut task_records = Vec::new();
         if let (Some(plane), Some(reference)) = (instance.get(), run_reference.as_deref()) {
             let message = std::str::from_utf8(text).unwrap_or_default();
-            door_tasks::continuation_refused(plane, given.unit, reference, message);
+            task_records = door_tasks::continuation_refused(plane, given.unit(), reference, message);
         }
         let mut audit: Option<crate::call::AuditRow> = None;
         let mut retry_after: Option<u32> = None;
         // A KERNEL REFUSAL BEFORE ANY UNIT (a mounted path's authentication, the body limit): the
         // JSON-RPC envelope with no id, in the 1.6.0 baseline's bytes (audit K4#2(b): the plane owns
         // the text, the kernel no longer renders it).
-        let unitless = (given.unit == 0 && given.cause == REFUSAL_KERNEL)
-            .then(|| unitless_kernel_body(given.reason))
+        let unitless = (given.unit() == 0 && given.cause() == REFUSAL_KERNEL)
+            .then(|| unitless_kernel_body(given.reason()))
             .flatten();
         let (status, body, allow) = if let Some(body) = unitless {
             // `0`: the kernel's status stands.
             (0, body.to_vec(), false)
-        } else if given.cause == REFUSAL_ARRIVE {
+        } else if given.cause() == REFUSAL_ARRIVE {
             match words_of(text) {
                 Some(Words::Rpc(refusal)) => (refusal.status, refusal.body(), false),
                 Some(Words::NotAllowed) => (
@@ -3666,34 +3765,34 @@ slot!(
                 busbar_contract::abi::plane::RefusalCode::GroupFrozen,
             ]
             .into_iter()
-            .any(|r| r.code() == given.reason);
+            .any(|r| r.code() == given.reason());
             // A CALL THE CALLER IS NOT GRANTED (the kernel's grant check said no before the plane
             // decided it): answered as the served engine answered it, `404 not_granted` in the
             // words an unknown tool gets.
             let scope_denied =
-                given.reason == busbar_contract::abi::plane::RefusalCode::ScopeDenied.code();
+                given.reason() == busbar_contract::abi::plane::RefusalCode::ScopeDenied.code();
             let ungranted = scope_denied && !creates_task;
             // THE AUDIT ROW of a call the KERNEL refused before the plane decided it (SEAM-L(o)):
             // a scope denial or a hook's veto is the served engine's rejected `mcp_tool.call` on the
             // tool the caller named.
-            if scope_denied || given.cause == REFUSAL_GATE {
+            if scope_denied || given.cause() == REFUSAL_GATE {
                 audit = called
                     .as_deref()
                     .map(|name| crate::call::AuditRow::tool(name, false));
             }
             let breaker_open =
-                given.reason == busbar_contract::abi::plane::RefusalCode::BreakerOpen.code();
+                given.reason() == busbar_contract::abi::plane::RefusalCode::BreakerOpen.code();
             if let (true, Some(server)) = (breaker_open, called_server.as_deref()) {
                 // A TRIPPED SERVER (the walk found no member its breaker admits): the served
                 // engine's `503`, `-32030`, its sentence and data, and the wait the kernel's cell
                 // knows as `Retry-After`.
-                retry_after = Some(given.retry_after_s);
+                retry_after = Some(given.retry_after_s());
                 // The same `-32030` either way; only the account of what happened differs: a call
                 // that WAS dispatched and spent the server's `timeout:` says so, and "did not
                 // dispatch" stays the words of the paths that dispatched nothing.
                 let expired = instance.get().is_some_and(|plane| {
-                    plane.units.with(&given.unit, |unit| {
-                        unit.is_some_and(|unit| timed_out(plane.services, given.head.ticket, unit))
+                    plane.units.with(&given.unit(), |unit| {
+                        unit.is_some_and(|unit| timed_out(plane.services, given.head().ticket(), unit))
                     })
                 });
                 let message = if expired {
@@ -3701,13 +3800,13 @@ slot!(
                         "MCP server `{server}` is unavailable: it did not answer this call within \
                          the server's timeout; busbar dispatched it and stopped waiting. Retry after \
                          {}s.",
-                        given.retry_after_s
+                        given.retry_after_s()
                     )
                 } else {
                     format!(
                         "MCP server `{server}` is unavailable: its circuit breaker is open after \
                          repeated failures; busbar did not dispatch this call. Retry after {}s.",
-                        given.retry_after_s
+                        given.retry_after_s()
                     )
                 };
                 let refusal = crate::tool_arrival::Refusal {
@@ -3718,7 +3817,7 @@ slot!(
                     data: Some(serde_json::json!({
                         "reason": "upstream_unavailable",
                         "server": server,
-                        "retry_after_ms": u64::from(given.retry_after_s).saturating_mul(1000),
+                        "retry_after_ms": u64::from(given.retry_after_s()).saturating_mul(1000),
                     })),
                 };
                 (refusal.status, refusal.body(), false)
@@ -3731,14 +3830,14 @@ slot!(
             } else {
             // A BUDGET REFUSAL carries the wait the kernel's window reset names (ARCHITECT Q5:
             // every plane's budget refusal renders it as `Retry-After`, never 0).
-            if budget && given.retry_after_s > 0 {
-                retry_after = Some(given.retry_after_s);
+            if budget && given.retry_after_s() > 0 {
+                retry_after = Some(given.retry_after_s());
             }
             let refusal = if budget && creates_task {
                 door_tasks::budget_refused(unit_id.clone(), message)
             } else if budget {
                 crate::tool_arrival::Refusal {
-                    status: given.status,
+                    status: given.status(),
                     id: unit_id.clone(),
                     code: crate::codec::CODE_REFUSED,
                     message: format!("this request was refused by your budget: {message}"),
@@ -3746,15 +3845,15 @@ slot!(
                 }
             } else {
                 crate::tool_arrival::Refusal {
-                    status: given.status,
+                    status: given.status(),
                     id: unit_id.clone(),
                     code: crate::codec::CODE_REFUSED,
                     message: message.to_string(),
                     // A HOOK'S VETO carries the served engine's reason (`hook_rejected`) and the name
                     // of the hook that vetoed it (SEAM-L(p)), where the kernel names one.
-                    data: (given.cause == REFUSAL_GATE).then(|| {
+                    data: (given.cause() == REFUSAL_GATE).then(|| {
                         let reason = busbar_contract::vocab::REASON_HOOK_REJECTED;
-                        match std::str::from_utf8(input.field(|i| &i.hook).bytes()) {
+                        match std::str::from_utf8(input.hook().bytes()) {
                             Ok(hook) if !hook.is_empty() => {
                                 serde_json::json!({ "reason": reason, "hook": hook })
                             }
@@ -3786,6 +3885,14 @@ slot!(
             });
         }
         let mut records = input.records_buf();
+        for (key, value) in &task_records {
+            records.push(RecordWrite {
+                kind: door::RECORD_TASK,
+                op: RECORD_PUT,
+                key: arena.span(key),
+                value: arena.span(value),
+            });
+        }
         if let Some(row) = &audit {
             records.push(RecordWrite {
                 kind: if row.applied {
@@ -3818,7 +3925,7 @@ slot!(
         // THE REFUSED UNIT IS OVER: the kernel ends a unit it refuses, and nothing else would ever
         // name it again, so its state (its request's params among it) goes with the refusal.
         if let Some(plane) = instance.get() {
-            plane.units.remove(&given.unit);
+            plane.units.remove(&given.unit());
         }
         Outcome::Ready
     }
@@ -3996,9 +4103,9 @@ slot!(
         let Some(plane) = instance.get() else {
             return Outcome::Failed;
         };
-        let route = input.get().route as usize;
+        let route = input.route() as usize;
         let held = plane.current();
-        let name = verb_subject(input.field(|i| &i.target).bytes());
+        let name = verb_subject(input.target().bytes());
         let found = held
             .as_ref()
             .zip(name.as_ref())
@@ -4162,8 +4269,8 @@ slot!(
     /// `rewritten` (the body the kernel keeps and re-pushes from then on) and is the body projected.
     /// Any other request carries no invocation for a hook to read: REFUSED.
     Project, ProjectIn, ProjectOut, |instance, input, mut out| {
-        let body = input.field(|i| &i.body).bytes();
-        let rewrite = input.field(|i| &i.rewrite).bytes();
+        let body = input.body().bytes();
+        let rewrite = input.rewrite().bytes();
         let rewritten = (!rewrite.is_empty())
             .then(|| crate::call::rewritten(body, rewrite))
             .flatten();
@@ -4186,7 +4293,7 @@ slot!(
             let params = serde_json::from_slice::<Value>(rewritten)
                 .ok()
                 .and_then(|v| v.get("params").cloned());
-            plane.units.with(&input.get().unit, |unit| {
+            plane.units.with(&input.unit(), |unit| {
                 if let Some(unit) = unit {
                     unit.params = params;
                 }
@@ -4206,11 +4313,11 @@ slot!(
             .fields()
             .iter()
             .find(|f| {
-                f.field(|f| &f.name)
+                f.name()
                     .as_str()
                     .is_ok_and(|n| n.eq_ignore_ascii_case(SESSION_FIELD))
             })
-            .and_then(|f| f.field(|f| &f.value).as_str().ok())
+            .and_then(|f| f.value().as_str().ok())
             .filter(|v| !v.is_empty())
             .map(str::to_string);
         let projected = serde_json::to_vec(&serde_json::json!({

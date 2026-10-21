@@ -7,9 +7,9 @@
 //! The failure this file exists to catch is the one `tests/method_coverage.rs` was written for, one
 //! level down: a column of the matrix whose contents are a property of its call sites drifts from
 //! the specification silently, because an absent verb and a considered-and-inapplicable verb look
-//! identical in source. [`UpstreamVerb::all`] is compared against busbar's `qa/method-inventory.json`
-//! — which is generated from rmcp's own model — in BOTH directions by `tests/method_inventory.rs`
-//! (it reads busbar at the pin); this file holds the enum's own closure.
+//! identical in source. The variants production constructs are compared against busbar's
+//! `qa/method-inventory.json` by `src/tests/method_inventory_tests.rs` (it reads busbar at the pin);
+//! this file holds the builder's own shape over [`UpstreamVerb::all`].
 
 use super::super::verb::UpstreamVerb;
 
@@ -72,10 +72,10 @@ fn notifications_carry_no_id_and_requests_do() {
         }
     }
     assert_eq!(
-        notifications, 5,
-        "the five client-originated notifications of this revision must be classified as \
-         notifications; a request misclassified as one would never be answered, and a notification \
-         misclassified as a request hangs the leg"
+        notifications, 1,
+        "`notifications/initialized`, the one notification busbar issues through this builder, \
+         must be classified as one; a request misclassified as one would never be answered, and a \
+         notification misclassified as a request hangs the leg"
     );
 }
 

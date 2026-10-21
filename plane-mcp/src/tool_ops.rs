@@ -16,9 +16,13 @@
 //!
 //! A CLIENT method is one a caller sends and this node answers. A PROVIDER method is one an upstream
 //! sends BACK during a call — asking for a completion, for a list of roots, or for something from
-//! the caller — which opens a unit of the upstream's own and runs all seven steps over it. A
+//! the caller — which is relayed to that call's caller inside the call's own unit (it opens no unit
+//! of its own; the caller's answer goes back to the upstream on the same unit). A
 //! NOTIFICATION is neither: it carries no identifier, obliges no answer, and the specification
 //! forbids replying to one.
+
+// The crate's only public item is `door`: the accessors and variants below were this module's public API; the tests hold them, the door does not reach them (BUSBAR-1.6.0.md l.3560).
+#![cfg_attr(not(test), allow(dead_code))]
 
 use busbar_contract::ids::OpClassId;
 
@@ -251,6 +255,7 @@ pub const METHODS: &[RpcMethodRow] = &[
 /// A notification obliges no answer, so recognising one is only about knowing whether to act on it.
 /// One this plane does not recognise is DROPPED rather than refused, which is what the specification
 /// requires and what the codec already does.
+#[cfg(test)]
 pub const NOTIFICATIONS: &[&str] = &[
     "notifications/roots/list_changed",
     "notifications/tools/list_changed",
@@ -265,6 +270,7 @@ pub fn method_row_for(method: &str) -> Option<&'static RpcMethodRow> {
 
 /// Whether a name is a notification this plane recognises.
 #[must_use]
+#[cfg(test)]
 pub fn is_known_notification(method: &str) -> bool {
     NOTIFICATIONS.contains(&method)
 }

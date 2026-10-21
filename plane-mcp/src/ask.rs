@@ -734,6 +734,7 @@ fn unanswered(child: &ChildLeg, retry: Retry<'_>) -> Option<String> {
 /// the principal, the call (method, tool, arguments as the caller sent them) and the catalogue
 /// generation, nesting the member that asked and its own state. `None` when it cannot be sealed.
 #[must_use]
+#[cfg(test)]
 pub fn relay_state(
     bind: Bind<'_>,
     args_digest: &str,

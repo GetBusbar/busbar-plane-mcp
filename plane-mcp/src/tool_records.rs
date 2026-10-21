@@ -42,6 +42,7 @@
 //! name state the codec keeps in memory or derives from configuration, and therefore forgets on
 //! restart; declaring them here is what makes that forgetting visible.
 
+#[cfg(test)]
 use busbar_contract::ids::RecordSchemaId;
 
 /// The `call` kind — the per-call log record's tag on the store seam.
@@ -59,27 +60,35 @@ pub const KIND_TASK: &str = "task";
 
 /// The plane-record kinds this plane keeps on the store's plane-record seam — its declaration's
 /// `record_kinds`, so the administrative `plane_record_write` verb writes only these under it.
+#[cfg(test)]
 pub const RECORD_KINDS: &[&str] = &[KIND_CALL, KIND_DEMOTION, KIND_APPROVAL, KIND_TASK];
 
 /// The call log: what each caller asked for, and what they got.
+#[cfg(test)]
 pub const SCHEMA_CALL: RecordSchemaId = RecordSchemaId::new(KIND_CALL);
 
 /// The quarantine rows: which servers are not being advertised, and why.
+#[cfg(test)]
 pub const SCHEMA_DEMOTION: RecordSchemaId = RecordSchemaId::new(KIND_DEMOTION);
 
 /// The tool catalogue: what each registered server was observed to offer.
+#[cfg(test)]
 pub const SCHEMA_CATALOGUE: RecordSchemaId = RecordSchemaId::new("catalogue");
 
 /// The approvals: the one-time grants a retry must not be able to re-spend.
+#[cfg(test)]
 pub const SCHEMA_APPROVAL: RecordSchemaId = RecordSchemaId::new(KIND_APPROVAL);
 
 /// The settings: each registered server's own configuration as it was applied.
+#[cfg(test)]
 pub const SCHEMA_SETTINGS: RecordSchemaId = RecordSchemaId::new("settings");
 
 /// The long-running tasks a caller may come back for.
+#[cfg(test)]
 pub const SCHEMA_TASK: RecordSchemaId = RecordSchemaId::new(KIND_TASK);
 
 /// The record schemas this plane keeps kernel-held durable records under.
+#[cfg(test)]
 pub const RECORD_SCHEMAS: &[RecordSchemaId] = &[
     SCHEMA_CALL,
     SCHEMA_DEMOTION,
@@ -88,48 +97,6 @@ pub const RECORD_SCHEMAS: &[RecordSchemaId] = &[
     SCHEMA_SETTINGS,
     SCHEMA_TASK,
 ];
-
-/// Read one record back by key.
-pub const OP_GET: &str = "get";
-
-/// Write one record, replacing any earlier one under the same key.
-pub const OP_PUT: &str = "put";
-
-/// Read every record of a schema under one parent.
-pub const OP_SCAN: &str = "scan";
-
-/// Add one record to a schema's append-only side.
-pub const OP_APPEND: &str = "append";
-
-/// Remove one record.
-pub const OP_DELETE: &str = "delete";
-
-/// Spend a one-time grant, exactly once, and say whether this caller is the one who spent it.
-pub const OP_REDEEM: &str = "redeem";
-
-/// Every operation any of this plane's schemas declares.
-pub const OPERATIONS: &[&str] = &[OP_GET, OP_PUT, OP_SCAN, OP_APPEND, OP_DELETE, OP_REDEEM];
-
-/// Which operations one schema declares.
-///
-/// A leg naming an operation its schema does not declare is refused by the trust unit, so the answer
-/// has to be a declaration rather than a convention.
-#[must_use]
-pub fn operations_for(schema: RecordSchemaId) -> &'static [&'static str] {
-    match schema.as_str() {
-        // The call log is append-and-read. It is the answer to "what happened", and an answer whose
-        // middle can be replaced is not an answer.
-        s if s == SCHEMA_CALL.as_str() => &[OP_APPEND, OP_SCAN],
-        s if s == SCHEMA_DEMOTION.as_str() => &[OP_GET, OP_PUT, OP_SCAN, OP_DELETE],
-        s if s == SCHEMA_CATALOGUE.as_str() => &[OP_GET, OP_PUT, OP_SCAN],
-        // An approval is spent, never read and then spent: the two-step version is the race the
-        // redeem operation exists to close.
-        s if s == SCHEMA_APPROVAL.as_str() => &[OP_PUT, OP_REDEEM],
-        s if s == SCHEMA_SETTINGS.as_str() => &[OP_GET, OP_PUT, OP_SCAN],
-        s if s == SCHEMA_TASK.as_str() => &[OP_GET, OP_PUT, OP_SCAN, OP_DELETE],
-        _ => &[],
-    }
-}
 
 #[cfg(test)]
 #[path = "tests/records.rs"]

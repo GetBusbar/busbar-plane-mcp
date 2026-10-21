@@ -7,21 +7,25 @@
 //! (and back out of) that envelope's opaque `body` with `serde_json` — byte-for-byte the same the
 //! store plugins persist it with. The neutral crates name none of these types.
 
+#[cfg(test)]
 use busbar_contract::records::{
-    PlaneDisposition, PlaneRecord, PlaneSelector, RecordStoreError, RecordStoreResult,
+    PlaneDisposition, PlaneRecord, RecordStoreError, RecordStoreResult,
 };
 
 // THE TWO KIND STRINGS ARE THE PLANE'S, AND ARE READ FROM IT. A record kind is the name the plane
 // declares its schema under (`busbar_plane_mcp::tool_records::SCHEMA_CALL`), so it is named once, there,
 // and this crate reads it. Spelling it on both sides is how two answers to "what is this record
 // called" come to differ, and the schema id is what a store indexes by.
-pub use crate::tool_records::{KIND_CALL, KIND_DEMOTION};
+#[cfg(test)]
+use crate::tool_records::KIND_DEMOTION;
 
 /// One MCP TOOL-CALL record, as it crosses the store seam for DURABLE persistence — the per-call
 /// evidence the audit claim rests on. The chain is scoped to the PRINCIPAL. A store persists these
 /// verbatim and returns them verbatim: the digest is computed and verified engine-side, and a backend
 /// never interprets or recomputes it. Plain data, never a credential — arguments and results are
-/// deliberately ABSENT.
+/// deliberately ABSENT. Read by the tests alone: the plane writes the call record's content suffix
+/// ([`call_suffix`]) and never this row.
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct McpCallRecord {
     /// The authenticated caller this chain belongs to. THE CHAIN SCOPE.
@@ -50,6 +54,7 @@ pub struct McpCallRecord {
     pub hash: String,
 }
 
+#[cfg(test)]
 impl McpCallRecord {
     // NB: there is deliberately NO plane-side `to_plane_record` WRITER for the call record. The
     // engine owns the append: a `call` chain is persisted ONLY as the neutral `{seq, prev_hash, hash,
@@ -57,18 +62,6 @@ impl McpCallRecord {
     // `McpCallRecord`. A writer that serialized this struct into a `PlaneRecord` body would emit a
     // shape the actual reader (`from_journal_body`) cannot parse — a footgun, so it does not exist.
     // The plane owns only the READ-BACK of what the engine wrote.
-
-    /// The list selector that reads one principal's `call` chain back, oldest-first.
-    pub fn parent_selector(principal: &str) -> PlaneSelector<'_> {
-        PlaneSelector::Parent(principal.into())
-    }
-
-    /// Reconstruct a record from an opaque serde `call` body — the inverse of a plain `serde_json`
-    /// serialization of this struct. NOT the engine's persisted shape (that is the neutral journal
-    /// body — see [`Self::from_journal_body`]); this decodes a bare `McpCallRecord` where one is held.
-    pub fn from_body(body: &[u8]) -> RecordStoreResult<Self> {
-        decode_record(body)
-    }
 
     /// Reconstruct a record from the NEUTRAL durable-journal body the engine's call-log seam persists
     /// — `{seq, prev_hash, hash, content}`, where `content` is the pre-framed LengthPrefixed field
@@ -79,6 +72,7 @@ impl McpCallRecord {
     /// `request_id` is a join key: never in the digest, so never in the neutral content, and it comes
     /// back EMPTY. The rebuilt fields feed the same digest byte stream the stored `hash` sealed, so a
     /// chain read back through this verifies byte-identically.
+    #[cfg(test)]
     pub fn from_journal_body(principal: &str, body: &[u8]) -> RecordStoreResult<Self> {
         // The neutral envelope, decoded structurally (matching field names) so this names no core type.
         #[derive(serde::Deserialize)]
@@ -149,6 +143,7 @@ pub fn call_suffix(
 /// field is `len:u64-be ⧺ bytes`; a numeric field is its eight big-endian bytes carried as one such
 /// length-prefixed field. Fails closed on a truncated/oversized field rather than reading past the
 /// buffer.
+#[cfg(test)]
 fn parse_call_suffix(
     content: &[u8],
 ) -> RecordStoreResult<(u64, String, String, String, String, String, u64)> {
@@ -213,6 +208,8 @@ fn parse_call_suffix(
 /// ONE RECORDED DEMOTION of an upstream MCP server, as it crosses the store seam. Written when a
 /// server is demoted, cleared when a later observation agrees with the approval again, and read back
 /// at boot so the demotion is in force before the first request is served. Keyed by `server`.
+/// Read by the tests alone.
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct McpDemotionRow {
     /// The registered upstream's local id — the row's primary key.
@@ -223,9 +220,11 @@ pub struct McpDemotionRow {
     pub recorded_at: u64,
 }
 
+#[cfg(test)]
 impl McpDemotionRow {
     /// Serialize this row into the opaque `demotion` [`PlaneRecord`] envelope (kind `demotion`),
     /// keyed by its server. Demotions are never purged by age, so the disposition is left `Active`.
+    #[cfg(test)]
     pub fn to_plane_record(&self) -> RecordStoreResult<PlaneRecord> {
         Ok(PlaneRecord {
             kind: KIND_DEMOTION.to_string(),
@@ -239,17 +238,21 @@ impl McpDemotionRow {
     }
 
     /// Reconstruct a row from an opaque `demotion` body — the inverse of [`Self::to_plane_record`].
+    /// Read by the tests alone.
+    #[cfg(test)]
     pub fn from_body(body: &[u8]) -> RecordStoreResult<Self> {
         decode_record(body)
     }
 }
 
 /// Serialize a typed plane row into an opaque `PlaneRecord::body`. `serde_json`.
+#[cfg(test)]
 fn encode<T: serde::Serialize>(row: &T) -> RecordStoreResult<Vec<u8>> {
     serde_json::to_vec(row).map_err(|e| RecordStoreError(format!("plane body encode: {e}")))
 }
 
 /// Decode an opaque `PlaneRecord::body` back into its typed plane row — the inverse of [`encode`].
+#[cfg(test)]
 fn decode_record<T: serde::de::DeserializeOwned>(body: &[u8]) -> RecordStoreResult<T> {
     serde_json::from_slice(body).map_err(|e| RecordStoreError(format!("plane body decode: {e}")))
 }

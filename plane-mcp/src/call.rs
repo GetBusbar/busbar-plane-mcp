@@ -406,6 +406,7 @@ pub fn custom_param_mismatch(
 /// name; `admit` is the caller's grant predicate (scope kind, name); `ask` is busbar's own ask
 /// decision for the resolved tool over the arguments as the caller sent them
 /// ([`crate::ask::decide`]), made before any answer becomes an argument.
+#[cfg(test)]
 pub fn admit_call(
     catalogue: &Catalogue,
     id: &Value,

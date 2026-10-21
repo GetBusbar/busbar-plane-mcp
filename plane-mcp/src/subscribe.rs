@@ -18,6 +18,9 @@
 //!   `SubscriptionsListenResult`, correlated to the request that opened it.
 //! - QUIET IS NOT NOTHING: an idle stream says it is alive every [`KEEPALIVE_NS`].
 
+// The crate's only public item is `door`: the accessors and variants below were this module's public API; the tests hold them, the door does not reach them (BUSBAR-1.6.0.md l.3560).
+#![cfg_attr(not(test), allow(dead_code))]
+
 use std::collections::BTreeSet;
 
 use serde_json::{json, Map, Value};
@@ -203,10 +206,10 @@ impl Listen {
                 return Err(invalid(
                     &id,
                     &format!(
-                        "`params.notifications.resourceSubscriptions` names {} distinct uris; a \
-                         `subscriptions/listen` call may watch at most {MAX_SUBSCRIBED_URIS} at \
-                         once. Open a second subscription for the rest.",
-                        uris.len()
+                        "`params.notifications.resourceSubscriptions` names more than \
+                         {MAX_SUBSCRIBED_URIS} distinct uris; a `subscriptions/listen` call may \
+                         watch at most {MAX_SUBSCRIBED_URIS} at once. Open a second subscription \
+                         for the rest."
                     ),
                 ));
             }
@@ -357,13 +360,6 @@ impl Listen {
             }
             Phase::Ended => Step::Closed,
         }
-    }
-
-    /// When the stream next has something to say with nothing changing: its keepalive or its bound.
-    #[must_use]
-    pub fn next_due_ns(&self) -> u64 {
-        (self.last_write_ns.saturating_add(KEEPALIVE_NS))
-            .min(self.opened_ns.saturating_add(MAX_LIFETIME_NS))
     }
 }
 

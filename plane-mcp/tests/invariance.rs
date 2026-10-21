@@ -54,6 +54,29 @@ fn walk(dir: &Path, f: &mut impl FnMut(&Path, &str)) {
     }
 }
 
+/// Walk every source file on the SURFACE, the code a shipped build compiles: every one under `dir`
+/// less the test-module directories (`src/tests/`, and each module's own `tests/`). A test module is
+/// compiled only when the tests are and the kernel never sees it; the suites that moved in from
+/// `tests/` when the crate's only public item became `door` read files, the environment and a
+/// clock, as they did out there.
+fn walk_surface(dir: &Path, f: &mut impl FnMut(&Path, &str)) {
+    for entry in std::fs::read_dir(dir)
+        .expect("the source directory is readable")
+        .flatten()
+    {
+        let path = entry.path();
+        if path.is_dir() {
+            if path.file_name().is_some_and(|n| n == "tests") {
+                continue;
+            }
+            walk_surface(&path, f);
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            let text = std::fs::read_to_string(&path).expect("a source file is readable");
+            f(&path, &text);
+        }
+    }
+}
+
 /// The manifest declares no features at all.
 #[test]
 fn the_crate_declares_no_features() {
@@ -75,7 +98,7 @@ fn the_crate_declares_no_features() {
 #[test]
 fn no_item_is_conditionally_compiled() {
     let mut offenders = Vec::new();
-    walk(&src_dir(), &mut |path, text| {
+    walk_surface(&src_dir(), &mut |path, text| {
         for (n, line) in text.lines().enumerate() {
             let line = line.trim_start();
             if line.starts_with("#[cfg(test)]") {
@@ -100,7 +123,10 @@ fn the_crate_forbids_unsafe_and_undocumented_items() {
     assert!(lib.contains("#![deny(missing_docs)]"));
 }
 
-/// No source file contains the word the lint gate forbids.
+/// No source file contains the word the lint gate forbids: neither the shipped surface nor the
+/// crate's own test modules (`src/tests/`, and each module's `tests/`), which compile under the same
+/// literal `#![forbid(unsafe_code)]`. A test that needs `unsafe` drives the door from an integration
+/// test (`tests/*.rs`) instead.
 #[test]
 fn the_source_contains_no_unsafe_block() {
     let mut offenders = Vec::new();
