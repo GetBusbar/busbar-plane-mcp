@@ -34,9 +34,14 @@
 //!   the run that continues; `tasks/cancel` settles the handle `cancelled`, which a running
 //!   continuation observes when it settles.
 //! * A SETTLE THAT DOES NOT LAND is owed: its task is held unsettled and the next create's sweep
-//!   settles it again, until it lands. The same sweep settles the live tasks of its caller a process
-//!   that is gone left behind ([`tasks::TaskLease`]), so they never exhaust the bound
-//!   of live work (THE DESIGN: admission bounds live work; nothing evicts it).
+//!   settles it again, until it lands. Its terminal state is in the records all the while: the
+//!   result (or the failure's words) is written where the task ended, the settle landed or not,
+//!   with its live state terminal and its run's lease lapsed, so `tasks/get` answers it on any
+//!   node, and a create of its caller on any node settles it with that state once the process
+//!   holding it is gone. A settled row whose result the records do not hold is answered `failed`
+//!   in words, never as a task that does not exist. The same sweep settles the live tasks of its
+//!   caller a process that is gone left behind ([`tasks::TaskLease`]), so they never exhaust the
+//!   bound of live work (THE DESIGN: admission bounds live work; nothing evicts it).
 
 use std::task::Poll;
 
@@ -135,10 +140,12 @@ pub(super) struct Create {
 }
 
 /// A task left behind, being settled: its reference, the handle number its find was issued under,
-/// and whether it is done.
+/// the live handle and row it found, its live state's records read, and whether it is done.
 pub(super) struct Left {
     reference: String,
     find: Option<u32>,
+    found: Option<(u64, WorkRow)>,
+    live: Listing,
     done: bool,
 }
 
@@ -484,6 +491,38 @@ fn struck_records(task: &Task) -> Vec<(Vec<u8>, Vec<u8>)> {
     out
 }
 
+/// THE RECORDS A TERMINAL STATE LEAVES (THE DESIGN, the mcp bullet: the task store is host
+/// records): `task`'s result chunks, written whether or not its settle `landed`, the count kept in
+/// hand. A settle that landed leaves its live chunks and index row to strike; one that is owed
+/// leaves its live state, terminal, and its index row with its run's lease lapsed at its last
+/// update: every node then answers its result from the records, and the next create of its caller
+/// on any node settles it with that state, a restart between them included.
+fn ended_records(plane: &McpDoor, task: &Task, landed: bool) -> tasks::Records {
+    let mut out = task
+        .terminal()
+        .and_then(|terminal| tasks::result_chunks(&task.id, &terminal).ok())
+        .unwrap_or_default();
+    let wrote = u32::try_from(out.len()).unwrap_or(0);
+    if wrote > 0 {
+        plane.tasks.with(&task.id, |t| {
+            if let Some(t) = t {
+                t.chunks = wrote;
+            }
+        });
+    }
+    if landed {
+        out.extend(struck_records(task));
+    } else {
+        // `0` is a lease no run holds (parked on its caller): a lapsed one is never `0`.
+        let lapsed = task.stamps().1.max(1);
+        out.extend(
+            live_records(plane, task, Some(lapsed))
+                .unwrap_or_else(|_| vec![lease_record(task, lapsed)]),
+        );
+    }
+    out
+}
+
 /// `records` of the task kind ride the unit's pending write.
 fn ride(unit: &mut CallUnit, records: Vec<(Vec<u8>, Vec<u8>)>) {
     if let Some(p) = unit.pending.as_mut() {
@@ -550,8 +589,10 @@ fn list_records(
     Poll::Ready(true)
 }
 
-/// A TASK LEFT BEHIND, settled `cancelled`: found (scoped to this caller), its own row cancelled and
-/// settled. The records its settle leaves to strike; none while it is owed.
+/// A TASK LEFT BEHIND, settled: found (scoped to this caller) and its live state read from the
+/// plane's records; one whose run reached its terminal state but whose settle never landed (the
+/// process that ran it gone) is settled with that state, its result already in the records; any
+/// other is cancelled and settled. The records its settle leaves to strike; none while it is owed.
 fn settle_left(
     plane: &McpDoor,
     services: Services,
@@ -564,27 +605,53 @@ fn settle_left(
     if left.done {
         return Poll::Ready(Vec::new());
     }
-    let h = handle(ticket, issued, &mut left.find);
-    let (mut buf, mut spans) = ([0u8; WORK_BYTES], [blank(); 1]);
-    let found = match services.work_find(h, &left.reference, &mut buf, &mut spans) {
+    if left.found.is_none() {
+        let h = handle(ticket, issued, &mut left.find);
+        let (mut buf, mut spans) = ([0u8; WORK_BYTES], [blank(); 1]);
+        let found = match services.work_find(h, &left.reference, &mut buf, &mut spans) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(found) => found,
+        };
+        match found {
+            Ok(Some(f)) if f.state == WORK_LIVE => match WorkRow::read(f.record) {
+                Some(row) => left.found = Some((f.handle, row)),
+                None => {
+                    left.done = true;
+                    return Poll::Ready(Vec::new());
+                }
+            },
+            // Settled, or past its retention: only its records are left.
+            Ok(_) => {
+                left.done = true;
+                let gone = Task::new(&left.reference, principal, 0, "", now);
+                return Poll::Ready(struck_records(&gone));
+            }
+            // The host could not say: the next create reads it again.
+            Err(_) => {
+                left.done = true;
+                return Poll::Ready(Vec::new());
+            }
+        }
+    }
+    let Some((work, row)) = left.found.clone() else {
+        return Poll::Ready(Vec::new());
+    };
+    let prefix = tasks::live_prefix(&left.reference);
+    let listed = match list_records(services, ticket, issued, &prefix, false, &mut left.live) {
         Poll::Pending => return Poll::Pending,
-        Poll::Ready(found) => found,
+        Poll::Ready(listed) => listed,
     };
     left.done = true;
-    let mut task = match found {
-        Ok(Some(f)) if f.state == WORK_LIVE => match WorkRow::read(f.record) {
-            Some(row) => Task::from_row(&left.reference, principal, f.handle, &row, None),
-            None => return Poll::Ready(Vec::new()),
-        },
-        // Settled, or past its retention: only its records are left.
-        Ok(_) => {
-            let gone = Task::new(&left.reference, principal, 0, "", now);
-            return Poll::Ready(struck_records(&gone));
+    let mut task = Task::from_row(&left.reference, principal, work, &row, None);
+    if listed {
+        let bytes: Vec<u8> = left.live.rows.iter().flat_map(|(_, v)| v.clone()).collect();
+        if let Some(live) = tasks::read_live(&bytes) {
+            task.take_live(&live);
         }
-        // The host could not say: the next create reads it again.
-        Err(_) => return Poll::Ready(Vec::new()),
-    };
-    task.cancel(now);
+    }
+    if !task.status().is_terminal() {
+        task.cancel(now);
+    }
     if settled(services, ticket, issued, task.handle, &task.row()) {
         Poll::Ready(struck_records(&task))
     } else {
@@ -667,7 +734,8 @@ fn creating(
     // THE SWEEP, as the served engine ran it, on a create: abandoned tasks cancelled (their
     // continuations woken to see it), expired ones dropped. A task that reached its terminal state
     // in hand with its handle unsettled is settled now; one whose settle does not land is owed
-    // again, until it lands.
+    // again, until it lands. A terminal state whose result is not yet in the records is written
+    // with this settle, landed or not.
     if !st.swept {
         st.swept = true;
         let swept = plane.tasks.with_all(|m| tasks::sweep(m, now));
@@ -675,10 +743,14 @@ fn creating(
             swept.wake.iter().for_each(|t| wake.wake(*t));
         }
         for (work, task) in &swept.settle {
-            if settled(services, ticket, &mut unit.issued, *work, &task.row()) {
-                st.struck.extend(struck_records(task));
-            } else {
+            let landed = settled(services, ticket, &mut unit.issued, *work, &task.row());
+            if !landed {
                 owe(plane, task);
+            }
+            if task.chunks == 0 {
+                st.struck.extend(ended_records(plane, task, landed));
+            } else if landed {
+                st.struck.extend(struck_records(task));
             }
         }
         plane.strikes.with_all(|m| {
@@ -724,6 +796,8 @@ fn creating(
                 st.left.push(Left {
                     reference: id.to_string(),
                     find: None,
+                    found: None,
+                    live: Listing::default(),
                     done: false,
                 });
             }
@@ -811,9 +885,11 @@ fn creating(
                         "the host ran no continuation for this task".to_string(),
                         now,
                     );
-                    if !settled(services, ticket, &mut unit.issued, work, &task.row()) {
+                    let landed = settled(services, ticket, &mut unit.issued, work, &task.row());
+                    if !landed {
                         owe(plane, &task);
                     }
+                    st.struck.extend(ended_records(plane, &task, landed));
                 }
                 let step = unavailable(unit, "the host runs no continuation for it");
                 ride(unit, std::mem::take(&mut st.struck));
@@ -1481,35 +1557,33 @@ fn running(
                     Poll::Ready(Err(_)) => None,
                 };
                 let reference = run.reference.clone();
-                let (status, chunks) = plane.tasks.with_all(|m| {
+                let (status, ended) = plane.tasks.with_all(|m| {
                     let t = m.entry(reference.clone()).or_insert(principal_task);
                     t.runner = None;
                     match won {
                         Some(false) => {
                             t.cancel(at);
-                            (t.status(), Vec::new())
+                            (t.status(), None)
                         }
                         won => {
                             apply(t);
                             t.unsettled = won.is_none();
-                            let chunks = match (won, t.terminal()) {
-                                (Some(true), Some(terminal)) => {
-                                    tasks::result_chunks(&reference, &terminal).unwrap_or_default()
-                                }
-                                _ => Vec::new(),
-                            };
-                            t.chunks = u32::try_from(chunks.len()).unwrap_or(0);
-                            (t.status(), chunks)
+                            (t.status(), Some(t.clone()))
                         }
                     }
                 });
-                // A settle that landed leaves the task's live state and index row to strike.
-                let mut records = chunks;
-                if won.is_some() {
-                    if let Some(task) = plane.tasks.get(&reference) {
-                        records.extend(struck_records(&task));
-                    }
-                }
+                // THE TERMINAL STATE IS WRITTEN TO THE HOST'S RECORDS whether or not the settle
+                // landed: a settle the host could not take at once is owed to the next create's
+                // sweep, and the result meanwhile answers from the records on every node. A
+                // cancel that won leaves the task's live state and index row to strike.
+                let records = match ended {
+                    Some(task) => ended_records(plane, &task, won == Some(true)),
+                    None => plane
+                        .tasks
+                        .get(&reference)
+                        .map(|t| struck_records(&t))
+                        .unwrap_or_default(),
+                };
                 return reply(unit, run, status, records);
             }
         }
@@ -1706,7 +1780,7 @@ fn nest_run(
 }
 
 /// A TASK NOTHING CAN CONTINUE, failed in `why` and its handle settled (owed until it lands): the
-/// records its settle leaves to strike.
+/// records its terminal state leaves ([`ended_records`]).
 fn fail_unrun(
     plane: &McpDoor,
     (services, ticket, issued): (Services, Ticket, &mut u32),
@@ -1721,10 +1795,12 @@ fn fail_unrun(
         })
     });
     match failed {
-        Some(t) if settled(services, ticket, issued, t.handle, &t.row()) => struck_records(&t),
         Some(t) => {
-            owe(plane, &t);
-            Vec::new()
+            let landed = settled(services, ticket, issued, t.handle, &t.row());
+            if !landed {
+                owe(plane, &t);
+            }
+            ended_records(plane, &t, landed)
         }
         None => Vec::new(),
     }
@@ -1990,9 +2066,10 @@ fn verbing(
 
 /// The task `task_id` names FOR THIS CALLER, from the host's rows (THE DESIGN, the mcp bullet: the
 /// task store is host records): `work.find` (scoped to the instance and the principal; every denial alike); a
-/// live handle's live state in the plane's records; a settled one's row and the result written
-/// there (or the result this instance holds, when it holds one the records could not). The
-/// instance's own halves of the task are kept beside what the host says.
+/// live handle's live state in the plane's records (and its result, when that state is terminal and
+/// its settle owed); a settled one's row and the result written there (or the result this instance
+/// holds, when it holds one the records could not), a result they do not hold answered `failed` in
+/// words. The instance's own halves of the task are kept beside what the host says.
 fn resolve(
     plane: &McpDoor,
     services: Services,
@@ -2034,8 +2111,9 @@ fn resolve(
     let Some(row) = row else {
         return Resolved::Unknown;
     };
-    let mut task = if state == WORK_LIVE {
-        // ITS LIVE STATE, read back from its chunks.
+    // ITS LIVE STATE, read back from its chunks: on a live handle, what the task holds now; a
+    // terminal one there is a run whose settle is still owed, its result already in the records.
+    let row = if state == WORK_LIVE {
         let prefix = tasks::live_prefix(task_id);
         match list_records(
             services,
@@ -2054,34 +2132,74 @@ fn resolve(
         if let Some(live) = tasks::read_live(&bytes) {
             task.take_live(&live);
         }
-        task
+        if !matches!(task.status(), Status::Completed | Status::Failed) {
+            return hosted(plane, task_id, task);
+        }
+        WorkRow {
+            status: task.status(),
+            created_ms: row.created_ms,
+            updated_ms: task.stamps().1,
+            digest: row.digest,
+        }
     } else {
-        let terminal = match row.status {
-            Status::Completed | Status::Failed => {
-                // THE RESULT, read back from its chunks.
-                let prefix = tasks::chunk_prefix(task_id);
-                match list_records(
-                    services,
-                    ticket,
-                    &mut unit.issued,
-                    &prefix,
-                    false,
-                    &mut st.result,
-                ) {
-                    Poll::Pending => return Resolved::Pending,
-                    Poll::Ready(false) => return unlisted(held),
-                    Poll::Ready(true) => {}
-                }
-                match tasks::read_chunks(st.result.rows.iter().map(|(_, v)| v.as_slice())) {
-                    Some(terminal) => Some(terminal),
-                    None => return Resolved::Unknown,
-                }
-            }
-            _ => None,
-        };
-        Task::from_row(task_id, principal, work, &row, terminal.as_ref())
+        row
     };
-    let host = task.clone();
+    let task = match row.status {
+        Status::Completed | Status::Failed => {
+            // THE RESULT, read back from its chunks.
+            let prefix = tasks::chunk_prefix(task_id);
+            match list_records(
+                services,
+                ticket,
+                &mut unit.issued,
+                &prefix,
+                false,
+                &mut st.result,
+            ) {
+                Poll::Pending => return Resolved::Pending,
+                Poll::Ready(false) => return unlisted(held),
+                Poll::Ready(true) => {}
+            }
+            let terminal = tasks::read_chunks(st.result.rows.iter().map(|(_, v)| v.as_slice()));
+            ended_task(task_id, principal, work, &row, terminal)
+        }
+        _ => Task::from_row(task_id, principal, work, &row, None),
+    };
+    hosted(plane, task_id, task)
+}
+
+/// The words of a task that ended but whose result the host's records do not hold.
+const RESULT_NOT_KEPT: &str = "this task ended, but its result is not in the host's records";
+
+/// A TERMINAL TASK read back from its `row` (completed or failed) and its result chunks
+/// (`terminal`); a result the records do not hold is said `failed` in words, never as a task that
+/// does not exist.
+fn ended_task(
+    task_id: &str,
+    principal: &str,
+    work: u64,
+    row: &WorkRow,
+    terminal: Option<Value>,
+) -> Task {
+    match terminal {
+        Some(terminal) => Task::from_row(task_id, principal, work, row, Some(&terminal)),
+        None => {
+            let failed = WorkRow {
+                status: Status::Failed,
+                ..row.clone()
+            };
+            let error = json!({
+                "error": { "code": TASK_PROTOCOL_ERROR_CODE, "message": RESULT_NOT_KEPT },
+            });
+            Task::from_row(task_id, principal, work, &failed, Some(&error))
+        }
+    }
+}
+
+/// The task the host's rows and records made (`host`), laid over what the instance holds of
+/// `task_id`, the instance keeping its own halves ([`Task::hosted`]).
+fn hosted(plane: &McpDoor, task_id: &str, host: Task) -> Resolved {
+    let mut task = host.clone();
     plane.tasks.with_all(|m| match m.get_mut(task_id) {
         Some(t) => {
             t.hosted(host);
@@ -2124,27 +2242,36 @@ pub(super) fn cancelled(plane: &McpDoor, ticket: Ticket) -> Vec<String> {
 /// The kernel refused the continuation `unit` (`text`: its walk was exhausted, its budget said no)
 /// before it settled its task: the task fails, as the served engine's runner failed a call that
 /// could not be carried. A task another continuation took is not touched.
-pub(super) fn continuation_refused(plane: &McpDoor, unit: u64, reference: &str, text: &str) {
+///
+/// Answers the records the refusal writes (THE DESIGN, the mcp bullet: the task store is host
+/// records): the failure, its settle owed to the next create's sweep, is written at the refusal
+/// ([`ended_records`]), so every node answers it before that sweep and across a restart. A re-call
+/// of the same refusal (its buffers were short) answers them again.
+pub(super) fn continuation_refused(
+    plane: &McpDoor,
+    unit: u64,
+    reference: &str,
+    text: &str,
+) -> tasks::Records {
     let now = clock_now(plane);
-    plane.tasks.with(&reference.to_string(), |t| {
-        let Some(t) = t else {
-            return;
-        };
+    let owed = plane.tasks.with(&reference.to_string(), |t| {
+        let t = t?;
         let ran_here = t.runner.is_some_and(|(u, _)| u == unit);
-        if !ran_here && t.started {
-            return;
+        if ran_here || !t.started {
+            let at = now.unwrap_or(t.stamps().1);
+            if t.fail(
+                TASK_PROTOCOL_ERROR_CODE,
+                format!("the MCP upstream call failed: {text}"),
+                at,
+            ) {
+                t.unsettled = true;
+            }
+            t.started = true;
+            t.runner = None;
         }
-        let at = now.unwrap_or(t.stamps().1);
-        if t.fail(
-            TASK_PROTOCOL_ERROR_CODE,
-            format!("the MCP upstream call failed: {text}"),
-            at,
-        ) {
-            t.unsettled = true;
-        }
-        t.started = true;
-        t.runner = None;
+        (t.unsettled && t.status() == Status::Failed).then(|| t.clone())
     });
+    owed.map_or_else(Vec::new, |t| ended_records(plane, &t, false))
 }
 
 /// The reference of the continuation `unit`, when it is one.

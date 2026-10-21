@@ -3658,9 +3658,11 @@ slot!(
                 })
             })
             .unwrap_or((false, None));
+        // Its failure is written to the host's records here, at the refusal.
+        let mut task_records = Vec::new();
         if let (Some(plane), Some(reference)) = (instance.get(), run_reference.as_deref()) {
             let message = std::str::from_utf8(text).unwrap_or_default();
-            door_tasks::continuation_refused(plane, given.unit, reference, message);
+            task_records = door_tasks::continuation_refused(plane, given.unit, reference, message);
         }
         let mut audit: Option<crate::call::AuditRow> = None;
         let mut retry_after: Option<u32> = None;
@@ -3818,6 +3820,14 @@ slot!(
             });
         }
         let mut records = input.records_buf();
+        for (key, value) in &task_records {
+            records.push(RecordWrite {
+                kind: door::RECORD_TASK,
+                op: RECORD_PUT,
+                key: arena.span(key),
+                value: arena.span(value),
+            });
+        }
         if let Some(row) = &audit {
             records.push(RecordWrite {
                 kind: if row.applied {
