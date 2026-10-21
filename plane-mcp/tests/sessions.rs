@@ -2802,3 +2802,89 @@ fn a_stdio_members_resource_subscription_is_acknowledged() {
         subscription_frames()
     );
 }
+
+// ── a member's resource update reaches a listen subscriber once ────────────────────────────────
+
+/// The stateless member's `notifications/resources/updated` for the readme, as the member spells
+/// it: members out of the usual order and a number in an unusual spelling, so bytes handed on
+/// unread could be told from bytes re-encoded.
+const MEMBER_UPDATE: &str = r#"{"params":{"uri":"file:///readme","revision":1.50E+1},"method":"notifications/resources/updated","jsonrpc":"2.0"}"#;
+
+/// The relayed call's far answer: the member's update, then the call's own answer.
+fn far_with_update() -> Vec<u8> {
+    format!(
+        "event: message\ndata: {MEMBER_UPDATE}\n\nevent: message\ndata: {{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{{\"content\":[],\"resultType\":\"complete\"}}}}\n\n"
+    )
+    .into_bytes()
+}
+
+/// predev's relay of a member's update of `uri` to the subscription opened under id `id`: a
+/// notification of the subscription's own, `{"uri"}` tagged with its subscription id
+/// (gh/predev crates/busbar-plane-mcp/src/subscribe.rs l.328-345 and `notification` l.249-256),
+/// never the member's bytes: the member's other params and its spelling are not handed on.
+fn predev_relayed_update(uri: &str, id: u64) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/resources/updated",
+        "params": {
+            "uri": uri,
+            "_meta": { "io.modelcontextprotocol/subscriptionId": id },
+        },
+    })
+}
+
+/// A MEMBER'S RESOURCE UPDATE REACHES AN HTTP LISTEN SUBSCRIBER EXACTLY ONCE, as predev relayed it
+/// (gh/predev crates/busbar-plane-mcp/src/subscribe.rs l.328-345; door_listen.rs l.256-290 frames
+/// it as one `message` event, framing.rs l.197-212): the collection after the member announced it
+/// carries predev's frame byte for byte (re-encoded under the subscription's id, not the member's
+/// bytes), and no further tick or collection delivers it again.
+#[test]
+fn a_members_update_reaches_a_listen_subscriber_exactly_once() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open();
+    let listen = br#"{"jsonrpc":"2.0","id":82,"method":"subscriptions/listen","params":{"notifications":{"resourceSubscriptions":["file:///readme"]},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#;
+    let fields = [
+        ACCEPT_BOTH,
+        ("mcp-protocol-version", "2026-07-28"),
+        ("mcp-method", "subscriptions/listen"),
+    ];
+    assert_eq!(
+        d.arrive(260, "POST", "/mcp", listen, &fields).outcome,
+        Outcome::Ready
+    );
+    let opened = d.piece(260, &Given::stream_open(ALICE, 260));
+    assert!(opened.text().contains("acknowledged"), "{}", opened.text());
+
+    assert_eq!(
+        d.arrive(261, "POST", "/mcp", ST_CALL, ST_FIELDS).outcome,
+        Outcome::Ready
+    );
+    d.piece(261, &Given::attempt(BOB, "st"));
+    assert!(d.piece(261, &Given::caller(BOB, ST_CALL)).far);
+    let far = far_with_update();
+    let answered = d.piece(
+        261,
+        &Given::far(BOB, 200, vec![("content-type", "text/event-stream")], &far),
+    );
+    assert_eq!(answered.status, 200, "{}", answered.text());
+
+    let delivered = d.piece(260, &Given::collect(ALICE, 260)).text();
+    let predev = format!(
+        "event: message\ndata: {}\n\n",
+        serde_json::to_string(&predev_relayed_update("file:///readme", 82)).unwrap()
+    );
+    assert_eq!(delivered, predev, "predev's relay of the member's update");
+    assert!(
+        !delivered.contains(MEMBER_UPDATE),
+        "the member's own bytes are not handed on: {delivered:?}"
+    );
+    for _ in 0..4 {
+        d.turn();
+        let again = d.piece(260, &Given::collect(ALICE, 260)).text();
+        assert!(
+            !again.contains("notifications/resources/updated"),
+            "the update was delivered a second time: {again:?}"
+        );
+    }
+}
