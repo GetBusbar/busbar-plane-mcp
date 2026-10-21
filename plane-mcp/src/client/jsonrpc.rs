@@ -149,8 +149,11 @@ pub fn tools_call(
     let name = key.tool();
     // BUSBAR'S OWN TOKEN, not the caller's. Sent only when the caller asked for progress at all —
     // a server MUST NOT emit progress without a token, so sending none is how busbar says "this
-    // caller did not ask". Derived from `request_id`, which is already unique per outbound call, so
-    // two concurrent calls cannot be told apart by the upstream as one conversation.
+    // caller did not ask". Written here from `request_id`, which is NOT unique across calls (on the
+    // HTTP carrier it is the round, `0` on every first round): the relayed call's negotiation
+    // replaces it with a token no other request of the instance carries (the instance's one id
+    // counter, `door_sessions::Negotiating::begin`, or the id a session or a held stream sends it
+    // under), and a stdio child's call carries the unit's own id.
     let progress_token: Option<String> = advertise.progress.then(|| format!("busbar-{request_id}"));
     // busbar declares NO client capabilities BY DEFAULT. Every ask kind is deny-by-default per
     // server, and declaring a capability we then refuse to honour invites an upstream to build a

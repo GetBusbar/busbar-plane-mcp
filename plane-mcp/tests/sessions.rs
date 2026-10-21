@@ -2427,3 +2427,74 @@ fn a_legacy_answer_with_frames_is_relayed_byte_for_byte() {
         answered.text()
     );
 }
+
+/// A `tools/call` of `name` asking for progress under the caller's token `p`.
+fn progress_call(name: &str) -> Vec<u8> {
+    serde_json::to_vec(&json!({
+        "jsonrpc": "2.0",
+        "id": 31,
+        "method": "tools/call",
+        "params": {
+            "name": name,
+            "arguments": {},
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": {},
+                "progressToken": "p",
+            },
+        },
+    }))
+    .unwrap()
+}
+
+/// RED: TWO CALLS IN FLIGHT NEVER SHARE A PROGRESS TOKEN: two first-round calls to a stateless
+/// upstream carry two tokens, and a call lowered into a session carries the token of the id it is
+/// sent under. RED: every first round carried `busbar-0`, the round's id.
+#[test]
+fn calls_in_flight_never_share_a_progress_token() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open();
+    let call = progress_call("st_read_file");
+    let mut tokens = Vec::new();
+    for unit in [130, 131] {
+        assert_eq!(
+            d.arrive(unit, "POST", "/mcp", &call, ST_FIELDS).outcome,
+            Outcome::Ready
+        );
+        d.piece(unit, &Given::attempt(ALICE, "st"));
+        let send = d.pump(unit, &Given::caller(ALICE, &call));
+        assert!(send.far, "{} {}", send.status, send.text());
+        let sent: Value = serde_json::from_slice(&send.bytes).expect("a JSON-RPC request");
+        assert_eq!(sent["id"], json!(0), "the stateless round's id: {sent}");
+        tokens.push(sent["params"]["_meta"]["progressToken"].clone());
+    }
+    assert!(
+        tokens
+            .iter()
+            .all(|t| t.as_str().is_some_and(|t| t.starts_with("busbar-"))),
+        "busbar's own tokens: {tokens:?}"
+    );
+    assert_ne!(tokens[0], tokens[1], "two calls in flight shared a token");
+
+    let call = progress_call("fs_read_file");
+    assert_eq!(
+        d.arrive(132, "POST", "/mcp", &call, CALL_FIELDS).outcome,
+        Outcome::Ready
+    );
+    d.piece(132, &Given::attempt(ALICE, "fs"));
+    let send = d.pump(132, &Given::caller(ALICE, &call));
+    assert!(send.far, "{} {}", send.status, send.text());
+    let sent: Value = serde_json::from_slice(&send.bytes).expect("a JSON-RPC request");
+    assert_eq!(
+        send.field("mcp-session-id"),
+        Some(UPSTREAM_SESSION),
+        "lowered into the session"
+    );
+    assert_eq!(
+        sent["params"]["_meta"]["progressToken"],
+        json!(format!("busbar-{}", sent["id"])),
+        "the token of the id the call is sent under: {sent}"
+    );
+    assert!(!tokens.contains(&sent["params"]["_meta"]["progressToken"]));
+}
