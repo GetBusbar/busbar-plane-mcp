@@ -54,6 +54,8 @@ mod catalogue;
 mod checks;
 mod client;
 mod codec;
+/// The plane's diagnostic catalog, which its `declares.json` states (a test holds the two equal).
+#[cfg(test)]
 mod diagnostics;
 mod door;
 mod endpoint;
@@ -80,7 +82,7 @@ pub use tool_door::door;
 
 /// THE PLANE'S DECLARED METADATA (`declares.json`), as the tests read it: the one document the
 /// door's Statement carries under `EXT_DECLARES` ([`tool_door`]'s `EXTENSIONS`) and the release signs
-/// into a dropped-in plane's manifest. The codes its catalog holds are [`diagnostics::DIAGNOSTICS`]
+/// into a dropped-in plane's manifest. The codes its catalog holds are `diagnostics::DIAGNOSTICS`
 /// (a test holds the two equal).
 #[cfg(test)]
 const DECLARES: &str = include_str!("../declares.json");

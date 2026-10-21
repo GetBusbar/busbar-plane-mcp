@@ -140,6 +140,7 @@ pub const H_PROTOCOL_VERSION: &str = "mcp-protocol-version";
 // both define their constants AS these, so the compiler holds the equality.
 
 /// The bytes could not be read at all. JSON-RPC standard.
+#[cfg(test)]
 pub const CODE_PARSE_ERROR: i64 = -32700;
 /// The envelope was not a request. JSON-RPC standard.
 pub const CODE_INVALID_REQUEST: i64 = -32600;
@@ -167,6 +168,7 @@ pub const CODE_UPSTREAM_UNAVAILABLE: i64 = -32030;
 
 /// EVERY CODE THIS DIALECT DEFINES. The plane asserts the set it may write is a subset of this, so
 /// a code invented on one side of the seam is a red test rather than a wire nobody recognises.
+#[cfg(test)]
 pub const CODES: &[i64] = &[
     CODE_PARSE_ERROR,
     CODE_INVALID_REQUEST,
@@ -183,6 +185,7 @@ pub const CODES: &[i64] = &[
 /// The codes THIS revision retired, which a conformant node must never write. A retired code is
 /// worse than an unknown one: a peer that still recognises it will act on a meaning this node did
 /// not intend.
+#[cfg(test)]
 pub const RETIRED_CODES: &[i64] = &[-32002, -32042];
 
 /// THE METHODS THIS DIALECT DISPATCHES. A method absent from here takes the `-32601` / `404` arm.

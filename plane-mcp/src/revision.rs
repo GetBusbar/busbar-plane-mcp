@@ -164,6 +164,7 @@ pub fn sessionless_get(version_header: Option<&str>) -> SessionlessGet {
 /// THE CLIENT LADDER: the order in which busbar, as a client, tries to open a conversation with an
 /// upstream whose revision it does not yet know.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(test)]
 pub enum ClientStep {
     /// A stateless `2026-07-28` request.
     Stateless,

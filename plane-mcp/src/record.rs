@@ -7,15 +7,16 @@
 //! (and back out of) that envelope's opaque `body` with `serde_json` — byte-for-byte the same the
 //! store plugins persist it with. The neutral crates name none of these types.
 
-use busbar_contract::records::{
-    PlaneDisposition, PlaneRecord, PlaneSelector, RecordStoreError, RecordStoreResult,
-};
+#[cfg(test)]
+use busbar_contract::records::{PlaneDisposition, PlaneRecord};
+use busbar_contract::records::{RecordStoreError, RecordStoreResult};
 
 // THE TWO KIND STRINGS ARE THE PLANE'S, AND ARE READ FROM IT. A record kind is the name the plane
 // declares its schema under (`busbar_plane_mcp::tool_records::SCHEMA_CALL`), so it is named once, there,
 // and this crate reads it. Spelling it on both sides is how two answers to "what is this record
 // called" come to differ, and the schema id is what a store indexes by.
-pub use crate::tool_records::{KIND_CALL, KIND_DEMOTION};
+#[cfg(test)]
+use crate::tool_records::KIND_DEMOTION;
 
 /// One MCP TOOL-CALL record, as it crosses the store seam for DURABLE persistence — the per-call
 /// evidence the audit claim rests on. The chain is scoped to the PRINCIPAL. A store persists these
@@ -145,6 +146,7 @@ pub fn call_suffix(
 /// field is `len:u64-be ⧺ bytes`; a numeric field is its eight big-endian bytes carried as one such
 /// length-prefixed field. Fails closed on a truncated/oversized field rather than reading past the
 /// buffer.
+#[cfg(test)]
 fn parse_call_suffix(
     content: &[u8],
 ) -> RecordStoreResult<(u64, String, String, String, String, String, u64)> {

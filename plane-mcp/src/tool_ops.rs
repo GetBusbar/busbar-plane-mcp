@@ -251,6 +251,7 @@ pub const METHODS: &[RpcMethodRow] = &[
 /// A notification obliges no answer, so recognising one is only about knowing whether to act on it.
 /// One this plane does not recognise is DROPPED rather than refused, which is what the specification
 /// requires and what the codec already does.
+#[cfg(test)]
 pub const NOTIFICATIONS: &[&str] = &[
     "notifications/roots/list_changed",
     "notifications/tools/list_changed",

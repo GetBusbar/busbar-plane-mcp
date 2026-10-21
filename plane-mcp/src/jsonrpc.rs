@@ -46,21 +46,6 @@ pub const PTR_ID: &str = "/id";
 /// The member carrying the parameters.
 pub const PTR_PARAMS: &str = "/params";
 
-/// The member carrying the result of an answer.
-pub const PTR_RESULT: &str = "/result";
-
-/// The member carrying the error of an answer.
-pub const PTR_ERROR: &str = "/error";
-
-/// The member carrying an error's code.
-pub const PTR_ERROR_CODE: &str = "/error/code";
-
-/// The member carrying the discriminator of a result.
-pub const PTR_RESULT_TYPE: &str = "/result/resultType";
-
-/// The member saying whether a tool reported that it itself failed.
-pub const PTR_IS_ERROR: &str = "/result/isError";
-
 /// The discriminator on a result this node is handing over as finished.
 pub const RESULT_TYPE_COMPLETE: &str = "complete";
 
@@ -78,10 +63,11 @@ pub const RESULT_TYPE_TASK: &str = "task";
 // for one number — the shape a divergence hides in, and one a `pub use` cannot grow. So the
 // restatement is gone and these are re-exports: one definition, in `codec`, where the rest of the
 // MCP wire vocabulary is, reachable on the path callers already spell.
+#[cfg(test)]
 pub use crate::codec::{
     CODES, CODE_HEADER_MISMATCH, CODE_INTERNAL, CODE_INVALID_PARAMS, CODE_INVALID_REQUEST,
-    CODE_METHOD_NOT_FOUND, CODE_MISSING_CLIENT_CAPABILITY, CODE_PARSE_ERROR, CODE_REFUSED,
-    CODE_UNSUPPORTED_PROTOCOL_VERSION, CODE_UPSTREAM_UNAVAILABLE, RETIRED_CODES,
+    CODE_METHOD_NOT_FOUND, CODE_MISSING_CLIENT_CAPABILITY, CODE_PARSE_ERROR,
+    CODE_UNSUPPORTED_PROTOCOL_VERSION, RETIRED_CODES,
 };
 
 /// What kind of scalar the identifier member held.
@@ -131,18 +117,6 @@ impl Envelope {
         self.id.is_some()
     }
 }
-
-/// Where a request's subject is, for the methods whose subject is a name.
-pub const PTR_PARAMS_NAME: &str = "/params/name";
-
-/// Where a request's subject is, for the methods whose subject is a resource.
-pub const PTR_PARAMS_URI: &str = "/params/uri";
-
-/// Where a request's subject is, for the methods whose subject is a task.
-pub const PTR_PARAMS_TASK_ID: &str = "/params/taskId";
-
-/// The caller's own metadata block.
-pub const PTR_PARAMS_META: &str = "/params/_meta";
 
 /// Read one envelope out of a request body.
 ///
