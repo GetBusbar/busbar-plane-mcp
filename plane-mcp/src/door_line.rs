@@ -22,20 +22,25 @@
 //!   round cap, or past [`MAX_LIVE_ASKS_PER_SESSION`] live on its session, is handed on as it is.
 //! - A SUBSCRIPTION (`subscriptions/listen`) is answered with its acknowledgement and kept on the
 //!   session ([`listen`]): the tick ([`tick`]) steps it, emitting what changed, a `ping` when it has
-//!   been quiet and its last frame at its bound.
+//!   been quiet and its last frame at its bound. Its `resourceSubscriptions` deliver as on the HTTP
+//!   carrier: before the acknowledgement each uri no watcher holds yet has busbar subscribe to the
+//!   member that declares it, and the last watcher of a uri going owes that member its
+//!   unsubscribe ([`super::door_sessions::release`]).
 //! - The STDIO-ERA VERBS are answered here, and a notification — or a line answering nothing busbar
 //!   asked — is answered with nothing at all.
 
 use std::collections::BTreeMap;
+use std::task::Poll;
 
 use serde_json::Value;
 
-use super::{door_listen, CallUnit, McpDoor, Pending};
+use super::{door_listen, door_sessions, CallUnit, Held, McpDoor, Pending};
 use crate::catalogue::Catalogue;
 use crate::line::{self, Era, LiveAsk, Reply};
-use crate::subscribe::{Listen, Standing, Step as ListenStep, KEEPALIVE_NS};
+use crate::subscribe::{Listen, Standing, Step as ListenStep, KEEPALIVE_NS, MAX_LIFETIME_NS};
 use crate::tool_arrival::Disposition;
 use busbar_contract::abi::mechanism::ticket::{CompletionHandle, Ticket};
+use busbar_contract::abi::sdk::Instance;
 
 /// What a line unit is to the carrier.
 #[derive(Debug, Clone, Default)]
@@ -81,6 +86,13 @@ pub(super) struct LineListen {
     pinged_ns: u64,
     /// The upstream announcements `(server, uri)` heard since its last step.
     updates: Vec<(String, String)>,
+    /// The members busbar subscribes to for its uris before it is acknowledged, as
+    /// `(server, uri)`, one exchange at a time on the opening unit's ticket.
+    subscribing: Vec<(String, String)>,
+    /// How many of those exchanges it made: each numbers its connector handles apart.
+    exchanged: u32,
+    /// The unit opening it, until its acknowledgement is answered (the tick steps it only after).
+    opener: Option<u64>,
 }
 
 impl LineListen {
@@ -95,6 +107,9 @@ impl LineListen {
             confirmed_ns: now_ns,
             pinged_ns: now_ns,
             updates: Vec::new(),
+            subscribing: Vec::new(),
+            exchanged: 0,
+            opener: None,
         }
     }
 
@@ -204,6 +219,13 @@ pub(super) fn announced(plane: &McpDoor, server: &str, uri: &str) {
             door_listen::hold_update(&mut kept.updates, server, uri);
         }
     });
+}
+
+/// Whether a subscription kept on a carrier session watches `uri`.
+pub(super) fn watches(plane: &McpDoor, uri: &str) -> bool {
+    plane
+        .line_listens
+        .with_all(|m| m.values().any(|l| door_listen::watching(&l.listen, uri)))
 }
 
 /// One line as `arrive` read it: what the unit is to the carrier, and the bytes the one dispatch
@@ -468,15 +490,17 @@ pub(super) fn liven(plane: &McpDoor, ticket: Ticket, principal: &str, unit: &mut
     }
 }
 
-/// OPEN a subscription on the carrier session: refused in its own words, or answered with its
-/// acknowledgement and kept on the session. `None` for a unit that is not a line's
+/// OPEN a subscription on the carrier session: refused in its own words, or kept on the session,
+/// subscribed upstream for the uris no watcher holds yet ([`subscribe_upstream`], PENDING while an
+/// exchange does), and answered with its acknowledgement. `None` for a unit that is not a line's
 /// `subscriptions/listen`.
 pub(super) fn listen(
+    instance: &Instance<'_, McpDoor>,
     plane: &McpDoor,
     ticket: Ticket,
     principal: &str,
     unit: &mut CallUnit,
-) -> Option<Pending> {
+) -> Option<Poll<Pending>> {
     let session = unit.line.as_ref()?.session;
     let Disposition::Request { row, id } = &unit.disposition else {
         return None;
@@ -486,6 +510,14 @@ pub(super) fn listen(
     }
     let id = id.clone();
     let held = plane.current().or_else(|| unit.held.clone())?;
+    let key = (session, line::id_key(&id));
+    // THIS UNIT'S OPEN UNDER WAY goes on with its subscriptions upstream.
+    if plane
+        .line_listens
+        .with(&key, |l| l.is_some_and(|l| l.opener == Some(unit.key)))
+    {
+        return Some(subscribe_upstream(instance, plane, &key, unit, &held));
+    }
     door_listen::entitled_afresh(plane, ticket, unit, &held);
     // A subscription opened at a clock read that failed is refused, never opened at the epoch
     // (row 159 finding P-M4).
@@ -496,12 +528,12 @@ pub(super) fn listen(
             super::CLOCK_UNREAD,
             None,
         );
-        return Some(Pending::answer(
+        return Some(Poll::Ready(Pending::answer(
             503,
             serde_json::to_vec(&body).unwrap_or_default(),
             None,
             &[],
-        ));
+        )));
     };
     let entitled = unit.entitled.clone();
     let admit = |kind: &str, name: &str| {
@@ -516,32 +548,122 @@ pub(super) fn listen(
             crate::catalogue::Lookup::One(_)
         )
     });
-    let mut listen = match opened {
+    let listen = match opened {
         Err(refusal) => {
             let body = serde_json::to_vec(&refusal).unwrap_or_default();
-            return Some(Pending::answer(400, body, None, &[]));
+            return Some(Poll::Ready(Pending::answer(400, body, None, &[])));
         }
         Ok(listen) => listen,
     };
-    let frames = match listen.step(&held.catalogue, &admit, &Standing::Live, &[], now) {
-        ListenStep::Frames(frames) | ListenStep::End(frames) => frames,
-        _ => Vec::new(),
-    };
-    let key = (session, line::id_key(&id));
-    let kept = LineListen::opened(listen, entitled, principal, now);
+    let first = door_listen::unwatched(plane, &listen, &held.catalogue, &admit);
+    let mut kept = LineListen::opened(listen, entitled, principal, now);
+    kept.opener = Some(unit.key);
     // THE QUOTA REFUSES THE NEW SUBSCRIPTION, never evicts a held one, as on the HTTP carrier.
     let admitted = plane.line_listens.with_all(|m| {
         if !m.contains_key(&key) && line_quota_full(m, principal) {
             return false;
         }
-        m.insert(key, kept);
+        m.insert(key.clone(), kept);
         true
     });
     if !admitted {
         let refusal = door_listen::quota_refusal(id);
-        return Some(Pending::answer(refusal.status, refusal.body(), None, &[]));
+        return Some(Poll::Ready(Pending::answer(
+            refusal.status,
+            refusal.body(),
+            None,
+            &[],
+        )));
     }
-    Some(Pending::answer(200, lines(&frames), None, &[]))
+    // A uri whose last watcher went while its unsubscribe was still owed keeps busbar's
+    // subscription: nothing is sent for it.
+    let owing: Vec<(String, String)> = first
+        .into_iter()
+        .filter(|(_, uri)| !door_sessions::unowe(plane, uri))
+        .collect();
+    plane.line_listens.with(&key, |l| {
+        if let Some(l) = l {
+            l.subscribing = owing;
+        }
+    });
+    Some(subscribe_upstream(instance, plane, &key, unit, &held))
+}
+
+/// BUSBAR'S SUBSCRIPTIONS UPSTREAM for the line subscription `key` the unit is opening, as on the
+/// HTTP carrier ([`door_listen`]): each `(server, uri)` it still owes sent `resources/subscribe` on
+/// the unit's ticket, one exchange at a time, a uri its member does not take narrowed out. Then the
+/// acknowledgement (stepped under the grants it was opened with), or, with nothing left to deliver,
+/// the refusal. PENDING while an exchange does.
+fn subscribe_upstream(
+    instance: &Instance<'_, McpDoor>,
+    plane: &McpDoor,
+    key: &(u64, String),
+    unit: &mut CallUnit,
+    held: &Held,
+) -> Poll<Pending> {
+    loop {
+        let next = plane.line_listens.with(key, |l| {
+            let l = l?;
+            Some((l.subscribing.first().cloned()?, l.exchanged))
+        });
+        let Some(((server, uri), exchanged)) = next else {
+            break;
+        };
+        let verb = crate::client::verb::UpstreamVerb::ResourcesSubscribe { uri: uri.clone() };
+        let base = door_sessions::subscribe_base(exchanged);
+        let slot = &mut unit.negotiating;
+        let Poll::Ready(taken) =
+            door_sessions::upstream(instance, plane, slot, base, held, &server, &verb)
+        else {
+            return Poll::Pending;
+        };
+        let delivers = plane.line_listens.with(key, |l| {
+            let l = l?;
+            l.subscribing.remove(0);
+            l.exchanged = l.exchanged.saturating_add(1);
+            Some(taken.is_ok() || l.listen.drop_resource(&uri))
+        });
+        if delivers == Some(false) {
+            if let Some(l) = plane.line_listens.remove(key) {
+                let id = l.listen.id.clone();
+                door_sessions::release(plane, door_listen::uris(&l.listen));
+                let body = door_listen::untaken(id);
+                return Poll::Ready(Pending::answer(
+                    door_listen::STATUS_UNTAKEN,
+                    body,
+                    None,
+                    &[],
+                ));
+            }
+        }
+    }
+    // THE ACKNOWLEDGEMENT, at the time it was opened under the grants it was opened with: from here
+    // the tick steps it.
+    let frames = plane
+        .line_listens
+        .with(key, |l| {
+            let l = l?;
+            l.opener = None;
+            let entitled = &l.entitled;
+            let admit = |kind: &str, name: &str| {
+                entitled
+                    .get(&format!("{kind}:{name}"))
+                    .copied()
+                    .unwrap_or(false)
+            };
+            let at = l.confirmed_ns;
+            Some(
+                match l
+                    .listen
+                    .step(&held.catalogue, &admit, &Standing::Live, &[], at)
+                {
+                    ListenStep::Frames(frames) | ListenStep::End(frames) => frames,
+                    _ => Vec::new(),
+                },
+            )
+        })
+        .unwrap_or_default();
+    Poll::Ready(Pending::answer(200, lines(&frames), None, &[]))
 }
 
 /// Frames as lines: one JSON-RPC message per line.
@@ -599,9 +721,17 @@ pub(super) fn tick(plane: &McpDoor, ticket: Ticket, now_ns: u64) {
     let Some(held) = plane.current() else {
         return;
     };
-    let gone = plane.line_listens.with_all(|m| {
+    let released = plane.line_listens.with_all(|m| {
         let mut gone = Vec::new();
         for ((session, key), kept) in m.iter_mut() {
+            // One still being opened is stepped only once its acknowledgement is answered; one whose
+            // opening unit never came back for it (cancelled part way) is dropped at its bound.
+            if kept.opener.is_some() {
+                if now_ns.saturating_sub(kept.confirmed_ns) > MAX_LIFETIME_NS {
+                    gone.push((*session, key.clone()));
+                }
+                continue;
+            }
             let (mut bytes, ended) = match kept.step_at(&held.catalogue, now_ns) {
                 ListenStep::Frames(frames) => (lines(&frames), false),
                 ListenStep::Keepalive => {
@@ -624,12 +754,16 @@ pub(super) fn tick(plane: &McpDoor, ticket: Ticket, now_ns: u64) {
                 gone.push((*session, key.clone()));
             }
         }
+        let mut released = Vec::new();
         for key in &gone {
-            m.remove(key);
+            if let Some(kept) = m.remove(key) {
+                released.extend(door_listen::uris(&kept.listen));
+            }
         }
-        gone
+        released
     });
-    let _ = gone;
+    // Their uris are released: what their last watcher owes is carried by a unit.
+    door_sessions::release(plane, released);
 }
 
 #[cfg(test)]
