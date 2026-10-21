@@ -249,12 +249,18 @@ fn an_abandoned_active_task_is_cancelled_by_the_sweep_and_then_ages_out() {
     let mut old = Task::new("old", "key-abandon", 1, "d", T0);
     old.runner = Some((9, ticket));
     tasks.insert("old".into(), old);
-    // Exactly AT the ceiling is not abandoned (the bound is strict, matching `is_expired`).
+    // Exactly AT the ceiling is not abandoned (the bound is strict, matching `is_expired`): the
+    // young task's age at the sweep is the ceiling itself, the old one's a millisecond past it.
     tasks.insert(
         "young".into(),
-        Task::new("young", "key-abandon", 2, "d", T0 + ACTIVE_TASK_ABANDON_MS),
+        Task::new("young", "key-abandon", 2, "d", T0 + 1),
     );
     let sweep_now = T0 + ACTIVE_TASK_ABANDON_MS + 1;
+    assert_eq!(
+        sweep_now - tasks["young"].stamps().1,
+        ACTIVE_TASK_ABANDON_MS,
+        "the young task sits exactly at the ceiling"
+    );
     let swept = sweep(&mut tasks, sweep_now);
     assert_eq!(
         tasks["old"].status(),
@@ -278,9 +284,11 @@ fn an_abandoned_active_task_is_cancelled_by_the_sweep_and_then_ages_out() {
         "after the retention the cancelled task is dropped like any other terminal task"
     );
     assert!(swept.strike.is_empty(), "it wrote no result to strike");
-    assert!(
-        tasks.contains_key("young"),
-        "the active task survives every sweep"
+    // By then the young task too is past the ceiling: cancelled by that sweep, never dropped.
+    assert_eq!(
+        tasks.get("young").map(Task::status),
+        Some(Status::Cancelled),
+        "an active task past the ceiling is cancelled, never dropped"
     );
 }
 
