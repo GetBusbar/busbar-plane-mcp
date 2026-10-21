@@ -334,18 +334,18 @@ slot!(
             services: input
                 .field(|i| &i.open)
                 .host()
-                .and_then(|h| Services::of(h.get())),
+                .and_then(|h| Services::of(&h)),
             host: input
                 .field(|i| &i.open)
                 .host()
-                .map(|h| busbar_contract::abi::sdk::conn::Host::of(h.get())),
+                .map(|h| busbar_contract::abi::sdk::conn::Host::of(&h)),
             sightings: Keyed::new(),
             spent: Keyed::new(),
             checked: Keyed::new(),
             wake: input
                 .field(|i| &i.open)
                 .host()
-                .and_then(|h| busbar_contract::abi::sdk::services::Wake::of(h.get())),
+                .and_then(|h| busbar_contract::abi::sdk::services::Wake::of(&h)),
             listens: Keyed::new(),
             driver: Keyed::new(),
             tasks: Keyed::new(),
