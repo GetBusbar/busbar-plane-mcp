@@ -989,6 +989,25 @@ fn ftp_backslashes_localhost_is_refused() {
     assert_refused("ftp:\\\\localhost", &[Field::Undeclared, Field::Reference]);
 }
 
+/// `file:\\127.0.0.1\x` fails the contract's reader whichever special-scheme set the contract
+/// keeps (it reads `file` opaque), so its refusal rests on the plane's OWN set naming `file`: the
+/// set is pinned here as the six WHATWG names, and the refusal is pinned with the contract's reading
+/// of the value shown to be a refusal, so a contract that changes its set cannot change this one.
+#[test]
+fn the_plane_reads_its_own_six_special_schemes_whatever_the_contract_keeps() {
+    assert_eq!(
+        super::SPECIAL_SCHEMES,
+        ["http", "https", "ws", "wss", "ftp", "file"],
+        "the WHATWG special schemes, all six"
+    );
+    let value = "file:\\\\127.0.0.1\\x";
+    assert!(
+        busbar_contract::net::parse_url(value).is_err(),
+        "the contract's reader does not read `{value}`; the plane's own set must"
+    );
+    assert_refused(value, &[Field::Undeclared, Field::Reference]);
+}
+
 #[test]
 fn file_backslashes_loopback_is_refused() {
     assert_refused(
@@ -1362,6 +1381,26 @@ const REVIEW_GAPS: &[(&str, &[Field], &str, &str)] = &[
     ),
 ];
 
+/// THE SPELLINGS WITHOUT `//` the busbar-side door test pinned before #1461 moved it (`http:h`,
+/// `http:/\h` with a literal backslash, and `http:0x`, which a URL client dials as `0.0.0.0`), each
+/// with every plain host that test spelt, in both field kinds. The plane pins them now.
+fn odd_spellings() -> Vec<String> {
+    let hosts = [
+        "localhost",
+        "127.0.0.1",
+        "169.254.169.254",
+        "0x7f.1",
+        "017700000001",
+    ];
+    let mut out: Vec<String> = Vec::new();
+    for h in hosts {
+        out.push(format!("http:{h}/latest/meta-data/"));
+        out.push(format!("http:/\\{h}/latest/meta-data/"));
+    }
+    out.push("http:0x/latest/meta-data/".to_string());
+    out
+}
+
 #[test]
 fn every_gap_the_differential_review_found_is_refused() {
     let mut cases = 0usize;
@@ -1381,6 +1420,16 @@ fn every_gap_the_differential_review_found_is_refused() {
     }
     assert_eq!(REVIEW_GAPS.len(), 48, "the review's 48 inputs");
     assert_eq!(cases, 58, "the review's 58 input-and-field cases");
+    for value in odd_spellings() {
+        for field in [Field::Undeclared, Field::Reference] {
+            cases += 1;
+            let (refused, got) = refused_in(field, &value);
+            if !refused {
+                allowed.push(format!("{value:?} in {field:?} (odd spelling): {got:?}"));
+            }
+        }
+    }
+    assert_eq!(cases, 80, "58 review cases and 22 odd-spelling cases");
     assert!(
         allowed.is_empty(),
         "{} of {cases} refused; still allowed:\n{}",
