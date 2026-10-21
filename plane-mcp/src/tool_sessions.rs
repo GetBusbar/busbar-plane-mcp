@@ -450,6 +450,12 @@ impl SessionTable {
         true
     }
 
+    /// Ends `id` whoever holds it: its owner's own end, taken by the plane (a `2024-11-05` session
+    /// ends with its stream).
+    pub fn end(&mut self, id: &str) {
+        self.remove(id);
+    }
+
     /// Opens a resumable stream in `id`. When the session is at `stream_cap`, the oldest cursor no
     /// live stream reads, and its buffered events, are dropped first. `None` when `owner` does not
     /// hold `id`, or when every cursor at the cap is read by a live stream (the open is refused;

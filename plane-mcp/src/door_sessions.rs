@@ -893,7 +893,7 @@ pub(super) fn heard(
                 };
                 // The record goes on as the upstream wrote it.
                 if passes {
-                    deliver_frame(plane, id, owner, data.trim(), now);
+                    let _delivered = deliver_frame(plane, id, owner, data.trim(), now);
                 }
             }
             _ => {}
@@ -984,16 +984,22 @@ pub(super) fn lower(plane: &McpDoor, ticket: Ticket, caller: &str, unit: &mut Ca
     }
     match legacy {
         Some(session) => {
-            deliver_frame(
+            let delivered = deliver_frame(
                 plane,
                 &session,
                 &owner_of(caller),
                 &String::from_utf8_lossy(&bytes),
                 now,
             );
-            pending.bytes.clear();
-            pending.fields.clear();
-            pending.status = STATUS_ACCEPTED;
+            // No stream took the answer (it ended while the message ran): the POST is told the
+            // session is gone, never accepted for an answer nobody will read.
+            if delivered {
+                pending.bytes.clear();
+                pending.fields.clear();
+                pending.status = STATUS_ACCEPTED;
+            } else {
+                *pending = not_found(&v.get("id").cloned().unwrap_or(Value::Null));
+            }
         }
         None => {
             if rpc {
@@ -1037,15 +1043,22 @@ pub(super) fn holds(plane: &McpDoor, unit: u64) -> bool {
     })
 }
 
-/// `data` buffered on `session`'s stream, and the stream named due.
-fn deliver_frame(plane: &McpDoor, session: &str, owner: &Owner, data: &str, now: u64) {
+/// `data` buffered on `session`'s stream, and the stream named due: `false` when no live stream
+/// took it.
+fn deliver_frame(plane: &McpDoor, session: &str, owner: &Owner, data: &str, now: u64) -> bool {
     let target = plane
         .streams
         .with_all(|m| m.values().find(|s| s.session == session).map(|s| s.stream));
-    if let Some(stream) = target {
-        with_sessions(plane, |t| t.push(session, owner, stream, data, now));
+    let Some(stream) = target else {
+        return false;
+    };
+    let pushed = with_sessions(plane, |t| t.push(session, owner, stream, data, now))
+        .flatten()
+        .is_some();
+    if pushed {
         due(plane, session);
     }
+    pushed
 }
 
 /// Every stream of `session` named due, and the driver woken.
@@ -1124,7 +1137,18 @@ pub(super) fn cancelled(plane: &McpDoor, ticket: Ticket) {
 /// resuming GET) and its session may give way again.
 fn end_stream(plane: &McpDoor, key: u64) -> Option<Stream> {
     let ended = plane.streams.remove(&key)?;
-    with_sessions(plane, |t| t.release_stream(&ended.session, ended.stream));
+    with_sessions(plane, |t| {
+        t.release_stream(&ended.session, ended.stream);
+        // A `2024-11-05` SESSION LIVES AS LONG AS ITS STREAM: its answers have nowhere else to go,
+        // so a message POSTed after the stream ended is told the session is unknown (`404`) before
+        // it runs, never run, charged and its answer dropped.
+        if ended.legacy {
+            t.end(&ended.session);
+        }
+    });
+    if ended.legacy {
+        plane.session_state.remove(&ended.session);
+    }
     Some(ended)
 }
 

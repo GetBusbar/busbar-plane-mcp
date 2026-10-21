@@ -2545,3 +2545,54 @@ fn a_held_stream_is_never_ended_for_another() {
         collected.text()
     );
 }
+
+/// Opens a `2024-11-05` stream on `unit` as `caller`: the message address its endpoint event names.
+fn legacy_stream(d: &Door, unit: u64, caller: &str) -> String {
+    let opened = d.arrive(unit, "GET", "/mcp", b"", &[("accept", "text/event-stream")]);
+    assert_eq!(opened.outcome, Outcome::Ready, "{opened:?}");
+    let text = d.piece(unit, &Given::stream_open(caller, unit)).text();
+    text.strip_prefix("event: endpoint\ndata: ")
+        .and_then(|rest| rest.split('\n').next())
+        .unwrap_or_else(|| panic!("the stream opens with the endpoint event: {text:?}"))
+        .to_string()
+}
+
+/// RED: A `2024-11-05` SESSION ENDS WITH ITS STREAM: once the caller's stream ended (or its op was
+/// cancelled), a message POSTed to its address is told the session is unknown (`404`) and is not
+/// run. RED: the session outlived its stream, the message ran, and it was answered `202` with its
+/// answer dropped.
+#[test]
+fn a_legacy_session_ends_with_its_stream() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open();
+    let list = br#"{"jsonrpc":"2.0","id":9,"method":"tools/list"}"#;
+    let json_type = [("content-type", "application/json")];
+
+    // The caller's side of the stream ends.
+    let address = legacy_stream(&d, 150, ALICE);
+    let ended = d.piece(
+        150,
+        &Given {
+            stream: 150,
+            ..Given::caller(ALICE, b"")
+        },
+    );
+    assert!(ended.done, "the stream ends: {}", ended.text());
+    assert_eq!(
+        d.arrive(151, "POST", &address, list, &json_type).outcome,
+        Outcome::Ready
+    );
+    let posted = d.piece(151, &Given::caller(ALICE, list));
+    assert_eq!(posted.status, 404, "{}", posted.text());
+
+    // The stream's op is cancelled.
+    let address = legacy_stream(&d, 152, ALICE);
+    d.cancel(152);
+    assert_eq!(
+        d.arrive(153, "POST", &address, list, &json_type).outcome,
+        Outcome::Ready
+    );
+    let posted = d.piece(153, &Given::caller(ALICE, list));
+    assert_eq!(posted.status, 404, "{}", posted.text());
+}
