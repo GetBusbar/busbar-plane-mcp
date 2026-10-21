@@ -1,0 +1,41 @@
+{
+  "schema": "blackbox/1",
+  "case": "the_line_flag_with_no_plane_claiming_the_carrier_refuses_and_binds_nothing",
+  "requires": {
+    "sections": [
+      "tools"
+    ],
+    "axes": [
+      "body-ingress"
+    ]
+  },
+  "files": {
+    "providers.yaml": "mock:\n  protocol: anthropic\n  base_url: \"http://127.0.0.1:9\"\n  api_key_env: MOCK_KEY\n",
+    "config.yaml": "listen: \"127.0.0.1:0\"\nadmin_listen: \"127.0.0.1:0\"\nadvanced:\n  allow_destinations: [\"127.0.0.1\"]\nstore: {module: memory}\nproviders:\n  mock:\n    api_key: { env: MOCK_KEY }\nmodels:\n  test-model:\n    provider: mock\n"
+  },
+  "vars": {
+    "MOCK_KEY": "test-key-value",
+    "BUSBAR_SIGNING_KEY": "0000000000000000000000000000000000000000000000000000000000000001",
+    "BUSBAR_CONFIG": "{dir}/config.yaml",
+    "BUSBAR_PROVIDERS": "{dir}/providers.yaml"
+  },
+  "unset": [
+    "BUSBAR_MCP_STDIO_CREDENTIAL"
+  ],
+  "steps": [
+    {
+      "session": {
+        "flag": "--mcp-stdio",
+        "expect": "refused",
+        "within_secs": 80,
+        "output_contains": [
+          "nothing to serve on stdin"
+        ],
+        "output_lacks": [
+          "busbar listening"
+        ],
+        "no_frames": true
+      }
+    }
+  ]
+}
