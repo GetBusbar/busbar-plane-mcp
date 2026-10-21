@@ -42,7 +42,7 @@ extern "C" fn signs(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> R
     // SAFETY: the wrapper hands a `SignIn` naming its live data and buffers, and a live `out`.
     unsafe {
         let i = input.cast::<SignIn>().read_unaligned();
-        let data = std::slice::from_raw_parts(i.data.ptr, i.data.len);
+        let data = std::slice::from_raw_parts(i.data.ptr(), i.data.len());
         let digest = busbar_contract::redacted::sha256_hex(data);
         let sig = &digest.as_bytes()[..64];
         *i.into.buf = b'k';
@@ -138,7 +138,8 @@ fn with_seal<R>(
     spent: &Keyed<String, u64>,
     f: impl FnOnce(&mut DoorSeal<'_>) -> R,
 ) -> R {
-    let tables = HostTables {
+    // Leaked, so the seal's services are the host's own `'static` handle, as the door holds them.
+    let tables: &'static HostTables = Box::leak(Box::new(HostTables {
         size: std::mem::size_of::<HostTables>() as u32,
         _reserved: 0,
         ctx: HostCtx::NONE,
@@ -146,10 +147,11 @@ fn with_seal<R>(
         conns: std::ptr::null(),
         io: std::ptr::null(),
         services: table,
-    };
+    }));
     let (mut issued, mut claim) = (0u32, None);
     let mut seal = DoorSeal {
-        services: Services::of(&tables).expect("a table was handed"),
+        // SAFETY: `tables` is leaked above and names a `'static` table of `extern "C"` functions.
+        services: unsafe { Services::from_raw(tables) }.expect("a table was handed"),
         ticket: Ticket::NONE,
         issued: &mut issued,
         claim: &mut claim,

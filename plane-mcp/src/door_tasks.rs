@@ -47,8 +47,8 @@ use busbar_contract::abi::mechanism::check::SPAN_ABSENT;
 use serde_json::{json, Map, Value};
 
 use super::{
-    clock_s, twin_of, CallUnit, CompletionHandle, DoorSeal, Held, McpDoor, Pending, Services, Step,
-    Ticket, Twin,
+    clock_s, twin_of, CallUnit, CompletionHandle, DoorSeal, Held, McpDoor, Pending, StaticServices,
+    Step, Ticket, Twin,
 };
 use crate::call::{AdmittedCall, Leg, RelayedRetry};
 use crate::door::RECORD_TASK;
@@ -273,7 +273,7 @@ pub(super) fn handle(ticket: Ticket, issued: &mut u32, slot: &mut Option<u32>) -
 /// The kernel's wall clock in Unix milliseconds, on a fresh handle of `ticket`; `None` when the
 /// read fails, which is never a time (row 159 finding P-M4): a task is never stamped at the epoch.
 /// A create refuses; a transition keeps the task's own last time; a lease is not renewed.
-fn task_clock_ms(services: Services, ticket: Ticket, issued: &mut u32) -> Option<u64> {
+fn task_clock_ms(services: StaticServices, ticket: Ticket, issued: &mut u32) -> Option<u64> {
     let mut fresh = None;
     let h = handle(ticket, issued, &mut fresh);
     services.clock_now(h).ok().map(|r| r.wall_ns / 1_000_000)
@@ -413,7 +413,13 @@ fn invalid(id: &Value, message: &str) -> Refusal {
 /// SETTLE handle `work` with `row`, on a fresh handle of `ticket`: whether it LANDED (settled now, or
 /// settled first by another unit). One that pends or fails is owed ([`owe`]): its task is held
 /// unsettled and the next create's sweep settles it again, until it lands.
-fn settled(services: Services, ticket: Ticket, issued: &mut u32, work: u64, row: &[u8]) -> bool {
+fn settled(
+    services: StaticServices,
+    ticket: Ticket,
+    issued: &mut u32,
+    work: u64,
+    row: &[u8],
+) -> bool {
     use busbar_contract::abi::sdk::services::ServiceError;
     let mut fresh = None;
     let h = handle(ticket, issued, &mut fresh);
@@ -495,7 +501,7 @@ fn ride(unit: &mut CallUnit, records: Vec<(Vec<u8>, Vec<u8>)>) {
 /// THE TASK KIND'S RECORDS under `prefix`, read page by page into `l.rows` in key order (one page
 /// only when `once`). `Ready(false)`: the host could not list them.
 fn list_records(
-    services: Services,
+    services: StaticServices,
     ticket: Ticket,
     issued: &mut u32,
     prefix: &[u8],
@@ -554,7 +560,7 @@ fn list_records(
 /// settled. The records its settle leaves to strike; none while it is owed.
 fn settle_left(
     plane: &McpDoor,
-    services: Services,
+    services: StaticServices,
     ticket: Ticket,
     issued: &mut u32,
     principal: &str,
@@ -1154,7 +1160,7 @@ fn not_run(unit: &mut CallUnit, run: &mut Run) -> Step {
 /// ended.
 fn relayed_leg(
     plane: &McpDoor,
-    services: Services,
+    services: StaticServices,
     ticket: Ticket,
     principal: &str,
     unit: &mut CallUnit,
@@ -1667,7 +1673,7 @@ fn call(
 /// a host that runs no continuation for it fails the task, its settle owed until it lands.
 fn nest_run(
     plane: &McpDoor,
-    services: Services,
+    services: StaticServices,
     ticket: Ticket,
     unit: &mut CallUnit,
     task: &Task,
@@ -1709,7 +1715,7 @@ fn nest_run(
 /// records its settle leaves to strike.
 fn fail_unrun(
     plane: &McpDoor,
-    (services, ticket, issued): (Services, Ticket, &mut u32),
+    (services, ticket, issued): (StaticServices, Ticket, &mut u32),
     task: &Task,
     why: &str,
     at: u64,
@@ -1742,7 +1748,7 @@ fn resume_data(principal: &str, reference: &str, round: usize, digest: &str) -> 
 /// the deployment signs nothing.
 fn resume_seal(
     plane: &McpDoor,
-    services: Services,
+    services: StaticServices,
     ticket: Ticket,
     unit: &mut CallUnit,
     data: &[u8],
@@ -1820,7 +1826,7 @@ pub(super) fn verb(
 #[allow(clippy::too_many_arguments)]
 fn verbing(
     plane: &McpDoor,
-    services: Services,
+    services: StaticServices,
     ticket: Ticket,
     principal: &str,
     unit: &mut CallUnit,
@@ -1995,7 +2001,7 @@ fn verbing(
 /// instance's own halves of the task are kept beside what the host says.
 fn resolve(
     plane: &McpDoor,
-    services: Services,
+    services: StaticServices,
     ticket: Ticket,
     principal: &str,
     unit: &mut CallUnit,

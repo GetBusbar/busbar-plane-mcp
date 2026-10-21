@@ -261,8 +261,8 @@ mod both_ways {
     use busbar_plane_mcp::{door, tool_door as plane_door, tool_ops as ops};
     use busbar_plugin_loader::dispatch::kinds::plane::{OwnedSnapshot, Plane};
     use busbar_plugin_loader::dispatch::{
-        in_head, load_dropped, load_linked, out_head, rendering_of, Bind, DispatchConfig,
-        Dispatcher, Frame, LinkedRow, NoSink, Plugin,
+        in_head, load_dropped, load_linked, out_head, rendering_of_macro, Bind, DispatchConfig,
+        Dispatcher, Frame, LinkedRow, LoadedDoor, NoSink, Plugin,
     };
     use serde_json::{json, Value};
 
@@ -283,19 +283,11 @@ mod both_ways {
     }
 
     fn octets(b: &'static [u8]) -> Blob {
-        Blob {
-            ptr: b.as_ptr(),
-            len: b.len(),
-            fmt: BLOB_OCTETS,
-            flags: 0,
-        }
+        Blob::of(b).with_fmt(BLOB_OCTETS)
     }
 
     fn text(b: &'static [u8]) -> AbiStr {
-        AbiStr {
-            ptr: b.as_ptr(),
-            len: b.len(),
-        }
+        AbiStr::of_bytes(b)
     }
 
     fn at(buf: &[u8], s: Span) -> String {
@@ -600,10 +592,8 @@ mod both_ways {
         let mut r: Frame<RefusalIn, RefusalOut> = Frame::new(z(), z());
         (r.input.head, r.out.head) = (in_head(), out_head());
         (r.input.cause, r.input.status) = (cause, status);
-        r.input.text = AbiStr {
-            ptr: words.as_ptr(),
-            len: words.len(),
-        };
+        // SAFETY: `words` outlives the call this `in` is built for.
+        r.input.text = unsafe { AbiStr::from_raw_parts(words.as_ptr(), words.len()) };
         (r.input.reply_buf, r.input.reply_cap) = (reply.as_mut_ptr(), reply.len());
         (r.input.fields_buf, r.input.fields_cap) = (fields.as_mut_ptr(), fields.len());
         (r.input.arena_buf, r.input.arena_cap) = (arena.as_mut_ptr(), arena.len());
@@ -720,10 +710,7 @@ mod both_ways {
             vec![0u8; 256],
         );
         let target = b"/tools/nope/health";
-        s.input.target = AbiStr {
-            ptr: target.as_ptr(),
-            len: target.len(),
-        };
+        s.input.target = AbiStr::of_bytes(target);
         s.input.route = 2;
         (s.input.reply_buf, s.input.reply_cap) = (reply.as_mut_ptr(), reply.len());
         (s.input.fields_buf, s.input.fields_cap) = (fields.as_mut_ptr(), fields.len());
@@ -803,7 +790,8 @@ mod both_ways {
     // ── the doors ────────────────────────────────────────────────────────────────────────────────────
 
     fn linked(d: &Dispatcher) -> Plugin<Plane> {
-        let row = LinkedRow::of(plane_door::door).expect("the linked door states its Statement");
+        let row = LinkedRow::of_macro(plane_door::MACRO_DOOR)
+            .expect("the linked door states its Statement");
         load_linked(&row, bind(d)).expect("the linked door loads")
     }
 
@@ -812,7 +800,8 @@ mod both_ways {
     /// dropped-in door's proof.
     fn dropped(d: &Dispatcher) -> Plugin<Plane> {
         let path = busbar_plugin_loader::conformance::cdylib_of("busbar_plane_mcp_plugin");
-        let stated = rendering_of(plane_door::door).expect("the door renders its Statement");
+        let stated =
+            rendering_of_macro(plane_door::MACRO_DOOR).expect("the door renders its Statement");
         load_dropped(&path, &stated, bind(d)).expect("the dropped door loads")
     }
 
@@ -1457,14 +1446,8 @@ mod both_ways {
         let mut arena = vec![0_u8; 4096];
         let mut turns = vec![
             busbar_contract::abi::hook::MessageView {
-                role: AbiStr {
-                    ptr: std::ptr::null(),
-                    len: 0,
-                },
-                text: AbiStr {
-                    ptr: std::ptr::null(),
-                    len: 0,
-                },
+                role: AbiStr::ABSENT,
+                text: AbiStr::ABSENT,
             };
             4
         ];
@@ -1483,12 +1466,12 @@ mod both_ways {
             let view = j.out.view;
             // A string the view leaves unset (NULL) reads as empty, as a span absent from the arena.
             let span_of = |a: AbiStr| {
-                if a.ptr.is_null() {
+                if a.is_absent() {
                     return Span { offset: 0, len: 0 };
                 }
                 Span {
-                    offset: u32::try_from(a.ptr as usize - base).expect("in the arena"),
-                    len: u32::try_from(a.len).expect("small"),
+                    offset: u32::try_from(a.ptr() as usize - base).expect("in the arena"),
+                    len: u32::try_from(a.len()).expect("small"),
                 }
             };
             s.detail = format!(
@@ -1919,7 +1902,7 @@ mod both_ways {
             input: Lent<'_, OnPieceIn>,
             mut out: Out<'_, OnPieceOut>,
         ) -> Outcome {
-            let bytes = input.field(|i| &i.bytes).bytes();
+            let bytes = input.bytes().bytes();
             let n = input.reply_buf().stream(bytes);
             out.set(|o| &o.emitted, n as u64);
             out.set(|o| &o.reply_status, 200);
@@ -1947,7 +1930,10 @@ mod both_ways {
     fn red_a_door_that_stops_answering_from_the_catalogue_answers_differently() {
         let d = Dispatcher::new(DispatchConfig::default());
         let honest = script(&linked(&d));
-        let row = LinkedRow::of(echo_door).expect("the door states its Statement");
+        // SAFETY: `echo_door` answers a leaked `'static`, fully initialised door whose Statement is
+        // the macro door's own.
+        let row = LinkedRow::of_loaded(unsafe { LoadedDoor::from_raw(echo_door) })
+            .expect("the door states its Statement");
         let red = script(&load_linked::<Plane>(&row, bind(&d)).expect("the door loads"));
         let (h, r) = (
             step(&honest, "answer tools/list"),
@@ -1990,19 +1976,11 @@ mod bounds {
     }
 
     fn octets(b: &'static [u8]) -> Blob {
-        Blob {
-            ptr: b.as_ptr(),
-            len: b.len(),
-            fmt: BLOB_OCTETS,
-            flags: 0,
-        }
+        Blob::of(b).with_fmt(BLOB_OCTETS)
     }
 
     fn text(b: &'static [u8]) -> AbiStr {
-        AbiStr {
-            ptr: b.as_ptr(),
-            len: b.len(),
-        }
+        AbiStr::of_bytes(b)
     }
 
     const SECTION: &[u8] =
@@ -2022,7 +2000,8 @@ mod bounds {
 
     /// The linked door, opened over [`SECTION`] and started.
     fn started(d: &Dispatcher) -> Plugin<Plane> {
-        let row = LinkedRow::of(plane_door::door).expect("the linked door states its Statement");
+        let row = LinkedRow::of_macro(plane_door::MACRO_DOOR)
+            .expect("the linked door states its Statement");
         let bind = Bind {
             instance: Arc::from("the-instance"),
             max_inflight_cap: 64,
