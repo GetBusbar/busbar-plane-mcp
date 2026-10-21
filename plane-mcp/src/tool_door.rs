@@ -99,8 +99,8 @@ busbar_contract::statement_extensions!(
     /// The Statement's extensions: this plugin's whole `declares` document (BUSBAR-1.6.0.md l.246),
     /// the one `declares.json` the release also signs into a dropped-in plane's manifest. It states
     /// the plane's breaker fact (ARCHITECT Q4: one transient failure below the trip threshold never
-    /// benches a member, the 1.5.5 MCP client leg's posture), the codes its diagnostic catalog holds
-    /// (`diagnostics::DIAGNOSTICS`; a test holds the two equal) and the carriers it needs.
+    /// benches a member, the posture ruled for this plane, which 1.5.5 did not have), the codes it
+    /// raises (`diagnostics::DIAGNOSTICS`; the tests hold the two equal) and the carriers it needs.
     EXTENSIONS: [(
         busbar_contract::abi::mechanism::extensions::EXT_DECLARES,
         include_bytes!("../declares.json")

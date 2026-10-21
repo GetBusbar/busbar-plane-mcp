@@ -19,9 +19,13 @@
 //!
 //! ## What it holds across calls
 //!
-//! Nothing. The plane is a value with no interior mutability, asserted by a test rather than by a
-//! comment. What state a held stream needs lives in the kernel-held per-connection codec state,
-//! which the kernel hands in and takes back.
+//! The plane value itself (`McpPlane`) holds nothing: it carries no field, no cell and no lock,
+//! asserted by a test rather than by a comment. The DOOR's instance (`tool_door`) does hold
+//! state across calls, each table bounded and owned by that one instance: the units in flight, the
+//! caller sessions of the session revisions and their held streams, the sessions busbar negotiated
+//! with each upstream, the held `2024-11-05` links, the line carriers' live asks and the tasks in
+//! hand. What must outlive the instance (a task's result, the call log, approvals) is written to
+//! the host's records, never kept here.
 //!
 //! ## Where this adapter had to write something down twice, and why
 //!
@@ -53,7 +57,8 @@ mod catalogue;
 mod checks;
 mod client;
 mod codec;
-/// The plane's diagnostic catalog, which its `declares.json` states (a test holds the two equal).
+/// The plane's diagnostic catalog: the codes it raises, which its `declares.json` states (the tests
+/// hold the two equal, and the codes equal to the ones the door raises).
 #[cfg(test)]
 mod diagnostics;
 mod door;
@@ -81,8 +86,8 @@ pub use tool_door::door;
 
 /// THE PLANE'S DECLARED METADATA (`declares.json`), as the tests read it: the one document the
 /// door's Statement carries under `EXT_DECLARES` ([`tool_door`]'s `EXTENSIONS`) and the release signs
-/// into a dropped-in plane's manifest. The codes its catalog holds are `diagnostics::DIAGNOSTICS`
-/// (a test holds the two equal).
+/// into a dropped-in plane's manifest. The codes its catalog holds are `diagnostics::DIAGNOSTICS`,
+/// the codes the door raises (the tests hold the three equal).
 #[cfg(test)]
 const DECLARES: &str = include_str!("../declares.json");
 

@@ -303,7 +303,10 @@ fn red_a_stateless_400_moves_the_ladder_and_is_never_remembered() {
         "a 400 to the probe remembered the upstream as speaking a revision"
     );
     let (_, body) = sent(&next);
-    assert_eq!(body["method"], "initialize", "the older revisions are tried");
+    assert_eq!(
+        body["method"], "initialize",
+        "the older revisions are tried"
+    );
     let initialized = n.on_answer(with_session(
         200,
         result(body["id"].clone(), json!({"protocolVersion":"2025-06-18"})),

@@ -64,8 +64,12 @@ fn red_any_4xx_to_the_stateless_request_refuses_its_revision() {
     }
     assert_eq!(stateless_outcome(503, b""), StepOutcome::Unreachable);
     // A success status: the stateless path's own answer, an upstream's own error included.
-    let own = json!({"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"bad args"}}).to_string();
-    assert_eq!(stateless_outcome(200, own.as_bytes()), StepOutcome::Answered);
+    let own =
+        json!({"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"bad args"}}).to_string();
+    assert_eq!(
+        stateless_outcome(200, own.as_bytes()),
+        StepOutcome::Answered
+    );
     let unsupported =
         json!({"jsonrpc":"2.0","id":1,"error":{"code":-32022,"message":"m"}}).to_string();
     assert_eq!(
