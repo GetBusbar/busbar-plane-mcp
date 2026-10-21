@@ -873,8 +873,9 @@ pub(super) fn heard(
                     (Some(_), None) => false,
                     (None, _) => true,
                 };
+                // The record goes on as the upstream wrote it.
                 if passes {
-                    deliver_frame(plane, id, owner, &frame.to_string(), now);
+                    deliver_frame(plane, id, owner, data.trim(), now);
                 }
             }
             _ => {}
@@ -937,24 +938,28 @@ pub(super) fn lower(plane: &McpDoor, ticket: Ticket, caller: &str, unit: &mut Ca
         );
         return;
     };
-    let Ok(mut v) = serde_json::from_slice::<Value>(&pending.bytes) else {
+    let Ok(v) = serde_json::from_slice::<Value>(&pending.bytes) else {
         return;
     };
-    let inexpressible = v
-        .get_mut("result")
-        .is_some_and(|result| adapt::lower_result(result).is_err());
-    if inexpressible {
-        let id = v.get("id").cloned().unwrap_or(Value::Null);
-        v = busbar_contract::jsonrpc::error_body(
-            id,
-            CODE_REFUSED,
-            "this answer asks for input or names a task, which this session's MCP revision \
-             cannot carry",
-            None,
-        );
-    }
     let rpc = v.get("jsonrpc").is_some() && (v.get("result").is_some() || v.get("error").is_some());
-    let bytes = serde_json::to_vec(&v).unwrap_or_default();
+    // THE ANSWER IS RELAYED AS ITS OWN BYTES (Law 11): handed on unchanged when nothing is lowered,
+    // and otherwise only the stateless-only members' spans are cut out ([`adapt::lower_answer`]).
+    let bytes = match adapt::lower_answer(&pending.bytes) {
+        None => return,
+        Some(adapt::Lowered::Unchanged) => std::mem::take(&mut pending.bytes),
+        Some(adapt::Lowered::Spliced(bytes)) => bytes,
+        Some(adapt::Lowered::Inexpressible) => {
+            let id = v.get("id").cloned().unwrap_or(Value::Null);
+            serde_json::to_vec(&busbar_contract::jsonrpc::error_body(
+                id,
+                CODE_REFUSED,
+                "this answer asks for input or names a task, which this session's MCP revision \
+                 cannot carry",
+                None,
+            ))
+            .unwrap_or_default()
+        }
+    };
     if line {
         pending.bytes = bytes;
         return;
