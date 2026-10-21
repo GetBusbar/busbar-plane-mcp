@@ -869,7 +869,9 @@ pub(super) fn call(
                         Some(idle) => idle.die(IDLE, &mut woken),
                         None => {
                             return Err(format!(
-                                "MCP server `{member}`: busbar already holds {MAX_LINKS}                                  2024-11-05 event streams, each in use by a call, and opens no                                  more until one is let go"
+                                "MCP server `{member}`: busbar already holds {MAX_LINKS} \
+                                 2024-11-05 event streams, each in use by a call, and opens no \
+                                 more until one is let go"
                             ))
                         }
                     }

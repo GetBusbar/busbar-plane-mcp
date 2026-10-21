@@ -1387,9 +1387,17 @@ pub(super) fn piece(
             _ => None,
         }
     });
-    // THE UNGOVERNED CHAIN SAYS SO, once per instance, on its first `2024-11-05` stream.
-    if say_ungoverned && plane.said_ungoverned.insert((), ()).is_none() {
-        let _reported = out.diag(UNGOVERNED_LEGACY_STREAM, SEVERITY_WARN, UNGOVERNED_WORDS);
+    // THE UNGOVERNED CHAIN SAYS SO, once per instance, on its first `2024-11-05` stream: latched
+    // only once the envelope carried it, so a report the envelope had no room for is made again on
+    // the next such stream.
+    if say_ungoverned {
+        plane.said_ungoverned.with_all(|said| {
+            if !said.contains_key(&())
+                && out.diag(UNGOVERNED_LEGACY_STREAM, SEVERITY_WARN, UNGOVERNED_WORDS)
+            {
+                said.insert((), ());
+            }
+        });
     }
     match step {
         None => Outcome::Refused,
