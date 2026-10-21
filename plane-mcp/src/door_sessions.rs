@@ -606,7 +606,14 @@ pub(super) fn answer(
                         Some(METHOD_SUBSCRIBE | METHOD_UNSUBSCRIBE)
                     ) =>
                 {
-                    match subscription(instance, plane, ticket, unit, (&session, &owner), &v) {
+                    match subscription(
+                        instance,
+                        plane,
+                        ticket,
+                        unit,
+                        (session.as_str(), &owner),
+                        &v,
+                    ) {
                         Poll::Pending => return Some(Step::Pending),
                         Poll::Ready(body) => answer_of(200, body),
                     }
