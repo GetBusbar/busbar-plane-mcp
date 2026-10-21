@@ -243,6 +243,16 @@ impl Negotiator {
             if let Ok(mut body) = serde_json::from_slice::<Value>(&request.body) {
                 if let Some(obj) = body.as_object_mut() {
                     obj.insert("id".to_string(), Value::from(id));
+                    // A progress token the request carries is derived from the id it is sent
+                    // under, so two requests in flight never share one.
+                    if let Some(token) = obj
+                        .get_mut("params")
+                        .and_then(|p| p.get_mut("_meta"))
+                        .and_then(|m| m.get_mut("progressToken"))
+                        .filter(|t| !t.is_null())
+                    {
+                        *token = Value::from(format!("busbar-{id}"));
+                    }
                     if let Ok(bytes) = serde_json::to_vec(&body) {
                         request.body = bytes;
                         self.sent_id = Some(id);

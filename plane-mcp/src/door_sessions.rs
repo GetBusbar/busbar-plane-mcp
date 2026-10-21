@@ -443,7 +443,7 @@ fn open_session(
     revision: Revision,
     carriage: Carriage,
     now: u64,
-) -> Result<String, &'static str> {
+) -> Result<String, (u32, &'static str)> {
     for _ in 0..2 {
         let mut entropy = [0_u8; 16];
         let drawn = plane.services.is_some_and(|s| {
@@ -451,7 +451,10 @@ fn open_session(
                 .is_ok()
         });
         if !drawn {
-            return Err("the host's random source did not answer, so no session id can be minted");
+            return Err((
+                STATUS_UNAVAILABLE,
+                "the host's random source did not answer, so no session id can be minted",
+            ));
         }
         let opened = with_sessions(plane, |t| {
             t.open(entropy, owner.clone(), revision, carriage, now)
@@ -460,14 +463,29 @@ fn open_session(
             Some(Ok(id)) => return Ok(id.as_str().to_string()),
             Some(Err(OpenRefused::Collision)) => {}
             Some(Err(OpenRefused::NoEntropy)) => {
-                return Err("the host's random source answered no entropy")
+                return Err((
+                    STATUS_UNAVAILABLE,
+                    "the host's random source answered no entropy",
+                ))
+            }
+            Some(Err(OpenRefused::OwnerFull)) => {
+                return Err((
+                    STATUS_QUOTA,
+                    "this caller holds as many MCP sessions as this node keeps for one caller, \
+                     each with a live stream: end one (DELETE it, or close its stream) and open \
+                     again",
+                ))
             }
             Some(Err(OpenRefused::Full)) | None => {
-                return Err("this caller holds as many MCP sessions as this node keeps for it")
+                return Err((
+                    STATUS_UNAVAILABLE,
+                    "this node holds as many MCP sessions as it keeps, and none of this caller's \
+                     is idle to give way",
+                ))
             }
         }
     }
-    Err("two fresh session ids collided")
+    Err((STATUS_UNAVAILABLE, "two fresh session ids collided"))
 }
 
 /// A JSON-RPC error envelope.
@@ -513,6 +531,7 @@ fn id_of(kind: &Kind) -> Value {
 /// ANSWER A SESSION UNIT on its caller's piece, the session first checked against its owner:
 /// `None` for a unit the one dispatch answers (its session checked).
 pub(super) fn answer(
+    instance: &Instance<'_, McpDoor>,
     plane: &McpDoor,
     ticket: Ticket,
     caller: &str,
@@ -579,6 +598,26 @@ pub(super) fn answer(
                     answer_of(STATUS_ACCEPTED, Vec::new())
                 }
                 Kind::Refused(r) => answer_of(r.status, r.body()),
+                // A RESOURCE SUBSCRIPTION DELIVERS: its first subscriber subscribes upstream, its
+                // last unsubscribes there ([`subscription`]); the unit pends while it does.
+                Kind::Here(v)
+                    if matches!(
+                        v.get("method").and_then(Value::as_str),
+                        Some(METHOD_SUBSCRIBE | METHOD_UNSUBSCRIBE)
+                    ) =>
+                {
+                    match subscription(
+                        instance,
+                        plane,
+                        ticket,
+                        unit,
+                        (session.as_str(), &owner),
+                        &v,
+                    ) {
+                        Poll::Pending => return Some(Step::Pending),
+                        Poll::Ready(body) => answer_of(200, body),
+                    }
+                }
                 Kind::Here(v) => {
                     let body = here(
                         plane,
@@ -656,7 +695,7 @@ fn open_endpoint(
         now,
     ) {
         Ok(session) => session,
-        Err(why) => return answer_of(STATUS_UNAVAILABLE, rpc_error(id, CODE_INTERNAL, why)),
+        Err((status, why)) => return answer_of(status, rpc_error(id, CODE_REFUSED, why)),
     };
     let result = adapt::initialize_result(&discovered, revision, false);
     let body = serde_json::to_vec(&crate::line::result(id, result)).unwrap_or_default();
@@ -682,7 +721,6 @@ fn here(
     let ok =
         |result: Value| serde_json::to_vec(&crate::line::result(&id, result)).unwrap_or_default();
     let invalid = |message: &str| rpc_error(&id, CODE_INVALID_PARAMS, message);
-    let uri = value.pointer("/params/uri").and_then(Value::as_str);
     match method {
         adapt::METHOD_PING => ok(json!({})),
         // The `2024-11-05` session opened with its stream; its `initialize` arrives inside it.
@@ -702,50 +740,6 @@ fn here(
             "this session is already open: send `initialize` without Mcp-Session-Id to open \
              another",
         ),
-        "resources/subscribe" => {
-            let Some(uri) = uri else {
-                return invalid("`params.uri` is required: the resource to watch.");
-            };
-            if uri.len() > MAX_RESOURCE_SUB_URI_BYTES {
-                return invalid(
-                    "`params.uri` is longer than a session retains: a subscription is held for \
-                     the session, so it is bounded.",
-                );
-            }
-            let Some(held) = unit.held.clone().or_else(|| plane.current()) else {
-                return invalid("this node publishes no MCP catalogue yet");
-            };
-            ask_entitlements(plane.services, ticket, unit, &held.catalogue.grants());
-            let entitled = &unit.entitled;
-            let admit = |kind: &str, name: &str| {
-                entitled
-                    .get(&format!("{kind}:{name}"))
-                    .copied()
-                    .unwrap_or(false)
-            };
-            if !matches!(held.catalogue.resource_by_uri(&admit, uri), Lookup::One(_)) {
-                return invalid("`params.uri` names no resource this caller may read.");
-            }
-            if subscribe(plane, session, owner, uri) {
-                ok(json!({}))
-            } else {
-                invalid(
-                    "this caller already holds as many resource subscriptions as this node \
-                     watches for it: unsubscribe from one before subscribing to another.",
-                )
-            }
-        }
-        "resources/unsubscribe" => {
-            let Some(uri) = uri else {
-                return invalid("`params.uri` is required: the resource to stop watching.");
-            };
-            plane.session_state.with(&session.to_string(), |s| {
-                if let Some(s) = s {
-                    s.uris.retain(|u| u != uri);
-                }
-            });
-            ok(json!({}))
-        }
         "logging/setLevel" => {
             let level = value.pointer("/params/level").and_then(Value::as_str);
             match level.filter(|l| LEVELS.contains(l)) {
@@ -786,6 +780,231 @@ fn state_of(plane: &McpDoor, session: &str, owner: &Owner, f: impl FnOnce(&mut S
         s.owner.get_or_insert_with(|| owner.clone());
         f(s);
     });
+}
+
+/// The method a session subscribes to one resource's updates with.
+const METHOD_SUBSCRIBE: &str = "resources/subscribe";
+/// The method a session drops one with.
+const METHOD_UNSUBSCRIBE: &str = "resources/unsubscribe";
+
+/// The binding busbar's own upstream subscriptions are negotiated under ([`fetch_in`]): one
+/// subscription upstream serves every session watching the uri, so it is no caller's (a caller
+/// reference is the kernel's opaque hex, never this).
+const SUBSCRIPTION_BINDING: &str = "plane:subscriptions";
+
+/// The connector handles a subscription's upstream exchange is numbered from on its unit's ticket.
+const SUBSCRIBE_SEQ: u32 = 1 << 26;
+
+/// The JSON-RPC id an upstream `resources/subscribe` or `resources/unsubscribe` carries: one
+/// request, correlated by it.
+const SUBSCRIBE_REQUEST_ID: u64 = 1;
+
+/// A RESOURCE SUBSCRIPTION, OR ITS END, in `session` (THE DESIGN section 2, the mcp bullet:
+/// subscribe stays for the old revisions, and it DELIVERS): the uri resolved under the caller's
+/// grants to the one member that declares it; on the uri's FIRST subscriber across the instance,
+/// `resources/subscribe` is sent to that member (a refusal there refuses the caller, never
+/// acknowledged); on its LAST unsubscribe, `resources/unsubscribe`. The member's updates reach the
+/// watching sessions as [`announce`] hands them on. PENDING while the upstream exchange pends.
+fn subscription(
+    instance: &Instance<'_, McpDoor>,
+    plane: &McpDoor,
+    ticket: Ticket,
+    unit: &mut CallUnit,
+    (session, owner): (&str, &Owner),
+    value: &Value,
+) -> Poll<Vec<u8>> {
+    let id = value.get("id").cloned().unwrap_or(Value::Null);
+    let subscribing = value.get("method").and_then(Value::as_str) == Some(METHOD_SUBSCRIBE);
+    let ok = || serde_json::to_vec(&crate::line::result(&id, json!({}))).unwrap_or_default();
+    let invalid = |message: &str| rpc_error(&id, CODE_INVALID_PARAMS, message);
+    let Some(uri) = value.pointer("/params/uri").and_then(Value::as_str) else {
+        return Poll::Ready(invalid(if subscribing {
+            "`params.uri` is required: the resource to watch."
+        } else {
+            "`params.uri` is required: the resource to stop watching."
+        }));
+    };
+    let Some(held) = unit.held.clone().or_else(|| plane.current()) else {
+        return Poll::Ready(invalid("this node publishes no MCP catalogue yet"));
+    };
+    // An exchange under way (this unit pended on it) is carried to its end.
+    let under_way = unit.negotiating.is_some();
+    if !subscribing {
+        let dropped = plane.session_state.with(&session.to_string(), |s| {
+            s.is_some_and(|s| {
+                let before = s.uris.len();
+                s.uris.retain(|u| u != uri);
+                s.uris.len() != before
+            })
+        });
+        if under_way || (dropped && !watched(plane, uri)) {
+            let declared = match held
+                .catalogue
+                .resource_by_uri(&|_: &str, _: &str| true, uri)
+            {
+                Lookup::One(entry) => Some(entry.server.clone()),
+                _ => None,
+            };
+            if let Some(server) = declared {
+                let verb = crate::client::verb::UpstreamVerb::ResourcesUnsubscribe {
+                    uri: uri.to_string(),
+                };
+                // The caller's subscription is gone whatever the member answers.
+                if upstream(instance, plane, unit, &held, &server, &verb).is_pending() {
+                    return Poll::Pending;
+                }
+            }
+        }
+        return Poll::Ready(ok());
+    }
+    if uri.len() > MAX_RESOURCE_SUB_URI_BYTES {
+        return Poll::Ready(invalid(
+            "`params.uri` is longer than a session retains: a subscription is held for the \
+             session, so it is bounded.",
+        ));
+    }
+    ask_entitlements(plane.services, ticket, unit, &held.catalogue.grants());
+    let entitled = &unit.entitled;
+    let admit = |kind: &str, name: &str| {
+        entitled
+            .get(&format!("{kind}:{name}"))
+            .copied()
+            .unwrap_or(false)
+    };
+    let server = match held.catalogue.resource_by_uri(&admit, uri) {
+        Lookup::One(entry) => entry.server.clone(),
+        _ => {
+            return Poll::Ready(invalid(
+                "`params.uri` names no resource this caller may read.",
+            ))
+        }
+    };
+    let quota = || {
+        invalid(
+            "this caller already holds as many resource subscriptions as this node watches for \
+             it: unsubscribe from one before subscribing to another.",
+        )
+    };
+    if !under_way {
+        match may_subscribe(plane, session, owner, uri) {
+            Some(true) => return Poll::Ready(ok()),
+            Some(false) => {}
+            None => return Poll::Ready(quota()),
+        }
+    }
+    if under_way || !watched(plane, uri) {
+        let verb = crate::client::verb::UpstreamVerb::ResourcesSubscribe {
+            uri: uri.to_string(),
+        };
+        match upstream(instance, plane, unit, &held, &server, &verb) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(why)) => {
+                return Poll::Ready(rpc_error(
+                    &id,
+                    CODE_INTERNAL,
+                    &format!(
+                        "MCP server `{server}` did not take the subscription to `{uri}`, so busbar \
+                         cannot watch it for this session: {why}"
+                    ),
+                ))
+            }
+            Poll::Ready(Ok(())) => {}
+        }
+    }
+    Poll::Ready(if subscribe(plane, session, owner, uri) {
+        ok()
+    } else {
+        quota()
+    })
+}
+
+/// Whether any session of the instance watches `uri` (busbar is subscribed to it upstream).
+fn watched(plane: &McpDoor, uri: &str) -> bool {
+    plane
+        .session_state
+        .with_all(|m| m.values().any(|s| s.uris.iter().any(|u| u == uri)))
+}
+
+/// Whether `session` may subscribe to `uri`: `Some(true)` when it already does, `Some(false)` when
+/// it may, `None` past its owner's subscription quota.
+fn may_subscribe(plane: &McpDoor, session: &str, owner: &Owner, uri: &str) -> Option<bool> {
+    plane.session_state.with_all(|m| {
+        if m.get(session)
+            .is_some_and(|s| s.uris.iter().any(|u| u == uri))
+        {
+            return Some(true);
+        }
+        let held: usize = m
+            .values()
+            .filter(|s| s.owner.as_ref() == Some(owner))
+            .map(|s| s.uris.len())
+            .sum();
+        (held < MAX_OWNER_SUBSCRIPTIONS).then_some(false)
+    })
+}
+
+/// ONE REQUEST busbar sends `server` for its subscriptions, over the plane's own reach of a member
+/// ([`fetch_in`]: the stateless request first, negotiated into a session or onto the `2024-11-05`
+/// stream as the member needs, every hop on the connector), on the unit's ticket: READY with
+/// whether the member answered it with a JSON-RPC result.
+fn upstream(
+    instance: &Instance<'_, McpDoor>,
+    plane: &McpDoor,
+    unit: &mut CallUnit,
+    held: &Held,
+    server: &str,
+    verb: &crate::client::verb::UpstreamVerb,
+) -> Poll<Result<(), String>> {
+    let Some(def) = held.section.servers.get(server) else {
+        return Poll::Ready(Err(format!("MCP server `{server}` is not registered")));
+    };
+    if super::door_program::is_program(def) || def.url.is_empty() {
+        return Poll::Ready(Err(
+            "it is reached over stdio, where busbar holds no resource subscription".to_string(),
+        ));
+    }
+    let mut request = verb.build(&def.url, SUBSCRIBE_REQUEST_ID, None);
+    // A token_exchange member's token is asked for under the registration's own scope, as its
+    // verify fetch's is.
+    if crate::tool_scope::exchanges(def, held.section.effective_upstream_credentials(server)) {
+        request.headers.push((
+            busbar_contract::abi::auth::SCOPE_REQUEST_FIELD.to_string(),
+            crate::tool_scope::registration_scope(server, def),
+        ));
+    }
+    let answered = fetch_in(
+        instance,
+        plane,
+        &mut unit.negotiating,
+        (
+            SUBSCRIBE_SEQ,
+            server,
+            SUBSCRIPTION_BINDING,
+            def.timeout_ms(),
+        ),
+        request,
+    );
+    let Poll::Ready(answered) = answered else {
+        return Poll::Pending;
+    };
+    Poll::Ready(match answered {
+        Err(why) => Err(why),
+        Ok(response) => {
+            use crate::client::jsonrpc::{parse_response, RpcOutcome};
+            match parse_response(&response.body, SUBSCRIBE_REQUEST_ID) {
+                RpcOutcome::Result(_) => Ok(()),
+                RpcOutcome::Error { code, message } => {
+                    Err(format!("it answered JSON-RPC error {code}: {message}"))
+                }
+                RpcOutcome::InputRequired { .. }
+                | RpcOutcome::Malformed(_)
+                | RpcOutcome::Uncorrelated(_) => Err(format!(
+                    "it answered HTTP {} with no JSON-RPC result",
+                    response.status
+                )),
+            }
+        }
+    })
 }
 
 /// Subscribes `session` to `uri`: `false` past the owner's subscription quota.
@@ -873,8 +1092,9 @@ pub(super) fn heard(
                     (Some(_), None) => false,
                     (None, _) => true,
                 };
+                // The record goes on as the upstream wrote it.
                 if passes {
-                    deliver_frame(plane, id, owner, &frame.to_string(), now);
+                    let _delivered = deliver_frame(plane, id, owner, data.trim(), now);
                 }
             }
             _ => {}
@@ -937,40 +1157,50 @@ pub(super) fn lower(plane: &McpDoor, ticket: Ticket, caller: &str, unit: &mut Ca
         );
         return;
     };
-    let Ok(mut v) = serde_json::from_slice::<Value>(&pending.bytes) else {
+    let Ok(v) = serde_json::from_slice::<Value>(&pending.bytes) else {
         return;
     };
-    let inexpressible = v
-        .get_mut("result")
-        .is_some_and(|result| adapt::lower_result(result).is_err());
-    if inexpressible {
-        let id = v.get("id").cloned().unwrap_or(Value::Null);
-        v = busbar_contract::jsonrpc::error_body(
-            id,
-            CODE_REFUSED,
-            "this answer asks for input or names a task, which this session's MCP revision \
-             cannot carry",
-            None,
-        );
-    }
     let rpc = v.get("jsonrpc").is_some() && (v.get("result").is_some() || v.get("error").is_some());
-    let bytes = serde_json::to_vec(&v).unwrap_or_default();
+    // THE ANSWER IS RELAYED AS ITS OWN BYTES (Law 11): handed on unchanged when nothing is lowered,
+    // and otherwise only the stateless-only members' spans are cut out ([`adapt::lower_answer`]).
+    let bytes = match adapt::lower_answer(&pending.bytes) {
+        None => return,
+        Some(adapt::Lowered::Unchanged) => std::mem::take(&mut pending.bytes),
+        Some(adapt::Lowered::Spliced(bytes)) => bytes,
+        Some(adapt::Lowered::Inexpressible) => {
+            let id = v.get("id").cloned().unwrap_or(Value::Null);
+            serde_json::to_vec(&busbar_contract::jsonrpc::error_body(
+                id,
+                CODE_REFUSED,
+                "this answer asks for input or names a task, which this session's MCP revision \
+                 cannot carry",
+                None,
+            ))
+            .unwrap_or_default()
+        }
+    };
     if line {
         pending.bytes = bytes;
         return;
     }
     match legacy {
         Some(session) => {
-            deliver_frame(
+            let delivered = deliver_frame(
                 plane,
                 &session,
                 &owner_of(caller),
                 &String::from_utf8_lossy(&bytes),
                 now,
             );
-            pending.bytes.clear();
-            pending.fields.clear();
-            pending.status = STATUS_ACCEPTED;
+            // No stream took the answer (it ended while the message ran): the POST is told the
+            // session is gone, never accepted for an answer nobody will read.
+            if delivered {
+                pending.bytes.clear();
+                pending.fields.clear();
+                pending.status = STATUS_ACCEPTED;
+            } else {
+                *pending = not_found(&v.get("id").cloned().unwrap_or(Value::Null));
+            }
         }
         None => {
             if rpc {
@@ -1014,15 +1244,22 @@ pub(super) fn holds(plane: &McpDoor, unit: u64) -> bool {
     })
 }
 
-/// `data` buffered on `session`'s stream, and the stream named due.
-fn deliver_frame(plane: &McpDoor, session: &str, owner: &Owner, data: &str, now: u64) {
+/// `data` buffered on `session`'s stream, and the stream named due: `false` when no live stream
+/// took it.
+fn deliver_frame(plane: &McpDoor, session: &str, owner: &Owner, data: &str, now: u64) -> bool {
     let target = plane
         .streams
         .with_all(|m| m.values().find(|s| s.session == session).map(|s| s.stream));
-    if let Some(stream) = target {
-        with_sessions(plane, |t| t.push(session, owner, stream, data, now));
+    let Some(stream) = target else {
+        return false;
+    };
+    let pushed = with_sessions(plane, |t| t.push(session, owner, stream, data, now))
+        .flatten()
+        .is_some();
+    if pushed {
         due(plane, session);
     }
+    pushed
 }
 
 /// Every stream of `session` named due, and the driver woken.
@@ -1084,11 +1321,36 @@ pub(super) fn tick(plane: &McpDoor) {
     }
 }
 
-/// The op on `ticket` was cancelled: the stream it carried is dropped.
+/// The op on `ticket` was cancelled: the stream it carried is ended.
 pub(super) fn cancelled(plane: &McpDoor, ticket: Ticket) {
-    plane
-        .streams
-        .with_all(|m| m.retain(|_, s| s.ticket != ticket));
+    let keys: Vec<u64> = plane.streams.with_all(|m| {
+        m.iter()
+            .filter(|(_, s)| s.ticket == ticket)
+            .map(|(k, _)| *k)
+            .collect()
+    });
+    for key in keys {
+        end_stream(plane, key);
+    }
+}
+
+/// ENDS the held stream of unit `key`: it is no longer live work, so its cursor (kept for a
+/// resuming GET) and its session may give way again.
+fn end_stream(plane: &McpDoor, key: u64) -> Option<Stream> {
+    let ended = plane.streams.remove(&key)?;
+    with_sessions(plane, |t| {
+        t.release_stream(&ended.session, ended.stream);
+        // A `2024-11-05` SESSION LIVES AS LONG AS ITS STREAM: its answers have nowhere else to go,
+        // so a message POSTed after the stream ended is told the session is unknown (`404`) before
+        // it runs, never run, charged and its answer dropped.
+        if ended.legacy {
+            t.end(&ended.session);
+        }
+    });
+    if ended.legacy {
+        plane.session_state.remove(&ended.session);
+    }
+    Some(ended)
 }
 
 /// What an idle stream writes to say it is alive.
@@ -1118,7 +1380,7 @@ pub(super) fn piece(
         }
         match given.from {
             FROM_CALLER if given.flags & PIECE_LAST != 0 => {
-                plane.streams.remove(&key);
+                end_stream(plane, key);
                 unit.pending = Some(door_listen::frame(Vec::new(), true, true));
                 Some(true)
             }
@@ -1132,9 +1394,17 @@ pub(super) fn piece(
             _ => None,
         }
     });
-    // THE UNGOVERNED CHAIN SAYS SO, once per instance, on its first `2024-11-05` stream.
-    if say_ungoverned && plane.said_ungoverned.insert((), ()).is_none() {
-        let _reported = out.diag(UNGOVERNED_LEGACY_STREAM, SEVERITY_WARN, UNGOVERNED_WORDS);
+    // THE UNGOVERNED CHAIN SAYS SO, once per instance, on its first `2024-11-05` stream: latched
+    // only once the envelope carried it, so a report the envelope had no room for is made again on
+    // the next such stream.
+    if say_ungoverned {
+        plane.said_ungoverned.with_all(|said| {
+            if !said.contains_key(&())
+                && out.diag(UNGOVERNED_LEGACY_STREAM, SEVERITY_WARN, UNGOVERNED_WORDS)
+            {
+                said.insert((), ());
+            }
+        });
     }
     match step {
         None => Outcome::Refused,
@@ -1157,7 +1427,7 @@ pub(super) fn piece(
                 }
                 Some(Ok(Written::Done)) => {
                     plane.units.remove(&key);
-                    plane.streams.remove(&key);
+                    end_stream(plane, key);
                     Outcome::Ready
                 }
             }
@@ -1237,9 +1507,9 @@ fn open_stream(
             );
             let session = match opened {
                 Ok(session) => session,
-                Err(why) => {
-                    let body = rpc_error(&Value::Null, CODE_INTERNAL, why);
-                    unit.pending = Some(answer_of(STATUS_UNAVAILABLE, body));
+                Err((status, why)) => {
+                    let body = rpc_error(&Value::Null, CODE_REFUSED, why);
+                    unit.pending = Some(answer_of(status, body));
                     return Some((true, false));
                 }
             };
@@ -1270,13 +1540,32 @@ fn open_stream(
                     (session, replay.stream, delivered, false, bytes)
                 }
                 None => {
-                    let stream =
-                        with_sessions(plane, |t| t.open_stream(&session, owner, now)).flatten()?;
+                    let opened =
+                        with_sessions(plane, |t| t.open_stream(&session, owner, now)).flatten();
+                    // THE SESSION'S CURSORS ARE ALL READ BY LIVE STREAMS: the new one is refused,
+                    // and no live stream is ended for it.
+                    let Some(stream) = opened else {
+                        let refusal = Refusal {
+                            status: STATUS_QUOTA,
+                            id: None,
+                            code: CODE_REFUSED,
+                            message: "this MCP session holds as many open streams as a session \
+                                      keeps; close one and open again"
+                                .to_string(),
+                            data: Some(json!({ "reason": "stream_quota" })),
+                        };
+                        unit.pending =
+                            Some(Pending::answer(refusal.status, refusal.body(), None, &[]));
+                        return Some((true, false));
+                    };
                     (session, stream, 0, false, KEEPALIVE.to_vec())
                 }
             }
         }
     };
+    // THE STREAM IS LIVE WORK: its session is never evicted, nor its cursor dropped, while it is
+    // held ([`end_stream`] lets it go).
+    with_sessions(plane, |t| t.hold_stream(&session, stream));
     // One stream per live unit, so the unit table's admission bound (it refuses past `MAX_UNITS`,
     // and evicts nothing) bounds this table too.
     plane.streams.insert(
@@ -1356,8 +1645,8 @@ fn step_stream(plane: &McpDoor, ticket: Ticket, unit: &mut CallUnit) -> Option<b
     })
     .flatten();
     let Some(replay) = replay else {
-        // The session is gone (ended, expired, evicted): so is its stream.
-        plane.streams.remove(&unit.key);
+        // The session is gone (ended or expired): so is its stream.
+        end_stream(plane, unit.key);
         unit.pending = Some(door_listen::frame(Vec::new(), true, true));
         return Some(true);
     };
@@ -1458,6 +1747,14 @@ impl Negotiating {
     ) -> Self {
         let key = crate::tool_sessions::upstream_key(member, binding);
         let (remembered, session_id) = remembered(plane, &key);
+        // A request lowered into a remembered session carries a token derived from the id it is
+        // sent under (the negotiator writes both); any other carries one drawn here from the
+        // instance's one counter, so two calls in flight never share a progress token (the round's
+        // id, `0` on every first round, is no such thing).
+        let original = match session_id {
+            Some(_) => original,
+            None => with_progress_token(plane, original),
+        };
         let stateless_known = remembered
             .as_ref()
             .is_some_and(|r| r.revision == Revision::R2026_07_28);
@@ -1801,6 +2098,28 @@ pub(super) fn fetch_in(
         }
         Negotiated::Failed(reason) => Err(reason),
     })
+}
+
+/// `request` with the progress token it carries (when it asks for progress at all) replaced by one
+/// no other request of this instance carries: `busbar-` and an id from the instance's one counter.
+fn with_progress_token(plane: &McpDoor, mut request: OutboundRequest) -> OutboundRequest {
+    let Ok(mut body) = serde_json::from_slice::<Value>(&request.body) else {
+        return request;
+    };
+    let Some(token) = body
+        .pointer_mut("/params/_meta/progressToken")
+        .filter(|t| !t.is_null())
+    else {
+        return request;
+    };
+    let Some(n) = plane.upstreams.with(&(), |t| t.map(|t| t.take_id())) else {
+        return request;
+    };
+    *token = Value::from(format!("busbar-{n}"));
+    if let Ok(bytes) = serde_json::to_vec(&body) {
+        request.body = bytes;
+    }
+    request
 }
 
 /// `body` (one JSON-RPC answer) with its top-level `id` put back to `id` when it is `sent`, the

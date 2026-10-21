@@ -229,8 +229,10 @@ fn the_distinct_uris_are_counted_through_a_set_and_the_ceiling_refuses_at_once()
     let refused = Listen::open(Some(&params), json!("sub"), 0, |_| true).expect_err("over the cap");
     let message = refused["error"]["message"].as_str().expect("a sentence");
     assert!(
-        message.contains(&format!("names {} distinct uris", MAX_SUBSCRIBED_URIS + 1)),
-        "the refusal came at the first uri past the ceiling: {message}"
+        message.contains(&format!(
+            "names more than {MAX_SUBSCRIBED_URIS} distinct uris"
+        )),
+        "the refusal states what it knows (it stopped counting past the ceiling): {message}"
     );
     let copies: Vec<&str> = (0..100_000)
         .map(|n| ["file:///a", "file:///b", "file:///c"][n % 3])

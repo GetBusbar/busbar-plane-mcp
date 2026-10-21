@@ -8,8 +8,11 @@
 //! tree; the plane's shipped source performs no input or output (tests/purity.rs), so the read is
 //! in this test module (moved in from `tests/` when the crate's only public item became `door`).
 //!
-//! * `the_issued_set_is_exactly_the_inventory_column`: `UpstreamVerb::all` is the inventory's
-//!   `mcp|stdio|client|client` column, in BOTH directions.
+//! * `the_issued_set_is_what_production_constructs`: the client-originated methods busbar issues
+//!   are counted at their PRODUCTION construction sites in the shipped source (never from the
+//!   enum's own list), each is in the inventory's busbar-as-client column, and every method of that
+//!   column production does not construct is named, so the column claims nothing the plane does not
+//!   send.
 //! * `every_server_originated_method_in_the_inventory_is_classified`: every
 //!   `mcp|stdio|client|server` method is recognised by the classifier in one of its shapes.
 
@@ -31,7 +34,9 @@ fn line(raw: &str) -> serde_json::Value {
     serde_json::from_str(raw).expect("the fixture is JSON")
 }
 
-/// Every `mcp|stdio|client|client|<method>` cell the generated inventory owes an implementation.
+/// Every `mcp|<transport>|client|client|<method>` cell the generated inventory names, over both
+/// transports: the methods a client may originate. (The streamable-HTTP column's verb rows,
+/// `GET /mcp` and `DELETE /mcp`, are no methods.)
 ///
 /// Read from the file rather than restated, for the reason the coverage gate itself gives: a list
 /// written from knowledge of the specification is exactly how a list ends at J with nobody noticing.
@@ -44,45 +49,133 @@ fn inventory_methods() -> std::collections::BTreeSet<String> {
         .iter()
         .filter(|c| {
             c["protocol"] == "mcp"
-                && c["transport"] == "stdio"
                 && c["role"] == "client"
                 && c["originator"] == "client"
                 && c["na_reason"].is_null()
         })
         .map(|c| c["method"].as_str().expect("a method").to_string())
+        .filter(|m| !m.contains(' '))
         .collect()
 }
 
-/// THE COLUMN IS COMPLETE, AND IT IS NOT WIDER THAN THE SPECIFICATION.
+/// The client-originated methods of the inventory busbar does NOT send an upstream: no production
+/// site constructs them. A method issued and still named here fails, and so does one neither
+/// issued nor named.
+const NOT_ISSUED: &[&str] = &[
+    "completion/complete",
+    "logging/setLevel",
+    "notifications/cancelled",
+    "notifications/elicitation/response",
+    "notifications/progress",
+    "notifications/roots/list_changed",
+    "ping",
+    "prompts/get",
+    "prompts/list",
+    "resources/list",
+    "resources/read",
+    "resources/templates/list",
+    "server/discover",
+    "subscriptions/listen",
+    "tasks/cancel",
+    "tasks/get",
+    "tasks/update",
+];
+
+/// The shipped source, every file under `src/` but the test modules: `(path, code)`, its `//`
+/// comments stripped so a name in prose is never a construction site.
+fn production_source() -> Vec<(String, String)> {
+    fn walk(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+        for entry in std::fs::read_dir(dir).expect("src reads") {
+            let path = entry.expect("an entry").path();
+            if path.is_dir() {
+                if path.file_name().is_some_and(|n| n != "tests") {
+                    walk(&path, out);
+                }
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                let text = std::fs::read_to_string(&path).expect("a source file reads");
+                let code: Vec<&str> = text
+                    .lines()
+                    .map(|l| l.split("//").next().unwrap_or(""))
+                    .collect();
+                out.push((path.display().to_string(), code.join("\n")));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut out,
+    );
+    out
+}
+
+/// THE ISSUED SET IS WHAT PRODUCTION CONSTRUCTS, and the inventory column is accounted for.
 ///
-/// Both directions, because each catches a different mistake. A method in the inventory with no
-/// variant is a cell busbar cannot serve and would be claiming. A variant with no inventory row is
-/// busbar sending an upstream a method the specification does not define, which is not coverage —
-/// it is a made-up verb that an upstream will answer `-32601` to.
+/// A variant of [`UpstreamVerb`] is issued only where the shipped source outside the builder
+/// constructs it (`UpstreamVerb::<Variant>`); `tools/call` and `tools/list` are issued where the
+/// dispatch and verify paths call their own builders. Every variant must have such a site (a
+/// variant no production path builds does not ship), every issued method must be in the inventory
+/// (busbar sends no made-up verb), and the inventory's remaining methods must be exactly
+/// [`NOT_ISSUED`].
 #[test]
-fn the_issued_set_is_exactly_the_inventory_column() {
+fn the_issued_set_is_what_production_constructs() {
     let owed = inventory_methods();
     assert!(
         owed.len() >= 20,
-        "only {} issuable stdio methods in the inventory. This test refuses to pass vacuously: a \
-         filter that matched nothing would report a complete column of nothing.",
+        "only {} client-originated methods in the inventory. This test refuses to pass vacuously: \
+         a filter that matched nothing would report a complete column of nothing.",
         owed.len()
     );
-    let built: std::collections::BTreeSet<String> = UpstreamVerb::all()
-        .iter()
-        .map(|v| v.method().to_string())
-        .collect();
-    let missing: Vec<&String> = owed.difference(&built).collect();
-    let invented: Vec<&String> = built.difference(&owed).collect();
-    assert!(
-        missing.is_empty(),
-        "the inventory owes these methods on the stdio client leg and `UpstreamVerb` has no variant \
-         for them: {missing:#?}"
-    );
+    let source = production_source();
+    assert!(source.len() >= 20, "the shipped source is read");
+    let built_at = |needle: &str| {
+        source
+            .iter()
+            .filter(|(path, code)| {
+                !path.ends_with("client/verb.rs")
+                    && !path.ends_with("client/jsonrpc.rs")
+                    && code.contains(needle)
+            })
+            .count()
+    };
+    let mut issued = std::collections::BTreeSet::new();
+    for verb in UpstreamVerb::all() {
+        let debug = format!("{verb:?}");
+        let variant = debug
+            .split([' ', '{', '('])
+            .next()
+            .expect("a variant name")
+            .to_string();
+        assert!(
+            built_at(&format!("UpstreamVerb::{variant}")) > 0,
+            "`UpstreamVerb::{variant}` has no production construction site: a verb no production \
+             path builds does not ship"
+        );
+        issued.insert(verb.method().to_string());
+    }
+    for (method, needle) in [
+        ("tools/call", "::tools_call("),
+        ("tools/list", "jsonrpc::tools_list("),
+    ] {
+        assert!(
+            built_at(needle) > 0,
+            "`{method}` has no production construction site"
+        );
+        issued.insert(method.to_string());
+    }
+    let invented: Vec<&String> = issued.difference(&owed).collect();
     assert!(
         invented.is_empty(),
-        "`UpstreamVerb` sends methods the generated matrix does not define: {invented:#?}\n\
+        "busbar sends methods the generated matrix does not define: {invented:#?}\n\
          Do not edit qa/method-inventory.json — it is generated from the SDKs and will come back."
+    );
+    let not_issued: std::collections::BTreeSet<String> =
+        owed.difference(&issued).cloned().collect();
+    let named: std::collections::BTreeSet<String> =
+        NOT_ISSUED.iter().map(|m| (*m).to_string()).collect();
+    assert_eq!(
+        not_issued, named,
+        "the inventory's client methods busbar does not issue must be exactly the ones named"
     );
 }
 
