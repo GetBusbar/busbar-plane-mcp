@@ -1100,20 +1100,6 @@ impl ServerTransport {
             ServerTransport::Stdio => true,
         }
     }
-
-    /// The ENGINE axis this config value names.
-    ///
-    /// Two types, deliberately: this one is the operator's GRAMMAR, frozen and additive-only, and
-    /// [`busbar_contract::transport::transport::Transport`] is the engine's dispatch axis. Collapsing them would tie a
-    /// wire word an operator has already written to an enum the engine is free to reshape.
-    pub fn axis(self) -> busbar_contract::transport::transport::Transport {
-        match self {
-            ServerTransport::StreamableHttp => {
-                busbar_contract::transport::transport::Transport::Http
-            }
-            ServerTransport::Stdio => busbar_contract::transport::transport::Transport::Stdio,
-        }
-    }
 }
 
 /// ONE VALUE in a stdio child's environment: a plain string, or a reference to a secret module.

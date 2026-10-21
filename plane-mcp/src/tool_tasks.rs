@@ -305,12 +305,6 @@ impl Task {
         index_key(&self.principal, &self.id)
     }
 
-    /// Whether it is parked on its upstream's ask.
-    #[must_use]
-    pub fn relayed(&self) -> bool {
-        self.relay.is_some()
-    }
-
     /// THE LIVE STATE its records keep ([`live_parts`]): its status and last update, its
     /// `inputRequests` in order, the answers it holds, the upstream ask and the round of its own
     /// asks it is parked on.
