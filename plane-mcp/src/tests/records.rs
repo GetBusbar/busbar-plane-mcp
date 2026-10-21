@@ -2,10 +2,7 @@
 //! measures implementation and nothing else; still a direct child module, so `use
 //! super::*` reaches the private items it always did.
 
-use super::{
-    operations_for, KIND_CALL, KIND_DEMOTION, OPERATIONS, RECORD_SCHEMAS, SCHEMA_APPROVAL,
-    SCHEMA_CALL, SCHEMA_DEMOTION,
-};
+use super::{KIND_CALL, KIND_DEMOTION, RECORD_SCHEMAS, SCHEMA_CALL, SCHEMA_DEMOTION};
 
 /// The two durable schemas carry the codec's own record kind names.
 ///
@@ -17,44 +14,11 @@ fn the_durable_schemas_are_the_codecs_own_kinds() {
     assert_eq!(SCHEMA_DEMOTION.as_str(), KIND_DEMOTION);
 }
 
-/// Every schema declares at least one operation, and every operation it declares is a known one.
-#[test]
-fn every_schema_declares_known_operations() {
-    for schema in RECORD_SCHEMAS {
-        let ops = operations_for(*schema);
-        assert!(!ops.is_empty(), "{schema} declares no operation");
-        for op in ops {
-            assert!(OPERATIONS.contains(op), "{schema} declares unknown op {op}");
-        }
-    }
-}
-
-/// A schema this plane does not declare has no operations at all.
-#[test]
-fn an_undeclared_schema_declares_nothing() {
-    let stranger = busbar_contract::ids::RecordSchemaId::new("ledger");
-    assert!(operations_for(stranger).is_empty());
-}
-
-/// The call log cannot be overwritten or deleted.
-#[test]
-fn the_call_log_cannot_be_rewritten() {
-    let ops = operations_for(SCHEMA_CALL);
-    assert!(!ops.contains(&super::OP_PUT));
-    assert!(!ops.contains(&super::OP_DELETE));
-}
-
-/// An approval is spent atomically, never read and then spent.
-///
-/// A read followed by a write is two units of time in which a second caller can spend the same
-/// grant. Declaring no read at all is what makes that impossible to write by accident.
-#[test]
-fn an_approval_is_spent_atomically() {
-    let ops = operations_for(SCHEMA_APPROVAL);
-    assert!(ops.contains(&super::OP_REDEEM));
-    assert!(!ops.contains(&super::OP_GET));
-    assert!(!ops.contains(&super::OP_SCAN));
-}
+// THE OPERATION TABLE IS GONE, with the four tests that read it: production never read it (it was
+// compiled under test alone), so those tests certified a table, not the plane. The call log's
+// append-only property is the record chain the door declares, pinned in `tests/door.rs`
+// (`the_call_log_is_the_one_chain_the_host_keeps`); an approval is spent through the host's one-time
+// `records.claim`.
 
 /// No schema name is repeated.
 #[test]
