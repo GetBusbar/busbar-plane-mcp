@@ -1095,6 +1095,15 @@ slot!(
         // A LINE OF THE LINE CARRIER (ARCHITECT Q1a): what it is to the carrier session it arrived
         // over, and the bytes the one dispatch decides on (none: the unit answers its preset).
         let line_route = input.get().claim as usize == door::LINE_ROUTE;
+        // A SHORT ANSWER APPLIES NOTHING, and the re-call reads what was stored: reading a line
+        // moves its carrier session (a live ask's answer is taken, a revision kept, a cancel
+        // applied), so the one buffer a line's arrival can come up short on (the units buffer its
+        // admission estimate rides) is judged before the line is read.
+        if line_route && input.get().units_cap < 1 {
+            out.set(|o| &o.units_written, 0);
+            out.set(|o| &o.units_needed, 1);
+            return Outcome::Failed;
+        }
         let line_arrival = line_route.then(|| {
             let session = fields
                 .iter()
