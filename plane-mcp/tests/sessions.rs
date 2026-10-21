@@ -2302,7 +2302,8 @@ fn a_listen_subscription_hears_the_upstreams_resource_update() {
     ];
     let arrived = d.arrive(110, "POST", "/mcp", listen, &fields);
     assert_eq!(arrived.outcome, Outcome::Ready, "{arrived:?}");
-    let opened = d.piece(110, &Given::stream_open(ALICE, 110));
+    // The open pends while busbar subscribes to the uri with its member.
+    let opened = d.settle(110, &Given::stream_open(ALICE, 110));
     assert!(
         opened.text().contains("acknowledged"),
         "the subscription is acknowledged: {} {}",
@@ -2721,4 +2722,259 @@ fn the_ungoverned_legacy_diagnostic_is_reported_once_when_carried() {
         "the first ungoverned stream carries the diagnostic"
     );
     assert_eq!(opened(172, "").diags, 0, "latched: said once per instance");
+}
+
+// ── a subscription's end, and a listen's uris, reach the member ─────────────────────────────────
+
+/// A `resources/subscribe` of the stateless member's declared resource.
+const SUBSCRIBE_README: &[u8] =
+    br#"{"jsonrpc":"2.0","id":3,"method":"resources/subscribe","params":{"uri":"file:///readme"}}"#;
+
+/// What the stateless member is told when the readme's last watcher goes.
+fn unsubscribe_readme() -> (String, String) {
+    (
+        "resources/unsubscribe".to_string(),
+        "file:///readme".to_string(),
+    )
+}
+
+/// `initialize` as `caller` on `unit`, re-called while it pends (a unit may carry an unsubscribe
+/// busbar owes a member before its own answer): the session it opened.
+fn open_session(d: &Door, unit: u64, caller: &str) -> String {
+    let arrived = d.arrive(unit, "POST", "/mcp", INIT_2025, &[ACCEPT_BOTH]);
+    assert_eq!(arrived.outcome, Outcome::Ready, "{arrived:?}");
+    let answered = d.settle(unit, &Given::caller(caller, INIT_2025));
+    assert_eq!(answered.status, 200, "{}", answered.text());
+    answered
+        .field("mcp-session-id")
+        .expect("the answer names its session")
+        .to_string()
+}
+
+/// `body` POSTed in `session` as `caller` on `unit`, re-called while it pends.
+fn session_post(d: &Door, unit: u64, session: &str, caller: &str, body: &[u8]) -> Answered {
+    let fields = [
+        ACCEPT_BOTH,
+        ("mcp-session-id", session),
+        ("mcp-protocol-version", "2025-06-18"),
+    ];
+    assert_eq!(
+        d.arrive(unit, "POST", "/mcp", body, &fields).outcome,
+        Outcome::Ready
+    );
+    d.settle(unit, &Given::caller(caller, body))
+}
+
+/// ALICE's session, subscribed to the readme: its id, and the member asked for the uri.
+fn subscribed_session(d: &Door, unit: u64) -> String {
+    let session = open_session(d, unit, ALICE);
+    let subscribed = session_post(d, unit + 1, &session, ALICE, SUBSCRIBE_README);
+    assert_eq!(
+        subscribed.json()["result"],
+        json!({}),
+        "{}",
+        subscribed.text()
+    );
+    assert_eq!(
+        subscriptions_seen(),
+        [(
+            "resources/subscribe".to_string(),
+            "file:///readme".to_string()
+        )]
+    );
+    session
+}
+
+/// RED: A SESSION ENDED BY ITS DELETE UNSUBSCRIBES UPSTREAM: the readme's last watcher went with
+/// the session, so the DELETE sends the declaring member `resources/unsubscribe` before it answers.
+/// RED: the session's subscription was dropped and the member was never told.
+#[test]
+fn a_deleted_sessions_subscription_is_unsubscribed_upstream() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open();
+    let session = subscribed_session(&d, 190);
+    let arrived = d.arrive(
+        192,
+        "DELETE",
+        "/mcp",
+        b"",
+        &[("mcp-session-id", session.as_str())],
+    );
+    assert_eq!(arrived.outcome, Outcome::Ready, "{arrived:?}");
+    let deleted = d.settle(192, &Given::caller(ALICE, b""));
+    assert_eq!(deleted.status, 200, "{}", deleted.text());
+    assert_eq!(
+        subscriptions_seen().last(),
+        Some(&unsubscribe_readme()),
+        "the DELETE told the member its uri's last watcher went"
+    );
+}
+
+/// RED: A SESSION THAT EXPIRED UNSUBSCRIBES UPSTREAM: past its idle bound the session is let go at
+/// the next session unit's clock reading, and that unit (here another caller's `initialize`)
+/// carries the `resources/unsubscribe` its last watcher owes the member. RED: the expired session's
+/// subscription went with it and the member was never told.
+#[test]
+fn an_expired_sessions_subscription_is_unsubscribed_upstream() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open();
+    let session = subscribed_session(&d, 200);
+    // Thirty-one minutes pass with the session untouched (its idle bound is thirty).
+    MONO.fetch_add(31 * 60 * 1_000_000_000, Ordering::SeqCst);
+    open_session(&d, 202, BOB);
+    assert_eq!(
+        subscriptions_seen().last(),
+        Some(&unsubscribe_readme()),
+        "the expired session's uri was unsubscribed at its member"
+    );
+    assert_eq!(
+        listed(&d, 203, &session, ALICE).status,
+        404,
+        "the session expired"
+    );
+}
+
+/// RED: A `2024-11-05` SESSION ENDED BY ITS STREAM CLOSING UNSUBSCRIBES UPSTREAM: its subscription
+/// (POSTed to its message address) goes with the stream, and the next session unit carries the
+/// `resources/unsubscribe` its last watcher owes the member. RED: the member was never told.
+#[test]
+fn a_closed_legacy_streams_subscription_is_unsubscribed_upstream() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open();
+    let address = legacy_stream(&d, 210, ALICE);
+    let json_type = [("content-type", "application/json")];
+    assert_eq!(
+        d.arrive(211, "POST", &address, SUBSCRIBE_README, &json_type)
+            .outcome,
+        Outcome::Ready
+    );
+    let posted = d.settle(211, &Given::caller(ALICE, SUBSCRIBE_README));
+    assert_eq!(posted.status, 202, "{}", posted.text());
+    assert_eq!(
+        subscriptions_seen(),
+        [(
+            "resources/subscribe".to_string(),
+            "file:///readme".to_string()
+        )],
+        "the legacy session's subscription reached the member"
+    );
+    let ended = d.piece(
+        210,
+        &Given {
+            stream: 210,
+            ..Given::caller(ALICE, b"")
+        },
+    );
+    assert!(ended.done, "the stream ends: {}", ended.text());
+    open_session(&d, 212, BOB);
+    assert_eq!(
+        subscriptions_seen().last(),
+        Some(&unsubscribe_readme()),
+        "the closed stream's uri was unsubscribed at its member"
+    );
+}
+
+/// A `subscriptions/listen` of the readme, in the stateless revision.
+const LISTEN_README: &[u8] = br#"{"jsonrpc":"2.0","id":81,"method":"subscriptions/listen","params":{"notifications":{"resourceSubscriptions":["file:///readme"]},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#;
+
+/// RED: A LISTEN'S RESOURCE SUBSCRIPTION DELIVERS: the uri's first listener has busbar send
+/// `resources/subscribe` to the member that declares it before the acknowledgement; a second
+/// listener sends nothing more; once the last listener's caller goes, the next unit carries
+/// `resources/unsubscribe`. RED: a listen subscribed nothing upstream, so the member was never
+/// asked for the updates the stream promised.
+#[test]
+fn a_listen_subscribes_the_declaring_member_upstream_until_its_last_listener_goes() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open();
+    let fields = [
+        ACCEPT_BOTH,
+        ("mcp-protocol-version", "2026-07-28"),
+        ("mcp-method", "subscriptions/listen"),
+    ];
+    let listen = |unit: u64, caller: &str| {
+        let arrived = d.arrive(unit, "POST", "/mcp", LISTEN_README, &fields);
+        assert_eq!(arrived.outcome, Outcome::Ready, "{arrived:?}");
+        let opened = d.settle(unit, &Given::stream_open(caller, unit));
+        assert!(
+            opened.text().contains("acknowledged"),
+            "the subscription is acknowledged: {} {}",
+            opened.status,
+            opened.text()
+        );
+    };
+    let close = |unit: u64, caller: &str| {
+        let ended = d.piece(
+            unit,
+            &Given {
+                stream: unit,
+                ..Given::caller(caller, b"")
+            },
+        );
+        assert!(ended.done, "the stream ends: {}", ended.text());
+    };
+    listen(220, ALICE);
+    assert_eq!(
+        subscriptions_seen(),
+        [(
+            "resources/subscribe".to_string(),
+            "file:///readme".to_string()
+        )],
+        "the declaring member is asked for the uri's updates"
+    );
+    listen(221, BOB);
+    assert_eq!(
+        subscriptions_seen().len(),
+        1,
+        "one upstream subscription serves both"
+    );
+    close(220, ALICE);
+    open_session(&d, 222, ALICE);
+    assert_eq!(
+        subscriptions_seen().len(),
+        1,
+        "bob's listener still watches it"
+    );
+    close(221, BOB);
+    open_session(&d, 223, BOB);
+    assert_eq!(
+        subscriptions_seen().last(),
+        Some(&unsubscribe_readme()),
+        "the last listener gone, the member is told"
+    );
+}
+
+/// The section with one `transport: stdio` member declaring a resource.
+const STDIO_SECTION: &str = r#"{
+    "io": {"transport": "stdio", "command": "/usr/bin/true", "pin": {"mechanism": "unpinned"}, "tools_allow": {"read_file": {}}, "resources_allow": {"file:///notes": {"name": "notes", "text": "hi"}}}
+}"#;
+
+/// RED: A STDIO MEMBER'S RESOURCE SUBSCRIPTION STANDS: it is acknowledged and held, and nothing is
+/// sent to the child (busbar keeps no subscription with a child; what the child announces beside a
+/// relayed exchange reaches the watchers). RED: the caller was refused because the member is reached
+/// over stdio.
+#[test]
+fn a_stdio_members_resource_subscription_is_acknowledged() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open_with(STDIO_SECTION);
+    let session = open_session(&d, 230, ALICE);
+    let subscribe =
+        br#"{"jsonrpc":"2.0","id":3,"method":"resources/subscribe","params":{"uri":"file:///notes"}}"#;
+    let subscribed = session_post(&d, 231, &session, ALICE, subscribe);
+    assert_eq!(subscribed.status, 200, "{}", subscribed.text());
+    assert_eq!(
+        subscribed.json()["result"],
+        json!({}),
+        "the subscription is acknowledged: {}",
+        subscribed.text()
+    );
+    assert!(
+        subscriptions_seen().is_empty(),
+        "nothing was sent for it: {:?}",
+        subscriptions_seen()
+    );
 }
