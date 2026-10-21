@@ -78,8 +78,10 @@ pub mod tools_config;
 /// statement the root reads for this linked plugin as it reads every default-linked plugin's (the
 /// codes its catalog holds, [`diagnostics::DIAGNOSTICS`]; a test holds the two equal) and its
 /// breaker fact (ARCHITECT Q4): one transient failure below the trip threshold never benches a
-/// member, the 1.5.5 MCP client leg's posture.
-pub const DECLARES: &str = include_str!("declares.json");
+/// member, the 1.5.5 MCP client leg's posture. ONE document: the crate's `declares.json`, the file
+/// the release signs into a dropped-in plane's manifest too, so linked and dropped-in state the same
+/// facts (`tests/declares_one_source.rs`).
+pub const DECLARES: &str = include_str!("../declares.json");
 /// THE DOOR CRATE'S CONVENTIONAL PATH, `<crate>::plane_door::door`: what a test-linked `door:` row's
 /// generated table names (the build scripts of the crates that test-link this door). The door
 /// itself is [`tool_door::door`].
