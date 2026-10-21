@@ -277,6 +277,8 @@ fn an_exchange_takes_its_own_answer_and_handles_the_childs_messages() {
         1,
         vec![
             json!({"jsonrpc": "2.0", "id": 424242, "result": {"tools": []}}),
+            json!({"jsonrpc": "2.0", "method": "notifications/progress",
+                "params": {"progressToken": "busbar-7", "progress": 1}}),
             json!({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}),
             json!({"jsonrpc": "2.0", "id": "srv-ping", "method": "ping"}),
         ],
@@ -290,7 +292,11 @@ fn an_exchange_takes_its_own_answer_and_handles_the_childs_messages() {
     let answer: Value = serde_json::from_slice(&done.answer.expect("an answer")).unwrap();
     assert_eq!(answer["id"], json!(id), "its own id, not 424242");
     assert_eq!(answer["result"]["tools"][0]["name"], json!("echo"));
-    assert_eq!(door.noticed, 1);
+    // The progress note is dropped: it is no list-changed notice and nothing answers it.
+    assert_eq!(
+        door.noticed, 1,
+        "only the list-changed notice is brought forward"
+    );
     let received = with(|c| c.received.clone());
     assert_eq!(methods(&received), vec!["tools/list", "<reply>"]);
     assert_eq!(

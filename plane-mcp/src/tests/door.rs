@@ -424,3 +424,18 @@ fn the_task_run_path_is_claimed_and_a_second_claimant_ties() {
         .selector
         .overlaps(&Selector::ExactPath("/mcp/tasks/other")));
 }
+
+/// THE CALL LOG CANNOT BE REWRITTEN: the call kind is the one record chain the door declares, so
+/// the host hash-chains every call record (its prelude length-prefixed, the scope in the digest)
+/// and a record whose middle is replaced breaks the chain. This is what production declares; no
+/// operation table of the plane's own stands in for it.
+#[test]
+fn the_call_log_is_the_one_chain_the_host_keeps() {
+    assert_eq!(RECORD_CHAINS.len(), 1);
+    let chain = RECORD_CHAINS[0];
+    assert_eq!(chain.kind, RECORD_CALL);
+    assert_eq!(chain.framing, CHAIN_LENGTH_PREFIXED);
+    assert_eq!(chain.flags, CHAIN_DIGESTS_SCOPE);
+    let kind = RECORD_KINDS[RECORD_CALL as usize];
+    assert_eq!(text(kind), crate::tool_records::KIND_CALL);
+}
