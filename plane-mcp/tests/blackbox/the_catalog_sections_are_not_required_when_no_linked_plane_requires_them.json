@@ -7,7 +7,7 @@
     ]
   },
   "unless": [
-    "body-ingress"
+    "protocols"
   ],
   "files": {
     "providers.yaml": "",
