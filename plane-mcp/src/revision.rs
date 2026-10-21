@@ -52,10 +52,6 @@ pub const ALL: &[Revision] = &[
     Revision::R2024_11_05,
 ];
 
-/// The revision a session request is read as when it carries no version header and no session
-/// names one: the spec's stated default for a server that cannot otherwise tell.
-pub const HEADERLESS_DEFAULT: &str = "2025-03-26";
-
 impl Revision {
     /// The revision's wire string.
     #[must_use]
@@ -98,6 +94,7 @@ impl Revision {
 
     /// Whether a disconnected server stream may be resumed with `Last-Event-ID`.
     #[must_use]
+    #[cfg(test)]
     pub const fn resumable(self) -> bool {
         matches!(self, Self::R2025_06_18 | Self::R2025_11_25)
     }
@@ -193,6 +190,7 @@ pub enum StepOutcome {
 /// The next rung after `step` observed `outcome`. `None` means stop: either the rung answered, or
 /// there is nothing left to try, or the failure says nothing about the revision.
 #[must_use]
+#[cfg(test)]
 pub fn next_step(step: ClientStep, outcome: StepOutcome) -> Option<ClientStep> {
     match (step, outcome) {
         (_, StepOutcome::Answered | StepOutcome::Unreachable) => None,

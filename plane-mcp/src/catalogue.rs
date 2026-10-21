@@ -89,6 +89,7 @@ impl ResourceEntry {
     /// Its rendered fields, in order: uri, name, description, mime type, text, blob (a blank one
     /// for each it has not).
     #[must_use]
+    #[cfg(test)]
     pub fn rendered(&self) -> [&str; 6] {
         [
             self.uri.as_str(),

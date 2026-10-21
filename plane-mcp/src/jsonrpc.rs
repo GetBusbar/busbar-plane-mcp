@@ -107,6 +107,7 @@ pub struct Envelope {
 impl Envelope {
     /// The method name, with its quotes stripped.
     #[must_use]
+    #[cfg(test)]
     pub fn method_str<'b>(&self, body: &'b [u8]) -> Option<&'b str> {
         let raw = body.get(self.method.start..self.method.end)?;
         let inner = raw.strip_prefix(b"\"")?.strip_suffix(b"\"")?;
@@ -117,6 +118,7 @@ impl Envelope {
     ///
     /// Quotes included on a string identifier, because those bytes are what an answer must echo.
     #[must_use]
+    #[cfg(test)]
     pub fn id_bytes<'b>(&self, body: &'b [u8]) -> Option<&'b [u8]> {
         let (span, _) = self.id?;
         body.get(span.start..span.end)
@@ -124,37 +126,11 @@ impl Envelope {
 
     /// Whether this envelope obliges an answer.
     #[must_use]
+    #[cfg(test)]
     pub fn is_request(&self) -> bool {
         self.id.is_some()
     }
 }
-
-/// Every pointer this plane declares over a REQUEST body, in one table.
-///
-/// The table is what the unit's span view is built from: the plane resolves these once, at the one
-/// step entitled to read the bytes, and the loop reads the spans off the draft rather than scanning
-/// the body again. A pointer named here that the body does not carry is simply absent from the
-/// view, which is how "not sent" stays distinguishable from "sent empty".
-pub const REQUEST_PTRS: &[&str] = &[
-    PTR_VERSION,
-    PTR_METHOD,
-    PTR_ID,
-    PTR_PARAMS,
-    PTR_PARAMS_NAME,
-    PTR_PARAMS_URI,
-    PTR_PARAMS_TASK_ID,
-    PTR_PARAMS_META,
-];
-
-/// Every pointer this plane declares over a RESPONSE body, in one table.
-pub const RESPONSE_PTRS: &[&str] = &[
-    PTR_ID,
-    PTR_RESULT,
-    PTR_RESULT_TYPE,
-    PTR_IS_ERROR,
-    PTR_ERROR,
-    PTR_ERROR_CODE,
-];
 
 /// Where a request's subject is, for the methods whose subject is a name.
 pub const PTR_PARAMS_NAME: &str = "/params/name";
@@ -284,6 +260,7 @@ fn is_number(raw: &[u8]) -> bool {
 ///
 /// # Errors
 /// Returns an encode error when the bytes are not a value.
+#[cfg(test)]
 pub fn id_value(raw: &[u8]) -> Result<serde_json::Value, Encode> {
     serde_json::from_slice(raw).map_err(|_| Encode::Unrepresentable)
 }
@@ -297,6 +274,7 @@ pub fn id_value(raw: &[u8]) -> Result<serde_json::Value, Encode> {
 ///
 /// # Errors
 /// Returns an encode error when the result bytes are not a document.
+#[cfg(test)]
 pub fn success(
     id: Option<&serde_json::Value>,
     result_bytes: &[u8],

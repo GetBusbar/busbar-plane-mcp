@@ -108,6 +108,7 @@ pub const OP_DELETE: &str = "delete";
 pub const OP_REDEEM: &str = "redeem";
 
 /// Every operation any of this plane's schemas declares.
+#[cfg(test)]
 pub const OPERATIONS: &[&str] = &[OP_GET, OP_PUT, OP_SCAN, OP_APPEND, OP_DELETE, OP_REDEEM];
 
 /// Which operations one schema declares.
@@ -115,6 +116,7 @@ pub const OPERATIONS: &[&str] = &[OP_GET, OP_PUT, OP_SCAN, OP_APPEND, OP_DELETE,
 /// A leg naming an operation its schema does not declare is refused by the trust unit, so the answer
 /// has to be a declaration rather than a convention.
 #[must_use]
+#[cfg(test)]
 pub fn operations_for(schema: RecordSchemaId) -> &'static [&'static str] {
     match schema.as_str() {
         // The call log is append-and-read. It is the answer to "what happened", and an answer whose

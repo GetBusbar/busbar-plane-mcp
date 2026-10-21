@@ -38,68 +38,67 @@
 //! that cannot hold a named identifier, the arena that cannot hold a span table, and the
 //! introspection verb that takes no argument.
 
-#![forbid(unsafe_code)]
+#![cfg_attr(not(test), forbid(unsafe_code))]
+#![cfg_attr(test, deny(unsafe_code))]
 #![deny(missing_docs)]
 
 /// The session revisions raised into, and lowered out of, the one dispatch.
-pub mod adapt;
-pub mod answer;
+mod adapt;
+mod answer;
 /// The argument half of the dispatch SSRF guard: a schema-aware walk judging every URL and host a
 /// call's arguments carry.
-pub mod argguard;
-pub mod ask;
-pub mod call;
-pub mod catalogue;
-pub mod checks;
-pub mod client;
-pub mod codec;
-pub mod diagnostics;
-pub mod door;
-pub mod endpoint;
-pub mod framing;
-pub mod identity;
-pub mod jsonrpc;
+mod argguard;
+mod ask;
+mod call;
+mod catalogue;
+mod checks;
+mod client;
+mod codec;
+mod diagnostics;
+mod door;
+mod endpoint;
+mod framing;
+mod identity;
+mod jsonrpc;
 /// The line carrier's meanings: one JSON-RPC message per line, each its own unit.
-pub mod line;
-pub mod tool_arrival;
-pub mod tool_claims;
-pub mod tool_door;
-pub mod tool_facts;
-pub mod tool_meta;
-pub mod tool_ops;
+mod line;
+mod tool_arrival;
+mod tool_claims;
+mod tool_door;
+mod tool_facts;
+mod tool_meta;
+mod tool_ops;
 /// The `transport: stdio` servers: one long-lived child per server, its messages correlated by id.
-pub mod tool_program;
-pub mod tool_scope;
+mod tool_program;
+mod tool_scope;
 /// SEP-2663, the tasks extension: a task's state, shapes, sweep and durable rows.
-pub mod tool_tasks;
-pub mod tools_config;
+mod tool_tasks;
+mod tools_config;
 
-/// THE PLANE'S DECLARED METADATA (`declares.json`): its manifest `declares` section, the static
-/// statement the root reads for this linked plugin as it reads every default-linked plugin's (the
-/// codes its catalog holds, [`diagnostics::DIAGNOSTICS`]; a test holds the two equal) and its
-/// breaker fact (ARCHITECT Q4): one transient failure below the trip threshold never benches a
-/// member, the 1.5.5 MCP client leg's posture.
-pub const DECLARES: &str = include_str!("declares.json");
-/// THE DOOR CRATE'S CONVENTIONAL PATH, `<crate>::plane_door::door`: what a test-linked `door:` row's
-/// generated table names (the build scripts of the crates that test-link this door). The door
-/// itself is [`tool_door::door`].
-pub mod plane_door {
-    pub use crate::tool_door::door;
-}
-pub mod reads;
-pub mod record;
+/// THE DOOR: this plugin's one public item (BUSBAR-1.6.0.md l.3567, Crate shape).
+pub use tool_door::door;
+
+/// THE PLANE'S DECLARED METADATA (`declares.json`), as the tests read it: the one document the
+/// door's Statement carries under `EXT_DECLARES` ([`tool_door`]'s `EXTENSIONS`) and the release signs
+/// into a dropped-in plane's manifest. The codes its catalog holds are [`diagnostics::DIAGNOSTICS`]
+/// (a test holds the two equal).
+#[cfg(test)]
+const DECLARES: &str = include_str!("../declares.json");
+
+mod reads;
+mod record;
 /// The dated revisions of the one MCP dialect, and their negotiation.
-pub mod revision;
-pub mod sanitize;
+mod revision;
+mod sanitize;
 /// The sealed `requestState`: busbar's own ask state, signed by the host.
-pub mod seal;
+mod seal;
 /// `subscriptions/listen`, as a state machine any carrier drives.
-pub mod subscribe;
-pub mod tool_records;
+mod subscribe;
+mod tool_records;
 /// Bounded, owner-bound session state for the session revisions.
-pub mod tool_sessions;
+mod tool_sessions;
 /// The trust surface: approvals, sightings, the derived state and the admin views.
-pub mod trust;
+mod trust;
 
 /// THE REGISTRY KEY MCP IS KNOWN BY, in the protocol registry and in the plane registry alike.
 ///
@@ -108,7 +107,7 @@ pub mod trust;
 /// lives on the PLANE side because a plane is the thing being named — a key spelled engine-side
 /// would be a key the plane could only copy, which is how two answers to "what is this plane
 /// called" start to differ.
-pub const PLANE_KEY: &str = "mcp";
+const PLANE_KEY: &str = "mcp";
 
 use busbar_contract::plugin::{AbiVersion, Kind, Plugin};
 
@@ -118,11 +117,11 @@ use busbar_contract::plugin::{AbiVersion, Kind, Plugin};
 /// (`Plugin`) hang on, and the served door reads those. There is no cell here, no lock and no
 /// atomic: the purity test asserts that by walking the source, not by trusting this sentence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct McpPlane;
+pub(crate) struct McpPlane;
 
 impl McpPlane {
     /// The plane. Nothing varies per instance, so there is one value of it.
-    pub const EMPTY: Self = Self;
+    pub(crate) const EMPTY: Self = Self;
 }
 
 impl Default for McpPlane {
@@ -144,3 +143,6 @@ impl Plugin for McpPlane {
         AbiVersion(1)
     }
 }
+
+#[cfg(test)]
+mod tests;

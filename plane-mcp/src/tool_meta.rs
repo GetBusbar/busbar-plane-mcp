@@ -128,6 +128,7 @@ const CONFIG_SCHEMA: &str = r#"{
 /// The command-line flag that serves this plane on the process's own stdin/stdout instead of a
 /// listener. Operator-facing and frozen (1.6.0 CHANGELOG, `busbar --help`); the plane owns the
 /// spelling (#47/#49) and the composition root reads it from here.
+#[cfg(test)]
 pub const STDIO_SERVE_FLAG: &str = "--mcp-stdio";
 
 /// This plane's lines in the `Flags:` block of `busbar --help`, byte for byte as the binary has

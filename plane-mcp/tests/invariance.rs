@@ -54,6 +54,29 @@ fn walk(dir: &Path, f: &mut impl FnMut(&Path, &str)) {
     }
 }
 
+/// Walk every source file on the SURFACE, the code a shipped build compiles: every one under `dir`
+/// less the test-module directories (`src/tests/`, and each module's own `tests/`). A test module is
+/// compiled only when the tests are and the kernel never sees it; the suites that moved in from
+/// `tests/` when the crate's only public item became `door` drive the door over its C ABI
+/// (`unsafe`), hold host doubles (`Mutex`, atomics) and read files, as they did out there.
+fn walk_surface(dir: &Path, f: &mut impl FnMut(&Path, &str)) {
+    for entry in std::fs::read_dir(dir)
+        .expect("the source directory is readable")
+        .flatten()
+    {
+        let path = entry.path();
+        if path.is_dir() {
+            if path.file_name().is_some_and(|n| n == "tests") {
+                continue;
+            }
+            walk_surface(&path, f);
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            let text = std::fs::read_to_string(&path).expect("a source file is readable");
+            f(&path, &text);
+        }
+    }
+}
+
 /// The manifest declares no features at all.
 #[test]
 fn the_crate_declares_no_features() {
@@ -75,7 +98,7 @@ fn the_crate_declares_no_features() {
 #[test]
 fn no_item_is_conditionally_compiled() {
     let mut offenders = Vec::new();
-    walk(&src_dir(), &mut |path, text| {
+    walk_surface(&src_dir(), &mut |path, text| {
         for (n, line) in text.lines().enumerate() {
             let line = line.trim_start();
             if line.starts_with("#[cfg(test)]") {
@@ -92,11 +115,15 @@ fn no_item_is_conditionally_compiled() {
     );
 }
 
-/// The crate carries the two lint gates the design requires of a plugin.
+/// The crate carries the two lint gates the design requires of a plugin. A shipped build forbids
+/// `unsafe`; the test build denies it, so the crate's one allocation counter
+/// (`src/tests/alloc_counter.rs`) may allow it for that module alone (ARCHITECT ruling 2026-10-21,
+/// allocation-counting gates).
 #[test]
 fn the_crate_forbids_unsafe_and_undocumented_items() {
     let lib = std::fs::read_to_string(src_dir().join("lib.rs")).expect("the root is readable");
-    assert!(lib.contains("#![forbid(unsafe_code)]"));
+    assert!(lib.contains("#![cfg_attr(not(test), forbid(unsafe_code))]"));
+    assert!(lib.contains("#![cfg_attr(test, deny(unsafe_code))]"));
     assert!(lib.contains("#![deny(missing_docs)]"));
 }
 
@@ -104,7 +131,7 @@ fn the_crate_forbids_unsafe_and_undocumented_items() {
 #[test]
 fn the_source_contains_no_unsafe_block() {
     let mut offenders = Vec::new();
-    walk(&src_dir(), &mut |path, text| {
+    walk_surface(&src_dir(), &mut |path, text| {
         for (n, line) in text.lines().enumerate() {
             let t = line.trim_start();
             if t.starts_with("//") {

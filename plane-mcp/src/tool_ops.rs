@@ -265,6 +265,7 @@ pub fn method_row_for(method: &str) -> Option<&'static RpcMethodRow> {
 
 /// Whether a name is a notification this plane recognises.
 #[must_use]
+#[cfg(test)]
 pub fn is_known_notification(method: &str) -> bool {
     NOTIFICATIONS.contains(&method)
 }

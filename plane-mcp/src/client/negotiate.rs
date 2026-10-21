@@ -451,14 +451,6 @@ impl Negotiator {
             _ => Action::AwaitEvent,
         }
     }
-
-    /// Whether a notification's call is complete: a notification POSTed on the stream is finished
-    /// by its POST's status, which [`Self::on_answer`] reports as [`Action::AwaitEvent`]; the driver
-    /// asks this instead of waiting for an answer that never comes.
-    #[must_use]
-    pub fn expects_no_answer(&self) -> bool {
-        self.phase == Phase::StreamCallPosted && self.original_id.is_none()
-    }
 }
 
 #[cfg(test)]

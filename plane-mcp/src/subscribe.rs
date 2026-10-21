@@ -358,13 +358,6 @@ impl Listen {
             Phase::Ended => Step::Closed,
         }
     }
-
-    /// When the stream next has something to say with nothing changing: its keepalive or its bound.
-    #[must_use]
-    pub fn next_due_ns(&self) -> u64 {
-        (self.last_write_ns.saturating_add(KEEPALIVE_NS))
-            .min(self.opened_ns.saturating_add(MAX_LIFETIME_NS))
-    }
 }
 
 /// A change key over one grant-scoped catalogue slice: FNV-1a, trusted for nothing (a collision

@@ -16,6 +16,7 @@ use std::os::raw::c_void;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
+use crate::{door, tool_door};
 use busbar_contract::abi::host::conn::connector::{
     ConnectorSlots, EstablishIn, ReplyIn, ReplyPiece, RequestIn, RequestPiece, StreamIn,
     REPLY_BODY, REPLY_END, REPLY_HEAD, REQUEST_BODY, REQUEST_HEAD, SERVICES as CONN_SERVICES,
@@ -38,7 +39,6 @@ use busbar_contract::abi::plane::{
     PIECE_LAST, RECORD_AUDIT,
 };
 use busbar_contract::abi::transport::FrameSpan;
-use busbar_plane_mcp::{door, tool_door};
 use serde_json::{json, Value};
 
 // ── the host's services ─────────────────────────────────────────────────────────────────────────
@@ -1523,12 +1523,9 @@ fn last_data(bytes: &[u8]) -> String {
 fn the_stream_carries_the_answers_own_bytes() {
     let body = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": {"name": "fs_read", "_meta": {"progressToken": "p"}}});
-    let framing = busbar_plane_mcp::framing::Framing::of(
-        Some(busbar_plane_mcp::framing::EVENT_STREAM),
-        "tools/call",
-        &body,
-    )
-    .expect("framed");
+    let framing =
+        crate::framing::Framing::of(Some(crate::framing::EVENT_STREAM), "tools/call", &body)
+            .expect("framed");
     let answer = b"{\"jsonrpc\":\"2.0\",\"id\":1,\n  \"result\":{\"zeta\":123456789012345678901234567890,\n  \"alpha\":1.0e0,\"content\":[]}}".to_vec();
     let (bytes, framed) = framing.frame(200, answer.clone(), &[]);
     assert!(framed);

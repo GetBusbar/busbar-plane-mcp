@@ -262,15 +262,6 @@ impl UpstreamVerb {
         )
     }
 
-    /// The `params` object as the ARGUMENT GUARD sees it, before `_meta` is added.
-    ///
-    /// Exposed for exactly one caller, the engine's `mcp::client::issue::issue`, which walks it for URL and host
-    /// fields. `_meta` is deliberately absent: it is BUSBAR's block, not the caller's, so judging it
-    /// would be judging busbar's own protocol declaration as though a caller had chosen it.
-    pub fn params_for_guard(&self) -> serde_json::Value {
-        self.params()
-    }
-
     /// The `params` object, WITHOUT `_meta` — which [`Self::build`] adds, once, for every verb.
     ///
     /// Split that way so no variant can forget the revision's required `_meta`: a per-variant
