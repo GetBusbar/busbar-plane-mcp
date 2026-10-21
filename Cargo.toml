@@ -81,6 +81,7 @@ oauth-as = { version = "1.0.0", features = ["http", "jwt", "consent", "resource-
 opentelemetry-proto = { version = "0.32", default-features = false, features = ["gen-tonic-messages", "trace"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 prost = { version = "0.14", default-features = false, features = ["std"] }
+psl = "2.1"
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 ring = "0.17"
