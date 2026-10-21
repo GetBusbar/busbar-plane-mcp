@@ -142,7 +142,39 @@ fn the_views_render_the_served_engines_fields_in_its_order() {
         json!({ "name": "fs", "state": "approved", "serving": true, "contacted": false,
                 "failure": null, "observed_tools": 0 })
     );
-    assert_ne!(catalogue_hash(&Observation::default()), "");
+}
+
+/// THE CATALOGUE HASH the kernel's trust book records is the SHA-256 of the observed set, one
+/// `name NUL digest LF` line per capability in name order: pinned to the bytes, so a change of
+/// framing or order is a different hash.
+#[test]
+fn the_catalogue_hash_is_the_sha256_of_the_name_ordered_lines() {
+    assert_eq!(
+        catalogue_hash(&Observation::default()),
+        "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "nothing observed hashes the empty input"
+    );
+    let observed = |pairs: &[(&str, &str)]| Observation {
+        capabilities: pairs
+            .iter()
+            .map(|(n, d)| ((*n).to_string(), (*d).to_string()))
+            .collect(),
+    };
+    // sha256(b"read\0sha256:aa\nwrite\0sha256:bb\n"), whichever order the tools were seen in.
+    let both = "sha256:565ff8ab7ea738e662ae1bcc2a51a3cdab3a59a386ef2bb3b3727c15e63470fd";
+    assert_eq!(
+        catalogue_hash(&observed(&[("read", "sha256:aa"), ("write", "sha256:bb")])),
+        both
+    );
+    assert_eq!(
+        catalogue_hash(&observed(&[("write", "sha256:bb"), ("read", "sha256:aa")])),
+        both
+    );
+    assert_ne!(
+        catalogue_hash(&observed(&[("read", "sha256:aa"), ("write", "sha256:bc")])),
+        both,
+        "one capability's digest moved is another catalogue"
+    );
 }
 
 /// THE VIEWS READ THE VERDICT THE KERNEL ENFORCES. After a restart the kernel replays a durable

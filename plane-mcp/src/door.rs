@@ -27,8 +27,8 @@ use busbar_contract::abi::mechanism::door::{KindTailHead, Section, SECTION_DECLA
 use busbar_contract::abi::plane::{
     AdminRoute, BillableClass, OpClass, PinMechanism, PlaneTail, RecordChain, RecordRetention,
     TrustKey, ANSWER_LAYOUT, CHAIN_DIGESTS_SCOPE, CHAIN_LENGTH_PREFIXED, INGRESS_REQUEST_RESPONSE,
-    INGRESS_RESPONSE_STREAM, MECHANISM_ROOT, SHAPE_PIECEWISE, TRUST_PIN, TRUST_PRIVATE_REACH,
-    TRUST_REVERIFY_TTL,
+    INGRESS_RESPONSE_STREAM, MECHANISM_PEER_KEY, MECHANISM_ROOT, SHAPE_PIECEWISE, TRUST_PIN,
+    TRUST_PRIVATE_REACH, TRUST_REVERIFY_TTL,
 };
 use busbar_contract::abi::sdk::door::abi_str;
 use busbar_contract::abi::sdk::publish::{
@@ -94,13 +94,23 @@ pub const SECTIONS: &[Section] = &[
     },
 ];
 
+/// WHERE EACH REGISTERED SERVER'S CLIENT IDENTITY IS WRITTEN, as a member path (`settings.*.<key>`,
+/// the http need's `trust_from`): a registration's `client_identity` (`{cert, key}`, secret
+/// references), busbar's client certificate for that server, which the host resolves once and the
+/// connector presents on every connection to it. The registration's `pin` key, under every root
+/// mechanism, is the far end's key the connector holds each of those connections to.
+pub const CLIENT_IDENTITY_FROM: &str = "settings.*.client_identity";
+
 /// THE SECRET REFERENCES ITS SECTION HOLDS, by settings path (`*` = every registration, every
-/// entry): a server's RFC 8693 subject token (busbar's own) and a stdio child's environment values
+/// entry): a server's RFC 8693 subject token (busbar's own), a stdio child's environment values
 /// that are references (a pipe has no header block, so `env:` is the one channel a child gets a
-/// credential through). The kernel enumerates them so `--validate` and boot resolve each one.
+/// credential through), and busbar's client certificate and key for a mutual handshake
+/// ([`CLIENT_IDENTITY_FROM`]). The kernel enumerates them so `--validate` and boot resolve each one.
 pub const SECRET_REFS: &[AbiStr] = &[
     abi_str("settings.*.token_exchange.subject_token"),
     abi_str("settings.*.env.*"),
+    abi_str("settings.*.client_identity.cert"),
+    abi_str("settings.*.client_identity.key"),
 ];
 
 /// The far end's response fields the plane reads: the answer's media type (a JSON document or an
@@ -134,9 +144,11 @@ const NO_DETAILS: Blob = Blob {
 
 /// THE PLANE'S CONNECTION NEEDS: outbound over http to the servers the operator registered at a URL,
 /// governed as upstreams a plane reaches (no auth style is named here: each member's credential is
-/// the binding the kernel seals for it, and it adds the fields when it sends); and the `transport:
-/// stdio` servers, each the program its registration names, run by the host as the operator's own
-/// infrastructure with no credential (a pipe carries none), one long-lived child per server.
+/// the binding the kernel seals for it, and it adds the fields when it sends), each held to its
+/// registration's anchors: its pin's key and its client identity ([`CLIENT_IDENTITY_FROM`]); and
+/// the `transport: stdio` servers, each the program its registration names, run by the host as the
+/// operator's own infrastructure with no credential (a pipe carries none), one long-lived child
+/// per server.
 pub const NEEDS: &[Need] = &[
     Need {
         direction: DIRECTION_OUTBOUND,
@@ -145,7 +157,8 @@ pub const NEEDS: &[Need] = &[
         auth: NONE,
         // Each registered server is reached at its own `url` (ARCHITECT Q-L3B-ROUTES).
         target_from: abi_str(MEMBER_TARGET),
-        trust_from: NONE,
+        // busbar's client identity for it, which the connector presents when the server asks.
+        trust_from: abi_str(CLIENT_IDENTITY_FROM),
         details: NO_DETAILS,
         keep_response_headers: KEEP_RESPONSE_HEADERS.as_ptr(),
         keep_response_headers_len: KEEP_RESPONSE_HEADERS.len(),
@@ -239,21 +252,23 @@ const RECORD_CHAINS: &[RecordChain] = &[RecordChain {
     _reserved: 0,
 }];
 
-/// The pin's four mechanisms; three are authenticity roots and `unpinned` is not.
+/// The pin's four mechanisms; three are authenticity roots and `unpinned` is not. Each root's key
+/// is the far end's key ([`MECHANISM_PEER_KEY`]): the host seals it into the registration's member
+/// route and the connector refuses a connection whose server presents another key.
 const PIN_MECHANISMS: &[PinMechanism] = &[
     PinMechanism {
         token: abi_str("pinned_pubkey"),
-        flags: MECHANISM_ROOT,
+        flags: MECHANISM_ROOT | MECHANISM_PEER_KEY,
         _reserved: 0,
     },
     PinMechanism {
         token: abi_str("cert_spki"),
-        flags: MECHANISM_ROOT,
+        flags: MECHANISM_ROOT | MECHANISM_PEER_KEY,
         _reserved: 0,
     },
     PinMechanism {
         token: abi_str("mtls"),
-        flags: MECHANISM_ROOT,
+        flags: MECHANISM_ROOT | MECHANISM_PEER_KEY,
         _reserved: 0,
     },
     PinMechanism {
