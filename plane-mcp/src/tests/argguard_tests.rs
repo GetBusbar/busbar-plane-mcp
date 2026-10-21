@@ -763,7 +763,8 @@ fn a_transition_address_embedding_a_private_v4_is_refused() {
 /// leading C0 controls and every tab/newline, reads the scheme case-blind, needs no `//` after a web
 /// scheme and reads `\` as `/`. Each spelling below is the metadata endpoint to such a stack, so
 /// each is judged on that host, in an undeclared field and in a declared `uri-reference` or
-/// `hostname` one; prose that only mentions `http:` is still not sniffed.
+/// `hostname` one; a value opening `http:` that no reader accepts is refused, and prose that
+/// mentions `http:` mid-sentence is still not sniffed.
 #[test]
 fn a_url_is_read_as_a_whatwg_parser_reads_it() {
     let hostile = [
@@ -806,10 +807,19 @@ fn a_url_is_read_as_a_whatwg_parser_reads_it() {
             .unwrap_or_else(|e| panic!("`{value:?}` names a public host: {e}"));
         assert_eq!(scan.undeclared_judged, 1, "`{value:?}` was judged");
     }
-    // And prose that merely mentions the scheme is not a URL to any parser: not sniffed.
-    let scan = guard(
+    // A value that opens with a special scheme and `:` but names no host a reader accepts is
+    // refused rather than read as naming none (fail closed), even when it reads as prose.
+    let refused = guard(
         &undeclared,
         &json!({ "target": "http: the protocol, see below" }),
+        public(),
+    )
+    .expect_err("a special scheme no reader accepts is refused");
+    assert!(matches!(refused.why, ArgWhy::NoHost(_)), "{refused:?}");
+    // Prose that mentions the scheme mid-sentence opens with no scheme: not sniffed.
+    let scan = guard(
+        &undeclared,
+        &json!({ "target": "the http: protocol, see below" }),
         public(),
     )
     .expect("prose passes");

@@ -41,9 +41,11 @@
 //!    nothing while reporting green, so every string in the arguments is ALSO judged when the whole
 //!    value (after trimming) begins `http://` or `https://`, and when a WHATWG URL reader (the
 //!    `fetch` most MCP servers use) reads the whole value as a URL naming a host, however it is
-//!    spelled: `http:/h`, `https:\\h`, a scheme split by a tab or led by a control character all
-//!    name `h` to the upstream, so `h` is judged. A value that begins with a web scheme and a slash
-//!    but names no host a reader accepts is refused rather than passed. Nothing narrower is
+//!    spelled: `http:/h`, `https:\\h`, `ftp:h`, `file:\\h\x`, a scheme split by a tab or led by a
+//!    control character all name `h` to the upstream, so `h` is judged; all six WHATWG special
+//!    schemes (`http`, `https`, `ws`, `wss`, `ftp`, `file`) are read so. A value that opens with a
+//!    special scheme and `:`, or with any `scheme://`, but names no host a reader accepts is refused
+//!    rather than passed. Nothing narrower is
 //!    sniffed — a bare `localhost` in an untyped `query` field stays untouched, because refusing a
 //!    hostname-shaped word in free text breaks real tools and buys nothing an attacker cannot
 //!    restate.
@@ -361,36 +363,97 @@ fn judge_string(
     Ok(())
 }
 
+/// THE WHATWG SPECIAL SCHEMES: the six a WHATWG URL reader reads by the web rules (a backslash is a
+/// slash, any run of slashes after the scheme is skipped, the authority ends at `/`, `\`, `?` or
+/// `#`). `file` keeps its own host rule ([`file_host`]).
+const SPECIAL_SCHEMES: [&str; 6] = ["http", "https", "ws", "wss", "ftp", "file"];
+
 /// THE HOST A WHATWG URL READER FINDS IN `value`, read as a fetching client reads it, by the
 /// contract's one URL reader (`busbar_contract::net::parse_url`, the reader the host's own
 /// destination guard reads with): leading and trailing C0 controls and spaces stripped, every tab
-/// and newline removed, a backslash read as a slash under a web scheme and any run of slashes after
-/// it skipped, the authority ended at `/`, `?`, `#` or `\`, the host percent-decoded.
-/// A host outside ASCII is the reader's own: it maps it through UTS-46 to the punycode name a
-/// fetching client dials, as 1.5.5 dialled it, so the judge is asked about that name.
-/// `Some(Some(host))`: the value is a URL naming `host`, lower-cased. `Some(None)`: it begins with
-/// a web scheme and a slash but names no host the reader accepts. `None`: it names no host.
+/// and newline removed, a backslash read as a slash under a special scheme and any run of slashes
+/// after it skipped, the authority ended at `/`, `?`, `#` or `\`, the host percent-decoded.
+/// All six WHATWG special schemes are read so: the contract reads `http`, `https`, `ws` and `wss`
+/// itself, `ftp` is read as `http` is, and `file` by [`file_host`].
+/// `Some(Some(host))`: the value is a URL naming `host`, lower-cased. `Some(None)`: a URL no reader
+/// accepts, refused rather than passed: it opens with a special scheme and `:`, or with any
+/// `scheme://`, and no host could be read from it. `None`: it names no host.
 fn whatwg_host(value: &str) -> Option<Option<String>> {
-    match busbar_contract::net::parse_url(value) {
-        Ok(parts) => Some(Some(parts.host.to_ascii_lowercase())),
-        Err(_) => names_web_scheme(value).then_some(None),
+    let cleaned = whatwg_cleaned(value);
+    let special = special_scheme(&cleaned);
+    let read = match special {
+        Some((scheme, after)) if scheme.eq_ignore_ascii_case("file") => match file_host(after) {
+            FileHost::Path => return None,
+            FileHost::Named(host) => Some(host),
+            FileHost::Unread => None,
+        },
+        Some((scheme, after)) if scheme.eq_ignore_ascii_case("ftp") => {
+            busbar_contract::net::parse_url(&format!("http:{after}"))
+                .ok()
+                .map(|p| p.host)
+        }
+        _ => busbar_contract::net::parse_url(value).ok().map(|p| p.host),
+    };
+    match read {
+        Some(host) => Some(Some(host.to_ascii_lowercase())),
+        None => (special.is_some() || opens_with_authority(&cleaned)).then_some(None),
     }
 }
 
-/// Whether `value`, after the WHATWG removals, begins `http:` or `https:` followed by a slash or a
-/// backslash: a web URL by its spelling, whether or not a reader accepts the rest.
-fn names_web_scheme(value: &str) -> bool {
-    let cleaned: String = value
-        .trim_matches(|c: char| c <= ' ')
-        .chars()
-        .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
-        .collect();
-    let lower = cleaned.to_ascii_lowercase();
-    ["http:", "https:"].iter().any(|scheme| {
-        lower
-            .strip_prefix(scheme)
-            .is_some_and(|rest| rest.starts_with(['/', '\\']))
+/// The scheme of `cleaned` and what follows its `:`, when the scheme is a WHATWG special one (in any
+/// case).
+fn special_scheme(cleaned: &str) -> Option<(&str, &str)> {
+    let (scheme, after) = cleaned.split_once(':')?;
+    SPECIAL_SCHEMES
+        .iter()
+        .any(|s| scheme.eq_ignore_ascii_case(s))
+        .then_some((scheme, after))
+}
+
+/// Whether `cleaned` opens with an RFC 3986 scheme and `://`: a URL with an authority by its
+/// spelling, whether or not a reader accepts the rest. Prose that only carries a URL mid-sentence
+/// does not open so (see the module header on mid-string URLs).
+fn opens_with_authority(cleaned: &str) -> bool {
+    cleaned.split_once("://").is_some_and(|(scheme, _)| {
+        scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+            && scheme
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
     })
+}
+
+/// What a WHATWG reader finds after `file:`.
+enum FileHost {
+    /// No host: the value is a path (`file:/etc/x`, `file:///etc/x`).
+    Path,
+    /// The host the reader dials.
+    Named(String),
+    /// A host is spelled but no reader accepts it.
+    Unread,
+}
+
+/// THE HOST OF A `file` URL, by the WHATWG file rule: a host follows only two slashes (either of
+/// `/` and `\`), and runs to the next `/`, `\`, `?` or `#`; an empty one names no host. The host
+/// is read by the contract's reader under a web scheme, so it is normalised as every other host is.
+fn file_host(after: &str) -> FileHost {
+    let mut chars = after.chars();
+    let two_slashes = matches!(
+        (chars.next(), chars.next()),
+        (Some('/' | '\\'), Some('/' | '\\'))
+    );
+    if !two_slashes {
+        return FileHost::Path;
+    }
+    let rest = chars.as_str();
+    let end = rest.find(['/', '\\', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..end];
+    if authority.is_empty() {
+        return FileHost::Path;
+    }
+    match busbar_contract::net::parse_url(&format!("http://{authority}/")) {
+        Ok(parts) => FileHost::Named(parts.host),
+        Err(_) => FileHost::Unread,
+    }
 }
 
 /// THE HOST A `uri-reference` NAMES, under the WHATWG reading: an absolute one's own, or a relative
