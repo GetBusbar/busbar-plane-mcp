@@ -18,6 +18,13 @@
 //! is kept in the host's records whole or refused in words (P-M6); a caller cannot drive its own
 //! task's continuation on the task-run claim (P-M9); and a create settles every page of its
 //! caller's left-behind tasks (C-L10).
+//!
+//! This suite drives the door over its C ABI with a host it stands up itself, so it needs
+//! `unsafe`, and it reaches the crate through `door` alone (the crate's only public item). The
+//! route table it claims against is spelled below and pinned to the crate's own in
+//! `src/tests/door_facts_tests.rs`.
+//! Its two pure checks of a task's own answers (C-H1) read crate functions and moved to
+//! `src/tests/door_facts_tests.rs`.
 
 #![allow(unsafe_code)]
 
@@ -26,8 +33,6 @@ use std::os::raw::c_void;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use crate::tool_tasks::{index_key, TaskLease, WorkRow};
-use crate::{codec, door, tool_claims, tool_door, tool_tasks};
 use busbar_contract::abi::host::conn::connector::{
     ConnectorSlots, EstablishIn, ReplyIn, ReplyPiece, RequestIn, RequestPiece, StreamIn,
     REPLY_BODY, REPLY_END, REPLY_HEAD, REQUEST_BODY, REQUEST_HEAD, SERVICES as CONN_SERVICES,
@@ -49,6 +54,7 @@ use busbar_contract::abi::plane::{
     PIECE_HAS_STATUS, PIECE_LAST, RECORD_PUT,
 };
 use busbar_contract::abi::transport::FrameSpan;
+use busbar_plane_mcp::door;
 use serde_json::{json, Value};
 
 // ── the host's services ─────────────────────────────────────────────────────────────────────────
@@ -62,7 +68,13 @@ fn answer(out: *mut ServiceOut, outcome: Outcome, value: u64, len: u64, items: u
             value,
             len,
             items,
-            ..ServiceOut::ZERO
+            _reserved: [0; 3],
+            needed_bytes: 0,
+            needed_items: 0,
+            error: AbiStr {
+                ptr: std::ptr::null(),
+                len: 0,
+            },
         });
     }
     RawOutcome::of(outcome)
@@ -356,7 +368,14 @@ extern "C" fn records_list(_: HostCtx, input: *const c_void, out: *mut ServiceOu
                 outcome: RawOutcome::of(Outcome::Failed),
                 needed_bytes: bytes as u64,
                 needed_items: rows.len() as u64,
-                ..ServiceOut::ZERO
+                _reserved: [0; 3],
+                value: 0,
+                len: 0,
+                items: 0,
+                error: AbiStr {
+                    ptr: std::ptr::null(),
+                    len: 0,
+                },
             });
         }
         return RawOutcome::of(Outcome::Failed);
@@ -727,7 +746,7 @@ fn out_head<T>() -> OutHead {
 
 fn ops() -> &'static Ops {
     // SAFETY: the door is a `'static` table whose ops are the plane kind's.
-    unsafe { &*(*tool_door::door()).ops.cast::<Ops>() }
+    unsafe { &*(*door()).ops.cast::<Ops>() }
 }
 
 fn lifecycle() -> &'static OpsHead {
@@ -777,11 +796,93 @@ struct Arrived {
     outcome: Outcome,
 }
 
+/// THE DOOR'S ROUTE TABLE, `(verb, target, carrier)` in claim order: the claim an arrival carries is
+/// its row's index. Spelled here because this test reaches the door and nothing else; the logic
+/// crate pins it to its own table (`src/tests/door_facts_tests.rs`).
+const ROUTES: &[(&str, &str, &str)] = &[
+    ("GET", "/.well-known/oauth-protected-resource/mcp", "http"),
+    ("POST", "/mcp", "http"),
+    ("GET", "/mcp", "http"),
+    ("DELETE", "/mcp", "http"),
+    ("POST", "/mcp", "sse"),
+    ("POST", "/mcp/tasks/run", "http"),
+    ("POST", "/mcp", "stdio"),
+];
+
+/// The task-run claim: the row of [`ROUTES`] on `/mcp/tasks/run`.
+const TASK_RUN_ROUTE: usize = 5;
+/// Its target.
+const TASK_RUN_MOUNT: &str = "/mcp/tasks/run";
+/// The record kind a task's row is written under (the index of `task` in the door's record kinds).
+const RECORD_TASK: u32 = 3;
+
+/// The header fields a client mirrors from a JSON-RPC body (the plane's `codec::mirrored`, pinned to
+/// it in `src/tests/door_facts_tests.rs`): `accept`, the method, the name it names, the revision.
+fn mirrored(value: &Value) -> Vec<(String, String)> {
+    fn sentinel(name: &str) -> String {
+        use base64::Engine as _;
+        if name
+            .bytes()
+            .all(|b| b.is_ascii_graphic() && b != b'=' && b != b'?')
+        {
+            return name.to_string();
+        }
+        format!(
+            "=?base64?{}?=",
+            base64::engine::general_purpose::STANDARD.encode(name)
+        )
+    }
+    let mut out = Vec::new();
+    let meta = value.get("params").and_then(|p| p.get("_meta"));
+    let wants_stream = meta.is_some_and(|m| {
+        m.get("io.busbar/loggingLevel").is_some()
+            || m.get("progressToken").is_some_and(|t| !t.is_null())
+    });
+    out.push((
+        "accept".to_string(),
+        if wants_stream {
+            "text/event-stream, application/json"
+        } else {
+            "application/json, text/event-stream"
+        }
+        .to_string(),
+    ));
+    if let Some(method) = value.get("method").and_then(Value::as_str) {
+        out.push(("mcp-method".to_string(), sentinel(method)));
+        let source = match method {
+            "tools/call" | "prompts/get" => Some("name"),
+            "resources/read" => Some("uri"),
+            "tasks/get" | "tasks/update" | "tasks/cancel" => Some("taskId"),
+            _ => None,
+        };
+        if let Some(name) = source
+            .and_then(|s| value.get("params").and_then(|p| p.get(s)))
+            .and_then(Value::as_str)
+        {
+            out.push(("mcp-name".to_string(), sentinel(name)));
+        }
+    }
+    if let Some(version) = meta
+        .and_then(|m| m.get("io.modelcontextprotocol/protocolVersion"))
+        .and_then(Value::as_str)
+        .filter(|v| !v.is_empty())
+    {
+        out.push(("mcp-protocol-version".to_string(), version.to_string()));
+    }
+    out
+}
+
+/// The key of task `id`'s index row under `principal` (the plane's `tool_tasks::index_key`).
+fn index_key(principal: &str, id: &str) -> Vec<u8> {
+    let owner = busbar_contract::redacted::sha256_hex(principal.as_bytes());
+    format!("o/{}/{id}", &owner[..32]).into_bytes()
+}
+
 /// The index of the claim `verb` `target` on the HTTP carrier.
 fn claim(verb: &str, target: &str) -> u32 {
-    let i = door::ROUTES
+    let i = ROUTES
         .iter()
-        .position(|r| r.verb == verb && r.target == target && r.carrier == "http")
+        .position(|&(v, t, c)| v == verb && t == target && c == "http")
         .expect("the door routes it");
     u32::try_from(i).unwrap()
 }
@@ -866,7 +967,7 @@ impl Answered {
 impl Door {
     fn arrive_on(&self, unit: u64, claim: u32, target: &str, body: &[u8]) -> Arrived {
         let value: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
-        let mirrored = codec::mirrored(&value);
+        let mirrored = mirrored(&value);
         let fields: Vec<Field> = mirrored
             .iter()
             .map(|(n, v)| Field {
@@ -907,8 +1008,8 @@ impl Door {
     fn arrive_run(&self, unit: u64, body: &[u8]) -> Arrived {
         self.arrive_on(
             unit,
-            u32::try_from(door::TASK_RUN_ROUTE).unwrap(),
-            tool_claims::TASK_RUN_MOUNT,
+            u32::try_from(TASK_RUN_ROUTE).unwrap(),
+            TASK_RUN_MOUNT,
             body,
         )
     }
@@ -980,7 +1081,7 @@ impl Door {
             );
             let writes: Vec<(Vec<u8>, Vec<u8>)> = records[..o.records_written as usize]
                 .iter()
-                .filter(|r| r.op == RECORD_PUT && r.kind == door::RECORD_TASK)
+                .filter(|r| r.op == RECORD_PUT && r.kind == RECORD_TASK)
                 .map(|r| (bytes_at(r.key), bytes_at(r.value)))
                 .collect();
             with_book(|b| {
@@ -1323,19 +1424,13 @@ fn a_create_settles_every_page_of_its_callers_left_behind_tasks() {
         (0..70u64)
             .map(|n| {
                 let reference = format!("{:032x}", 0x1eff_0000_u64 + n);
-                let row = WorkRow {
-                    status: tool_tasks::Status::Working,
-                    created_ms: 1,
-                    updated_ms: 1,
-                    digest: "d".to_string(),
-                };
-                let lease = TaskLease {
-                    until_ms: 1,
-                    updated_ms: 1,
-                };
-                b.records
-                    .insert(index_key(ALICE, &reference), lease.bytes());
-                open_work(b, reference, row.bytes())
+                // A working task's row (`t1|<status>|<created>|<updated>|<digest>`) and its index
+                // row (`l1|<until>|<updated>`), as the plane writes them (pinned in
+                // `src/tests/door_facts_tests.rs`).
+                let row = b"t1|working|1|1|d".to_vec();
+                let lease = b"l1|1|1".to_vec();
+                b.records.insert(index_key(ALICE, &reference), lease);
+                open_work(b, reference, row)
             })
             .collect()
     });
@@ -1347,59 +1442,5 @@ fn a_create_settles_every_page_of_its_callers_left_behind_tasks() {
         missed.is_empty(),
         "{} of the caller's 70 left-behind tasks were not settled",
         missed.len()
-    );
-}
-
-// ── C-H1: the answers to a task's own rounds ────────────────────────────────────────────────────
-
-/// An ask, built the one way a `CallerAsk` can be built: from an operator-written config entry.
-fn elicitation(key: &str) -> crate::ask::CallerAsk {
-    crate::ask::CallerAsk::from_config(
-        key,
-        &crate::tools_config::AskEntryCfg {
-            method: "elicitation/create".into(),
-            params: Some(json!({})),
-        },
-    )
-}
-
-/// C-H1 [HIGH]: `tasks/update` keeps only the answers the task's current round asked for. A key
-/// the round did not ask is ignored (SEP-2663: keys the task is not waiting on are not refused), so
-/// an update cannot smuggle a tool argument into the call the task runs (call.rs, the synchronous
-/// rule: "an answer may only supply what was asked for").
-#[test]
-fn an_update_keeps_only_the_keys_the_round_asked() {
-    let mut t = tool_tasks::Task::new("0123456789abcdef0123456789abcdef", "k", 7, "d1", 1);
-    t.park(vec![elicitation("confirm")], 1);
-    assert!(t.deliver(
-        &serde_json::from_value(json!({"confirm": {"action": "accept"}, "path": "/etc/shadow"}))
-            .unwrap(),
-        2,
-    ));
-    assert_eq!(
-        t.answers().get("confirm"),
-        Some(&json!({"action": "accept"}))
-    );
-    assert!(
-        t.answers().get("path").is_none(),
-        "an answer the round never asked is kept: {:?}",
-        t.answers()
-    );
-    let mut idle = tool_tasks::Task::new("0123456789abcdef0123456789abcdef", "k", 7, "d1", 1);
-    assert!(idle.deliver(&serde_json::from_value(json!({"path": "/x"})).unwrap(), 2));
-    assert!(idle.answers().is_empty(), "{:?}", idle.answers());
-}
-
-/// C-H1 [HIGH]: the answers never rewrite an argument the call was admitted with: the hooks and the
-/// argument guard judged the admitted arguments, and those are the arguments that go out.
-#[test]
-fn an_answer_never_rewrites_an_admitted_argument() {
-    let answers: serde_json::Map<String, Value> =
-        serde_json::from_value(json!({"path": "/etc/shadow", "confirm": {"action": "accept"}}))
-            .unwrap();
-    assert_eq!(
-        tool_tasks::merge_answers(&json!({ "path": "/a" }), &answers),
-        json!({ "path": "/a", "confirm": {"action": "accept"} }),
-        "an answer rewrote an admitted argument"
     );
 }

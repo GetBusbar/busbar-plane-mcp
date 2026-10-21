@@ -37,8 +37,9 @@ fn sibling_plane_crate_paths() -> Vec<String> {
 /// Walk every source file on the SURFACE, the code a shipped build compiles: every one under `dir`
 /// less the test-module directories (`src/tests/`, and each module's own `tests/`). A test module is
 /// compiled only when the tests are and the kernel never sees it; the suites that moved in from
-/// `tests/` when the crate's only public item became `door` drive the door over its C ABI
-/// (`unsafe`), hold host doubles (`Mutex`, atomics) and read files, as they did out there.
+/// `tests/` when the crate's only public item became `door` read files, the environment and a
+/// clock, as they did out there, and the modules left unwired there (`src/tests/mod.rs`) hold the
+/// C-ABI host doubles they were written with.
 fn walk_surface(dir: &Path, f: &mut impl FnMut(&Path, &str)) {
     for entry in std::fs::read_dir(dir)
         .expect("the source directory is readable")

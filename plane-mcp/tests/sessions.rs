@@ -12,6 +12,11 @@
 //! are stand-ins written in this file: a clock, the kernel's entitlement and trust answers (all
 //! yes), a counting `random.fill`, and two upstreams behind the connector, one that requires a
 //! session and one that speaks the stateless revision.
+//!
+//! This suite drives the door over its C ABI with a host it stands up itself, so it needs
+//! `unsafe`, and it reaches the crate through `door` alone (the crate's only public item). The
+//! route table it claims against is spelled below and pinned to the crate's own in
+//! `src/tests/door_facts_tests.rs`.
 
 #![allow(unsafe_code)]
 
@@ -20,7 +25,6 @@ use std::os::raw::c_void;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use crate::{door, tool_door};
 use busbar_contract::abi::host::conn::connector::{
     ConnectorSlots, EstablishIn, ReplyIn, ReplyPiece, RequestIn, RequestPiece, StreamIn,
     REPLY_BODY, REPLY_END, REPLY_HEAD, REQUEST_BODY, REQUEST_HEAD, SERVICES as CONN_SERVICES,
@@ -43,6 +47,7 @@ use busbar_contract::abi::plane::{
     PIECE_LAST, RECORD_AUDIT,
 };
 use busbar_contract::abi::transport::FrameSpan;
+use busbar_plane_mcp::door;
 use serde_json::{json, Value};
 
 // ── the host's services ─────────────────────────────────────────────────────────────────────────
@@ -55,7 +60,14 @@ fn answer(out: *mut ServiceOut, outcome: Outcome, value: u64, len: u64) -> RawOu
             outcome: RawOutcome::of(outcome),
             value,
             len,
-            ..ServiceOut::ZERO
+            _reserved: [0; 3],
+            items: 0,
+            needed_bytes: 0,
+            needed_items: 0,
+            error: AbiStr {
+                ptr: std::ptr::null(),
+                len: 0,
+            },
         });
     }
     RawOutcome::of(outcome)
@@ -743,7 +755,7 @@ fn out_head<T>() -> OutHead {
 
 fn ops() -> &'static Ops {
     // SAFETY: the door is a `'static` table whose ops are the plane kind's.
-    unsafe { &*(*tool_door::door()).ops.cast::<Ops>() }
+    unsafe { &*(*door()).ops.cast::<Ops>() }
 }
 
 fn lifecycle() -> &'static OpsHead {
@@ -814,10 +826,23 @@ struct Arrived {
     refusal_status: u32,
 }
 
+/// THE DOOR'S ROUTE TABLE, `(verb, target, carrier)` in claim order: the claim an arrival carries is
+/// its row's index. Spelled here because this test reaches the door and nothing else; the logic
+/// crate pins it to its own table (`src/tests/door_facts_tests.rs`).
+const ROUTES: &[(&str, &str, &str)] = &[
+    ("GET", "/.well-known/oauth-protected-resource/mcp", "http"),
+    ("POST", "/mcp", "http"),
+    ("GET", "/mcp", "http"),
+    ("DELETE", "/mcp", "http"),
+    ("POST", "/mcp", "sse"),
+    ("POST", "/mcp/tasks/run", "http"),
+    ("POST", "/mcp", "stdio"),
+];
+
 fn claim(verb: &str) -> u32 {
-    let i = door::ROUTES
+    let i = ROUTES
         .iter()
-        .position(|r| r.verb == verb && r.target == "/mcp" && r.carrier == "http")
+        .position(|&(v, t, c)| v == verb && t == "/mcp" && c == "http")
         .expect("the door routes it");
     u32::try_from(i).unwrap()
 }

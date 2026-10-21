@@ -1,13 +1,22 @@
 //! What reading a stdio child's message is allowed to allocate. Moved in from `tests/` when the
-//! crate's only public item became `door`; it counts through the crate's one allocator
-//! ([`super::alloc_counter`]).
+//! crate's only public item became `door`.
+//!
+//! NOT WIRED: this module is not declared in `src/tests/mod.rs`, so it does not compile or run. It
+//! counts allocations through `busbar_contract::alloc_counter::Counting` (busbar-contract's
+//! `alloc-counter` dev-dependency feature, ARCHITECT addendum 2026-10-21 08:30Z), installed as this
+//! crate's test build's one `#[global_allocator]`; no plugin crate holds `unsafe` for an allocator.
+//! The busbar pin (#1399's line) does not carry that feature yet: the gate is wired, with its budget
+//! unchanged, at the repin that carries it.
 //!
 //! An allocation COUNT is the same number on every machine, so work that grows with the input
 //! where it should not is seen here where a stopwatch on a shared runner would miss it. (The
 //! decode-allocation pin that lived here drove the unserved `Plane` impl, deleted with it under
 //! plane-mcp finding 12.)
 
-use super::alloc_counter::allocations_of;
+// Wired at the repin that carries `alloc-counter`:
+// #[global_allocator]
+// static A: busbar_contract::alloc_counter::Counting = busbar_contract::alloc_counter::Counting::new();
+// and `allocations_of` reads its count.
 
 /// RED (finding 14, the design's no-blocking rule: bounded work): a stdio child's message arriving
 /// in many small pieces is read ONCE. Re-parsing everything held on every piece builds and drops

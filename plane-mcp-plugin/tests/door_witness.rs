@@ -1,56 +1,81 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE PLANE'S DOOR, LINKED AND DROPPED IN, ANSWERS THE SAME (BUSBAR-1.6.0.md, the plane driver's
-//! "Proven by": the plane conformance suite, compiled-in and dropped-in through one table).
+//! The plane's door driven both ways: linked and dropped in, one script through every plane op.
 //!
-//! The linked door (`busbar_plane_mcp::door`, the crate's only public item) and this crate's
-//! dropped-in image (its built cdylib, the same door behind `export_door!`) are each admitted
-//! through the one loader on one dispatcher and run ONE script through every plane op, each answer
-//! read back. The two transcripts must be identical, step for step.
-//!
-//! What the linked transcript must say, against the plane's own tables and pure functions, is held
-//! in the logic crate (`plane-mcp/src/tests/door_witness_tests.rs`), which alone can see them: it
-//! runs this same script and relay script. This file reaches the door and nothing else, so the
-//! wire facts the script sends are spelled here; the logic crate's copy pins them to its tables.
+//! The dropped-in door is this crate's own cdylib. This file reaches the logic crate through
+//! `door` alone (its only public item, BUSBAR-1.6.0.md l.3567): the wire facts it sends and reads
+//! answers by are spelled here and pinned to the crate's own tables in the logic crate
+//! (`plane-mcp/src/tests/door_facts_tests.rs`). The checks that read the plane's own functions (the
+//! vocabulary against the battery, and the transcript against what the plane's pure functions say)
+//! live in the logic crate (`plane-mcp/src/tests/`).
 
-/// THE MCP PLANE'S CONFORMANCE RIG, BOTH WAYS.
+/// THE MCP PLANE'S CONFORMANCE RIG, BOTH WAYS (BUSBAR-1.6.0.md, the plane driver's "Proven by":
+/// the plane conformance suite, compiled-in and dropped-in through one table).
+///
+/// The linked door and this crate's dropped-in image (its built cdylib, the same door behind
+/// `export_door!`) are each admitted through the one loader on one dispatcher and run ONE script
+/// through every plane op, each answer read back. The two transcripts must be identical, step for
+/// step. The door's answers are also held to what the plane states on the wire: its sections, its
+/// refusal family, its fee unit, its entitlement binding.
+///
+/// RED ARM, kept: the same door with `on_piece` swapped for one that relays the caller's bytes
+/// back instead of answering from the catalogue. Its transcript differs at the answer, so a door
+/// that stopped answering from what the plane holds cannot pass for this one.
 mod both_ways {
     use std::mem::zeroed;
     use std::sync::Arc;
 
     use busbar_contract::abi::mechanism::call::{AbiStr, Blob, Field, Outcome, Span, BLOB_OCTETS};
+    use busbar_contract::abi::mechanism::door::Door;
     use busbar_contract::abi::mechanism::lifecycle::{
         slot as life, CancelIn, CancelOut, GenIn, RefreshIn, TickIn, TickOut, ValidateIn,
     };
     use busbar_contract::abi::plane::{
-        slot, ArriveIn, ArriveOut, OnPieceIn, OnPieceOut, OutField, PlaneOpenIn, PlaneOpenOut,
-        PlaneRefreshOut, ProjectIn, ProjectOut, RecordWrite, RefusalIn, RefusalOut, ServeIn,
-        ServeOut, UnitCount, EMIT_DONE, EMIT_TO_FAR_END, FROM_CALLER, FROM_FAR_END, FROM_KERNEL,
-        PIECE_HAS_STATUS, PIECE_LAST, PRINCIPAL_REQUIRED, REFUSAL_ARRIVE, REFUSAL_GATE,
+        self, slot, ArriveIn, ArriveOut, OnPieceIn, OnPieceOut, OutField, PlaneOpenIn,
+        PlaneOpenOut, PlaneRefreshOut, ProjectIn, ProjectOut, RecordWrite, RefusalIn, RefusalOut,
+        ServeIn, ServeOut, UnitCount, EMIT_DONE, EMIT_TO_FAR_END, FROM_CALLER, FROM_FAR_END,
+        FROM_KERNEL, PIECE_HAS_STATUS, PIECE_LAST, PRINCIPAL_REQUIRED, REFUSAL_ARRIVE,
+        REFUSAL_GATE,
     };
-    use busbar_contract::abi::sdk::door::abi_str;
+    use busbar_contract::abi::sdk::capture::{CaptureHome, CaptureSlot};
+    use busbar_contract::abi::sdk::door::{abi_str, kind_op};
+    use busbar_contract::abi::sdk::{Instance, Lent, Out, Safe, SafeSlot};
     use busbar_plugin_loader::dispatch::kinds::plane::{OwnedSnapshot, Plane};
     use busbar_plugin_loader::dispatch::{
         in_head, load_dropped, load_linked, out_head, rendering_of, Bind, DispatchConfig,
         Dispatcher, Frame, LinkedRow, NoSink, Plugin,
     };
+    use serde_json::{json, Value};
 
     // The door: this plugin's one public item.
     use busbar_plane_mcp::door;
 
-    /// The wire's header names and revision (the logic crate's `codec` constants, which its copy of
-    /// this script reads).
-    const H_PROTOCOL_VERSION: &str = "mcp-protocol-version";
-    const H_MCP_METHOD: &str = "mcp-method";
+    /// The wire facts this script sends and reads answers by, spelled here because the test reaches
+    /// the door and nothing else; the logic crate pins each to its own table
+    /// (`plane-mcp/src/tests/door_facts_tests.rs`).
+    pub(crate) const H_PROTOCOL_VERSION: &str = "mcp-protocol-version";
+    pub(crate) const H_MCP_METHOD: &str = "mcp-method";
     const H_MCP_NAME: &str = "mcp-name";
-    const PROTOCOL_VERSION: &str = "2026-07-28";
-    /// The protected-resource metadata path the door serves (the logic crate's
-    /// `tool_claims::DEFAULT_METADATA`).
+    pub(crate) const PROTOCOL_VERSION: &str = "2026-07-28";
     const DEFAULT_METADATA: &str = "/.well-known/oauth-protected-resource/mcp";
-    /// The head of the door's route table, `(verb, target)` in claim order: the claims the script's
-    /// arrivals carry (the logic crate's copy pins these rows to its `door::ROUTES`).
-    const ROUTES: &[(&str, &str)] = &[("GET", DEFAULT_METADATA), ("POST", "/mcp"), ("GET", "/mcp")];
+    const TOOLS_SECTION: &str = "tools";
+    const ENDPOINT_SECTION: &str = "mcp";
+    const CODE_REFUSED: i64 = -32000;
+    const CODE_INTERNAL: i64 = -32603;
+    const CODE_HEADER_MISMATCH: i64 = -32020;
+    /// The fee unit's class index in the door's tail.
+    const CLASS_FEE_INDEX: u32 = 2;
+    /// The door's route table, `(verb, target, carrier)` in claim order.
+    pub(crate) const ROUTES: &[(&str, &str, &str)] = &[
+        ("GET", DEFAULT_METADATA, "http"),
+        ("POST", "/mcp", "http"),
+        ("GET", "/mcp", "http"),
+        ("DELETE", "/mcp", "http"),
+        ("POST", "/mcp", "sse"),
+        ("POST", "/mcp/tasks/run", "http"),
+        ("POST", "/mcp", "stdio"),
+    ];
 
     fn z<T>() -> T {
         // SAFETY: every `in`/`out` here is plain C data; all-zero is a valid value of each.
@@ -133,7 +158,7 @@ mod both_ways {
     fn claim(verb: &str, target: &str) -> u32 {
         let i = ROUTES
             .iter()
-            .position(|&(v, t)| v == verb && t == target)
+            .position(|&(v, t, _)| v == verb && t == target)
             .expect("the door routes it");
         u32::try_from(i).expect("a small table")
     }
@@ -561,6 +586,16 @@ mod both_ways {
         t
     }
 
+    fn step<'a>(t: &'a [Step], what: &str) -> &'a Step {
+        t.iter()
+            .find(|s| s.what == what)
+            .unwrap_or_else(|| panic!("the script has no `{what}` step"))
+    }
+
+    fn document(bytes: &[u8]) -> Value {
+        serde_json::from_slice(bytes).expect("a JSON document")
+    }
+
     // ── the doors ────────────────────────────────────────────────────────────────────────────────────
 
     fn linked(d: &Dispatcher) -> Plugin<Plane> {
@@ -577,6 +612,17 @@ mod both_ways {
         load_dropped(&path, &stated, bind(d)).expect("the dropped door loads")
     }
 
+    /// The Statement's sections, as the loader reads them, are the grammar's: `tools:` declared and
+    /// the `mcp:` endpoint block owned beside it (the door states them as literals, which the
+    /// config-schema census reads).
+    #[test]
+    fn the_statements_sections_are_the_grammars() {
+        let d = Dispatcher::new(DispatchConfig::default());
+        let served = linked(&d).served();
+        assert_eq!(served.section, TOOLS_SECTION);
+        assert_eq!(served.owns, vec![ENDPOINT_SECTION]);
+    }
+
     #[test]
     fn the_linked_and_the_dropped_in_door_answer_every_op_the_same() {
         let d = Dispatcher::new(DispatchConfig::default());
@@ -584,7 +630,89 @@ mod both_ways {
         assert_eq!(script(&dropped(&d)), linked, "the dropped-in door");
     }
 
-    /// The linked transcript is the one the plane's own pure functions say the door answers.
+    /// The kernel refuses with `reason` at its own `status` (no unit had arrived), and the door
+    /// renders it.
+    fn kernel_refusal(p: &Plugin<Plane>, reason: u32, status: u32) -> Step {
+        let words = b"refused";
+        let (mut reply, mut fields, mut arena) = ([0_u8; 512], [z::<OutField>(); 2], [0_u8; 64]);
+        let mut r: Frame<RefusalIn, RefusalOut> = Frame::new(z(), z());
+        (r.input.head, r.out.head) = (in_head(), out_head());
+        (r.input.cause, r.input.status, r.input.reason) = (plane::REFUSAL_KERNEL, status, reason);
+        r.input.text = text(words);
+        (r.input.reply_buf, r.input.reply_cap) = (reply.as_mut_ptr(), reply.len());
+        (r.input.fields_buf, r.input.fields_cap) = (fields.as_mut_ptr(), fields.len());
+        (r.input.arena_buf, r.input.arena_cap) = (arena.as_mut_ptr(), arena.len());
+        let c = p.call(slot::REFUSAL, &mut r);
+        let mut s = Step::new("kernel refusal", c.outcome);
+        s.status = r.out.status;
+        s.reply = reply[..usize::try_from(r.out.reply_written).expect("small")].to_vec();
+        s
+    }
+
+    /// P-ITEM: REFUSAL-REASON COLLAPSE (spec DONE item 2, "All P-item behaviours match 1.5.5";
+    /// drive log P2, commit 470351a480; TODO L-ENG9). 1.5.5's one surface gave every limit reason
+    /// its own status and kind and answered none of them as an internal error (v1.5.5
+    /// `crates/busbar/src/ingress/mod.rs:237-305`). On the served mcp door the reason-to-family
+    /// decision is the kernel's alone: every reason a plane is handed is answered at the status the
+    /// kernel chose from the one classification (`busbar_contract::abi::plane::RefusalCode::class`;
+    /// the door states `0`, the kernel's status stands) and in the one refusal family
+    /// (`CODE_REFUSED`), never as the internal error, whatever its class. The door holds no
+    /// reason-to-class table of its own (the unserved `Plane` impl's `refusal_words` is deleted,
+    /// plane-mcp finding 12).
+    #[test]
+    fn p_item_refusal_reason_collapse_the_door_answers_every_reason_at_the_kernels_status_never_internal(
+    ) {
+        use busbar_contract::abi::plane::{reason_of, RefusalCode};
+        let d = Dispatcher::new(DispatchConfig::default());
+        let p = linked(&d);
+        let mut i: PlaneOpenIn = z();
+        i.open.head = in_head();
+        (i.open.generation, i.open.settings) = (1, octets(SECTION));
+        i.public_url = text(PUBLIC_URL.as_bytes());
+        let mut o: PlaneOpenOut = z();
+        o.open.head = out_head();
+        let (c, _) = p.open(&mut Frame::new(i, o));
+        assert_eq!(c.outcome, Outcome::Ready, "the door opens");
+        let mut rendered = 0;
+        for code in RefusalCode::ALL {
+            // Two codes are the kernel's own money verdicts and never reach a plane (`reason_of`).
+            if reason_of(code.code()).is_none() {
+                continue;
+            }
+            let class = code.class();
+            let status = if class.is_node_fault() { 500 } else { 403 };
+            let r = kernel_refusal(&p, code.code(), status);
+            assert_eq!(
+                (r.outcome, r.status),
+                (Outcome::Ready, 0),
+                "{code:?} (class {class:?}) is answered at the kernel's status"
+            );
+            let body = document(&r.reply);
+            // A mounted path's failed authentication and the body limit, refused before any
+            // unit, keep the bytes the kernel's own JSON-RPC rendering answered (`-32600`, the
+            // 1.6.0 baseline; audit K4#2(b)): every other reason is the one refusal family.
+            let want = if matches!(
+                code,
+                RefusalCode::Unauthenticated | RefusalCode::BodyTooLarge
+            ) {
+                json!(-32600)
+            } else {
+                json!(CODE_REFUSED)
+            };
+            assert_eq!(
+                body["error"]["code"], want,
+                "{code:?} (class {class:?}) renders {body}"
+            );
+            assert_ne!(
+                body["error"]["code"],
+                json!(CODE_INTERNAL),
+                "{code:?} (class {class:?}) is never the internal error"
+            );
+            rendered += 1;
+        }
+        assert!(rendered > 0, "the walk rendered at least one reason");
+    }
+
     // ── the relayed call and the entitlement binding ───────────────────────────────────────────────
 
     /// A HOST whose entitlement answer is a fixed table of `"<kind>:<name>"` grants, and which
@@ -991,6 +1119,50 @@ mod both_ways {
         s
     }
 
+    /// `project`'s PROMPT VIEW is the served engine's projection of an invocation: one `user` turn,
+    /// the arguments as JSON text (what a content-granted gate or rewrite hook screens).
+    #[test]
+    fn a_call_projects_one_user_turn_of_its_arguments() {
+        let t = relay_script(&linked(&served(ALL)));
+        let call = step(&t, "project call");
+        assert_eq!(
+            call.fields,
+            vec![("turn:user".to_string(), r#"{"path":"/a"}"#.to_string())]
+        );
+    }
+
+    /// A REQUEST-STAGE HOOK'S REWRITE (BUSBAR-1.6.0.md Part 3 section 12, "Hooks"): the plane applies
+    /// it in its own dialect (the arguments replaced, every other member as the caller sent it),
+    /// answers the rewritten request, and projects THAT request; a rewrite with no usable arguments
+    /// object is not applied and the request projects as it came (the served engine's call went out
+    /// untouched).
+    #[test]
+    fn a_rewrite_replaces_the_arguments_and_the_rewritten_call_is_projected() {
+        let t = relay_script(&linked(&served(ALL)));
+        let rewritten = step(&t, "project rewritten");
+        assert_eq!(rewritten.outcome, Outcome::Ready);
+        assert_eq!(
+            document(&rewritten.reply),
+            json!({ "tool": "fs_read_file", "arguments": { "path": "/redacted" } })
+        );
+        let body = rewritten
+            .fields
+            .iter()
+            .find(|(n, _)| n == "rewritten")
+            .map(|(_, v)| v.clone())
+            .expect("the rewritten request is answered");
+        let mut expected = document(RELAY_CALL);
+        expected["params"]["arguments"] = json!({ "path": "/redacted" });
+        assert_eq!(document(body.as_bytes()), expected);
+        let unusable = step(&t, "project unusable rewrite");
+        assert_eq!(unusable.outcome, Outcome::Ready);
+        assert!(unusable.fields.iter().all(|(n, _)| n != "rewritten"));
+        assert_eq!(
+            document(&unusable.reply),
+            json!({ "tool": "fs_read_file", "arguments": { "path": "/a" } })
+        );
+    }
+
     fn served(grants: &'static [&'static str]) -> Dispatcher {
         Dispatcher::with_services(DispatchConfig::default(), Arc::new(Grants(grants)))
     }
@@ -1006,6 +1178,587 @@ mod both_ways {
             relay_script(&dropped(&d)),
             want,
             "the dropped-in door, entitled to nothing"
+        );
+    }
+
+    /// $ A CALL ITS UPSTREAM NEVER ANSWERED BILLS ITS FEE UNIT AND NO CLASS (/status row 123; #62,
+    /// BUSBAR-1.6.0.md l.2252: what is billed is what was delivered; #71: the plane reports counts,
+    /// the kernel writes them). The call went out, and the far end ended with nothing (the kernel's
+    /// `Ok(None)` piece). The caller is answered the upstream-failure result, 200 `isError`, and the
+    /// plane reports exactly the fee unit that success earns (tail class 2, `per_request`): the call
+    /// left, so it keeps its fee (Q35, "a hop that left is billed whatever the backend then
+    /// answered"). It reports no `tool_calls` and no `bytes`, because no server answered a call and
+    /// no document was read back. MCP is new in 1.6.0, so this pins predev's own figures
+    /// (BUSBAR-1.6.0.md l.4684-4685: the baseline for the new planes is current predev behaviour,
+    /// never a 1.5.5 one). It is also the one shape that reads `requests=1`, the flat fee and no
+    /// class counts on the admin usage row: a red `h2-class-price` with that shape is an upstream
+    /// that never answered.
+    #[test]
+    fn a_call_its_upstream_never_answered_bills_its_fee_unit_and_no_class() {
+        let t = relay_script(&linked(&served(ALL)));
+        let send = step(&t, "send unanswered");
+        assert!(
+            send.detail.contains("far=true"),
+            "the call went out: {}",
+            send.detail
+        );
+        let none = step(&t, "answer none");
+        assert_eq!((none.outcome, none.status), (Outcome::Ready, 200));
+        assert_eq!(document(&none.reply)["id"], json!(30));
+        assert_eq!(
+            document(&none.reply)["result"]["isError"],
+            json!(true),
+            "the upstream-failure result: {:?}",
+            String::from_utf8_lossy(&none.reply)
+        );
+        assert_eq!(
+            none.units,
+            vec![(CLASS_FEE_INDEX, 1)],
+            "the fee unit alone: no tool call and no byte was measured"
+        );
+    }
+
+    /// $ AN UPSTREAM THAT ANSWERED HTTP 5xx WITH NO JSON-RPC BODY IS STILL A SERVED CALL
+    /// (ARCHITECT/coordinator ruling 2026-10-14, Q35 in 1.6.0-QUESTIONS.md: "a hop that left is
+    /// billed whatever the backend then answered"). The far end answered, so the plane counts one
+    /// `tool_calls` and the bytes of the body it read back (tail classes 0 and 1), beside the fee
+    /// unit its caller's 200 `isError` answer earns (tail class 2).
+    #[test]
+    fn an_upstream_5xx_that_is_no_json_rpc_counts_as_a_served_call() {
+        let t = relay_script(&linked(&served(ALL)));
+        let answered = step(&t, "answer 5xx");
+        assert_eq!((answered.outcome, answered.status), (Outcome::Ready, 200));
+        assert_eq!(
+            document(&answered.reply)["result"]["isError"],
+            json!(true),
+            "the upstream-failure result: {:?}",
+            String::from_utf8_lossy(&answered.reply)
+        );
+        assert_eq!(
+            answered.units,
+            vec![
+                (CLASS_FEE_INDEX, 1),
+                (0, 1),
+                (
+                    1,
+                    u64::try_from(FAR_BAD_GATEWAY.len()).expect("a small body")
+                )
+            ],
+            "one tool call, the bytes the far end answered with, and the fee unit"
+        );
+    }
+
+    /// The calls the plane refuses itself, with a member picked: the catalogue's and the mirror's
+    /// refusals, written to the caller as a local answer and never sent on.
+    #[test]
+    fn a_call_the_plane_refuses_is_answered_and_never_sent() {
+        let t = relay_script(&linked(&served(ALL)));
+        let draft = step(&t, "answer draft");
+        assert_eq!((draft.outcome, draft.status), (Outcome::Ready, 403));
+        assert!(
+            draft.detail.contains("done=true far=false"),
+            "{}",
+            draft.detail
+        );
+        assert_eq!(
+            document(&draft.reply)["error"]["data"]["reason"],
+            json!("not_approved")
+        );
+        let mismatch = step(&t, "answer mismatch");
+        assert_eq!(mismatch.status, 400);
+        assert_eq!(
+            document(&mismatch.reply)["error"]["code"],
+            json!(CODE_HEADER_MISMATCH)
+        );
+    }
+
+    /// THE ENTITLEMENT BINDING: what a caller sees and may call is the kernel's answer for it.
+    #[test]
+    fn what_a_caller_sees_and_calls_is_what_the_kernel_entitles() {
+        let granted = relay_script(&linked(&served(ALL)));
+        let tools = document(&step(&granted, "answer list").reply)["result"]["tools"].clone();
+        assert_eq!(tools.as_array().map(Vec::len), Some(2));
+        let none = relay_script(&linked(&served(&[])));
+        let tools = document(&step(&none, "answer list").reply)["result"]["tools"].clone();
+        assert_eq!(tools, json!([]));
+        let refused = step(&none, "send");
+        assert_eq!((refused.outcome, refused.status), (Outcome::Ready, 404));
+        assert_eq!(
+            document(&refused.reply)["error"]["data"]["reason"],
+            json!("not_granted")
+        );
+        assert!(
+            refused.detail.contains("far=false"),
+            "never sent: {}",
+            refused.detail
+        );
+    }
+
+    /// A caller that prefers an event stream is answered with one: the answer after the plane's
+    /// own log records.
+    #[test]
+    fn a_caller_preferring_a_stream_is_answered_with_one() {
+        let t = relay_script(&linked(&served(ALL)));
+        let s = step(&t, "answer stream list");
+        assert_eq!(s.status, 200);
+        assert_eq!(
+            s.fields,
+            vec![
+                ("content-type".to_string(), "text/event-stream".to_string()),
+                (
+                    "cache-control".to_string(),
+                    "no-cache, no-store".to_string()
+                ),
+            ]
+        );
+        let text = String::from_utf8(s.reply.clone()).expect("text");
+        let events: Vec<Value> = text
+            .lines()
+            .filter_map(|l| l.strip_prefix("data: "))
+            .map(|d| serde_json::from_str(d).expect("an event"))
+            .collect();
+        assert_eq!(events.last().map(|e| e["id"].clone()), Some(json!(9)));
+        assert_eq!(events[0]["method"], json!("notifications/message"));
+    }
+
+    // ── the red arm ──────────────────────────────────────────────────────────────────────────────────
+
+    /// A call capture for the hand-built table entry below: one slot per thread, as `plugin_door!`
+    /// expands for a plugin's own image.
+    struct TestCapture;
+    impl CaptureHome for TestCapture {
+        fn with<R>(f: impl FnOnce(&mut CaptureSlot) -> R) -> R {
+            thread_local! {
+                static SLOT: std::cell::RefCell<CaptureSlot> =
+                    std::cell::RefCell::new(CaptureSlot::new());
+            }
+            SLOT.with(|s| f(&mut s.borrow_mut()))
+        }
+    }
+
+    /// An `on_piece` that relays the caller's bytes back instead of answering from the catalogue.
+    struct Echo;
+    impl SafeSlot for Echo {
+        type In = OnPieceIn;
+        type Out = OnPieceOut;
+        type State = ();
+        fn call(
+            _: Instance<'_, ()>,
+            input: Lent<'_, OnPieceIn>,
+            mut out: Out<'_, OnPieceOut>,
+        ) -> Outcome {
+            let bytes = input.field(|i| &i.bytes).bytes();
+            let n = input.reply_buf().stream(bytes);
+            out.set(|o| &o.emitted, n as u64);
+            out.set(|o| &o.reply_status, 200);
+            out.set(|o| &o.flags, EMIT_DONE);
+            Outcome::Ready
+        }
+    }
+
+    /// The mcp door with `on_piece` swapped for [`Echo`].
+    extern "C" fn echo_door() -> *const Door {
+        // SAFETY: the macro's `'static` door and its plane table.
+        let (d, mut ops) = unsafe {
+            let d = &*door();
+            (d, *d.ops.cast::<plane::Ops>())
+        };
+        ops.on_piece = kind_op::<plane::Ops, Safe<Echo>, TestCapture, { slot::ON_PIECE }>();
+        let ops: &'static plane::Ops = Box::leak(Box::new(ops));
+        Box::leak(Box::new(Door {
+            ops: std::ptr::from_ref(ops).cast(),
+            ..*d
+        }))
+    }
+
+    #[test]
+    fn red_a_door_that_stops_answering_from_the_catalogue_answers_differently() {
+        let d = Dispatcher::new(DispatchConfig::default());
+        let honest = script(&linked(&d));
+        let row = LinkedRow::of(echo_door).expect("the door states its Statement");
+        let red = script(&load_linked::<Plane>(&row, bind(&d)).expect("the door loads"));
+        let (h, r) = (
+            step(&honest, "answer tools/list"),
+            step(&red, "answer tools/list"),
+        );
+        assert_ne!(r.reply, h.reply, "the answer is where the two differ");
+        assert_ne!(red, honest);
+    }
+}
+
+mod bounds {
+    //! WHAT THE DOOR HOLDS AND GATHERS IS BOUNDED. A unit the kernel refuses is over, and the door
+    //! drops it; an upstream's answer is gathered only under the SDK's reply ceiling.
+    //!
+    //! The units are driven through the linked door op by op, as [`super::both_ways`] drives it.
+
+    use std::mem::zeroed;
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use busbar_contract::abi::mechanism::call::{AbiStr, Blob, Field, Outcome, BLOB_OCTETS};
+    use busbar_contract::abi::mechanism::lifecycle::GenIn;
+    use busbar_contract::abi::plane::{
+        slot, ArriveIn, ArriveOut, OnPieceIn, OnPieceOut, OutField, PlaneOpenIn, PlaneOpenOut,
+        RecordWrite, RefusalIn, RefusalOut, UnitCount, FROM_CALLER, FROM_FAR_END, PIECE_LAST,
+        REFUSAL_GATE,
+    };
+    use busbar_contract::abi::sdk::door::abi_str;
+    use busbar_plane_mcp::door;
+
+    use super::both_ways::{H_MCP_METHOD, H_PROTOCOL_VERSION, PROTOCOL_VERSION, ROUTES};
+    use busbar_plugin_loader::dispatch::kinds::plane::Plane;
+    use busbar_plugin_loader::dispatch::{
+        in_head, load_linked, out_head, Bind, DispatchConfig, Dispatcher, Frame, LinkedRow, NoSink,
+        Plugin,
+    };
+
+    fn z<T>() -> T {
+        // SAFETY: every `in`/`out` here is plain C data; all-zero is a valid value of each.
+        unsafe { zeroed() }
+    }
+
+    fn octets(b: &'static [u8]) -> Blob {
+        Blob {
+            ptr: b.as_ptr(),
+            len: b.len(),
+            fmt: BLOB_OCTETS,
+            flags: 0,
+        }
+    }
+
+    fn text(b: &'static [u8]) -> AbiStr {
+        AbiStr {
+            ptr: b.as_ptr(),
+            len: b.len(),
+        }
+    }
+
+    const SECTION: &[u8] =
+        br#"{"fs": {"url": "https://mcp.example/fs", "pin": {"mechanism": "unpinned"}}}"#;
+    const PUBLIC_URL: &str = "https://busbar.example";
+    const TOOLS_LIST: &[u8] = br#"{"jsonrpc":"2.0","id":9,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#;
+    const LIST_FIELDS: &[Field] = &[
+        Field {
+            name: abi_str(H_PROTOCOL_VERSION),
+            value: abi_str(PROTOCOL_VERSION),
+        },
+        Field {
+            name: abi_str(H_MCP_METHOD),
+            value: abi_str("tools/list"),
+        },
+    ];
+
+    /// The linked door, opened over [`SECTION`] and started.
+    fn started(d: &Dispatcher) -> Plugin<Plane> {
+        let row = LinkedRow::of(door).expect("the linked door states its Statement");
+        let bind = Bind {
+            instance: Arc::from("the-instance"),
+            max_inflight_cap: 64,
+            sink: Arc::new(NoSink),
+            dispatcher: d.adopter(),
+            conns: busbar_plugin_loader::dispatch::ConnTable::Probe,
+        };
+        let p = load_linked(&row, bind).expect("the linked door loads");
+        let mut i: PlaneOpenIn = z();
+        i.open.head = in_head();
+        (i.open.generation, i.open.settings) = (1, octets(SECTION));
+        i.public_url = text(PUBLIC_URL.as_bytes());
+        let mut o: PlaneOpenOut = z();
+        o.open.head = out_head();
+        let (c, _) = p.open(&mut Frame::new(i, o));
+        assert_eq!(c.outcome, Outcome::Ready, "open");
+        for op in [slot::HYDRATE, slot::START] {
+            let mut g = Frame::new(
+                GenIn {
+                    head: in_head(),
+                    generation: 1,
+                },
+                out_head(),
+            );
+            assert_eq!(p.call(op, &mut g).outcome, Outcome::Ready);
+        }
+        p
+    }
+
+    /// A `tools/list` of `unit` arrives (the plane answers it from what it holds).
+    fn arrive_list(p: &Plugin<Plane>, unit: u64) {
+        let route = ROUTES
+            .iter()
+            .position(|&(v, t, _)| v == "POST" && t == "/mcp")
+            .expect("the door routes it");
+        let mut a: Frame<ArriveIn, ArriveOut> = Frame::new(z(), z());
+        (a.input.head, a.out.head) = (in_head(), out_head());
+        a.input.unit = unit;
+        a.input.claim = u32::try_from(route).expect("a small table");
+        (a.input.method, a.input.target) = (text(b"POST"), text(b"/mcp"));
+        a.input.body = octets(TOOLS_LIST);
+        (a.input.fields, a.input.fields_len) = (LIST_FIELDS.as_ptr(), LIST_FIELDS.len());
+        assert_eq!(
+            p.call(slot::ARRIVE, &mut a).outcome,
+            Outcome::Ready,
+            "arrive"
+        );
+    }
+
+    /// What one `on_piece` answered: its outcome, the status it stated and the bytes it emitted.
+    struct Piece {
+        outcome: Outcome,
+        status: u32,
+        reply: Vec<u8>,
+    }
+
+    /// One `on_piece` of `unit` from `from` carrying `flags`, `stream` and `caller`, through a
+    /// reply buffer of `cap` bytes and buffers that hold the rest.
+    fn push(
+        p: &Plugin<Plane>,
+        (unit, from, flags): (u64, u32, u32),
+        (stream, caller): (u64, &'static str),
+        cap: usize,
+    ) -> Piece {
+        let mut reply = vec![0_u8; cap];
+        let (mut fields, mut arena) = ([z::<OutField>(); 16], vec![0_u8; 4096]);
+        let mut records = [z::<RecordWrite>(); 16];
+        let mut units = [z::<UnitCount>(); 8];
+        let mut i: OnPieceIn = z();
+        i.head = in_head();
+        (i.unit, i.from, i.stream) = (unit, from, stream);
+        i.caller_ref = text(caller.as_bytes());
+        (i.flags, i.bytes) = (flags, octets(TOOLS_LIST));
+        (i.reply_buf, i.reply_cap) = (reply.as_mut_ptr(), reply.len());
+        (i.fields_buf, i.fields_cap) = (fields.as_mut_ptr(), fields.len());
+        (i.arena_buf, i.arena_cap) = (arena.as_mut_ptr(), arena.len());
+        (i.records_buf, i.records_cap) = (records.as_mut_ptr(), records.len());
+        (i.units_buf, i.units_cap) = (units.as_mut_ptr(), units.len());
+        let mut o: OnPieceOut = z();
+        o.head = out_head();
+        let mut f = Frame::new(i, o);
+        let c = p.call(slot::ON_PIECE, &mut f);
+        let emitted = usize::try_from(f.out.emitted).expect("small");
+        Piece {
+            outcome: c.outcome,
+            status: f.out.reply_status,
+            reply: reply[..emitted].to_vec(),
+        }
+    }
+
+    /// One whole-body `on_piece` of `unit` from `from`: its outcome.
+    fn piece(p: &Plugin<Plane>, unit: u64, from: u32) -> Outcome {
+        push(p, (unit, from, PIECE_LAST), (0, ""), 1 << 16).outcome
+    }
+
+    /// The kernel refuses `unit` (a gate's `403`), and the plane renders the refusal.
+    fn refuse(p: &Plugin<Plane>, unit: u64) {
+        let (mut reply, mut fields, mut arena) =
+            (vec![0_u8; 4096], [z::<OutField>(); 4], vec![0_u8; 512]);
+        let mut records = [z::<RecordWrite>(); 4];
+        let mut r: Frame<RefusalIn, RefusalOut> = Frame::new(z(), z());
+        (r.input.head, r.out.head) = (in_head(), out_head());
+        r.input.unit = unit;
+        (r.input.cause, r.input.status) = (REFUSAL_GATE, 403);
+        r.input.text = text(b"denied");
+        (r.input.reply_buf, r.input.reply_cap) = (reply.as_mut_ptr(), reply.len());
+        (r.input.fields_buf, r.input.fields_cap) = (fields.as_mut_ptr(), fields.len());
+        (r.input.arena_buf, r.input.arena_cap) = (arena.as_mut_ptr(), arena.len());
+        (r.input.records_buf, r.input.records_cap) = (records.as_mut_ptr(), records.len());
+        assert_eq!(
+            p.call(slot::REFUSAL, &mut r).outcome,
+            Outcome::Ready,
+            "refusal"
+        );
+    }
+
+    /// A unit the kernel refuses after it arrived is over: the plane no longer holds it, so a
+    /// piece naming it is refused rather than answered from the request params it kept.
+    #[test]
+    fn a_unit_the_kernel_refuses_is_dropped() {
+        let d = Dispatcher::new(DispatchConfig::default());
+        let p = started(&d);
+        arrive_list(&p, 7);
+        refuse(&p, 7);
+        assert_eq!(
+            piece(&p, 7, FROM_CALLER),
+            Outcome::Refused,
+            "the refused unit is still held"
+        );
+    }
+
+    /// A unit a piece of which the plane refuses is over too: nothing else would ever end it.
+    #[test]
+    fn a_unit_whose_piece_the_plane_refuses_is_dropped() {
+        let d = Dispatcher::new(DispatchConfig::default());
+        let p = started(&d);
+        arrive_list(&p, 8);
+        // A far end's piece for a unit that sent nothing on.
+        assert_eq!(piece(&p, 8, FROM_FAR_END), Outcome::Refused);
+        assert_eq!(
+            piece(&p, 8, FROM_CALLER),
+            Outcome::Refused,
+            "the unit whose piece was refused is still held"
+        );
+    }
+
+    /// An upstream's answer is gathered only under the SDK's reply ceiling, and the call that
+    /// passes it fails as any bad upstream answer does. The gather site is reached only by a call
+    /// the kernel has admitted and entitled, which this harness has no host to do, so the bound is
+    /// read off the source at that site.
+    #[test]
+    fn an_upstreams_answer_is_gathered_only_under_the_reply_ceiling() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../plane-mcp/src/tool_door.rs");
+        let source = std::fs::read_to_string(path).expect("the door's source reads");
+        let lines: Vec<&str> = source.lines().collect();
+        let gather = lines
+            .iter()
+            .position(|l| l.contains("relay.far.extend_from_slice(bytes)"))
+            .expect("the gather site");
+        let guard = lines[gather.saturating_sub(8)..gather].join("\n");
+        assert!(
+            guard.contains("REPLY_MAX") && guard.contains("upstream_failed"),
+            "the gather is not bounded by the reply ceiling, failing the call past it:\n{guard}"
+        );
+    }
+
+    /// A `subscriptions/listen` of `unit` arrives, opting in to a list category.
+    fn arrive_listen(p: &Plugin<Plane>, unit: u64) {
+        const LISTEN: &[u8] = br#"{"jsonrpc":"2.0","id":3,"method":"subscriptions/listen","params":{"notifications":{"toolsListChanged":true},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#;
+        const FIELDS: &[Field] = &[
+            Field {
+                name: abi_str(H_PROTOCOL_VERSION),
+                value: abi_str(PROTOCOL_VERSION),
+            },
+            Field {
+                name: abi_str(H_MCP_METHOD),
+                value: abi_str("subscriptions/listen"),
+            },
+        ];
+        let route = ROUTES
+            .iter()
+            .position(|&(v, t, _)| v == "POST" && t == "/mcp")
+            .expect("the door routes it");
+        let mut a: Frame<ArriveIn, ArriveOut> = Frame::new(z(), z());
+        (a.input.head, a.out.head) = (in_head(), out_head());
+        a.input.unit = unit;
+        a.input.claim = u32::try_from(route).expect("a small table");
+        (a.input.method, a.input.target) = (text(b"POST"), text(b"/mcp"));
+        a.input.body = octets(LISTEN);
+        (a.input.fields, a.input.fields_len) = (FIELDS.as_ptr(), FIELDS.len());
+        assert_eq!(
+            p.call(slot::ARRIVE, &mut a).outcome,
+            Outcome::Ready,
+            "arrive listen"
+        );
+    }
+
+    /// A HOST WITH A CLOCK: the shared services double, serving `clock.now` (a subscription is
+    /// timed on it) and nothing else.
+    struct Clocked;
+
+    impl busbar_contract::services::double::ServicesDouble for Clocked {
+        fn now(&self) -> busbar_contract::services::Reading {
+            busbar_contract::services::Reading {
+                wall_ns: 1_800_000_000_000_000_000,
+                mono_ns: 1_000_000_000,
+            }
+        }
+    }
+
+    /// A dispatcher whose host serves a clock.
+    fn clocked() -> Dispatcher {
+        Dispatcher::with_services(DispatchConfig::default(), Arc::new(Clocked))
+    }
+
+    /// One caller opening its quota's worth of subscriptions, plus one, cuts off no other caller's
+    /// stream: the extra one is refused, in the caller's own answer.
+    #[test]
+    fn a_caller_at_its_subscription_quota_is_refused_and_evicts_no_other_caller() {
+        const QUOTA: u64 = 64;
+        let d = clocked();
+        let p = started(&d);
+        // Streams are opened through a one-byte reply buffer, so each stays held, its head part
+        // written.
+        let open = |unit: u64, caller: &'static str, cap: usize| {
+            arrive_listen(&p, unit);
+            push(&p, (unit, FROM_CALLER, 0), (unit, caller), cap)
+        };
+        open(1, "caller-b", 1);
+        for unit in 100..100 + QUOTA {
+            assert_eq!(open(unit, "caller-a", 1).outcome, Outcome::Ready);
+        }
+        let over = open(100 + QUOTA, "caller-a", 1 << 16);
+        assert_eq!(
+            over.status, 429,
+            "the caller's extra subscription is refused"
+        );
+        assert!(
+            String::from_utf8_lossy(&over.reply).contains("subscription_quota"),
+            "the refusal names its reason"
+        );
+        let b = push(&p, (1, FROM_CALLER, 0), (1, "caller-b"), 1 << 16);
+        assert_eq!(
+            b.outcome,
+            Outcome::Ready,
+            "caller B's stream survives caller A"
+        );
+        assert!(
+            !b.reply.is_empty(),
+            "caller B's stream still has its frame to write"
+        );
+    }
+
+    /// FAIL CLOSED ON THE CLOCK (row 159 finding P-M4): on a host whose clock is unbound, a
+    /// subscription is refused `503` in its caller's own answer, never opened at the epoch.
+    #[test]
+    fn a_subscription_on_a_host_whose_clock_is_unbound_is_refused() {
+        let d = Dispatcher::new(DispatchConfig::default());
+        let p = started(&d);
+        arrive_listen(&p, 1);
+        let refused = push(&p, (1, FROM_CALLER, 0), (1, "caller-a"), 1 << 16);
+        assert_eq!(
+            refused.status,
+            503,
+            "a subscription the clock cannot time is refused: {}",
+            String::from_utf8_lossy(&refused.reply)
+        );
+    }
+
+    /// A `tools/list` of `unit` arrives: its outcome and the status the plane refused it with.
+    fn arrival(p: &Plugin<Plane>, unit: u64) -> (Outcome, u32) {
+        let route = ROUTES
+            .iter()
+            .position(|&(v, t, _)| v == "POST" && t == "/mcp")
+            .expect("the door routes it");
+        let mut a: Frame<ArriveIn, ArriveOut> = Frame::new(z(), z());
+        (a.input.head, a.out.head) = (in_head(), out_head());
+        a.input.unit = unit;
+        a.input.claim = u32::try_from(route).expect("a small table");
+        (a.input.method, a.input.target) = (text(b"POST"), text(b"/mcp"));
+        a.input.body = octets(TOOLS_LIST);
+        (a.input.fields, a.input.fields_len) = (LIST_FIELDS.as_ptr(), LIST_FIELDS.len());
+        let outcome = p.call(slot::ARRIVE, &mut a).outcome;
+        (outcome, a.out.refusal_status)
+    }
+
+    /// A full unit table refuses the next arrival (429) and never evicts: the first unit is still
+    /// held and still answers.
+    #[test]
+    fn a_full_unit_table_refuses_the_next_arrival_and_evicts_nothing() {
+        let d = Dispatcher::new(DispatchConfig::default());
+        let p = started(&d);
+        let mut first_refused = None;
+        for unit in 1..=5000 {
+            if arrival(&p, unit) != (Outcome::Ready, 0) && first_refused.is_none() {
+                first_refused = Some((unit, arrival(&p, unit)));
+            }
+        }
+        assert_eq!(
+            first_refused,
+            Some((4097, (Outcome::Refused, 429))),
+            "the arrival past the cap"
+        );
+        assert_eq!(
+            piece(&p, 1, FROM_CALLER),
+            Outcome::Ready,
+            "the first unit was evicted to make room"
         );
     }
 }

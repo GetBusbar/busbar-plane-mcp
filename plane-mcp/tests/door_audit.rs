@@ -8,6 +8,13 @@
 //!
 //! The host and its upstreams are the stand-ins `sessions.rs` drives the door under, with a clock
 //! that can be made to fail and one upstream that is down.
+//!
+//! This suite drives the door over its C ABI with a host it stands up itself, so it needs
+//! `unsafe`, and it reaches the crate through `door` alone (the crate's only public item). The
+//! route table it claims against is spelled below and pinned to the crate's own in
+//! `src/tests/door_facts_tests.rs`.
+//! Its two pure checks (a name the routing key cannot spell, and the event stream carrying the
+//! answer's own bytes) read crate functions and moved to `src/tests/door_facts_tests.rs`.
 
 #![allow(unsafe_code, dead_code)]
 
@@ -16,7 +23,6 @@ use std::os::raw::c_void;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use crate::{door, tool_door};
 use busbar_contract::abi::host::conn::connector::{
     ConnectorSlots, EstablishIn, ReplyIn, ReplyPiece, RequestIn, RequestPiece, StreamIn,
     REPLY_BODY, REPLY_END, REPLY_HEAD, REQUEST_BODY, REQUEST_HEAD, SERVICES as CONN_SERVICES,
@@ -39,6 +45,7 @@ use busbar_contract::abi::plane::{
     PIECE_LAST, RECORD_AUDIT,
 };
 use busbar_contract::abi::transport::FrameSpan;
+use busbar_plane_mcp::door;
 use serde_json::{json, Value};
 
 // ── the host's services ─────────────────────────────────────────────────────────────────────────
@@ -51,7 +58,14 @@ fn answer(out: *mut ServiceOut, outcome: Outcome, value: u64, len: u64) -> RawOu
             outcome: RawOutcome::of(outcome),
             value,
             len,
-            ..ServiceOut::ZERO
+            _reserved: [0; 3],
+            items: 0,
+            needed_bytes: 0,
+            needed_items: 0,
+            error: AbiStr {
+                ptr: std::ptr::null(),
+                len: 0,
+            },
         });
     }
     RawOutcome::of(outcome)
@@ -667,7 +681,7 @@ fn out_head<T>() -> OutHead {
 
 fn ops() -> &'static Ops {
     // SAFETY: the door is a `'static` table whose ops are the plane kind's.
-    unsafe { &*(*tool_door::door()).ops.cast::<Ops>() }
+    unsafe { &*(*door()).ops.cast::<Ops>() }
 }
 
 fn lifecycle() -> &'static OpsHead {
@@ -737,10 +751,26 @@ struct Arrived {
     refusal_status: u32,
 }
 
+/// THE DOOR'S ROUTE TABLE, `(verb, target, carrier)` in claim order: the claim an arrival carries is
+/// its row's index. Spelled here because this test reaches the door and nothing else; the logic
+/// crate pins it to its own table (`src/tests/door_facts_tests.rs`).
+const ROUTES: &[(&str, &str, &str)] = &[
+    ("GET", "/.well-known/oauth-protected-resource/mcp", "http"),
+    ("POST", "/mcp", "http"),
+    ("GET", "/mcp", "http"),
+    ("DELETE", "/mcp", "http"),
+    ("POST", "/mcp", "sse"),
+    ("POST", "/mcp/tasks/run", "http"),
+    ("POST", "/mcp", "stdio"),
+];
+
+/// The line carrier's route: the row of [`ROUTES`] on the `stdio` carrier.
+const LINE_ROUTE: usize = 6;
+
 fn claim(verb: &str) -> u32 {
-    let i = door::ROUTES
+    let i = ROUTES
         .iter()
-        .position(|r| r.verb == verb && r.target == "/mcp" && r.carrier == "http")
+        .position(|&(v, t, c)| v == verb && t == "/mcp" && c == "http")
         .expect("the door routes it");
     u32::try_from(i).unwrap()
 }
@@ -1242,13 +1272,13 @@ impl Door {
             name: str_of(busbar_contract::abi::host::service::CARRIER_SESSION_FIELD),
             value: str_of(&session),
         }];
-        let route = &door::ROUTES[door::LINE_ROUTE];
+        let route = ROUTES[LINE_ROUTE];
         let mut i: ArriveIn = z();
         i.head = head::<ArriveIn>(slot::ARRIVE, Ticket::NONE);
         i.unit = unit;
-        i.claim = u32::try_from(door::LINE_ROUTE).unwrap();
-        i.target = str_of(route.target);
-        i.method = str_of(route.verb);
+        i.claim = u32::try_from(LINE_ROUTE).unwrap();
+        i.target = str_of(route.1);
+        i.method = str_of(route.0);
         i.body = octets(body);
         (i.fields, i.fields_len) = (fields.as_ptr(), fields.len());
         let mut units = [z::<UnitCount>(); 8];
@@ -1477,63 +1507,6 @@ fn a_line_refused_at_the_unit_cap_moves_nothing_on_its_session() {
         after.outcome,
         Outcome::Refused,
         "the refused `initialize` kept no revision for session 9: {after:?}"
-    );
-}
-
-// ── P-M11: a name the routing key cannot spell ──────────────────────────────────────────────────
-
-/// RED P-M11: A SERVER ID OR A `tools_allow` NAME THE ROUTING KEY CANNOT SPELL IS REFUSED AT
-/// VALIDATE, in words naming it; never accepted and then silently undispatchable.
-#[test]
-fn a_name_the_routing_key_cannot_spell_is_refused_at_validate() {
-    let tool = br#"{"st": {"url": "https://up.example/st", "pin": {"mechanism": "unpinned"}, "tools_allow": {"read file": {}}}}"#;
-    let refused = door::read_tools_section(tool).expect_err("a tool name with a space");
-    assert!(
-        refused.contains("`tools.st`") && refused.contains("read file"),
-        "{refused}"
-    );
-    let server = br#"{"s+t": {"url": "https://up.example/st", "pin": {"mechanism": "unpinned"}, "tools_allow": {"read_file": {}}}}"#;
-    let refused = door::read_tools_section(server).expect_err("a server id with a `+`");
-    assert!(refused.contains("s+t"), "{refused}");
-    let fine = br#"{"st": {"url": "https://up.example/st", "pin": {"mechanism": "unpinned"}, "tools_allow": {"read_file.v2-x": {}}}}"#;
-    assert!(door::read_tools_section(fine).is_ok());
-}
-
-// ── A-M2: the event stream carries the answer's own bytes ─────────────────────────────────────
-
-/// The `data` of the stream's last event, its `data:` lines joined back with `\n` as a client
-/// joins them.
-fn last_data(bytes: &[u8]) -> String {
-    let text = String::from_utf8(bytes.to_vec()).expect("an event stream is text");
-    let last = text
-        .trim_end_matches('\n')
-        .rsplit("\n\n")
-        .next()
-        .expect("an event");
-    last.lines()
-        .filter_map(|l| l.strip_prefix("data: "))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// RED A-M2: THE STREAM CARRIES THE ANSWER'S OWN BYTES (Law 11): its members in the upstream's
-/// order, its numbers as the upstream spelled them (an integer past 64 bits, a float's exponent),
-/// and its line breaks as `data:` lines a client joins back. Never parsed and printed again.
-#[test]
-fn the_stream_carries_the_answers_own_bytes() {
-    let body = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-        "params": {"name": "fs_read", "_meta": {"progressToken": "p"}}});
-    let framing =
-        crate::framing::Framing::of(Some(crate::framing::EVENT_STREAM), "tools/call", &body)
-            .expect("framed");
-    let answer = b"{\"jsonrpc\":\"2.0\",\"id\":1,\n  \"result\":{\"zeta\":123456789012345678901234567890,\n  \"alpha\":1.0e0,\"content\":[]}}".to_vec();
-    let (bytes, framed) = framing.frame(200, answer.clone(), &[]);
-    assert!(framed);
-    assert_eq!(
-        last_data(&bytes),
-        String::from_utf8(answer).unwrap(),
-        "the answer's own bytes, line for line: {}",
-        String::from_utf8_lossy(&bytes)
     );
 }
 

@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
+//! NOT WIRED: this module is not declared in `src/tests/mod.rs`, so it does not compile or run. It
+//! calls the door's own `decide_ask` and `seal_relayed` with a host whose clock, signer and random
+//! fill are `extern "C"` stubs: it needs the crate's internals and `unsafe` both. The crate keeps
+//! the literal `#![forbid(unsafe_code)]` (ARCHITECT addendum 2026-10-21 08:30Z), which a test
+//! module cannot lift, and an integration test cannot reach those functions.
+//!
 //! A sealed state's window is judged at a time the host's clock gave: a host whose `clock.now`
 //! fails refuses the state (busbar's own and a relayed one) and mints none, and never reads the
 //! failure as the epoch (BUSBAR-1.6.0 spec line 1576: the clock is the kernel's one clock; line
