@@ -362,6 +362,9 @@ fn upstream_answer(url: &str, fields: &[(String, String)], body: &Value) -> Repl
                     json!({"content": [{"type": "text", "text": "stateless"}], "resultType": "complete"}),
                 ),
             ),
+            "resources/subscribe" | "resources/unsubscribe" => {
+                (200, json_head(), rpc_result(&id, json!({})))
+            }
             _ => (404, Vec::new(), b"no such method".to_vec()),
         };
     }
@@ -1598,7 +1601,7 @@ fn a_session_subscription_hears_the_upstreams_resource_update() {
         d.arrive(61, "POST", "/mcp", subscribe, &in_session).outcome,
         Outcome::Ready
     );
-    let subscribed = d.piece(61, &Given::caller(ALICE, subscribe));
+    let subscribed = d.settle(61, &Given::caller(ALICE, subscribe));
     assert_eq!(subscribed.status, 200, "{}", subscribed.text());
     assert_eq!(subscribed.json()["result"], json!({}));
 
@@ -2595,4 +2598,94 @@ fn a_legacy_session_ends_with_its_stream() {
     );
     let posted = d.piece(153, &Given::caller(ALICE, list));
     assert_eq!(posted.status, 404, "{}", posted.text());
+}
+
+/// The resource subscriptions busbar sent an upstream: `(method, uri)`, in order.
+fn subscriptions_seen() -> Vec<(String, String)> {
+    seen()
+        .into_iter()
+        .filter_map(|s| {
+            let method = s.body["method"].as_str()?.to_string();
+            method.starts_with("resources/").then(|| {
+                (
+                    method,
+                    s.body["params"]["uri"].as_str().unwrap_or("").to_string(),
+                )
+            })
+        })
+        .collect()
+}
+
+/// RED: A RESOURCE SUBSCRIPTION DELIVERS: the uri's first subscriber in a session revision has
+/// busbar send `resources/subscribe` to the member that declares it; a second subscriber sends
+/// nothing more; the last unsubscribe sends `resources/unsubscribe`. RED: the subscription was
+/// acknowledged and recorded, and no upstream was ever asked to send its updates.
+#[test]
+fn a_subscription_subscribes_the_declaring_member_upstream() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open();
+    let in_session = |unit: u64, caller: &str, body: &[u8]| {
+        let session = initialize(&d, unit, caller)
+            .field("mcp-session-id")
+            .expect("the answer names its session")
+            .to_string();
+        let fields = [
+            ACCEPT_BOTH,
+            ("mcp-session-id", session.as_str()),
+            ("mcp-protocol-version", "2025-06-18"),
+        ];
+        assert_eq!(
+            d.arrive(unit + 1, "POST", "/mcp", body, &fields).outcome,
+            Outcome::Ready
+        );
+        let answered = d.settle(unit + 1, &Given::caller(caller, body));
+        (session, answered)
+    };
+    let subscribe =
+        br#"{"jsonrpc":"2.0","id":3,"method":"resources/subscribe","params":{"uri":"file:///readme"}}"#;
+    let unsubscribe =
+        br#"{"jsonrpc":"2.0","id":4,"method":"resources/unsubscribe","params":{"uri":"file:///readme"}}"#;
+    let (alice, answered) = in_session(160, ALICE, subscribe);
+    assert_eq!(answered.status, 200, "{}", answered.text());
+    assert_eq!(answered.json()["result"], json!({}), "{}", answered.text());
+    assert_eq!(
+        subscriptions_seen(),
+        [(
+            "resources/subscribe".to_string(),
+            "file:///readme".to_string()
+        )],
+        "the declaring member is asked for the uri's updates"
+    );
+    let (bob, answered) = in_session(162, BOB, subscribe);
+    assert_eq!(answered.json()["result"], json!({}), "{}", answered.text());
+    assert_eq!(
+        subscriptions_seen().len(),
+        1,
+        "one upstream subscription serves both"
+    );
+
+    let drop_in = |unit: u64, session: &str, caller: &str| {
+        let fields = [
+            ACCEPT_BOTH,
+            ("mcp-session-id", session),
+            ("mcp-protocol-version", "2025-06-18"),
+        ];
+        assert_eq!(
+            d.arrive(unit, "POST", "/mcp", unsubscribe, &fields).outcome,
+            Outcome::Ready
+        );
+        d.settle(unit, &Given::caller(caller, unsubscribe))
+    };
+    assert_eq!(drop_in(164, &alice, ALICE).json()["result"], json!({}));
+    assert_eq!(subscriptions_seen().len(), 1, "bob still watches it");
+    assert_eq!(drop_in(165, &bob, BOB).json()["result"], json!({}));
+    assert_eq!(
+        subscriptions_seen().last(),
+        Some(&(
+            "resources/unsubscribe".to_string(),
+            "file:///readme".to_string()
+        )),
+        "the last subscriber gone, the member is told"
+    );
 }
