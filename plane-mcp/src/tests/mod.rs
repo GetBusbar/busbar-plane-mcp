@@ -23,10 +23,18 @@ mod battery_vocabulary_tests;
 mod declarations_agree_tests;
 /// The approval digest, pinned (`tests/digest_pin.rs`).
 mod digest_pin_tests;
+/// A sealed state's window judged at the host clock's time: a clock that fails refuses
+/// (`decide_ask`, `seal_relayed` over a host that is a value).
+mod door_clock_tests;
 /// The door's facts the door-driven tests restate (`tests/support/door_facts.rs`), held to the
 /// crate's own items, and those tests' pure checks.
 mod door_facts_tests;
 /// The stdio client leg against busbar's method inventory (`tests/method_inventory.rs`).
 mod method_inventory_tests;
+/// The door's own exchanges with a stdio child (`ProgramExchange` over a child that is a value).
+mod program_tests;
+/// The relayed call is the request and the answer the plane's own builders say (the linked door
+/// driven through the loader).
+mod relayed_call_tests;
 /// The sanitiser's complexity guards (`tests/sanitize_complexity.rs`).
 mod sanitize_complexity_tests;

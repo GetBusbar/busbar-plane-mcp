@@ -1420,6 +1420,28 @@ impl DoorSeal<'_> {
     }
 }
 
+/// THE HOST A SEALED STATE IS MINTED AND JUDGED AGAINST: its signature and its wall clock, beside
+/// the [`crate::ask::Seal`] that mints, opens, draws nonces and spends approvals. The door's is
+/// [`DoorSeal`], over the host's services; the ask decision and the relayed state's seal take any,
+/// so their logic is tested in the crate over a host that is a plain Rust value (a clock that fails
+/// is a `None` there, as it is here).
+pub trait SealHost: crate::ask::Seal {
+    /// The host's signature of `data`; `None` when it signs none.
+    fn sign(&mut self, data: &[u8]) -> Option<Vec<u8>>;
+    /// The kernel's wall clock, in Unix seconds; `None` when it cannot be read.
+    fn now(&mut self) -> Option<u64>;
+}
+
+impl SealHost for DoorSeal<'_> {
+    fn sign(&mut self, data: &[u8]) -> Option<Vec<u8>> {
+        DoorSeal::sign(self, data)
+    }
+
+    fn now(&mut self) -> Option<u64> {
+        DoorSeal::now(self)
+    }
+}
+
 impl crate::ask::Seal for DoorSeal<'_> {
     fn mint(&mut self, state: &crate::ask::AskState) -> Option<String> {
         crate::seal::seal_state(state, &mut |data| self.sign(data))
@@ -2315,12 +2337,12 @@ pub struct Site<'a> {
 /// host services) or a host that signs nothing is a deployment with no sealer, and a capability that
 /// asks its caller is refused as one with no signing key refuses it.
 #[doc(hidden)]
-pub fn decide_ask(
+pub fn decide_ask<S: SealHost>(
     held: &Held,
     site: Site<'_>,
     params: Option<&Value>,
     arguments: &Value,
-    seal: Option<&mut DoorSeal<'_>>,
+    seal: Option<&mut S>,
 ) -> AskDecision {
     let cap = held
         .section
@@ -2346,7 +2368,7 @@ pub fn decide_ask(
     }
     // A state's window is stamped and judged at a time the host's clock gave: a clock that fails
     // refuses (never the epoch), in words that name the clock and not the signing key.
-    let now = match seal.as_deref_mut().map(DoorSeal::now) {
+    let now = match seal.as_deref_mut().map(SealHost::now) {
         Some(None) if !site.rounds.is_empty() || retry.state.is_some() => {
             return AskDecision::Refuse(crate::ask::AskRefusal::ClockUnavailable {
                 capability: site.capability.to_string(),
@@ -2587,8 +2609,8 @@ pub const CLOCK_UNAVAILABLE: &str = "the host's clock could not be read, so the 
 ///
 /// `Unavailable` naming the clock when it cannot be read, `NoSealer` when the state cannot be signed.
 #[doc(hidden)]
-pub fn seal_relayed<'b>(
-    seal: &mut DoorSeal<'_>,
+pub fn seal_relayed<'b, S: SealHost>(
+    seal: &mut S,
     server: &str,
     bind: impl FnOnce(u64) -> crate::ask::Bind<'b>,
     digest: &str,
