@@ -48,6 +48,7 @@ impl ResourceUpdatedParam {
 /// `pub` for the same reason [`PROTOCOL_VERSION`] is: `busbar-plane-mcp` declares its transport
 /// claims against this path and may not name the server half, so it reads the value here. A path
 /// the plane copied instead of read is a plane claiming a route nothing is served at.
+#[cfg(test)]
 pub const PATH_MCP: &str = "/mcp";
 
 /// THE PREFIX THE PROTECTED-RESOURCE METADATA DOCUMENT IS SERVED UNDER (RFC 9728).
@@ -96,10 +97,6 @@ pub const PROTOCOL_VERSION: &str = "2026-07-28";
 /// `pub(crate)` because that assertion is now a cross-crate read.
 /// Invoke a tool by name, with arguments.
 pub const METHOD_TOOLS_CALL: &str = "tools/call";
-/// Register interest in a resource's changes.
-pub const METHOD_RESOURCES_SUBSCRIBE: &str = "resources/subscribe";
-/// Withdraw that interest.
-pub const METHOD_RESOURCES_UNSUBSCRIBE: &str = "resources/unsubscribe";
 /// The server's notice that its tool list is no longer what it was.
 pub const METHOD_NOTIFY_TOOLS_LIST_CHANGED: &str = "notifications/tools/list_changed";
 /// The server's notice that a subscribed resource changed.

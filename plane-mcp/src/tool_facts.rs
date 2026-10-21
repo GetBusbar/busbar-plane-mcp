@@ -7,9 +7,6 @@
 use busbar_contract::bounded::PlaneAlloc;
 use busbar_contract::ids::{CorrelationRef, CorrelationValue};
 
-/// The method name the request carried, exactly as it was spelled.
-pub const FACT_METHOD: &str = "method";
-
 /// The request identifier, as the raw bytes it arrived as.
 ///
 /// This is also the correlation's declared key. The bytes are kept as well as the reference because
@@ -34,9 +31,6 @@ pub const FACT_IS_ERROR: &str = "is_error";
 /// The protocol-level error code the answer carried, where it carried one.
 pub const FACT_ERROR_CODE: &str = "error_code";
 
-/// The token a caller asked progress to be reported under.
-pub const FACT_PROGRESS_TOKEN: &str = "progress_token";
-
 /// The session fact keys this plane writes.
 ///
 /// The revision and the server are session facts because a session that changed either mid-flight
@@ -56,9 +50,6 @@ pub const CONTENT_FACTS: &[&str] = &[
     FACT_ERROR_CODE,
 ];
 
-/// The member every modern request of this protocol carries its own metadata under.
-pub const META_MEMBER: &str = "_meta";
-
 // THE TWO `_meta` KEYS ARE THE DIALECT'S, AND THERE IS ONE OF EACH. Same reasoning as the error
 // codes in `jsonrpc`: restated here while the dialect lived one crate away, re-exported now that it
 // does not. A key spelled twice in one crate is a key that can come to differ in one of them.
@@ -74,10 +65,12 @@ pub const META_PROGRESS_TOKEN: &str = "progressToken";
 /// metadata block — spends a heap allocation to spell out something that was known when the crate
 /// was compiled. The pair below is checked against the unquoted names by a test in this module, so
 /// the two spellings cannot drift apart without the drift being said out loud.
+#[cfg(test)]
 pub const META_PROTOCOL_VERSION_QUOTED: &[u8] = b"\"io.modelcontextprotocol/protocolVersion\"";
 
 /// The progress-token key as it appears on the wire, quoted. See
 /// [`META_PROTOCOL_VERSION_QUOTED`].
+#[cfg(test)]
 pub const META_PROGRESS_TOKEN_QUOTED: &[u8] = b"\"progressToken\"";
 
 /// The correlation reference for one request identifier.
@@ -97,6 +90,7 @@ pub const META_PROGRESS_TOKEN_QUOTED: &[u8] = b"\"progressToken\"";
 /// Answers nothing when the arena is full or the identifier is not text: a correlation that cannot
 /// be carried honestly is better absent than approximated.
 #[must_use]
+#[cfg(test)]
 pub fn correlation_for<'u>(raw_id: &[u8], arena: &'u dyn PlaneAlloc) -> Option<CorrelationRef<'u>> {
     Some(CorrelationRef {
         fact_key: FACT_RPC_ID,

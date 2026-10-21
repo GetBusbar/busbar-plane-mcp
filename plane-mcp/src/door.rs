@@ -647,6 +647,7 @@ pub fn read_open(
 /// absolute URI) and its protected-resource metadata document, and it claims its routes. Without
 /// one it claims nothing: a plane with no public base has no audience a token could name.
 #[must_use]
+#[cfg(test)]
 pub fn endpoint_snapshot_spec(public_url: Option<&str>) -> SnapshotSpec {
     snapshot_spec_for(public_url.map(under_public_url))
 }

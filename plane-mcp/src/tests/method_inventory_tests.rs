@@ -5,15 +5,16 @@
 //! (generated from rmcp's own model) at the pin this repo names, read from `BUSBAR_CHECKOUT` (a
 //! checkout of GetBusbar/busbar at `.busbar-ref`, which plugin-ci exports). Both tests moved here
 //! from `src/client/tests/{verb,peer}_tests.rs`, where they compiled the inventory in from busbar's
-//! tree; the plane's source performs no input or output (tests/purity.rs), so the read is here.
+//! tree; the plane's shipped source performs no input or output (tests/purity.rs), so the read is
+//! in this test module (moved in from `tests/` when the crate's only public item became `door`).
 //!
 //! * `the_issued_set_is_exactly_the_inventory_column`: `UpstreamVerb::all` is the inventory's
 //!   `mcp|stdio|client|client` column, in BOTH directions.
 //! * `every_server_originated_method_in_the_inventory_is_classified`: every
 //!   `mcp|stdio|client|server` method is recognised by the classifier in one of its shapes.
 
-use busbar_plane_mcp::client::peer::{classify, ServerMessage};
-use busbar_plane_mcp::client::verb::UpstreamVerb;
+use crate::client::peer::{classify, ServerMessage};
+use crate::client::verb::UpstreamVerb;
 
 /// busbar's `qa/method-inventory.json` at the pin. An unset variable is a failure, never a skip.
 fn inventory() -> String {

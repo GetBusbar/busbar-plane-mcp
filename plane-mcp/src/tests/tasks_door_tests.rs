@@ -26,6 +26,8 @@ use std::os::raw::c_void;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
+use crate::tool_tasks::{index_key, TaskLease, WorkRow};
+use crate::{codec, door, tool_claims, tool_door, tool_tasks};
 use busbar_contract::abi::host::conn::connector::{
     ConnectorSlots, EstablishIn, ReplyIn, ReplyPiece, RequestIn, RequestPiece, StreamIn,
     REPLY_BODY, REPLY_END, REPLY_HEAD, REQUEST_BODY, REQUEST_HEAD, SERVICES as CONN_SERVICES,
@@ -47,8 +49,6 @@ use busbar_contract::abi::plane::{
     PIECE_HAS_STATUS, PIECE_LAST, RECORD_PUT,
 };
 use busbar_contract::abi::transport::FrameSpan;
-use busbar_plane_mcp::tool_tasks::{index_key, TaskLease, WorkRow};
-use busbar_plane_mcp::{codec, door, tool_claims, tool_door, tool_tasks};
 use serde_json::{json, Value};
 
 // ── the host's services ─────────────────────────────────────────────────────────────────────────
@@ -1353,10 +1353,10 @@ fn a_create_settles_every_page_of_its_callers_left_behind_tasks() {
 // ── C-H1: the answers to a task's own rounds ────────────────────────────────────────────────────
 
 /// An ask, built the one way a `CallerAsk` can be built: from an operator-written config entry.
-fn elicitation(key: &str) -> busbar_plane_mcp::ask::CallerAsk {
-    busbar_plane_mcp::ask::CallerAsk::from_config(
+fn elicitation(key: &str) -> crate::ask::CallerAsk {
+    crate::ask::CallerAsk::from_config(
         key,
-        &busbar_plane_mcp::tools_config::AskEntryCfg {
+        &crate::tools_config::AskEntryCfg {
             method: "elicitation/create".into(),
             params: Some(json!({})),
         },

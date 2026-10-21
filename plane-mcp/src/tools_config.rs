@@ -168,21 +168,9 @@ impl McpPinMechanism {
     /// question the kernel's `busbar_kernel::trust::declared` asks of a mechanism, so the reader that builds the
     /// artifact and the refusal that fires at boot cannot come to disagree about what "rooted"
     /// means.
+    #[cfg(test)]
     pub fn is_a_root(self) -> bool {
         !matches!(self, McpPinMechanism::Unpinned)
-    }
-
-    /// Can an MCP hop independently attest a pin declared under `token`? True for the two
-    /// mechanisms pinned on the peer certificate's key (the certificate-key pin and the
-    /// client-certificate binding); `pinned_pubkey` names an MCP-native manifest signature this
-    /// build does not verify and `unpinned` has no root, so neither has an observation source.
-    pub fn observes_the_peer_certificate(token: &str) -> bool {
-        [
-            McpPinMechanism::CertSpki,
-            McpPinMechanism::ClientCertBinding,
-        ]
-        .iter()
-        .any(|m| m.token() == token)
     }
 
     /// The config token, for diagnostics. Deliberately the same string `serde` accepts.

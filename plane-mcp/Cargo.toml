@@ -72,4 +72,8 @@ url = { workspace = true }
 # The TEST-ONLY seal (#65). `busbar_contract::plugin::TestKernelSeal` is the one blessed
 # fixture implementor of the SEALED `KernelSeal` trait; this crate's test harnesses used to
 # forge their own. Dev-only and feature-gated, so it is absent from every release build.
-busbar-contract = { workspace = true, features = ["test-seal"] }
+busbar-contract = { workspace = true, features = ["test-seal", "services-double"] }
+# THE LOADER, TEST-ONLY: the door witness (`src/tests/door_witness_tests.rs`, moved in from the plugin
+# crate when this crate's only public item became `door`) admits the linked door through the one
+# loader, as busbar does, and drives it op by op.
+busbar-plugin-loader = { workspace = true }

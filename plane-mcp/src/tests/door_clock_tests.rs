@@ -17,13 +17,13 @@ use busbar_contract::abi::mechanism::call::{RawOutcome, Span};
 use busbar_contract::abi::mechanism::ticket::{HostCtx, HostTables};
 use serde_json::json;
 
+use crate::ask::{self as ask, AskDecision, AskRefusal, Rejected, UpstreamLeg};
+use crate::tool_door::{decide_ask, DoorSeal, Held, Site};
+use crate::{codec, door, tools_config};
 use busbar_contract::abi::mechanism::call::Outcome;
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::publish::Keyed;
 use busbar_contract::abi::sdk::Services;
-use busbar_plane_mcp::ask::{self as ask, AskDecision, AskRefusal, Rejected, UpstreamLeg};
-use busbar_plane_mcp::tool_door::{decide_ask, DoorSeal, Held, Site};
-use busbar_plane_mcp::{codec, door, tools_config};
 use serde_json::Value;
 
 fn answered(out: *mut ServiceOut, len: u64, items: u64) -> RawOutcome {
@@ -277,7 +277,7 @@ fn a_relayed_state_is_refused_when_the_clock_fails() {
 }
 
 /// A relayed state's seal under the failing clock: the refusal and the words the caller reads.
-fn relayed_under_failed_clock(ttl_secs: u64) -> busbar_plane_mcp::call::AskRefusal {
+fn relayed_under_failed_clock(ttl_secs: u64) -> crate::call::AskRefusal {
     let spent = Keyed::new();
     let leg = UpstreamLeg {
         member: "fs".into(),
@@ -295,7 +295,7 @@ fn relayed_under_failed_clock(ttl_secs: u64) -> busbar_plane_mcp::call::AskRefus
         roots_epoch: 0,
     };
     with_seal(&FAILS, &spent, |seal| {
-        busbar_plane_mcp::tool_door::seal_relayed(seal, "fs", bind, "d", leg, ttl_secs)
+        crate::tool_door::seal_relayed(seal, "fs", bind, "d", leg, ttl_secs)
     })
     .expect_err("a state is never sealed at a time that was not read")
 }
@@ -309,7 +309,7 @@ fn a_relayed_ask_under_a_failed_clock_is_refused_naming_the_clock() {
     assert!(
         refusal
             .to_string()
-            .contains(busbar_plane_mcp::tool_door::CLOCK_UNAVAILABLE),
+            .contains(crate::tool_door::CLOCK_UNAVAILABLE),
         "{refusal}"
     );
 }
@@ -317,12 +317,12 @@ fn a_relayed_ask_under_a_failed_clock_is_refused_naming_the_clock() {
 /// A task parked on its caller's answer (the task relay's window) refuses the same way.
 #[test]
 fn a_task_relay_under_a_failed_clock_is_refused_naming_the_clock() {
-    let refusal = relayed_under_failed_clock(busbar_plane_mcp::tool_tasks::TASK_RELAY_TTL_SECS);
+    let refusal = relayed_under_failed_clock(crate::tool_tasks::TASK_RELAY_TTL_SECS);
     assert_eq!(refusal.audit_reason(), "ask_unavailable");
     assert!(
         refusal
             .to_string()
-            .contains(busbar_plane_mcp::tool_door::CLOCK_UNAVAILABLE),
+            .contains(crate::tool_door::CLOCK_UNAVAILABLE),
         "{refusal}"
     );
 }

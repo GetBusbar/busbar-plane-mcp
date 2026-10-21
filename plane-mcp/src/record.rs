@@ -58,11 +58,6 @@ impl McpCallRecord {
     // shape the actual reader (`from_journal_body`) cannot parse — a footgun, so it does not exist.
     // The plane owns only the READ-BACK of what the engine wrote.
 
-    /// The list selector that reads one principal's `call` chain back, oldest-first.
-    pub fn parent_selector(principal: &str) -> PlaneSelector<'_> {
-        PlaneSelector::Parent(principal.into())
-    }
-
     /// Reconstruct a record from an opaque serde `call` body — the inverse of a plain `serde_json`
     /// serialization of this struct. NOT the engine's persisted shape (that is the neutral journal
     /// body — see [`Self::from_journal_body`]); this decodes a bare `McpCallRecord` where one is held.
@@ -79,6 +74,7 @@ impl McpCallRecord {
     /// `request_id` is a join key: never in the digest, so never in the neutral content, and it comes
     /// back EMPTY. The rebuilt fields feed the same digest byte stream the stored `hash` sealed, so a
     /// chain read back through this verifies byte-identically.
+    #[cfg(test)]
     pub fn from_journal_body(principal: &str, body: &[u8]) -> RecordStoreResult<Self> {
         // The neutral envelope, decoded structurally (matching field names) so this names no core type.
         #[derive(serde::Deserialize)]
@@ -226,6 +222,7 @@ pub struct McpDemotionRow {
 impl McpDemotionRow {
     /// Serialize this row into the opaque `demotion` [`PlaneRecord`] envelope (kind `demotion`),
     /// keyed by its server. Demotions are never purged by age, so the disposition is left `Active`.
+    #[cfg(test)]
     pub fn to_plane_record(&self) -> RecordStoreResult<PlaneRecord> {
         Ok(PlaneRecord {
             kind: KIND_DEMOTION.to_string(),

@@ -13,6 +13,8 @@ use std::os::raw::c_void;
 use std::sync::Mutex;
 use std::task::Poll;
 
+use crate::client::jsonrpc::ServerRequestGrants;
+use crate::tool_program::{list_id, AskOwner, Exchanged, Peer, ProgramExchange};
 use busbar_contract::abi::host::conn::connector::{
     ConnectorSlots, EstablishIn, IoIn, ReplyIn, ReplyPiece, StreamIn, REPLY_BODY, REPLY_HEAD,
     SERVICES,
@@ -22,8 +24,6 @@ use busbar_contract::abi::mechanism::call::{Outcome, RawOutcome};
 use busbar_contract::abi::mechanism::ticket::{HostCtx, HostTables, Ticket};
 use busbar_contract::abi::sdk::conn::Host;
 use busbar_contract::abi::transport::FrameSpan;
-use busbar_plane_mcp::client::jsonrpc::ServerRequestGrants;
-use busbar_plane_mcp::tool_program::{list_id, AskOwner, Exchanged, Peer, ProgramExchange};
 use serde_json::{json, Value};
 
 /// THE STAND-IN CHILD: its generation, every message it received, the messages each open lease has
@@ -229,10 +229,10 @@ impl Peer for Door {
 /// A `tools/list` exchange with the member, under `id`, driven to its end.
 fn list(door: &mut Door, id: u64, ticket: u32) -> Exchanged {
     let host = host();
-    let request = busbar_plane_mcp::client::jsonrpc::tools_list("", id, None).body;
+    let request = crate::client::jsonrpc::tools_list("", id, None).body;
     let mut exchange = ProgramExchange::new(
         "srv",
-        busbar_plane_mcp::door::NEED_PROGRAM,
+        crate::door::NEED_PROGRAM,
         vec![(request, Some(id))],
         true,
     );

@@ -142,6 +142,7 @@ impl SessionId {
 /// The part of a session id that may be logged: its first eight characters, or nothing when the
 /// value is not a well-formed id at all (so a hostile header is never echoed into a log).
 #[must_use]
+#[cfg(test)]
 pub fn log_prefix(id: &str) -> &str {
     if id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()) {
         &id[..8]
@@ -420,6 +421,7 @@ impl SessionTable {
     }
 
     /// Whether `id` has seen `notifications/initialized`.
+    #[cfg(test)]
     pub fn is_initialized(&mut self, id: &str, owner: &Owner, now_ms: u64) -> bool {
         self.find(id, owner, now_ms).is_some_and(|s| s.initialized)
     }

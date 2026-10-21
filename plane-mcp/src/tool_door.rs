@@ -64,7 +64,7 @@ use crate::answer::Answer;
 use crate::ask::AskDecision;
 use crate::call::{Admission, AdmittedCall, Settled};
 use crate::catalogue::Catalogue;
-use crate::door;
+use crate::door::{self};
 use crate::framing::{
     Framing, CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE, EVENT_STREAM, JSON, NO_STORE,
 };
@@ -91,12 +91,26 @@ pub const STATEMENT: Statement = Statement {
     // ([`door_sessions::UNGOVERNED_LEGACY_STREAM`]).
     diag_ids: door_sessions::DIAG_IDS.as_ptr(),
     diag_ids_len: door_sessions::DIAG_IDS.len(),
+    extensions: EXTENSIONS,
     ..statement(crate::PLANE_KEY, VERSION, MAX_INFLIGHT)
 };
+
+busbar_contract::statement_extensions!(
+    /// The Statement's extensions: this plugin's whole `declares` document (BUSBAR-1.6.0.md l.246),
+    /// the one `declares.json` the release also signs into a dropped-in plane's manifest. It states
+    /// the plane's breaker fact (ARCHITECT Q4: one transient failure below the trip threshold never
+    /// benches a member, the 1.5.5 MCP client leg's posture), the codes its diagnostic catalog holds
+    /// ([`crate::diagnostics::DIAGNOSTICS`]; a test holds the two equal) and the carriers it needs.
+    EXTENSIONS: [(
+        busbar_contract::abi::mechanism::extensions::EXT_DECLARES,
+        include_bytes!("../declares.json")
+    )]
+);
 
 /// THE CLAIMS AXIS: the pure plane the boot seal registers under its key, and the bytes it claims,
 /// sealed against every other plane's so a tie is refused at boot (the transport each names must be
 /// registered).
+#[cfg(test)]
 pub const PLANE: crate::McpPlane = crate::McpPlane::EMPTY;
 /// The bytes [`PLANE`] claims.
 pub const CLAIMS: &[busbar_contract::grammar::Claim] =

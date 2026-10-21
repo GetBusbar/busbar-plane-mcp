@@ -190,22 +190,6 @@ impl fmt::Display for ToolKey {
     }
 }
 
-/// THE BOUND IDENTITY, all three components of it: the registered server, the namespaced tool, and
-/// the schema/description digest the operator approved.
-///
-/// Every one of the three is authenticated state — an id the operator registered, a name derived
-/// from it, and a digest the operator approved. None of them is free text an upstream chose the
-/// content of at refresh time. That is the whole property, and it is why this struct has no
-/// `description` field: a routing decision made over this value cannot read one.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BoundIdentity {
-    /// The routing key: the registered server and its tool.
-    pub key: ToolKey,
-    /// The approved `sha256:…` digest over the tool's name, description and input schema. Computed by the
-    /// engine's client catalogue (`tool_digest`).
-    pub digest: String,
-}
-
 #[cfg(test)]
 #[path = "tests/identity_tests.rs"]
 mod identity_tests;

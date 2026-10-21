@@ -88,6 +88,7 @@ impl OutboundRequest {
     /// Used by the tests that scan the whole wire for a leaked caller credential; the dispatch
     /// path hands the body to the transport directly.
     #[allow(dead_code)]
+    #[cfg(test)]
     pub fn wire_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(self.url.as_bytes());
