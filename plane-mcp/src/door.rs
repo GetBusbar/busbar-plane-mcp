@@ -25,16 +25,15 @@ use busbar_contract::abi::host::conn::connector::{
 use busbar_contract::abi::mechanism::call::{AbiStr, Blob, BLOB_ABSENT};
 use busbar_contract::abi::mechanism::door::{KindTailHead, Section, SECTION_DECLARING};
 use busbar_contract::abi::plane::{
-    AdminRoute, BillableClass, OpClass, PinMechanism, PlaneTail, RecordChain, RecordRetention,
-    TrustKey, ANSWER_LAYOUT, CHAIN_DIGESTS_SCOPE, CHAIN_LENGTH_PREFIXED, INGRESS_REQUEST_RESPONSE,
+    AdminRoute, BillableClass, OpClass, PinMechanism, PlaneTail, RecordChain, TrustKey,
+    ANSWER_LAYOUT, CHAIN_DIGESTS_SCOPE, CHAIN_LENGTH_PREFIXED, INGRESS_REQUEST_RESPONSE,
     INGRESS_RESPONSE_STREAM, MECHANISM_ROOT, SHAPE_PIECEWISE, TRUST_PIN, TRUST_PRIVATE_REACH,
     TRUST_REVERIFY_TTL,
 };
 use busbar_contract::abi::sdk::door::abi_str;
 use busbar_contract::abi::sdk::publish::{
-    admin_route, class_index, record_retention, AdminRouteSpec, ServedRoute, SnapshotSpec,
+    admin_route, class_index, AdminRouteSpec, ServedRoute, SnapshotSpec,
 };
-use busbar_contract::records::Retention;
 
 use crate::tool_claims::{
     CARRIER_HTTP, CARRIER_SSE, CARRIER_STDIO, DEFAULT_METADATA, DEFAULT_MOUNT, TASK_RUN_MOUNT,
@@ -217,12 +216,6 @@ const RECORD_KINDS: &[AbiStr] = &[
     abi_str(crate::tool_records::KIND_APPROVAL),
     abi_str(crate::tool_records::KIND_TASK),
 ];
-
-/// The retention rule of each record kind that is not purged by age ([`RECORD_KINDS`] indexes): a
-/// task's record is kept while it is active, so a purge drops only the terminal ones. Every other
-/// kind lists no rule and is purged by age.
-const RECORD_RETENTIONS: &[RecordRetention] =
-    &[record_retention(RECORD_TASK, Retention::TerminalOnly)];
 
 /// The kind a completed ask exchange's approval is claimed under, once ([`RECORD_KINDS`]): the
 /// spent-approval ledger is the host's one-time `records.claim` (ARCHITECT Q-L3B-ASK).
@@ -459,8 +452,6 @@ pub const TAIL: &PlaneTail = &PlaneTail {
     // No stream ceiling (ARCHITECT STREAM-CEILING, 2026-10-07): predev's mcp engine put no bound on
     // a stalled consumer (its event and subscribe streams were pull-based bodies, `session_serve.rs`,
     // `subscribe.rs`), so the mcp plane states none and keeps that behaviour.
-    record_retentions: RECORD_RETENTIONS.as_ptr(),
-    record_retentions_len: RECORD_RETENTIONS.len(),
     ..PlaneTail::ZERO
 };
 

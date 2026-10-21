@@ -95,25 +95,6 @@ fn the_tails_trust_keys_are_the_grammars() {
     }
 }
 
-/// The tail declares exactly the task kind as TerminalOnly: every other kind is purged by age.
-#[test]
-fn the_tail_declares_the_task_kind_as_terminal_only() {
-    let retentions: Vec<(String, u32)> = RECORD_RETENTIONS
-        .iter()
-        .map(|r| (text(RECORD_KINDS[r.kind as usize]), r.rule))
-        .collect();
-    assert_eq!(
-        retentions,
-        [(
-            crate::tool_records::KIND_TASK.to_string(),
-            Retention::TerminalOnly.code()
-        )]
-    );
-    // The tail points at that table, not a copy.
-    assert_eq!(TAIL.record_retentions, RECORD_RETENTIONS.as_ptr());
-    assert_eq!(TAIL.record_retentions_len, RECORD_RETENTIONS.len());
-}
-
 /// The record kinds and billable classes are the plane's own symbols, stated once.
 #[test]
 fn the_tail_names_the_planes_own_classes_and_kinds() {
