@@ -531,6 +531,7 @@ fn id_of(kind: &Kind) -> Value {
 /// ANSWER A SESSION UNIT on its caller's piece, the session first checked against its owner:
 /// `None` for a unit the one dispatch answers (its session checked).
 pub(super) fn answer(
+    instance: &Instance<'_, McpDoor>,
     plane: &McpDoor,
     ticket: Ticket,
     caller: &str,
@@ -597,6 +598,19 @@ pub(super) fn answer(
                     answer_of(STATUS_ACCEPTED, Vec::new())
                 }
                 Kind::Refused(r) => answer_of(r.status, r.body()),
+                // A RESOURCE SUBSCRIPTION DELIVERS: its first subscriber subscribes upstream, its
+                // last unsubscribes there ([`subscription`]); the unit pends while it does.
+                Kind::Here(v)
+                    if matches!(
+                        v.get("method").and_then(Value::as_str),
+                        Some(METHOD_SUBSCRIBE | METHOD_UNSUBSCRIBE)
+                    ) =>
+                {
+                    match subscription(instance, plane, ticket, unit, (&session, &owner), &v) {
+                        Poll::Pending => return Some(Step::Pending),
+                        Poll::Ready(body) => answer_of(200, body),
+                    }
+                }
                 Kind::Here(v) => {
                     let body = here(
                         plane,
@@ -700,7 +714,6 @@ fn here(
     let ok =
         |result: Value| serde_json::to_vec(&crate::line::result(&id, result)).unwrap_or_default();
     let invalid = |message: &str| rpc_error(&id, CODE_INVALID_PARAMS, message);
-    let uri = value.pointer("/params/uri").and_then(Value::as_str);
     match method {
         adapt::METHOD_PING => ok(json!({})),
         // The `2024-11-05` session opened with its stream; its `initialize` arrives inside it.
@@ -720,50 +733,6 @@ fn here(
             "this session is already open: send `initialize` without Mcp-Session-Id to open \
              another",
         ),
-        "resources/subscribe" => {
-            let Some(uri) = uri else {
-                return invalid("`params.uri` is required: the resource to watch.");
-            };
-            if uri.len() > MAX_RESOURCE_SUB_URI_BYTES {
-                return invalid(
-                    "`params.uri` is longer than a session retains: a subscription is held for \
-                     the session, so it is bounded.",
-                );
-            }
-            let Some(held) = unit.held.clone().or_else(|| plane.current()) else {
-                return invalid("this node publishes no MCP catalogue yet");
-            };
-            ask_entitlements(plane.services, ticket, unit, &held.catalogue.grants());
-            let entitled = &unit.entitled;
-            let admit = |kind: &str, name: &str| {
-                entitled
-                    .get(&format!("{kind}:{name}"))
-                    .copied()
-                    .unwrap_or(false)
-            };
-            if !matches!(held.catalogue.resource_by_uri(&admit, uri), Lookup::One(_)) {
-                return invalid("`params.uri` names no resource this caller may read.");
-            }
-            if subscribe(plane, session, owner, uri) {
-                ok(json!({}))
-            } else {
-                invalid(
-                    "this caller already holds as many resource subscriptions as this node \
-                     watches for it: unsubscribe from one before subscribing to another.",
-                )
-            }
-        }
-        "resources/unsubscribe" => {
-            let Some(uri) = uri else {
-                return invalid("`params.uri` is required: the resource to stop watching.");
-            };
-            plane.session_state.with(&session.to_string(), |s| {
-                if let Some(s) = s {
-                    s.uris.retain(|u| u != uri);
-                }
-            });
-            ok(json!({}))
-        }
         "logging/setLevel" => {
             let level = value.pointer("/params/level").and_then(Value::as_str);
             match level.filter(|l| LEVELS.contains(l)) {
@@ -804,6 +773,231 @@ fn state_of(plane: &McpDoor, session: &str, owner: &Owner, f: impl FnOnce(&mut S
         s.owner.get_or_insert_with(|| owner.clone());
         f(s);
     });
+}
+
+/// The method a session subscribes to one resource's updates with.
+const METHOD_SUBSCRIBE: &str = "resources/subscribe";
+/// The method a session drops one with.
+const METHOD_UNSUBSCRIBE: &str = "resources/unsubscribe";
+
+/// The binding busbar's own upstream subscriptions are negotiated under ([`fetch_in`]): one
+/// subscription upstream serves every session watching the uri, so it is no caller's (a caller
+/// reference is the kernel's opaque hex, never this).
+const SUBSCRIPTION_BINDING: &str = "plane:subscriptions";
+
+/// The connector handles a subscription's upstream exchange is numbered from on its unit's ticket.
+const SUBSCRIBE_SEQ: u32 = 1 << 26;
+
+/// The JSON-RPC id an upstream `resources/subscribe` or `resources/unsubscribe` carries: one
+/// request, correlated by it.
+const SUBSCRIBE_REQUEST_ID: u64 = 1;
+
+/// A RESOURCE SUBSCRIPTION, OR ITS END, in `session` (THE DESIGN section 2, the mcp bullet:
+/// subscribe stays for the old revisions, and it DELIVERS): the uri resolved under the caller's
+/// grants to the one member that declares it; on the uri's FIRST subscriber across the instance,
+/// `resources/subscribe` is sent to that member (a refusal there refuses the caller, never
+/// acknowledged); on its LAST unsubscribe, `resources/unsubscribe`. The member's updates reach the
+/// watching sessions as [`announce`] hands them on. PENDING while the upstream exchange pends.
+fn subscription(
+    instance: &Instance<'_, McpDoor>,
+    plane: &McpDoor,
+    ticket: Ticket,
+    unit: &mut CallUnit,
+    (session, owner): (&str, &Owner),
+    value: &Value,
+) -> Poll<Vec<u8>> {
+    let id = value.get("id").cloned().unwrap_or(Value::Null);
+    let subscribing = value.get("method").and_then(Value::as_str) == Some(METHOD_SUBSCRIBE);
+    let ok = || serde_json::to_vec(&crate::line::result(&id, json!({}))).unwrap_or_default();
+    let invalid = |message: &str| rpc_error(&id, CODE_INVALID_PARAMS, message);
+    let Some(uri) = value.pointer("/params/uri").and_then(Value::as_str) else {
+        return Poll::Ready(invalid(if subscribing {
+            "`params.uri` is required: the resource to watch."
+        } else {
+            "`params.uri` is required: the resource to stop watching."
+        }));
+    };
+    let Some(held) = unit.held.clone().or_else(|| plane.current()) else {
+        return Poll::Ready(invalid("this node publishes no MCP catalogue yet"));
+    };
+    // An exchange under way (this unit pended on it) is carried to its end.
+    let under_way = unit.negotiating.is_some();
+    if !subscribing {
+        let dropped = plane.session_state.with(&session.to_string(), |s| {
+            s.is_some_and(|s| {
+                let before = s.uris.len();
+                s.uris.retain(|u| u != uri);
+                s.uris.len() != before
+            })
+        });
+        if under_way || (dropped && !watched(plane, uri)) {
+            let declared = match held
+                .catalogue
+                .resource_by_uri(&|_: &str, _: &str| true, uri)
+            {
+                Lookup::One(entry) => Some(entry.server.clone()),
+                _ => None,
+            };
+            if let Some(server) = declared {
+                let verb = crate::client::verb::UpstreamVerb::ResourcesUnsubscribe {
+                    uri: uri.to_string(),
+                };
+                // The caller's subscription is gone whatever the member answers.
+                if upstream(instance, plane, unit, &held, &server, &verb).is_pending() {
+                    return Poll::Pending;
+                }
+            }
+        }
+        return Poll::Ready(ok());
+    }
+    if uri.len() > MAX_RESOURCE_SUB_URI_BYTES {
+        return Poll::Ready(invalid(
+            "`params.uri` is longer than a session retains: a subscription is held for the \
+             session, so it is bounded.",
+        ));
+    }
+    ask_entitlements(plane.services, ticket, unit, &held.catalogue.grants());
+    let entitled = &unit.entitled;
+    let admit = |kind: &str, name: &str| {
+        entitled
+            .get(&format!("{kind}:{name}"))
+            .copied()
+            .unwrap_or(false)
+    };
+    let server = match held.catalogue.resource_by_uri(&admit, uri) {
+        Lookup::One(entry) => entry.server.clone(),
+        _ => {
+            return Poll::Ready(invalid(
+                "`params.uri` names no resource this caller may read.",
+            ))
+        }
+    };
+    let quota = || {
+        invalid(
+            "this caller already holds as many resource subscriptions as this node watches for \
+             it: unsubscribe from one before subscribing to another.",
+        )
+    };
+    if !under_way {
+        match may_subscribe(plane, session, owner, uri) {
+            Some(true) => return Poll::Ready(ok()),
+            Some(false) => {}
+            None => return Poll::Ready(quota()),
+        }
+    }
+    if under_way || !watched(plane, uri) {
+        let verb = crate::client::verb::UpstreamVerb::ResourcesSubscribe {
+            uri: uri.to_string(),
+        };
+        match upstream(instance, plane, unit, &held, &server, &verb) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(why)) => {
+                return Poll::Ready(rpc_error(
+                    &id,
+                    CODE_INTERNAL,
+                    &format!(
+                        "MCP server `{server}` did not take the subscription to `{uri}`, so busbar \
+                         cannot watch it for this session: {why}"
+                    ),
+                ))
+            }
+            Poll::Ready(Ok(())) => {}
+        }
+    }
+    Poll::Ready(if subscribe(plane, session, owner, uri) {
+        ok()
+    } else {
+        quota()
+    })
+}
+
+/// Whether any session of the instance watches `uri` (busbar is subscribed to it upstream).
+fn watched(plane: &McpDoor, uri: &str) -> bool {
+    plane
+        .session_state
+        .with_all(|m| m.values().any(|s| s.uris.iter().any(|u| u == uri)))
+}
+
+/// Whether `session` may subscribe to `uri`: `Some(true)` when it already does, `Some(false)` when
+/// it may, `None` past its owner's subscription quota.
+fn may_subscribe(plane: &McpDoor, session: &str, owner: &Owner, uri: &str) -> Option<bool> {
+    plane.session_state.with_all(|m| {
+        if m.get(session)
+            .is_some_and(|s| s.uris.iter().any(|u| u == uri))
+        {
+            return Some(true);
+        }
+        let held: usize = m
+            .values()
+            .filter(|s| s.owner.as_ref() == Some(owner))
+            .map(|s| s.uris.len())
+            .sum();
+        (held < MAX_OWNER_SUBSCRIPTIONS).then_some(false)
+    })
+}
+
+/// ONE REQUEST busbar sends `server` for its subscriptions, over the plane's own reach of a member
+/// ([`fetch_in`]: the stateless request first, negotiated into a session or onto the `2024-11-05`
+/// stream as the member needs, every hop on the connector), on the unit's ticket: READY with
+/// whether the member answered it with a JSON-RPC result.
+fn upstream(
+    instance: &Instance<'_, McpDoor>,
+    plane: &McpDoor,
+    unit: &mut CallUnit,
+    held: &Held,
+    server: &str,
+    verb: &crate::client::verb::UpstreamVerb,
+) -> Poll<Result<(), String>> {
+    let Some(def) = held.section.servers.get(server) else {
+        return Poll::Ready(Err(format!("MCP server `{server}` is not registered")));
+    };
+    if super::door_program::is_program(def) || def.url.is_empty() {
+        return Poll::Ready(Err(
+            "it is reached over stdio, where busbar holds no resource subscription".to_string(),
+        ));
+    }
+    let mut request = verb.build(&def.url, SUBSCRIBE_REQUEST_ID, None);
+    // A token_exchange member's token is asked for under the registration's own scope, as its
+    // verify fetch's is.
+    if crate::tool_scope::exchanges(def, held.section.effective_upstream_credentials(server)) {
+        request.headers.push((
+            busbar_contract::abi::auth::SCOPE_REQUEST_FIELD.to_string(),
+            crate::tool_scope::registration_scope(server, def),
+        ));
+    }
+    let answered = fetch_in(
+        instance,
+        plane,
+        &mut unit.negotiating,
+        (
+            SUBSCRIBE_SEQ,
+            server,
+            SUBSCRIPTION_BINDING,
+            def.timeout_ms(),
+        ),
+        request,
+    );
+    let Poll::Ready(answered) = answered else {
+        return Poll::Pending;
+    };
+    Poll::Ready(match answered {
+        Err(why) => Err(why),
+        Ok(response) => {
+            use crate::client::jsonrpc::{parse_response, RpcOutcome};
+            match parse_response(&response.body, SUBSCRIBE_REQUEST_ID) {
+                RpcOutcome::Result(_) => Ok(()),
+                RpcOutcome::Error { code, message } => {
+                    Err(format!("it answered JSON-RPC error {code}: {message}"))
+                }
+                RpcOutcome::InputRequired { .. }
+                | RpcOutcome::Malformed(_)
+                | RpcOutcome::Uncorrelated(_) => Err(format!(
+                    "it answered HTTP {} with no JSON-RPC result",
+                    response.status
+                )),
+            }
+        }
+    })
 }
 
 /// Subscribes `session` to `uri`: `false` past the owner's subscription quota.
