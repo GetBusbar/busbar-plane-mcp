@@ -1,0 +1,129 @@
+{
+  "schema": "blackbox/1",
+  "case": "an_ungranted_tool_is_refused_per_call_on_the_line",
+  "requires": {
+    "sections": [
+      "tools"
+    ],
+    "features": [
+      "test-harness"
+    ],
+    "axes": [
+      "protocols"
+    ]
+  },
+  "files": {
+    "providers.yaml": "mock:\n  protocol: anthropic\n  base_url: \"http://127.0.0.1:9\"\n  api_key_env: MOCK_KEY\n",
+    "config.yaml": "listen: \"127.0.0.1:0\"\nadmin_listen: \"127.0.0.1:0\"\nadvanced:\n  allow_destinations: [\"127.0.0.1\"]\nstore: {module: memory}\nproviders:\n  mock:\n    api_key: { env: MOCK_KEY }\nmodels:\n  test-model:\n    provider: mock\nmcp:\n  canonical_uri: \"http://127.0.0.1:18080/mcp\"\n  authorization_servers: [\"https://login.example.com\"]\nplugins:\n  enabled: true\n  dir: '{plugins_dir}'\n  trust:\n    allow_unsigned: true\nidentity-providers:\n  idp:\n    module: e2e-idp-module\n    settings:\n{issuer_settings:6:http://127.0.0.1:18080/mcp}auth:\n  chain: [idp]\n  signing_key: { env: BUSBAR_SIGNING_KEY }\n  role_bindings:\n    idp:\n      tester: { allowed_pools: [elsewhere] }\ntools:\n  ws:\n    url: \"http://127.0.0.1:9/rpc\"\n    allow_private: true\n    pin: { mechanism: cert_spki, key: \"sha256/UNUSED=\" }\n    tools_allow:\n      read: { schema_hash: \"sha256:0000\" }\n"
+  },
+  "vars": {
+    "MOCK_KEY": "test-key-value",
+    "BUSBAR_SIGNING_KEY": "0000000000000000000000000000000000000000000000000000000000000001",
+    "BUSBAR_CONFIG": "{dir}/config.yaml",
+    "BUSBAR_PROVIDERS": "{dir}/providers.yaml"
+  },
+  "unset": [
+    "BUSBAR_MCP_STDIO_CREDENTIAL"
+  ],
+  "steps": [
+    {
+      "session": {
+        "flag": "--mcp-stdio",
+        "credential_var": "BUSBAR_MCP_STDIO_CREDENTIAL",
+        "credential": "{token:http://127.0.0.1:18080/mcp}",
+        "expect": "served",
+        "script": [
+          {
+            "send": {
+              "jsonrpc": "2.0",
+              "id": "call-0",
+              "method": "tools/call",
+              "params": {
+                "_meta": {
+                  "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                  "io.modelcontextprotocol/clientCapabilities": {
+                    "elicitation": {}
+                  }
+                },
+                "name": "ws_read",
+                "arguments": {}
+              }
+            }
+          },
+          {
+            "recv": {
+              "pointer_eq": {
+                "/id": "call-0",
+                "/error/data/reason": "not_granted"
+              }
+            }
+          },
+          {
+            "send": {
+              "jsonrpc": "2.0",
+              "id": "call-1",
+              "method": "tools/call",
+              "params": {
+                "_meta": {
+                  "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                  "io.modelcontextprotocol/clientCapabilities": {
+                    "elicitation": {}
+                  }
+                },
+                "name": "ws_read",
+                "arguments": {}
+              }
+            }
+          },
+          {
+            "recv": {
+              "pointer_eq": {
+                "/id": "call-1",
+                "/error/data/reason": "not_granted"
+              }
+            }
+          },
+          {
+            "send": {
+              "jsonrpc": "2.0",
+              "id": "list",
+              "method": "tools/list",
+              "params": {
+                "_meta": {
+                  "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                  "io.modelcontextprotocol/clientCapabilities": {
+                    "elicitation": {}
+                  }
+                }
+              }
+            }
+          },
+          {
+            "recv": {
+              "pointer_eq": {
+                "/id": "list"
+              },
+              "has": [
+                "/result"
+              ]
+            }
+          },
+          {
+            "eof": {
+              "exit": 0,
+              "within_secs": 60
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "credentials": {
+    "auth_plugin": {
+      "alias": "e2e-idp",
+      "module": "e2e-idp-module",
+      "first_party": true
+    },
+    "issuer": true
+  }
+}

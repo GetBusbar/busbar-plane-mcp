@@ -32,7 +32,9 @@ use crate::codec::{
 use crate::identity::{ServerId, ToolKey};
 use crate::jsonrpc::RESULT_TYPE_COMPLETE;
 use crate::tool_arrival::Refusal;
-use crate::tools_config::{McpServerDefCfg, TaskSupport, DEFAULT_MAX_INPUT_REQUIRED_ROUNDS};
+use crate::tools_config::{
+    McpServerDefCfg, SamplingBoundsCfg, TaskSupport, DEFAULT_MAX_INPUT_REQUIRED_ROUNDS,
+};
 use busbar_contract::abi::host::service::{
     DISTRUST_CHANGED, DISTRUST_NONE, DISTRUST_NOT_APPROVED, DISTRUST_QUARANTINED,
     DISTRUST_UNKNOWN_ITEM, DISTRUST_UNSIGHTED,
@@ -68,6 +70,10 @@ pub const REASON_ANSWER_UNDECLARED: &str = "caller_ask_answer_undeclared";
 pub const REASON_ASK_NOT_PROXIED: &str = "ask_not_proxied";
 /// The call-log reason of a call whose upstream asked its caller something, relayed to the caller.
 pub const REASON_ASK_RELAYED: &str = "ask_relayed";
+/// The call-log reason of a call that NEVER LEFT ITS QUEUE: it waited its turn on a stdio member's
+/// child (another call held it) and its deadline passed first. It rides `refused`, because the call
+/// did not go out ([`never_sent`]).
+pub const REASON_QUEUE_DEADLINE: &str = "queue_deadline";
 
 /// The tasks extension's identifier.
 pub const TASKS_EXTENSION_ID: &str = crate::answer::TASKS_EXTENSION_ID;
@@ -606,11 +612,22 @@ pub fn admit_trusted(
     // BUSBAR'S OWN ASK, decided over the arguments as the caller sent them: the state is sealed over
     // their digest, so the answers are merged only after it.
     let mut relay = None;
+    let mut answered = None;
     match ask(entry, &arguments) {
         crate::ask::AskDecision::Proceed => {}
+        // THE EXCHANGE COMPLETED: every round's answers, the sealed earlier rounds' with the last
+        // retry's, become arguments below.
+        crate::ask::AskDecision::Answered(answers) => answered = Some(answers),
         // A RELAYED ASK'S RETRY: the caller's answers are the upstream's, sent back to the member
-        // that asked with its own state, verbatim; none of them becomes an argument.
+        // that asked with its own state, verbatim; none of them becomes an argument. Busbar's own
+        // answers the first call went out with, sealed in the state, are merged again: the retry
+        // is the same request plus the upstream's answers.
         crate::ask::AskDecision::Relayed(leg) => {
+            if let (Some(own), Some(merged)) = (leg.answers, arguments.as_object_mut()) {
+                for (key, value) in own {
+                    merged.insert(key, value);
+                }
+            }
             let mut continuation = Map::new();
             if let Some(responses) = params.and_then(|p| p.get("inputResponses")) {
                 continuation.insert("inputResponses".to_string(), responses.clone());
@@ -649,11 +666,7 @@ pub fn admit_trusted(
     }
     // THE ANSWERS BECOME ARGUMENTS, bounded by what the operator asked for: an answer may bind only
     // a key this tool's own `ask_caller:` rounds declared, and never an argument the caller sent.
-    if let Some(responses) = params
-        .and_then(|p| p.get("inputResponses"))
-        .and_then(Value::as_object)
-        .filter(|_| relay.is_none())
-    {
+    if let Some(responses) = &answered {
         let declared: std::collections::BTreeSet<&str> = entry
             .ask_caller
             .iter()
@@ -706,6 +719,24 @@ pub fn admit_trusted(
         sent_digest,
         relay,
     })
+}
+
+/// BUSBAR'S OWN ANSWERS `admitted` goes out with: its arguments under the keys its tool's
+/// `ask_caller` rounds declare, as merged. Sealed in a relayed ask's state
+/// ([`crate::ask::UpstreamLeg::answers`]) so the retry goes out with them again. A key the caller
+/// itself sent is among them only with the value the caller sent, which the retry (bound to the
+/// same arguments) sends again. `None` when there are none.
+#[must_use]
+pub fn own_answers(admitted: &AdmittedCall) -> Option<Map<String, Value>> {
+    let arguments = admitted.arguments.as_object()?;
+    let own: Map<String, Value> = admitted
+        .entry
+        .ask_caller
+        .iter()
+        .flat_map(|round| round.keys())
+        .filter_map(|key| Some((key.clone(), arguments.get(key)?.clone())))
+        .collect();
+    (!own.is_empty()).then_some(own)
 }
 
 /// THE ARGUMENT GUARD ([`crate::argguard`]) on an admitted call: the arguments that go out (the
@@ -912,6 +943,29 @@ pub fn outbound_program(
     })
 }
 
+/// A relayed call that was NEVER SENT: it waited its turn on its member and its deadline passed first
+/// (`reason`, the sentence the caller reads). The caller is answered the same upstream-failure tool
+/// error, 200 `isError`, as a call whose upstream failed. The call log does not say `dispatched`:
+/// that word means the call went out (`busbar_contract::vocab`), and this one did not. It is
+/// `refused` under [`REASON_QUEUE_DEADLINE`], audited rejected. The door answers it with no fee unit
+/// (ARCHITECT/coordinator ruling 2026-10-14, after #62 "bill what was delivered" and Q35 "a hop
+/// refused before the socket is refunded", applied uniformly across planes).
+#[must_use]
+pub fn never_sent(admitted: &AdmittedCall, reason: &str) -> Settled {
+    Settled::Answer {
+        status: STATUS_OK,
+        body: result(
+            &admitted.id,
+            upstream_failure_result(&admitted.entry.server, reason),
+        ),
+        line: CallLine::resolved(
+            &admitted.entry,
+            vocab::OUTCOME_REFUSED,
+            REASON_QUEUE_DEADLINE,
+        ),
+    }
+}
+
 /// A relayed call whose upstream leg failed before an answer (`reason`, in the previous release's
 /// words): the caller is answered the upstream-failure result, the call log names it dispatched and
 /// failed.
@@ -1049,6 +1103,18 @@ pub enum AskRefusal {
         /// Why.
         reason: String,
     },
+    /// A granted `sampling/createMessage` ask is larger than the operator's
+    /// `tools.<server>.sampling_bounds` allow (owner ruling Q22c): refused by name, never relayed.
+    SamplingBound {
+        /// The server.
+        server: String,
+        /// The `sampling_bounds` key that was exceeded.
+        key: &'static str,
+        /// The bound, as configured (a count, or the `min..=max` range for the temperature).
+        limit: String,
+        /// What the ask carried.
+        got: String,
+    },
 }
 
 impl std::fmt::Display for AskRefusal {
@@ -1080,6 +1146,33 @@ impl std::fmt::Display for AskRefusal {
                 "the ask MCP server `{server}` made could not be relayed to busbar's caller: \
                  {reason}"
             ),
+            AskRefusal::SamplingBound {
+                server,
+                key: "max_input_response_bytes",
+                limit,
+                got,
+            } => write!(
+                f,
+                "the reply to MCP server `{server}`'s ask carries {got}, over \
+                 `tools.{server}.sampling_bounds.max_input_response_bytes` ({limit}), so the \
+                 reply was not forwarded to the server. Raise \
+                 `tools.{server}.sampling_bounds.max_input_response_bytes` only if this server \
+                 legitimately needs a larger reply."
+            ),
+            AskRefusal::SamplingBound {
+                server,
+                key,
+                limit,
+                got,
+            } => write!(
+                f,
+                "MCP server `{server}` asked its caller for a `sampling/createMessage` completion \
+                 that exceeds `tools.{server}.sampling_bounds.{key}` (limit {limit}, the ask \
+                 carries {got}), so the ask was not relayed to you. The prompt an upstream sends is \
+                 spent against the caller's budget, so its size is bounded by the operator. Raise \
+                 `tools.{server}.sampling_bounds.{key}` only if this server legitimately needs a \
+                 larger ask."
+            ),
         }
     }
 }
@@ -1093,6 +1186,7 @@ impl AskRefusal {
             AskRefusal::RoundCapExceeded { .. } => "ask_round_cap",
             AskRefusal::NoSealer { .. } => "ask_no_sealer",
             AskRefusal::Unavailable { .. } => "ask_unavailable",
+            AskRefusal::SamplingBound { .. } => "sampling_bound_exceeded",
         }
     }
 }
@@ -1306,11 +1400,160 @@ fn judge_ask(
             kind: denied.to_string(),
         });
     }
+    judge_sampling_bounds(
+        &server,
+        &def.map(|d| d.sampling_bounds).unwrap_or_default(),
+        payload
+            .get("inputRequests")
+            .and_then(Value::as_object)
+            .into_iter()
+            .flat_map(|requests| requests.values()),
+    )?;
     Ok(Settled::Relay {
         result: payload.clone(),
         round,
         child: None,
     })
+}
+
+/// THE CALLER'S REPLY TO AN ASK, bounded (`sampling_bounds.max_input_response_bytes`): `forwarded` is
+/// the serialised byte length of exactly what would be sent upstream. Over the cap the reply is
+/// refused by name and never forwarded.
+pub fn judge_input_response(
+    server: &str,
+    bounds: &SamplingBoundsCfg,
+    forwarded: usize,
+) -> Result<(), AskRefusal> {
+    if forwarded as u64 > u64::from(bounds.max_input_response_bytes) {
+        return Err(AskRefusal::SamplingBound {
+            server: server.to_string(),
+            key: "max_input_response_bytes",
+            limit: bounds.max_input_response_bytes.to_string(),
+            got: format!("{forwarded} bytes"),
+        });
+    }
+    Ok(())
+}
+
+/// The http continuation (`inputResponses` and `requestState`) judged by [`judge_input_response`].
+pub fn judge_continuation(
+    server: &str,
+    bounds: &SamplingBoundsCfg,
+    continuation: &Value,
+) -> Result<(), AskRefusal> {
+    judge_input_response(server, bounds, continuation.to_string().len())
+}
+
+/// THE ONE JUDGEMENT of a relayed ask's size (owner ruling Q22c), shared by the http path
+/// ([`judge_ask`]) and the stdio relay (`tool_program::judge_child_asks`): every request whose
+/// `method` is `sampling/createMessage` is measured against the server's `sampling_bounds`, and the
+/// first bound it exceeds is returned as a named refusal. Other methods are not measured.
+///
+/// Measured as the ask arrived: the message count, the prompt bytes (`systemPrompt` plus every
+/// content part of every message: a text part's text, any other part (an image, audio, a resource,
+/// a tool use or result) as serialised, since an upstream picks its size too), the stop-sequence
+/// count and each one's bytes, and a present `temperature` against `min..=max` thousandths.
+pub fn judge_sampling_bounds<'a>(
+    server: &str,
+    bounds: &SamplingBoundsCfg,
+    requests: impl IntoIterator<Item = &'a Value>,
+) -> Result<(), AskRefusal> {
+    let refuse = |key: &'static str, limit: String, got: String| AskRefusal::SamplingBound {
+        server: server.to_string(),
+        key,
+        limit,
+        got,
+    };
+    for request in requests {
+        if request.get("method").and_then(Value::as_str) != Some("sampling/createMessage") {
+            continue;
+        }
+        let params = request.get("params");
+        let messages = params
+            .and_then(|p| p.get("messages"))
+            .and_then(Value::as_array);
+        let count = messages.map_or(0, Vec::len);
+        if count as u64 > u64::from(bounds.max_messages) {
+            return Err(refuse(
+                "max_messages",
+                bounds.max_messages.to_string(),
+                format!("{count} messages"),
+            ));
+        }
+        let mut prompt_bytes = params
+            .and_then(|p| p.get("systemPrompt"))
+            .and_then(Value::as_str)
+            .map_or(0usize, str::len);
+        for message in messages.into_iter().flatten() {
+            let content = message.get("content");
+            let parts: &[Value] = match content {
+                Some(Value::Array(parts)) => parts,
+                Some(one) => std::slice::from_ref(one),
+                None => &[],
+            };
+            for part in parts {
+                let bytes = match (
+                    part.get("type").and_then(Value::as_str),
+                    part.get("text").and_then(Value::as_str),
+                ) {
+                    (Some("text"), Some(text)) => text.len(),
+                    _ => part.to_string().len(),
+                };
+                prompt_bytes = prompt_bytes.saturating_add(bytes);
+            }
+        }
+        if prompt_bytes as u64 > u64::from(bounds.max_prompt_bytes) {
+            return Err(refuse(
+                "max_prompt_bytes",
+                bounds.max_prompt_bytes.to_string(),
+                format!("{prompt_bytes} prompt bytes"),
+            ));
+        }
+        if let Some(stops) = params
+            .and_then(|p| p.get("stopSequences"))
+            .and_then(Value::as_array)
+        {
+            if stops.len() as u64 > u64::from(bounds.max_stop_sequences) {
+                return Err(refuse(
+                    "max_stop_sequences",
+                    bounds.max_stop_sequences.to_string(),
+                    format!("{} stop sequences", stops.len()),
+                ));
+            }
+            if let Some(longest) = stops
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::len)
+                .filter(|n| *n as u64 > u64::from(bounds.max_stop_sequence_bytes))
+                .max()
+            {
+                return Err(refuse(
+                    "max_stop_sequence_bytes",
+                    bounds.max_stop_sequence_bytes.to_string(),
+                    format!("a {longest}-byte stop sequence"),
+                ));
+            }
+        }
+        if let Some(t) = params.and_then(|p| p.get("temperature")) {
+            let min = f64::from(bounds.temperature_min_milli) / 1000.0;
+            let max = f64::from(bounds.temperature_max_milli) / 1000.0;
+            if !t
+                .as_f64()
+                .is_some_and(|v| v.is_finite() && (min..=max).contains(&v))
+            {
+                let (key, limit) = match t.as_f64() {
+                    Some(v) if v > max => ("temperature_max_milli", bounds.temperature_max_milli),
+                    _ => ("temperature_min_milli", bounds.temperature_min_milli),
+                };
+                return Err(refuse(
+                    key,
+                    format!("{limit} thousandths ({min}..={max})"),
+                    format!("temperature {t}"),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The call-log line of a call whose upstream's ask was relayed to its caller: it went out and was

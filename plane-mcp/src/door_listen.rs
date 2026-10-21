@@ -53,6 +53,9 @@ const STATUS_INVALID: u32 = 400;
 /// The status a `subscriptions/listen` is refused with when its caller is at its quota.
 const STATUS_QUOTA: u32 = 429;
 
+/// The status a `subscriptions/listen` is refused with when the host's clock cannot be read.
+const STATUS_CLOCK: u32 = 503;
+
 /// One held subscription, by its session's stream.
 #[derive(Debug, Clone)]
 pub(super) struct Listening {
@@ -71,6 +74,38 @@ pub(super) struct Listening {
     due: bool,
     /// The stream's head is written.
     headed: bool,
+    /// The upstream announcements `(server, uri)` heard since its last step: its next step relays
+    /// those it watches, under the grant it re-asks that frame.
+    updates: Vec<(String, String)>,
+}
+
+/// The most announcements one held subscription keeps between two of its steps (the oldest go).
+pub(super) const MAX_HELD_UPDATES: usize = 64;
+
+/// Holds `(server, uri)` for the next step of `updates`, at most [`MAX_HELD_UPDATES`] of them.
+pub(super) fn hold_update(updates: &mut Vec<(String, String)>, server: &str, uri: &str) {
+    if updates.len() >= MAX_HELD_UPDATES {
+        updates.remove(0);
+    }
+    updates.push((server.to_string(), uri.to_string()));
+}
+
+/// AN UPSTREAM ANNOUNCED that `uri` of its registration `server` changed: every held subscription on
+/// the HTTP carrier is asked for a step that relays it (the step relays it only to a subscription
+/// that asked for the uri, under the caller's grant re-asked that frame), and so is every one kept
+/// on a line carrier ([`super::door_line::announced`]).
+pub(super) fn announced(plane: &McpDoor, server: &str, uri: &str) {
+    let any = plane.listens.with_all(|m| {
+        for l in m.values_mut() {
+            hold_update(&mut l.updates, server, uri);
+            l.due = true;
+        }
+        !m.is_empty()
+    });
+    super::door_line::announced(plane, server, uri);
+    if any {
+        wake_driver(plane);
+    }
 }
 
 /// A frame of the stream: its head (status, fields and the request's fee unit) with the first.
@@ -192,7 +227,19 @@ fn open(plane: &McpDoor, ticket: Ticket, principal: &str, unit: &mut CallUnit) -
     let id = id.clone();
     let held = plane.current().or_else(|| unit.held.clone())?;
     entitled_afresh(plane, ticket, unit, &held);
-    let now = mono_ns(plane.services, ticket, unit);
+    // A subscription opened at a clock read that failed is refused, never opened at the epoch
+    // (row 159 finding P-M4): its lifetime and keepalive are judged against this reading.
+    let Some(now) = mono_ns(plane.services, ticket, unit) else {
+        let refusal = crate::tool_arrival::Refusal {
+            status: STATUS_CLOCK,
+            id: Some(id),
+            code: crate::codec::CODE_REFUSED,
+            message: super::CLOCK_UNREAD.to_string(),
+            data: None,
+        };
+        unit.pending = Some(Pending::answer(refusal.status, refusal.body(), None, &[]));
+        return Some(true);
+    };
     let opened = {
         let entitled = &unit.entitled;
         let admit = |kind: &str, name: &str| {
@@ -220,6 +267,7 @@ fn open(plane: &McpDoor, ticket: Ticket, principal: &str, unit: &mut CallUnit) -
                 first_tick: 0,
                 due: false,
                 headed: false,
+                updates: Vec::new(),
             };
             // THE QUOTA REFUSES THE NEW STREAM, never evicts a held one: this caller at its own
             // bound, or the instance at its total, is told so.
@@ -233,16 +281,7 @@ fn open(plane: &McpDoor, ticket: Ticket, principal: &str, unit: &mut CallUnit) -
                 !full
             });
             if !admitted {
-                let refusal = crate::tool_arrival::Refusal {
-                    status: STATUS_QUOTA,
-                    id: Some(id),
-                    code: crate::codec::CODE_REFUSED,
-                    message: format!(
-                        "this caller holds {MAX_LISTENS_PER_OWNER} open subscriptions, the most one \
-                         caller may hold; close one and open again"
-                    ),
-                    data: Some(serde_json::json!({ "reason": "subscription_quota" })),
-                };
+                let refusal = quota_refusal(id);
                 unit.pending = Some(Pending::answer(refusal.status, refusal.body(), None, &[]));
                 return Some(true);
             }
@@ -251,12 +290,30 @@ fn open(plane: &McpDoor, ticket: Ticket, principal: &str, unit: &mut CallUnit) -
     }
 }
 
+/// THE QUOTA'S REFUSAL of subscription `id`, on either carrier: its caller holds the most open
+/// subscriptions one caller may, or the instance its total.
+pub(super) fn quota_refusal(id: Value) -> crate::tool_arrival::Refusal {
+    crate::tool_arrival::Refusal {
+        status: STATUS_QUOTA,
+        id: Some(id),
+        code: crate::codec::CODE_REFUSED,
+        message: format!(
+            "this caller holds {MAX_LISTENS_PER_OWNER} open subscriptions, the most one caller may \
+             hold; close one and open again"
+        ),
+        data: Some(serde_json::json!({ "reason": "subscription_quota" })),
+    }
+}
+
 /// ONE STEP of the unit's subscription over the live catalogue, its permission re-asked: what it
 /// writes, if anything. `Some(false)` when it has nothing to say.
 fn step(plane: &McpDoor, ticket: Ticket, principal: &str, unit: &mut CallUnit) -> Option<bool> {
     let held = plane.current().or_else(|| unit.held.clone())?;
     entitled_afresh(plane, ticket, unit, &held);
-    let now = mono_ns(plane.services, ticket, unit);
+    // A step whose clock read failed says nothing: the next one reads it again.
+    let Some(now) = mono_ns(plane.services, ticket, unit) else {
+        return Some(false);
+    };
     let standing = standing(plane, ticket, principal, unit);
     let entitled = &unit.entitled;
     let admit = |kind: &str, name: &str| {
@@ -268,7 +325,10 @@ fn step(plane: &McpDoor, ticket: Ticket, principal: &str, unit: &mut CallUnit) -
     let (stepped, headed) = plane.listens.with(&unit.key, |l| {
         let l = l?;
         l.due = false;
-        let stepped = l.listen.step(&held.catalogue, &admit, &standing, &[], now);
+        let updates = std::mem::take(&mut l.updates);
+        let stepped = l
+            .listen
+            .step(&held.catalogue, &admit, &standing, &updates, now);
         Some((stepped, l.headed))
     })?;
     let (bytes, done) = match stepped {
@@ -314,7 +374,8 @@ pub(super) fn tick(plane: &McpDoor, driver: Ticket, now_ns: u64) -> u64 {
     for key in gone {
         plane.units.remove(&key);
     }
-    if any {
+    // A held 2024-11-05 stream is read on the driver ticket too.
+    if any || super::door_legacy::any(plane) {
         wake_driver(plane);
     }
     now_ns.saturating_add(POLL_NS)
@@ -410,18 +471,21 @@ pub(super) fn asks_a_round(
     asks && !retried
 }
 
-/// The host's monotonic clock on a fresh handle of the unit's ticket; `0` with no clock.
-pub(super) fn mono_ns(services: Option<Services>, ticket: Ticket, unit: &mut CallUnit) -> u64 {
-    let Some(services) = services else {
-        return 0;
-    };
+/// The host's monotonic clock on a fresh handle of the unit's ticket; `None` with no clock or a
+/// failed read, which is never a time (row 159 finding P-M4): no timer is armed at it.
+pub(super) fn mono_ns(
+    services: Option<Services>,
+    ticket: Ticket,
+    unit: &mut CallUnit,
+) -> Option<u64> {
+    let services = services?;
     let handle = CompletionHandle {
         ticket,
         seq: unit.issued,
         _reserved: 0,
     };
     unit.issued += 1;
-    services.clock_now(handle).map_or(0, |r| r.mono_ns)
+    services.clock_now(handle).ok().map(|r| r.mono_ns)
 }
 
 /// The catalogue's every grant, entitled afresh for this frame: a held unit re-asks what its caller

@@ -144,3 +144,40 @@ fn the_views_render_the_served_engines_fields_in_its_order() {
     );
     assert_ne!(catalogue_hash(&Observation::default()), "");
 }
+
+/// THE VIEWS READ THE VERDICT THE KERNEL ENFORCES. After a restart the kernel replays a durable
+/// demotion (every item `quarantined`) while the plane has sighted nothing (`Never`), and a revoked
+/// counterparty or an unapproved pin answers every item `new` beside the configured digest. The
+/// kernel's `trust.serves` refuses every call in both; the health view says so (not serving) and the
+/// trust view renders no tool approved.
+#[test]
+fn the_views_read_the_verdict_the_kernel_enforces() {
+    let digest = tool_digest("read", "reads a file", &schema());
+    let def = rooted(&digest);
+    let good =
+        seen(json!([{ "name": "read", "description": "reads a file", "inputSchema": schema() }]));
+    // A quarantine the kernel restored, the plane's sightings empty after the restart.
+    let restored = [item("read", "quarantined", Some(&digest))];
+    assert_eq!(state(&restored, &Sighting::Never), State::Quarantined);
+    let health: Value =
+        serde_json::from_str(&health_view("fs", &Sighting::Never, &restored)).unwrap();
+    assert_eq!(
+        (&health["state"], &health["serving"]),
+        (&json!("quarantined"), &json!(false)),
+        "a restored quarantine does not serve: {health}"
+    );
+    let view: Value =
+        serde_json::from_str(&trust_view("fs", &def, &Sighting::Never, &restored)).unwrap();
+    assert_eq!(view["changed"], json!(["read"]), "{view}");
+    assert_ne!(view["capabilities"][0]["status"], "approved", "{view}");
+    // A revoked counterparty, or a pin the kernel holds unapproved: every item `new`.
+    let revoked = [item("read", "new", Some(&digest))];
+    for sighting in [Sighting::Never, good] {
+        assert_eq!(state(&revoked, &sighting), State::Pending, "{sighting:?}");
+        let health: Value = serde_json::from_str(&health_view("fs", &sighting, &revoked)).unwrap();
+        assert_eq!(health["serving"], false, "{health}");
+        let view: Value =
+            serde_json::from_str(&trust_view("fs", &def, &sighting, &revoked)).unwrap();
+        assert_ne!(view["capabilities"][0]["status"], "approved", "{view}");
+    }
+}
