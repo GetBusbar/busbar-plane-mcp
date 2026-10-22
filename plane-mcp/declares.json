@@ -8,7 +8,7 @@
       "slug": "mcp-calllog-chain-verify-failed",
       "title": "MCP per-call log failed hash-chain verification on restore (tamper evidence)",
       "severity": "actionable",
-      "summary": "The persisted MCP per-call log was read at boot but does NOT verify against its own hash chain, which is tamper evidence — a persisted call record was altered out from under busbar, or its store is corrupt. The records are still restored and the chain resumes from the broken tail, because refusing to restore would let anyone able to write to the store DELETE a caller's history by corrupting one record.",
+      "summary": "The persisted MCP per-call log was read at boot but does NOT verify against its own hash chain, which is tamper evidence \u2014 a persisted call record was altered out from under busbar, or its store is corrupt. The records are still restored and the chain resumes from the broken tail, because refusing to restore would let anyone able to write to the store DELETE a caller's history by corrupting one record.",
       "action": "Treat the durable governance store as compromised until explained: capture it for forensic review before it is overwritten, then restore from a trusted backup once the cause is understood.",
       "since": "1.6.0"
     },
@@ -45,7 +45,7 @@
       "title": "MCP stdio serve read error on stdin (session ending)",
       "severity": "benign_recurring",
       "summary": "The MCP stdio server hit a read error on stdin and is shutting the session down. This is the expected outcome when the peer closes the pipe, so it is logged at debug rather than as an operator alert.",
-      "action": "None — self-heals. Expected when a stdio MCP client disconnects.",
+      "action": "None \u2014 self-heals. Expected when a stdio MCP client disconnects.",
       "since": "1.6.0"
     },
     {
@@ -53,14 +53,14 @@
       "slug": "mcp-ask-recogniser-missed",
       "title": "MCP input-required result reached the terminal check (ask recogniser missed)",
       "severity": "actionable",
-      "summary": "An upstream MCP tool returned an input-required result that reached the terminal check without the ask recogniser catching it — an internal invariant breach, since such a result should have been recognised and handled earlier. The call is refused rather than handing the caller an upstream's demand for a secret.",
+      "summary": "An upstream MCP tool returned an input-required result that reached the terminal check without the ask recogniser catching it \u2014 an internal invariant breach, since such a result should have been recognised and handled earlier. The call is refused rather than handing the caller an upstream's demand for a secret.",
       "action": "Report the named tool and field: the ask-recognition path has a gap that let an input-required shape through. This is a code-level fix, not an operator misconfig.",
       "since": "1.6.0"
     },
     {
       "code": 7065,
       "slug": "mcp-output-schema-violation",
-      "title": "MCP upstream structuredContent violated the published outputSchema — RETIRED",
+      "title": "MCP upstream structuredContent violated the published outputSchema \u2014 RETIRED",
       "severity": "benign_recurring",
       "summary": "RETIRED. An upstream MCP tool's `structuredContent` that did not validate against the tool's published `outputSchema` was once refused and replaced by busbar's own tool error. 1.6.0 removed that check: busbar relays an upstream's tool result unchanged (THE DESIGN Law 11), and the caller judges it against the published schema.",
       "action": "Nothing emits this code.",
@@ -72,7 +72,7 @@
       "title": "MCP tools/call refused by policy",
       "severity": "benign_recurring",
       "summary": "An MCP `tools/call` was refused by busbar's policy (budget, gate, or capability). This is a routine per-request governance outcome, logged at debug so a busy caller cannot spam the operator log.",
-      "action": "None — self-heals. The refusal reason is recorded in the audit and call log if a specific caller needs to be understood.",
+      "action": "None \u2014 self-heals. The refusal reason is recorded in the audit and call log if a specific caller needs to be understood.",
       "since": "1.6.0"
     },
     {
@@ -81,7 +81,7 @@
       "title": "MCP tools/call upstream failed",
       "severity": "benign_recurring",
       "summary": "An MCP `tools/call` was dispatched and the upstream server failed to execute it. This is reported to the model as a tool execution error (not a busbar refusal) and can recur per request, so it is logged at debug.",
-      "action": "None locally — self-heals. If a specific upstream fails persistently, check that server's health.",
+      "action": "None locally \u2014 self-heals. If a specific upstream fails persistently, check that server's health.",
       "since": "1.6.0"
     },
     {
@@ -90,7 +90,7 @@
       "title": "MCP tools/call refused before the upstream",
       "severity": "benign_recurring",
       "summary": "An MCP `tools/call` was refused before it reached the upstream (a pre-dispatch policy denial). Routine per-request governance, logged at debug to avoid spamming the operator log under load.",
-      "action": "None — self-heals. The refusal reason is in the audit and call log.",
+      "action": "None \u2014 self-heals. The refusal reason is in the audit and call log.",
       "since": "1.6.0"
     },
     {
@@ -99,7 +99,7 @@
       "title": "MCP caller-ask refused",
       "severity": "benign_recurring",
       "summary": "A caller's MCP ask for a capability was refused by policy. This is a routine per-request governance outcome, logged at debug so it cannot spam the operator log.",
-      "action": "None — self-heals. The refusal reason is recorded in the audit and call log.",
+      "action": "None \u2014 self-heals. The refusal reason is recorded in the audit and call log.",
       "since": "1.6.0"
     }
   ],
