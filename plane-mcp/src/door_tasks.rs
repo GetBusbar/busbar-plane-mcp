@@ -1255,12 +1255,11 @@ fn running(
                         // THE RESUME of an answered round of the task's own asks: the update that
                         // answered it nested it once under the plane's seal (row 159 mcp finding
                         // P-M9: a resume its caller posted on the task-run claim itself carries
-                        // none), and the host's one-time claim of that round takes it; it asks
-                        // from that round on.
+                        // none), and the round is the one that update answered on this instance,
+                        // taken here once; then the host's one-time claim of that round takes it.
+                        // The seal is opened first, so a resume that carries none spends nothing.
+                        // It asks from that round on.
                         Some(Retry::Asked { round, seal }) => {
-                            let working = plane.tasks.get(&run.reference).is_some_and(|t| {
-                                t.owned_by(principal) && t.status() == Status::Working
-                            });
                             let data = resume_data(principal, &run.reference, round, &run.digest);
                             let mut door_seal = DoorSeal {
                                 services,
@@ -1270,9 +1269,13 @@ fn running(
                                 spent: &plane.spent,
                                 pending: false,
                             };
-                            if !working
-                                || !crate::seal::opens(&data, &seal, &mut |d| door_seal.sign(d))
-                            {
+                            let sealed =
+                                crate::seal::opens(&data, &seal, &mut |d| door_seal.sign(d));
+                            let working = sealed
+                                && plane.tasks.with(&run.reference, |t| {
+                                    t.is_some_and(|t| t.take_resume(principal, round))
+                                });
+                            if !working {
                                 return not_run(unit, run);
                             }
                             run.round = round;
@@ -1864,7 +1867,7 @@ fn verbing(
                     && was == Status::InputRequired
                     && t.status() == Status::Working
                 {
-                    t.asked.take()
+                    t.answer_round()
                 } else {
                     None
                 };

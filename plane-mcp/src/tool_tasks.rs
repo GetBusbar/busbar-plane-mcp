@@ -221,6 +221,10 @@ pub struct Task {
     /// continuation ended with the handle live, and the `tasks/update` that answers the round
     /// nests the resume.
     pub asked: Option<(usize, Value)>,
+    /// THE ROUND A `tasks/update` ANSWERED and nested the resume of: the one resume this instance
+    /// runs, taken once. A `resume` no update nested (the task-run claim is a credentialed route)
+    /// finds none, so it can neither skip the operator's rounds nor run the call again.
+    resumed: Option<usize>,
     /// How many live-state chunks this instance wrote for it.
     pub live_chunks: u32,
 }
@@ -263,6 +267,7 @@ impl Task {
             chunks: 0,
             relay: None,
             asked: None,
+            resumed: None,
             live_chunks: 0,
         }
     }
@@ -394,6 +399,7 @@ impl Task {
             self.unsettled,
             self.chunks,
             self.live_chunks,
+            self.resumed,
         );
         *self = host;
         (
@@ -402,7 +408,31 @@ impl Task {
             self.unsettled,
             self.chunks,
             self.live_chunks,
+            self.resumed,
         ) = kept;
+    }
+
+    /// THE ROUND OF ITS OWN ASKS A `tasks/update` ANSWERED, taken: the round and the call the resume
+    /// it nests runs with. The round is remembered as the one resume this instance will run.
+    pub fn answer_round(&mut self) -> Option<(usize, Value)> {
+        let answered = self.asked.take();
+        if let Some((round, _)) = &answered {
+            self.resumed = Some(*round);
+        }
+        answered
+    }
+
+    /// Whether the continuation resuming at `round` for `principal` may run it: the task is that
+    /// caller's and working, and `round` is the one a `tasks/update` answered and nested, taken
+    /// here once.
+    pub fn take_resume(&mut self, principal: &str, round: usize) -> bool {
+        let runs = self.owned_by(principal)
+            && self.status == Status::Working
+            && self.resumed == Some(round);
+        if runs {
+            self.resumed = None;
+        }
+        runs
     }
 
     /// Its status.
