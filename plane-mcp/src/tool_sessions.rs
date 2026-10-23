@@ -170,8 +170,10 @@ struct Use {
     bytes: usize,
 }
 
+/// One buffered server-sent event of a session stream, kept so a reconnecting `Last-Event-ID` can
+/// resume from it.
 #[derive(Debug)]
-struct SessionEvent {
+struct ReplayEvent {
     seq: u64,
     /// Session-wide write order, so the oldest event in any stream is found without a clock.
     order: u64,
@@ -184,7 +186,7 @@ struct Stream {
     next_seq: u64,
     /// The highest seq ever trimmed away, or 0 when nothing was trimmed.
     trimmed_through: u64,
-    events: VecDeque<SessionEvent>,
+    events: VecDeque<ReplayEvent>,
 }
 
 #[derive(Debug)]
@@ -476,7 +478,7 @@ impl SessionTable {
         let seq = st.next_seq;
         st.next_seq += 1;
         let cost = data.len() + EVENT_OVERHEAD;
-        st.events.push_back(SessionEvent {
+        st.events.push_back(ReplayEvent {
             seq,
             order,
             data: data.to_string(),

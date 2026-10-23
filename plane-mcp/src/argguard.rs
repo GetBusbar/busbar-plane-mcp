@@ -39,10 +39,14 @@
 //! 2. **UNDECLARED.** Most real MCP tools take a URL in a plain `{"type": "string"}` with no
 //!    `format` at all. A walk that judged only declared fields would therefore refuse almost
 //!    nothing while reporting green, so every string in the arguments is ALSO judged when the whole
-//!    value (after trimming) begins `http://` or `https://`. That prefix has exactly one reading:
-//!    it is a URL. Nothing narrower is sniffed — a bare `localhost` in an untyped `query` field
-//!    stays untouched, because refusing a hostname-shaped word in free text breaks real tools and
-//!    buys nothing an attacker cannot restate.
+//!    value (after trimming) begins `http://` or `https://`, and when a WHATWG URL reader (the
+//!    `fetch` most MCP servers use) reads the whole value as a URL naming a host, however it is
+//!    spelled: `http:/h`, `https:\\h`, a scheme split by a tab or led by a control character all
+//!    name `h` to the upstream, so `h` is judged. A value that begins with a web scheme and a slash
+//!    but names no host a reader accepts is refused rather than passed. Nothing narrower is
+//!    sniffed — a bare `localhost` in an untyped `query` field stays untouched, because refusing a
+//!    hostname-shaped word in free text breaks real tools and buys nothing an attacker cannot
+//!    restate.
 //!
 //! The counts of both are RETURNED ([`ArgScan`]) rather than kept internal, because a walker that
 //! visits nothing refuses nothing and passes every test it is given. A caller — and the tests —
@@ -232,8 +236,9 @@ impl std::fmt::Display for ArgRefusal {
 pub struct ArgScan {
     /// String values judged because the pinned schema declared a URL-ish format for them.
     pub declared_judged: usize,
-    /// String values judged because the value itself began `http://` or `https://` while the
-    /// schema declared no URL-ish format there.
+    /// String values judged because the value itself is a URL naming a host (it began `http://`
+    /// or `https://`, or a WHATWG reader reads it as one) while the schema declared no URL-ish
+    /// format there.
     pub undeclared_judged: usize,
     /// Every string leaf the walk reached, judged or not. The denominator that makes the two
     /// numerators above readable.
@@ -333,9 +338,21 @@ fn judge_string(
             why,
         });
     }
-    if is_http_url(trimmed) {
+    if starts_with_http(trimmed) {
         scan.undeclared_judged += 1;
         return judge_argument(Urlish::AbsoluteUrl, trimmed, judge).map_err(|why| ArgRefusal {
+            pointer: pointer.to_string(),
+            declared_format: None,
+            why,
+        });
+    }
+    if let Some(found) = whatwg_host(s) {
+        scan.undeclared_judged += 1;
+        let judged = match found {
+            Some(host) => judge_host(&host, judge),
+            None => Err(ArgWhy::NoHost(s.to_string())),
+        };
+        return judged.map_err(|why| ArgRefusal {
             pointer: pointer.to_string(),
             declared_format: None,
             why,
@@ -344,21 +361,64 @@ fn judge_string(
     Ok(())
 }
 
-/// Whether the WHOLE value is an `http(s)` URL AS A WHATWG PARSER READS ONE (row 159 mcp finding
-/// C-M8): after the parser's own clean-up ([`whatwg_cleaned`]), an `http:`/`https:` scheme in any
-/// case followed by `//`, or by anything the parser reads a host out of (`http:host`,
-/// `http:/\host`: no `//` is needed after a web scheme and `\` reads as `/`). Deliberately a test
-/// on the whole value rather than a search: see the module header on why substring matching over
-/// free text is not wanted here. Prose that only mentions `http:` names no host and is not one.
-fn is_http_url(v: &str) -> bool {
-    let cleaned = whatwg_cleaned(v);
-    if !http_scheme(&cleaned) {
-        return false;
+/// THE HOST A WHATWG URL READER FINDS IN `value`, read as a fetching client reads it, by the
+/// contract's one URL reader (`busbar_contract::net::parse_url`, the reader the host's own
+/// destination guard reads with): leading and trailing C0 controls and spaces stripped, every tab
+/// and newline removed, a backslash read as a slash under a web scheme and any run of slashes after
+/// it skipped, the authority ended at `/`, `?`, `#` or `\`, the host percent-decoded.
+/// A host outside ASCII is the reader's own: it maps it through UTS-46 to the punycode name a
+/// fetching client dials, as 1.5.5 dialled it, so the judge is asked about that name.
+/// `Some(Some(host))`: the value is a URL naming `host`, lower-cased. `Some(None)`: it begins with
+/// a web scheme and a slash but names no host the reader accepts. `None`: it names no host.
+fn whatwg_host(value: &str) -> Option<Option<String>> {
+    match busbar_contract::net::parse_url(value) {
+        Ok(parts) => Some(Some(parts.host.to_ascii_lowercase())),
+        Err(_) => names_web_scheme(value).then_some(None),
     }
+}
+
+/// Whether `value`, after the WHATWG removals, begins `http:` or `https:` followed by a slash or a
+/// backslash: a web URL by its spelling, whether or not a reader accepts the rest.
+fn names_web_scheme(value: &str) -> bool {
+    let cleaned: String = value
+        .trim_matches(|c: char| c <= ' ')
+        .chars()
+        .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
+        .collect();
     let lower = cleaned.to_ascii_lowercase();
-    lower.starts_with("http://")
-        || lower.starts_with("https://")
-        || busbar_contract::net::parse_url(&cleaned).is_ok()
+    ["http:", "https:"].iter().any(|scheme| {
+        lower
+            .strip_prefix(scheme)
+            .is_some_and(|rest| rest.starts_with(['/', '\\']))
+    })
+}
+
+/// THE HOST A `uri-reference` NAMES, under the WHATWG reading: an absolute one's own, or a relative
+/// one resolved against a web base. A reference that names a host (`//h`, and the `\\h`, `/\h`
+/// and `\/h` a reader takes for it) names that host against any web base; any other relative one
+/// (a path, a query, a fragment) takes the base's, so it names none of its own.
+fn reference_host(value: &str) -> Option<Option<String>> {
+    if let Some(found) = whatwg_host(value) {
+        return Some(found);
+    }
+    let cleaned = whatwg_cleaned(value);
+    let mut opening = cleaned.chars();
+    let network_path = matches!(
+        (opening.next(), opening.next()),
+        (Some('/' | '\\'), Some('/' | '\\'))
+    );
+    if network_path {
+        return whatwg_host(&format!("https:{cleaned}"));
+    }
+    None
+}
+
+/// Whether the WHOLE value is an `http(s)` URL. Deliberately a prefix test on the whole trimmed
+/// string rather than a search: see the module header on why substring matching over free text is
+/// not wanted here.
+fn starts_with_http(v: &str) -> bool {
+    let lower = v.to_ascii_lowercase();
+    lower.starts_with("http://") || lower.starts_with("https://")
 }
 
 /// The WHATWG URL parser's first step, as a connecting stack applies it: leading and trailing C0
@@ -392,7 +452,12 @@ fn judge_argument(kind: Urlish, value: &str, judge: &mut Judge<'_>) -> Result<()
             if value.contains("://") || http_scheme(&whatwg_cleaned(value)) {
                 return judge_absolute(value, judge);
             }
-            Ok(())
+            // Every other spelling a WHATWG reader takes as naming a host.
+            match reference_host(value) {
+                Some(Some(host)) => judge_host(&host, judge),
+                Some(None) => Err(ArgWhy::NoHost(value.to_string())),
+                None => Ok(()),
+            }
         }
         Urlish::Host => {
             // A `hostname`/`ipv4`/`ipv6`-declared field is supposed to carry a bare host, but

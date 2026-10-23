@@ -59,16 +59,10 @@ fn answer(out: *mut ServiceOut, outcome: Outcome, value: u64, len: u64, items: u
         out.write(ServiceOut {
             size: std::mem::size_of::<ServiceOut>() as u32,
             outcome: RawOutcome::of(outcome),
-            _reserved: [0; 3],
             value,
             len,
             items,
-            needed_bytes: 0,
-            needed_items: 0,
-            error: AbiStr {
-                ptr: std::ptr::null(),
-                len: 0,
-            },
+            ..ServiceOut::ZERO
         });
     }
     RawOutcome::of(outcome)
@@ -360,16 +354,9 @@ extern "C" fn records_list(_: HostCtx, input: *const c_void, out: *mut ServiceOu
             out.write(ServiceOut {
                 size: std::mem::size_of::<ServiceOut>() as u32,
                 outcome: RawOutcome::of(Outcome::Failed),
-                _reserved: [0; 3],
-                value: 0,
-                len: 0,
-                items: 0,
                 needed_bytes: bytes as u64,
                 needed_items: rows.len() as u64,
-                error: AbiStr {
-                    ptr: std::ptr::null(),
-                    len: 0,
-                },
+                ..ServiceOut::ZERO
             });
         }
         return RawOutcome::of(Outcome::Failed);
@@ -422,6 +409,9 @@ static HOST_SLOTS: HostSlots = HostSlots {
     trust_decide: None,
     trust_state: None,
     session_emit: None,
+    auth_call: None,
+    unit_hand_in: None,
+    unit_refuse: None,
 };
 
 // ── the upstreams behind the connector ──────────────────────────────────────────────────────────

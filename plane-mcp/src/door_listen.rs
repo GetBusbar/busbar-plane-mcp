@@ -281,21 +281,27 @@ fn open(plane: &McpDoor, ticket: Ticket, principal: &str, unit: &mut CallUnit) -
                 !full
             });
             if !admitted {
-                let refusal = crate::tool_arrival::Refusal {
-                    status: STATUS_QUOTA,
-                    id: Some(id),
-                    code: crate::codec::CODE_REFUSED,
-                    message: format!(
-                        "this caller holds {MAX_LISTENS_PER_OWNER} open subscriptions, the most one \
-                         caller may hold; close one and open again"
-                    ),
-                    data: Some(serde_json::json!({ "reason": "subscription_quota" })),
-                };
+                let refusal = quota_refusal(id);
                 unit.pending = Some(Pending::answer(refusal.status, refusal.body(), None, &[]));
                 return Some(true);
             }
             step(plane, ticket, principal, unit)
         }
+    }
+}
+
+/// THE QUOTA'S REFUSAL of subscription `id`, on either carrier: its caller holds the most open
+/// subscriptions one caller may, or the instance its total.
+pub(super) fn quota_refusal(id: Value) -> crate::tool_arrival::Refusal {
+    crate::tool_arrival::Refusal {
+        status: STATUS_QUOTA,
+        id: Some(id),
+        code: crate::codec::CODE_REFUSED,
+        message: format!(
+            "this caller holds {MAX_LISTENS_PER_OWNER} open subscriptions, the most one caller may \
+             hold; close one and open again"
+        ),
+        data: Some(serde_json::json!({ "reason": "subscription_quota" })),
     }
 }
 
