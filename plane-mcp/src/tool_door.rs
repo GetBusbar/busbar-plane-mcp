@@ -602,12 +602,20 @@ struct Pending {
     /// The unit's admin audit rows, written with its first call as `RECORD_AUDIT` writes (the
     /// kernel folds them into its own audit chain under the principal it verified).
     audits: Vec<crate::call::AuditRow>,
-    /// The unit's ledger lane, named with its first call: the published tool a call resolved to
-    /// (`{server}_{tool}`), the identity the rate card prices and the usage rows read; `None` = the
-    /// route entry the walk picked.
+    /// The unit's ledger lane, named with its first call: the registered SERVER the call resolved
+    /// to, as `mcp_server:<server>` ([`server_lane`]), the key the rate card prices and the usage
+    /// rows read (architect ruling 2026-10-23, R-11); `None` = the route entry the walk picked.
     lane: Option<String>,
     /// The counts its first call reports (the unit's cumulative usage, read off the far end).
     units: Vec<UnitCount>,
+}
+
+/// THE LEDGER LANE OF A CALL TO `server` (architect ruling 2026-10-23, R-11): the plane bills each
+/// call under its registered SERVER, `mcp_server:<server>` (the door's first scope kind and the
+/// registration's name), as the a2a plane bills an agent under `agent:<id>` and as the kernel holds
+/// a present `tools.rate_card` to every registration at boot. A per-tool key names no lane.
+pub(crate) fn server_lane(server: &str) -> String {
+    format!("{}:{server}", door::SCOPE)
 }
 
 /// The host's clock, for the call log's `ts`: the kernel's one clock (`clock.now`), whole Unix
@@ -707,7 +715,7 @@ impl Pending {
         if let Some(line) = line {
             self.audits.extend(line.audit.clone());
             if !line.server.is_empty() {
-                self.lane = Some(line.tool.clone());
+                self.lane = Some(server_lane(&line.server));
             }
         }
         self
@@ -727,9 +735,9 @@ impl Pending {
         self
     }
 
-    /// Laned by the published tool `tool`.
-    fn laned(mut self, tool: &str) -> Self {
-        self.lane = Some(tool.to_string());
+    /// Laned by the registered server `server` ([`server_lane`]).
+    fn laned(mut self, server: &str) -> Self {
+        self.lane = Some(server_lane(server));
         self
     }
 
@@ -1758,7 +1766,7 @@ fn queued_turn(plane: &McpDoor, ticket: Ticket, unit: &mut CallUnit) -> Option<R
     if first {
         let (outbound, _) = relay.queued.take()?;
         relay.dispatched_ms = now;
-        unit.pending = Some(Pending::far(outbound).laned(&relay.admitted.entry.namespaced));
+        unit.pending = Some(Pending::far(outbound).laned(&relay.admitted.entry.server));
         return Some(Ok(Step::Write));
     }
     if deadline == 0 || now.is_none_or(|now| now < deadline) {
@@ -2857,7 +2865,7 @@ fn send_to_member(
         )));
     }
     relay.dispatched_ms = now;
-    unit.pending = Some(Pending::far(outbound).laned(&relay.admitted.entry.namespaced));
+    unit.pending = Some(Pending::far(outbound).laned(&relay.admitted.entry.server));
     unit.relay = Some(relay);
     Some(MemberSend::Step(Step::Write))
 }
