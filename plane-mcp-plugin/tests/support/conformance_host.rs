@@ -51,7 +51,7 @@ use std::time::{Duration, Instant};
 use busbar_contract::abi::host::conn::connector::{
     DIRECTION_OUTBOUND, EGRESS_OPERATOR_INFRASTRUCTURE,
 };
-use busbar_contract::abi::mechanism::call::{Blob, Outcome, BLOB_ABSENT};
+use busbar_contract::abi::mechanism::call::{Blob, Outcome};
 use busbar_contract::abi::mechanism::door::DoorFn;
 use busbar_contract::abi::mechanism::lifecycle::{slot as life, OpenIn, OpenOut};
 use busbar_contract::abi::mechanism::rendering::{ReadBlob, ReadNeed};
@@ -218,12 +218,7 @@ impl Opened {
             .cloned()
             .unwrap_or_else(|| panic!("the host's transport `{claim}` states no transport tail"));
         let mut i: OpenIn = blank_in();
-        i.settings = Blob {
-            ptr: std::ptr::null(),
-            len: 0,
-            fmt: BLOB_ABSENT,
-            flags: 0,
-        };
+        i.settings = Blob::ABSENT;
         let mut f = Frame::new(i, blank_out::<OpenOut>());
         let opened = plugin.call(life::OPEN, &mut f);
         assert_eq!(
