@@ -8,4 +8,4 @@
 # mcp 2.0.0 is the first official SDK release that implements the modern
 # stateless revision 2026-07-28 (server/discover, per-request _meta, MRTR,
 # subscriptions/listen). See the battery document, section "Control".
-mcp==2.0.0
+mcp==2.2.0
