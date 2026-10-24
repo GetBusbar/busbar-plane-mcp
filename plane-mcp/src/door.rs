@@ -85,13 +85,10 @@ pub const SECTIONS: &[Section] = &[
     Section {
         name: abi_str("tools"),
         flags: SECTION_DECLARING,
-        _reserved: 0,
         ..Section::ZERO
     },
     Section {
         name: abi_str("mcp"),
-        flags: 0,
-        _reserved: 0,
         ..Section::ZERO
     },
 ];
@@ -128,10 +125,7 @@ pub const KEEP_PROGRAM_HEADERS: &[AbiStr] =
     &[abi_str(busbar_contract::conn::PROGRAM_GENERATION_FIELD)];
 
 const NO_DETAILS: Blob = Blob {
-    ptr: std::ptr::null(),
-    len: 0,
     fmt: BLOB_ABSENT,
-    flags: 0,
     ..Blob::ZERO
 };
 
@@ -152,11 +146,7 @@ pub const NEEDS: &[Need] = &[
         details: NO_DETAILS,
         keep_response_headers: KEEP_RESPONSE_HEADERS.as_ptr(),
         keep_response_headers_len: KEEP_RESPONSE_HEADERS.len(),
-        timeout_ms: 0,
         keep_mode: KEEP_NAMED,
-        _reserved: 0,
-        deny_response_headers: std::ptr::null(),
-        deny_response_headers_len: 0,
         ..Need::ZERO
     },
     Need {
@@ -169,11 +159,7 @@ pub const NEEDS: &[Need] = &[
         details: NO_DETAILS,
         keep_response_headers: KEEP_PROGRAM_HEADERS.as_ptr(),
         keep_response_headers_len: KEEP_PROGRAM_HEADERS.len(),
-        timeout_ms: 0,
         keep_mode: KEEP_NAMED,
-        _reserved: 0,
-        deny_response_headers: std::ptr::null(),
-        deny_response_headers_len: 0,
         ..Need::ZERO
     },
 ];
@@ -186,12 +172,10 @@ const BILLABLE_CLASSES: &[BillableClass] = &[
     BillableClass {
         class: abi_str(crate::tool_meta::CLASS_TOOL_CALLS.as_str()),
         family: abi_str(CALLS_FAMILY),
-        ..BillableClass::ZERO
     },
     BillableClass {
         class: abi_str(crate::tool_meta::CLASS_BYTES.as_str()),
         family: abi_str(BYTES_FAMILY),
-        ..BillableClass::ZERO
     },
     // THE FEE UNIT is also a class (the tail check holds `fee_units ⊆ billable_classes`, ARCHITECT
     // Q-L5-FEE (C)): reported `1` on an answer the caller is served with a success, so a unit whose
@@ -199,7 +183,6 @@ const BILLABLE_CLASSES: &[BillableClass] = &[
     BillableClass {
         class: abi_str(FEE_PER_REQUEST),
         family: abi_str(FEE_FAMILY),
-        ..BillableClass::ZERO
     },
 ];
 
@@ -244,7 +227,6 @@ const RECORD_CHAINS: &[RecordChain] = &[RecordChain {
     kind: RECORD_CALL,
     framing: CHAIN_LENGTH_PREFIXED,
     flags: CHAIN_DIGESTS_SCOPE,
-    _reserved: 0,
     ..RecordChain::ZERO
 }];
 
@@ -253,25 +235,20 @@ const PIN_MECHANISMS: &[PinMechanism] = &[
     PinMechanism {
         token: abi_str("pinned_pubkey"),
         flags: MECHANISM_ROOT,
-        _reserved: 0,
         ..PinMechanism::ZERO
     },
     PinMechanism {
         token: abi_str("cert_spki"),
         flags: MECHANISM_ROOT,
-        _reserved: 0,
         ..PinMechanism::ZERO
     },
     PinMechanism {
         token: abi_str("mtls"),
         flags: MECHANISM_ROOT,
-        _reserved: 0,
         ..PinMechanism::ZERO
     },
     PinMechanism {
         token: abi_str("unpinned"),
-        flags: 0,
-        _reserved: 0,
         ..PinMechanism::ZERO
     },
 ];
@@ -283,7 +260,6 @@ const TRUST_KEYS: &[TrustKey] = &[
     TrustKey {
         key: abi_str("pin"),
         role: TRUST_PIN,
-        flags: 0,
         default: NONE,
         mechanisms: PIN_MECHANISMS.as_ptr(),
         mechanisms_len: PIN_MECHANISMS.len(),
@@ -292,28 +268,19 @@ const TRUST_KEYS: &[TrustKey] = &[
     TrustKey {
         key: abi_str("verify_ttl"),
         role: TRUST_REVERIFY_TTL,
-        flags: 0,
         default: abi_str(DEFAULT_MCP_VERIFY_TTL),
-        mechanisms: std::ptr::null(),
-        mechanisms_len: 0,
         ..TrustKey::ZERO
     },
     TrustKey {
         key: abi_str("allow_private"),
         role: TRUST_PRIVATE_REACH,
-        flags: 0,
         default: NONE,
-        mechanisms: std::ptr::null(),
-        mechanisms_len: 0,
         ..TrustKey::ZERO
     },
     TrustKey {
         key: abi_str(crate::tools_config::TOOL_APPROVALS_KEY),
         role: busbar_contract::abi::plane::TRUST_ITEM_APPROVALS,
-        flags: 0,
         default: abi_str(crate::tools_config::TOOL_APPROVAL_FIELD),
-        mechanisms: std::ptr::null(),
-        mechanisms_len: 0,
         ..TrustKey::ZERO
     },
 ];
@@ -322,7 +289,6 @@ const fn op_class(i: usize) -> OpClass {
     OpClass {
         op: abi_str(crate::tool_ops::OP_CLASSES[i].as_str()),
         name: abi_str(crate::tool_ops::OP_CLASSES[i].as_str()),
-        ..OpClass::ZERO
     }
 }
 
@@ -453,7 +419,6 @@ pub const TAIL: &PlaneTail = &PlaneTail {
         ptr: ADMIN_OPENAPI.as_ptr(),
         len: ADMIN_OPENAPI.len(),
         fmt: busbar_contract::abi::mechanism::call::BLOB_JSON,
-        flags: 0,
         ..Blob::ZERO
     },
     // No stream ceiling (ARCHITECT STREAM-CEILING, 2026-10-07): predev's mcp engine put no bound on
