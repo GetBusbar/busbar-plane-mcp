@@ -16,7 +16,7 @@
 //! custom `Deserialize` where the reserved keys, the section knobs and the value rules all live.
 
 use busbar_contract::abi::mechanism::call::AbiStr;
-use busbar_contract::abi::mechanism::door::SECTION_DECLARING;
+use busbar_contract::abi::mechanism::door::{SECTION_DECLARING, SECTION_SELECTS};
 use serde_json::{json, Value};
 
 use super::{
@@ -530,7 +530,7 @@ fn spells(stated: AbiStr, word: &str) -> bool {
 }
 
 /// THE WORDS THE ROOT BATTERY READS OFF THE STATEMENT ARE THE GRAMMAR'S: the declaring section is
-/// `SECTION`, the owned one the endpoint block, the subject noun `SUBJECT_NOUN`; and the endpoint's
+/// `SECTION`, the owned one the endpoint block (which selects the plane), the subject noun `SUBJECT_NOUN`; and the endpoint's
 /// fixed mount and
 /// its RFC 9728 document are spelled from the endpoint block's name (so the root may build them from
 /// the section the Statement owns).
@@ -545,6 +545,11 @@ fn the_statement_names_the_grammars_section_noun_and_endpoint() {
         "the owned endpoint block"
     );
     assert_eq!(sections[1].flags & SECTION_DECLARING, 0);
+    assert_ne!(
+        sections[1].flags & SECTION_SELECTS,
+        0,
+        "the endpoint block selects the plane (Law 7)"
+    );
     assert!(spells(crate::door::TAIL.subject_noun, SUBJECT_NOUN));
     assert_eq!(
         crate::tool_claims::DEFAULT_MOUNT,
