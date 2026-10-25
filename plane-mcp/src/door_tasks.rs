@@ -1927,9 +1927,9 @@ fn verbing(
             at
         }
     };
-    let ack = |unit: &mut CallUnit| answer(unit, 200, crate::call::result(id, json!({})));
+    let ack = |unit: &mut CallUnit| answer(unit, 200, crate::catalogue::complete(id, json!({})));
     if op == crate::tool_ops::OP_TASK_GET {
-        return answer(unit, 200, crate::call::result(id, task.detailed()));
+        return answer(unit, 200, crate::catalogue::complete(id, task.detailed()));
     }
     if op == crate::tool_ops::OP_TASK_UPDATE {
         // ABSENT is treated as empty rather than refused.

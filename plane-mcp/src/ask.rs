@@ -817,4 +817,4 @@ pub fn relayed_result(id: &Value, upstream: &Value, state: &str) -> Vec<u8> {
 
 #[cfg(test)]
 #[path = "tests/ask.rs"]
-mod tests;
+pub(crate) mod tests;

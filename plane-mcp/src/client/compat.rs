@@ -17,16 +17,13 @@
 use serde_json::Value;
 
 use super::jsonrpc::OutboundRequest;
+use crate::adapt::H_SESSION_ID;
 use crate::codec::{
     CODE_INVALID_PARAMS, CODE_INVALID_REQUEST, CODE_METHOD_NOT_FOUND,
     CODE_UNSUPPORTED_PROTOCOL_VERSION, H_MCP_METHOD, H_MCP_NAME, H_PROTOCOL_VERSION,
     META_CLIENT_CAPABILITIES, META_PROTOCOL_VERSION,
 };
 use crate::revision::{Revision, StepOutcome};
-
-/// The response header an upstream names its session in, and the request header busbar carries it
-/// back in.
-pub const H_SESSION: &str = crate::adapt::H_SESSION_ID;
 
 /// Reads what a stateless request's answer says about the upstream's revision.
 ///
@@ -198,7 +195,7 @@ fn session_envelope(
             k != H_PROTOCOL_VERSION
                 && k != H_MCP_METHOD
                 && k != H_MCP_NAME
-                && k != H_SESSION
+                && k != H_SESSION_ID
                 && !k.starts_with("mcp-param-")
         })
         .cloned()
@@ -207,7 +204,7 @@ fn session_envelope(
         headers.push((H_PROTOCOL_VERSION.to_string(), r.wire().to_string()));
     }
     if let Some(s) = session {
-        headers.push((H_SESSION.to_string(), s.to_string()));
+        headers.push((H_SESSION_ID.to_string(), s.to_string()));
     }
     OutboundRequest {
         url: url.to_string(),
@@ -447,4 +444,4 @@ impl EventStreamLink {
 
 #[cfg(test)]
 #[path = "tests/compat_tests.rs"]
-mod tests;
+pub(super) mod tests;

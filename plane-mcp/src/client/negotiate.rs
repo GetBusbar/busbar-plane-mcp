@@ -16,7 +16,7 @@
 //!
 //! - [`Action::Send`]: send the request with its verb; feed the answer to [`Negotiator::on_answer`]
 //!   as a [`HopAnswer`] (status, the response head's kept fields, body), or `None` when there was no
-//!   answer at all. The only head field read is [`super::compat::H_SESSION`], which the plane
+//!   answer at all. The only head field read is [`crate::adapt::H_SESSION_ID`], which the plane
 //!   declares in `keep_response_headers`.
 //! - [`Action::OpenStream`]: open a GET stream; feed its head to [`Negotiator::on_answer`] (body
 //!   empty), then every event read off it to [`Negotiator::on_event`] until the machine finishes.
@@ -35,7 +35,7 @@ use serde_json::Value;
 
 use super::compat::{
     initialize_request, initialized_notification, lower_request, offered_revision, probe_outcome,
-    stateless_outcome, EventStreamLink, LinkEffect, StreamEvent, H_SESSION,
+    stateless_outcome, EventStreamLink, LinkEffect, StreamEvent,
 };
 use super::jsonrpc::OutboundRequest;
 use crate::revision::{self, Revision, StepOutcome};
@@ -333,7 +333,7 @@ impl Negotiator {
                         if r.is_event_stream_revision() {
                             return self.fail(Refusal::OfferedUnsupported);
                         }
-                        let session = answer.field(H_SESSION).map(str::to_string);
+                        let session = answer.field(crate::adapt::H_SESSION_ID).map(str::to_string);
                         let url = self.original.url.clone();
                         let request =
                             initialized_notification(&self.original, &url, r, session.as_deref());

@@ -25,8 +25,8 @@ pub const META_LOGGING_LEVEL: &str = "io.busbar/loggingLevel";
 /// The level a caller that names none is given.
 pub const DEFAULT_LEVEL: &str = "info";
 
-/// The protocol's eight severities, least severe first.
-const SEVERITIES: &[&str] = &[
+/// The protocol's eight severities (RFC 5424's), least severe first.
+pub(crate) const SEVERITIES: &[&str] = &[
     "debug",
     "info",
     "notice",
@@ -55,7 +55,8 @@ pub const JSON: &str = "application/json";
 /// The cache directive an event-stream answer carries.
 pub const NO_STORE: &str = "no-cache, no-store";
 
-fn severity_of(name: &str) -> Option<usize> {
+/// The rank of severity `name` ([`SEVERITIES`]), `None` for a name that is none of them.
+pub(crate) fn severity_of(name: &str) -> Option<usize> {
     SEVERITIES.iter().position(|s| *s == name)
 }
 

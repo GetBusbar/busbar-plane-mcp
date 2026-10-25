@@ -6,6 +6,7 @@
 use serde_json::{json, Value};
 
 use super::*;
+use crate::tests::everyone;
 
 const SECTION: &[u8] = br#"{
   "fs": {
@@ -34,10 +35,6 @@ fn catalogue() -> Catalogue {
         1,
         &crate::door::read_tools_section(SECTION).expect("the section reads"),
     )
-}
-
-fn everyone(_: &str, _: &str) -> bool {
-    true
 }
 
 fn only_fs(kind: &str, name: &str) -> bool {

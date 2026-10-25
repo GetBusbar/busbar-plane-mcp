@@ -35,11 +35,28 @@ fn loaded_door() -> busbar_plugin_loader::dispatch::LoadedDoor {
     busbar_plugin_loader::dispatch::LoadedDoor::from(door)
 }
 
+/// An all-zero `in`/`out` frame.
+fn z<T>() -> T {
+    // SAFETY: every `in`/`out` here is plain C data; all-zero is a valid value of each.
+    unsafe { std::mem::zeroed() }
+}
+
+/// `b` as opaque octets.
+fn octets(b: &'static [u8]) -> busbar_contract::abi::mechanism::call::Blob {
+    busbar_contract::abi::mechanism::call::Blob::of(b)
+        .with_fmt(busbar_contract::abi::mechanism::call::BLOB_OCTETS)
+}
+
+/// `b` as an ABI string.
+fn text(b: &'static [u8]) -> busbar_contract::abi::mechanism::call::AbiStr {
+    busbar_contract::abi::mechanism::call::AbiStr::of_bytes(b)
+}
+
 mod both_ways {
-    use std::mem::zeroed;
     use std::sync::Arc;
 
-    use busbar_contract::abi::mechanism::call::{AbiStr, Blob, Field, Outcome, Span, BLOB_OCTETS};
+    use super::{octets, text, z};
+    use busbar_contract::abi::mechanism::call::{AbiStr, Field, Outcome, Span};
     use busbar_contract::abi::mechanism::door::Door;
     use busbar_contract::abi::mechanism::lifecycle::{
         slot as life, CancelIn, CancelOut, GenIn, RefreshIn, TickIn, TickOut, ValidateIn,
@@ -71,11 +88,6 @@ mod both_ways {
         H_PROTOCOL_VERSION, PROTOCOL_VERSION, TOOLS_SECTION,
     };
 
-    fn z<T>() -> T {
-        // SAFETY: every `in`/`out` here is plain C data; all-zero is a valid value of each.
-        unsafe { zeroed() }
-    }
-
     fn bind(d: &Dispatcher) -> Bind {
         Bind {
             instance: Arc::from("the-instance"),
@@ -85,14 +97,6 @@ mod both_ways {
             // The conformance door is driven op by op and opens nothing: bound as a probe.
             conns: busbar_plugin_loader::dispatch::ConnTable::Probe,
         }
-    }
-
-    fn octets(b: &'static [u8]) -> Blob {
-        Blob::of(b).with_fmt(BLOB_OCTETS)
-    }
-
-    fn text(b: &'static [u8]) -> AbiStr {
-        AbiStr::of_bytes(b)
     }
 
     fn at(buf: &[u8], s: Span) -> String {
@@ -1702,11 +1706,11 @@ mod bounds {
     //!
     //! The units are driven through the linked door op by op, as [`super::both_ways`] drives it.
 
-    use std::mem::zeroed;
     use std::path::Path;
     use std::sync::Arc;
 
-    use busbar_contract::abi::mechanism::call::{AbiStr, Blob, Field, Outcome, BLOB_OCTETS};
+    use super::{octets, text, z};
+    use busbar_contract::abi::mechanism::call::{Field, Outcome};
     use busbar_contract::abi::mechanism::lifecycle::GenIn;
     use busbar_contract::abi::plane::{
         slot, ArriveIn, ArriveOut, OnPieceIn, OnPieceOut, OutField, PlaneOpenIn, PlaneOpenOut,
@@ -1721,19 +1725,6 @@ mod bounds {
         in_head, load_linked, out_head, Bind, DispatchConfig, Dispatcher, Frame, LinkedRow, NoSink,
         Plugin,
     };
-
-    fn z<T>() -> T {
-        // SAFETY: every `in`/`out` here is plain C data; all-zero is a valid value of each.
-        unsafe { zeroed() }
-    }
-
-    fn octets(b: &'static [u8]) -> Blob {
-        Blob::of(b).with_fmt(BLOB_OCTETS)
-    }
-
-    fn text(b: &'static [u8]) -> AbiStr {
-        AbiStr::of_bytes(b)
-    }
 
     const SECTION: &[u8] =
         br#"{"fs": {"url": "https://mcp.example/fs", "pin": {"mechanism": "unpinned"}}}"#;
@@ -1783,21 +1774,24 @@ mod bounds {
         p
     }
 
-    /// A `tools/list` of `unit` arrives (the plane answers it from what it holds).
-    fn arrive_list(p: &Plugin<Plane>, unit: u64) {
+    /// `body` with `fields` arrives as `unit`, POSTed on the mount: its outcome and the status the
+    /// plane refused it with.
+    fn arrive(
+        p: &Plugin<Plane>,
+        unit: u64,
+        body: &'static [u8],
+        fields: &'static [Field],
+    ) -> (Outcome, u32) {
         let route = claim("POST", "/mcp", "http");
         let mut a: Frame<ArriveIn, ArriveOut> = Frame::new(z(), z());
         (a.input.head, a.out.head) = (in_head(), out_head());
         a.input.unit = unit;
         a.input.claim = route;
         (a.input.method, a.input.target) = (text(b"POST"), text(b"/mcp"));
-        a.input.body = octets(TOOLS_LIST);
-        (a.input.fields, a.input.fields_len) = (LIST_FIELDS.as_ptr(), LIST_FIELDS.len());
-        assert_eq!(
-            p.call(slot::ARRIVE, &mut a).outcome,
-            Outcome::Ready,
-            "arrive"
-        );
+        a.input.body = octets(body);
+        (a.input.fields, a.input.fields_len) = (fields.as_ptr(), fields.len());
+        let outcome = p.call(slot::ARRIVE, &mut a).outcome;
+        (outcome, a.out.refusal_status)
     }
 
     /// What one `on_piece` answered: its outcome, the status it stated and the bytes it emitted.
@@ -1873,7 +1867,11 @@ mod bounds {
     fn a_unit_the_kernel_refuses_is_dropped() {
         let d = Dispatcher::new(DispatchConfig::default());
         let p = started(&d);
-        arrive_list(&p, 7);
+        assert_eq!(
+            arrive(&p, 7, TOOLS_LIST, LIST_FIELDS).0,
+            Outcome::Ready,
+            "arrive"
+        );
         refuse(&p, 7);
         assert_eq!(
             piece(&p, 7, FROM_CALLER),
@@ -1887,7 +1885,11 @@ mod bounds {
     fn a_unit_whose_piece_the_plane_refuses_is_dropped() {
         let d = Dispatcher::new(DispatchConfig::default());
         let p = started(&d);
-        arrive_list(&p, 8);
+        assert_eq!(
+            arrive(&p, 8, TOOLS_LIST, LIST_FIELDS).0,
+            Outcome::Ready,
+            "arrive"
+        );
         // A far end's piece for a unit that sent nothing on.
         assert_eq!(piece(&p, 8, FROM_FAR_END), Outcome::Refused);
         assert_eq!(
@@ -1917,33 +1919,18 @@ mod bounds {
         );
     }
 
-    /// A `subscriptions/listen` of `unit` arrives, opting in to a list category.
-    fn arrive_listen(p: &Plugin<Plane>, unit: u64) {
-        const LISTEN: &[u8] = br#"{"jsonrpc":"2.0","id":3,"method":"subscriptions/listen","params":{"notifications":{"toolsListChanged":true},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#;
-        const FIELDS: &[Field] = &[
-            Field {
-                name: abi_str(H_PROTOCOL_VERSION),
-                value: abi_str(PROTOCOL_VERSION),
-            },
-            Field {
-                name: abi_str(H_MCP_METHOD),
-                value: abi_str("subscriptions/listen"),
-            },
-        ];
-        let route = claim("POST", "/mcp", "http");
-        let mut a: Frame<ArriveIn, ArriveOut> = Frame::new(z(), z());
-        (a.input.head, a.out.head) = (in_head(), out_head());
-        a.input.unit = unit;
-        a.input.claim = route;
-        (a.input.method, a.input.target) = (text(b"POST"), text(b"/mcp"));
-        a.input.body = octets(LISTEN);
-        (a.input.fields, a.input.fields_len) = (FIELDS.as_ptr(), FIELDS.len());
-        assert_eq!(
-            p.call(slot::ARRIVE, &mut a).outcome,
-            Outcome::Ready,
-            "arrive listen"
-        );
-    }
+    /// A `subscriptions/listen`, opting in to a list category.
+    const LISTEN: &[u8] = br#"{"jsonrpc":"2.0","id":3,"method":"subscriptions/listen","params":{"notifications":{"toolsListChanged":true},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#;
+    const LISTEN_FIELDS: &[Field] = &[
+        Field {
+            name: abi_str(H_PROTOCOL_VERSION),
+            value: abi_str(PROTOCOL_VERSION),
+        },
+        Field {
+            name: abi_str(H_MCP_METHOD),
+            value: abi_str("subscriptions/listen"),
+        },
+    ];
 
     /// A HOST WITH A CLOCK: the shared services double, serving `clock.now` (a subscription is
     /// timed on it) and nothing else.
@@ -1973,7 +1960,11 @@ mod bounds {
         // Streams are opened through a one-byte reply buffer, so each stays held, its head part
         // written.
         let open = |unit: u64, caller: &'static str, cap: usize| {
-            arrive_listen(&p, unit);
+            assert_eq!(
+                arrive(&p, unit, LISTEN, LISTEN_FIELDS).0,
+                Outcome::Ready,
+                "arrive listen"
+            );
             push(&p, (unit, FROM_CALLER, 0), (unit, caller), cap)
         };
         open(1, "caller-b", 1);
@@ -2007,7 +1998,11 @@ mod bounds {
     fn a_subscription_on_a_host_whose_clock_is_unbound_is_refused() {
         let d = Dispatcher::new(DispatchConfig::default());
         let p = started(&d);
-        arrive_listen(&p, 1);
+        assert_eq!(
+            arrive(&p, 1, LISTEN, LISTEN_FIELDS).0,
+            Outcome::Ready,
+            "arrive listen"
+        );
         let refused = push(&p, (1, FROM_CALLER, 0), (1, "caller-a"), 1 << 16);
         assert_eq!(
             refused.status,
@@ -2015,20 +2010,6 @@ mod bounds {
             "a subscription the clock cannot time is refused: {}",
             String::from_utf8_lossy(&refused.reply)
         );
-    }
-
-    /// A `tools/list` of `unit` arrives: its outcome and the status the plane refused it with.
-    fn arrival(p: &Plugin<Plane>, unit: u64) -> (Outcome, u32) {
-        let route = claim("POST", "/mcp", "http");
-        let mut a: Frame<ArriveIn, ArriveOut> = Frame::new(z(), z());
-        (a.input.head, a.out.head) = (in_head(), out_head());
-        a.input.unit = unit;
-        a.input.claim = route;
-        (a.input.method, a.input.target) = (text(b"POST"), text(b"/mcp"));
-        a.input.body = octets(TOOLS_LIST);
-        (a.input.fields, a.input.fields_len) = (LIST_FIELDS.as_ptr(), LIST_FIELDS.len());
-        let outcome = p.call(slot::ARRIVE, &mut a).outcome;
-        (outcome, a.out.refusal_status)
     }
 
     /// A full unit table refuses the next arrival (429) and never evicts: the first unit is still
@@ -2039,8 +2020,10 @@ mod bounds {
         let p = started(&d);
         let mut first_refused = None;
         for unit in 1..=5000 {
-            if arrival(&p, unit) != (Outcome::Ready, 0) && first_refused.is_none() {
-                first_refused = Some((unit, arrival(&p, unit)));
+            if arrive(&p, unit, TOOLS_LIST, LIST_FIELDS) != (Outcome::Ready, 0)
+                && first_refused.is_none()
+            {
+                first_refused = Some((unit, arrive(&p, unit, TOOLS_LIST, LIST_FIELDS)));
             }
         }
         assert_eq!(

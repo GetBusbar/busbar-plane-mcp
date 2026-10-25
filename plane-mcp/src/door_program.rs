@@ -25,7 +25,7 @@
 
 use super::*;
 use crate::tool_program::{
-    call_id, first_in_line, list_id, AskOwner, Correlator, Exchanged, Peer, ProgramExchange,
+    first_in_line, list_id, AskOwner, Correlator, Exchanged, Peer, ProgramExchange,
 };
 
 /// THE LINE OF CALLS RELAYED TO STDIO CHILDREN, by serial (arrival order) (finding 5): every
@@ -556,11 +556,7 @@ pub(super) fn far(
             // A retry reaches only the child that asked: a restarted one owes nothing.
             if relay.expect.is_some_and(|g| g != generation) {
                 relay.corr.outbox.clear();
-                relay.settled = Some(Err(RESTARTED.to_string()));
-                return match relay.settled.take() {
-                    Some(settled) => Far::Settled(settled),
-                    None => Far::Taken,
-                };
+                return Far::Settled(Err(RESTARTED.to_string()));
             }
         }
         let mut peer = DoorPeer {
@@ -651,11 +647,6 @@ pub(super) fn refuse_asks(
 /// The progress frames the relay's reading kept, taken.
 pub(super) fn progress(relay: &mut ProgramRelay) -> Vec<Value> {
     std::mem::take(&mut relay.corr.progress)
-}
-
-/// The id unit `key`'s call carries on a child, round `round`.
-pub(super) fn id_of(key: u64, round: u32) -> u64 {
-    call_id(key, round)
 }
 
 #[cfg(test)]

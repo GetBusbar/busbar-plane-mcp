@@ -77,30 +77,6 @@ pub struct OutboundRequest {
     pub body: Vec<u8>,
 }
 
-impl OutboundRequest {
-    /// EVERY byte this request will put on the wire, concatenated: URL, then each header name and
-    /// value, then the body.
-    ///
-    /// This exists for the adversarial scan and for nothing else. Its value is that it is derived
-    /// from the same fields the transport writes, so a field added to `OutboundRequest` without
-    /// being added here fails `wire_tests::every_field_is_scanned` — a scan that silently stops
-    /// covering a new field is the exact false green this rule exists to prevent.
-    /// Used by the tests that scan the whole wire for a leaked caller credential; the dispatch
-    /// path hands the body to the transport directly.
-    #[allow(dead_code)]
-    #[cfg(test)]
-    pub fn wire_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::new();
-        out.extend_from_slice(self.url.as_bytes());
-        for (name, value) in &self.headers {
-            out.extend_from_slice(name.as_bytes());
-            out.extend_from_slice(value.as_bytes());
-        }
-        out.extend_from_slice(&self.body);
-        out
-    }
-}
-
 /// WHICH client capabilities the outbound `_meta` declares — one flag per capability busbar can
 /// genuinely answer for THIS server. A struct rather than adjacent booleans, because two `bool`s
 /// in one signature are two arguments a call site can swap without the compiler noticing, and the

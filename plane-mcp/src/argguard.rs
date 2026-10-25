@@ -248,16 +248,6 @@ pub struct ArgScan {
     pub strings_seen: usize,
 }
 
-impl ArgScan {
-    /// Total values that were actually put through the guard. Read by the tests alone: the
-    /// dispatch path acts on the REFUSAL, and the counts exist for the floor assertions that stop
-    /// a walker which visits nothing from passing.
-    #[cfg(test)]
-    pub fn judged(&self) -> usize {
-        self.declared_judged + self.undeclared_judged
-    }
-}
-
 /// THE ENTRY POINT: walk `arguments` against the PINNED `schema` and refuse on the first
 /// inadmissible value.
 ///

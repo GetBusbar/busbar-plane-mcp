@@ -22,7 +22,7 @@
 
 use serde_json::{json, Map, Value};
 
-use crate::catalogue::{granted, Catalogue, ToolEntry};
+use crate::catalogue::{complete, granted, Catalogue, ToolEntry};
 use crate::checks::decode_sentinel;
 use crate::client::jsonrpc::{self as wire, AdvertisedCaps, RpcOutcome, ServerAsk};
 use crate::codec::{
@@ -476,7 +476,7 @@ fn trust_refusal(
         Trust::Verdict(code) => code,
         Trust::Unreached(reason) => {
             return Some(Ok(Admission::Unreached(
-                result(
+                complete(
                     id,
                     upstream_failure_result(
                         server,
@@ -755,11 +755,15 @@ pub fn judge_arguments(
         return admission;
     };
     let entry = &admitted.entry;
-    let schema = entry
-        .input_schema
-        .clone()
-        .unwrap_or_else(|| json!({ "type": "object" }));
-    match crate::argguard::guard(&schema, &admitted.arguments, |dest| judge(entry, dest)) {
+    let undeclared;
+    let schema = match &entry.input_schema {
+        Some(schema) => schema,
+        None => {
+            undeclared = json!({ "type": "object" });
+            &undeclared
+        }
+    };
+    match crate::argguard::guard(schema, &admitted.arguments, |dest| judge(entry, dest)) {
         Ok(_) => Admission::Go(admitted),
         Err(refused) => Admission::Refused(
             error(
@@ -955,7 +959,7 @@ pub fn outbound_program(
 pub fn never_sent(admitted: &AdmittedCall, reason: &str) -> Settled {
     Settled::Answer {
         status: STATUS_OK,
-        body: result(
+        body: complete(
             &admitted.id,
             upstream_failure_result(&admitted.entry.server, reason),
         ),
@@ -974,7 +978,7 @@ pub fn never_sent(admitted: &AdmittedCall, reason: &str) -> Settled {
 pub fn upstream_failed(admitted: &AdmittedCall, reason: &str) -> Settled {
     Settled::Answer {
         status: STATUS_OK,
-        body: result(
+        body: complete(
             &admitted.id,
             upstream_failure_result(&admitted.entry.server, reason),
         ),
@@ -1057,19 +1061,6 @@ pub fn upstream_failure_result(server: &str, reason: &str) -> Value {
             "text": format!("The MCP server `{server}` did not complete this tool call: {reason}"),
         }],
     })
-}
-
-/// A success envelope with `resultType: complete` stamped on the result.
-#[must_use]
-pub fn result(id: &Value, mut value: Value) -> Vec<u8> {
-    if let Some(obj) = value.as_object_mut() {
-        obj.insert("resultType".into(), RESULT_TYPE_COMPLETE.into());
-    }
-    let mut envelope = Map::new();
-    envelope.insert("jsonrpc".into(), "2.0".into());
-    envelope.insert("id".into(), id.clone());
-    envelope.insert("result".into(), value);
-    serde_json::to_vec(&Value::Object(envelope)).unwrap_or_default()
 }
 
 /// Why busbar declined to carry an upstream's ask to its caller, in the engine's words. Every arm is
@@ -1270,7 +1261,7 @@ pub fn settle_call_as(
     };
     let failed = |reason: String| Settled::Answer {
         status: STATUS_OK,
-        body: result(id, upstream_failure_result(&entry.server, &reason)),
+        body: complete(id, upstream_failure_result(&entry.server, &reason)),
         line: CallLine::resolved(
             entry,
             vocab::OUTCOME_DISPATCHED,
@@ -1618,7 +1609,7 @@ fn completed(admitted: &AdmittedCall, value: &Value, body: &[u8]) -> Settled {
 /// object that carries no `resultType` at all; a `resultType` the upstream sent is its own.
 fn relayed(id: &Value, value: &Value, body: &[u8]) -> Vec<u8> {
     let Some(sent) = result_bytes(body) else {
-        return result(id, value.clone());
+        return complete(id, value.clone());
     };
     let mut out = format!("{{\"id\":{id},\"jsonrpc\":\"2.0\",\"result\":");
     match sent.trim_start().strip_prefix('{') {

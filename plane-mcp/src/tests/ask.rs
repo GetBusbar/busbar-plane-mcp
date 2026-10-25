@@ -10,9 +10,10 @@ use serde_json::{json, Value};
 use super::*;
 use crate::tools_config::AskRoundCfg;
 
-/// A seal that writes the state as JSON behind a marker and spends each nonce once.
+/// A seal that writes the state as JSON behind a marker and spends each nonce once (the ask
+/// tests' own stand-in for the host's, shared with the call tests).
 #[derive(Default)]
-struct Plain {
+pub(crate) struct Plain {
     spent: BTreeSet<String>,
     next: u32,
 }

@@ -109,18 +109,6 @@ const MAX_RESOURCE_SUB_URI_BYTES: usize = 2048;
 /// gives way.
 const MAX_PENDING_UPDATES: usize = 64;
 
-/// The RFC 5424 severities `logging/setLevel` names, least severe first.
-const LEVELS: &[&str] = &[
-    "debug",
-    "info",
-    "notice",
-    "warning",
-    "error",
-    "critical",
-    "alert",
-    "emergency",
-];
-
 /// What a unit is to the session machinery.
 #[derive(Debug, Clone)]
 pub(super) enum SessionUnit {
@@ -778,7 +766,7 @@ fn here(
         }
         "logging/setLevel" => {
             let level = value.pointer("/params/level").and_then(Value::as_str);
-            match level.filter(|l| LEVELS.contains(l)) {
+            match level.filter(|l| crate::framing::SEVERITIES.contains(l)) {
                 Some(level) => {
                     state_of(plane, session, owner, |s| s.level = Some(level.to_string()));
                     ok(json!({}))
@@ -897,7 +885,7 @@ pub(super) fn heard(
                     .get(&id.to_string())
                     .and_then(|s| s.level);
                 let level = frame.pointer("/params/level").and_then(Value::as_str);
-                let rank = |l: &str| LEVELS.iter().position(|x| *x == l);
+                let rank = crate::framing::severity_of;
                 let passes = match (floor.as_deref().and_then(rank), level.and_then(rank)) {
                     (Some(floor), Some(level)) => level >= floor,
                     (Some(_), None) => false,
