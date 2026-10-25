@@ -137,4 +137,4 @@ ulid = "1"
 # patches them to its own tree. The source is busbar spelled through www.github.com: Cargo
 # refuses a patch that names the source it patches.
 [patch."https://github.com/GetBusbar/busbar"]
-busbar-contract = { git = "https://www.github.com/GetBusbar/busbar", rev = "93d8a0f6887a65d9e69cc62982b54dcbf4a00bae" }
+busbar-contract = { git = "https://www.github.com/GetBusbar/busbar", rev = "1768a6e1db639389d8d1396f6d0b1e0f144adefc" }
