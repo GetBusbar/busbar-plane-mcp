@@ -89,7 +89,6 @@ pub const SECTIONS: &[Section] = &[
     },
     Section {
         name: abi_str("mcp"),
-        flags: 0,
         ..Section::ZERO
     },
 ];
@@ -147,10 +146,7 @@ pub const NEEDS: &[Need] = &[
         details: NO_DETAILS,
         keep_response_headers: KEEP_RESPONSE_HEADERS.as_ptr(),
         keep_response_headers_len: KEEP_RESPONSE_HEADERS.len(),
-        timeout_ms: 0,
         keep_mode: KEEP_NAMED,
-        deny_response_headers: std::ptr::null(),
-        deny_response_headers_len: 0,
         ..Need::ZERO
     },
     Need {
@@ -163,10 +159,7 @@ pub const NEEDS: &[Need] = &[
         details: NO_DETAILS,
         keep_response_headers: KEEP_PROGRAM_HEADERS.as_ptr(),
         keep_response_headers_len: KEEP_PROGRAM_HEADERS.len(),
-        timeout_ms: 0,
         keep_mode: KEEP_NAMED,
-        deny_response_headers: std::ptr::null(),
-        deny_response_headers_len: 0,
         ..Need::ZERO
     },
 ];
@@ -256,7 +249,6 @@ const PIN_MECHANISMS: &[PinMechanism] = &[
     },
     PinMechanism {
         token: abi_str("unpinned"),
-        flags: 0,
         ..PinMechanism::ZERO
     },
 ];
