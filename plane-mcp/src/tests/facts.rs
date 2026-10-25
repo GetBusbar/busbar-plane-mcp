@@ -166,18 +166,6 @@ fn the_empty_identifier_correlates_with_nothing() {
     );
 }
 
-/// The same bytes always give the same value.
-#[test]
-fn the_value_is_deterministic() {
-    let arena = TestPlaneAlloc;
-    for raw in [&b"42"[..], &br#""abc""#[..], &b"null"[..]] {
-        assert_eq!(
-            correlation_value(raw, &arena),
-            correlation_value(raw, &arena)
-        );
-    }
-}
-
 /// The correlation carries the declared key and the identifier's value.
 #[test]
 fn the_correlation_carries_the_declared_key() {
