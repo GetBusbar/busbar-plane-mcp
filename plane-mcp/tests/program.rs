@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE DOOR'S OWN EXCHANGES WITH A STDIO CHILD (ARCHITECT round 5 Q-L3B-STDIO-UPSTREAM (A)), driven
+//! THE DOOR'S OWN EXCHANGES WITH A STDIO CHILD, driven
 //! over a host connector table that stands in for the host's one long-lived program per member: a
 //! scripted child every lease shares, whose messages reach every open lease, and whose generation
 //! the test moves (a crash and a restart).
