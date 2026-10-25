@@ -689,8 +689,34 @@ fn a_refused_url_without_userinfo_is_echoed_verbatim() {
 /// what a log line or a panic message renders.
 #[test]
 fn a_child_env_literal_is_not_printed_by_debug() {
-    let plain = super::ChildEnvValue::Plain(CANARY.to_string());
+    let plain = super::ChildEnvValue::Plain(
+        busbar_contract::abi::sdk::cred::Cred::take(&mut json!(CANARY)).expect("a string"),
+    );
     let shown = format!("{plain:?}");
     assert!(!shown.contains(CANARY), "{shown}");
     assert_eq!(shown, "Plain(<redacted>)");
+}
+
+/// A stdio child's `env:` literal is sealed as it is read (CHIP-DESIGN v4.1 change 12): the
+/// registration holds it as a `Cred`, so neither writing the registration back nor its `Debug`
+/// spells it, and the same literal read twice is still the same registration.
+#[test]
+fn a_child_env_literal_is_sealed_at_parse_and_never_written_back() {
+    let section = json!({
+        "s": {
+            "pin": { "mechanism": "unpinned" },
+            "transport": "stdio",
+            "command": ABS_PROGRAM,
+            "env": { "API_KEY": CANARY, "UPSTREAM": { "env": "BUSBAR_UPSTREAM_KEY" } }
+        }
+    });
+    let cfg = grammar(section.clone()).expect("a stdio registration with an env literal");
+    let def = &cfg.servers["s"];
+    let written = serde_json::to_string(def);
+    assert!(
+        written.as_deref().map_or(true, |w| !w.contains(CANARY)),
+        "an env literal was written back"
+    );
+    assert!(!format!("{def:?}").contains(CANARY));
+    assert_eq!(&grammar(section).expect("reads again").servers["s"], def);
 }
