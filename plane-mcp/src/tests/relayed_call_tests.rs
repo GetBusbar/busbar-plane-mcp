@@ -665,8 +665,10 @@ fn a_relayed_call_is_the_request_and_the_answer_the_plane_says() {
         "one call record"
     );
     // THE AUDIT ROW (SEAM-L(k)): the dispatched call's one `mcp_tool.call` row, applied, on the
-    // published tool; and THE LEDGER LANE (SEAM-L(j)): the published tool, as the served engine
-    // priced and ledgered a call.
+    // published tool; and THE LEDGER LANE (SEAM-L(j)): the call's registered server,
+    // `mcp_server:<server>`, never the published tool (architect ruling 2026-10-23, R-11): the
+    // kernel holds a present `tools.rate_card` to its registrations, so a per-tool key prices
+    // nothing.
     assert_eq!(
         ok.audits,
         vec![(
@@ -678,8 +680,13 @@ fn a_relayed_call_is_the_request_and_the_answer_the_plane_says() {
     );
     assert_eq!(
         send.lane.as_deref(),
+        Some("mcp_server:fs"),
+        "the call's lane is its server's"
+    );
+    assert_ne!(
+        send.lane.as_deref(),
         Some("fs_read_file"),
-        "the call's lane"
+        "a per-tool lane is no lane the card can price"
     );
 
     let error = step(&t, "answer error");

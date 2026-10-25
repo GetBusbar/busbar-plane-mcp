@@ -781,3 +781,99 @@ fn a_client_identity_with_no_handshake_to_present_it_in_is_refused() {
         "{err}"
     );
 }
+
+/// THE CANARY a credential-echo test plants: bytes that may appear in a config and must appear in
+/// no refusal, error or `Debug` rendering of it.
+const CANARY: &str = "CANARY-plane-mcp-echo-7f3a91";
+
+/// One registration read straight into its typed definition, then judged by [`validate_server`],
+/// the function boot and the admin write path both call. The refusal it answers is what reaches
+/// `busbar --validate`'s stderr and the read-only admin dry-run validate endpoint.
+fn refusal_of(extra: Value) -> String {
+    let mut s = json!({
+        "pin": { "mechanism": "cert_spki", "key": "sha256/PIN==" },
+        "tools_allow": { "read_file": {} },
+    });
+    if let (Some(s), Some(extra)) = (s.as_object_mut(), extra.as_object()) {
+        s.extend(extra.clone());
+    }
+    let def: super::McpServerDefCfg = serde_json::from_value(s).expect("the shape reads");
+    super::validate_server("canary", &def).expect_err("the registration is refused")
+}
+
+/// A `url:` refused for its scheme names the URL it refused, WITHOUT the userinfo an operator put
+/// in it: the refusal reaches stderr and the read-only admin validate endpoint, so a password in
+/// the URL would be handed to anyone who can read either.
+#[test]
+fn a_refused_url_does_not_echo_its_userinfo() {
+    let err = refusal_of(json!({ "url": format!("ftp://user:{CANARY}@tools.internal/mcp") }));
+    assert!(
+        !err.contains(CANARY),
+        "the refusal echoes the credential: {err}"
+    );
+    assert!(
+        !err.contains("user:"),
+        "the refusal echoes the userinfo: {err}"
+    );
+    assert!(
+        err.contains(
+            "`url:` must be an http:// or https:// endpoint, got `ftp://***@tools.internal/mcp`"
+        ),
+        "the refusal keeps its words and the rest of the URL: {err}"
+    );
+}
+
+/// The same for `token_exchange.token_url:`, refused for plaintext to a public host.
+#[test]
+fn a_refused_token_url_does_not_echo_its_userinfo() {
+    let err = refusal_of(json!({
+        "url": "https://tools.internal/mcp",
+        "token_exchange": {
+            "token_url": format!("http://busbar:{CANARY}@auth.example.com/token"),
+            "subject_token": { "env": "BUSBAR_SUBJECT" },
+        },
+    }));
+    assert!(
+        !err.contains(CANARY),
+        "the refusal echoes the credential: {err}"
+    );
+    assert!(
+        err.contains("Got `http://***@auth.example.com/token`."),
+        "the refusal keeps its words and the rest of the URL: {err}"
+    );
+}
+
+/// A URL with no userinfo is echoed byte for byte: masking removes credential bytes and nothing
+/// else, so every refusal that never carried a credential reads exactly as it did.
+#[test]
+fn a_refused_url_without_userinfo_is_echoed_verbatim() {
+    let err = refusal_of(json!({ "url": "ftp://tools.internal/a@b?c=d@e" }));
+    assert!(
+        err.ends_with(
+            "`url:` must be an http:// or https:// endpoint, got `ftp://tools.internal/a@b?c=d@e`"
+        ),
+        "{err}"
+    );
+    for (raw, shown) in [
+        ("https://h/p", "https://h/p"),
+        ("u:p@h/x", "***@h/x"),
+        ("https://u@h", "https://***@h"),
+        ("https://a@b@h:1/x?q#f", "https://***@h:1/x?q#f"),
+        ("x/y?r=https://u:p@h", "x/y?r=https://u:p@h"),
+        ("u:p@h?r=https://x", "***@h?r=https://x"),
+        ("", ""),
+    ] {
+        assert_eq!(super::url_for_display(raw), shown, "{raw}");
+    }
+}
+
+/// A stdio child's `env:` literal is not printed by `Debug`: a value an operator pasted there may
+/// be the credential the secret-reference arm exists to keep out of the config, and `Debug` is
+/// what a log line or a panic message renders.
+#[test]
+fn a_child_env_literal_is_not_printed_by_debug() {
+    let plain = super::ChildEnvValue::Plain(CANARY.to_string());
+    let shown = format!("{plain:?}");
+    assert!(!shown.contains(CANARY), "{shown}");
+    assert_eq!(shown, "Plain(<redacted>)");
+}
