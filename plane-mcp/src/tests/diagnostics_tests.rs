@@ -135,10 +135,12 @@ fn the_declares_file_states_the_catalog() {
         })
         .collect();
     // Beside the catalog, the plane's one breaker fact (ARCHITECT Q4): a transient failure below
-    // the trip threshold never benches a member (the 1.5.5 MCP client leg's posture).
+    // the trip threshold never benches a member (the 1.5.5 MCP client leg's posture); and the
+    // carriers it needs, which the one document states for the dropped-in manifest too.
     let whole = serde_json::json!({
         "breaker": { "bench_below_trip_threshold": false },
         "diagnostics": want,
+        "needs": ["http", "stdio"],
     });
     assert_eq!(
         declared,
