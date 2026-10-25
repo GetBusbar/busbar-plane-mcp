@@ -64,15 +64,7 @@
 //! is now enforced rather than the first place it is bypassed.
 
 use super::jsonrpc::ServerRequestGrants;
-
-/// JSON-RPC standard: the method is not implemented.
-///
-/// A local re-statement rather than an import of the engine's `mcp::envelope::code`, and it is the one
-/// duplicated number in this module: that module's codes are `pub(super)`/`pub(in crate::mcp)` on
-/// the SERVER plane's ingress, and widening their visibility so the client leg could borrow one
-/// would make the ingress vocabulary reachable from the outbound half. The value is the JSON-RPC
-/// specification's, not busbar's, so there is no busbar decision here for the two copies to drift on.
-const METHOD_NOT_FOUND: i64 = -32601;
+use crate::codec::CODE_METHOD_NOT_FOUND;
 
 /// The code busbar refuses an authority ask it will not relay with.
 ///
@@ -364,7 +356,7 @@ pub fn refused(id: &serde_json::Value, reason: &str, message: String) -> serde_j
 pub fn method_not_found(id: &serde_json::Value, method: &str) -> serde_json::Value {
     error_reply(
         id,
-        METHOD_NOT_FOUND,
+        CODE_METHOD_NOT_FOUND,
         format!(
             "busbar's MCP client leg does not implement `{method}`; it answers `ping` and gates \
              `roots/list`, `sampling/createMessage` and `elicitation/create` on the operator's \
