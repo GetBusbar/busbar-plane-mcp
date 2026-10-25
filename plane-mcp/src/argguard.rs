@@ -573,6 +573,11 @@ fn judge_absolute(url: &str, judge: &mut Judge<'_>) -> Result<(), ArgWhy> {
 /// THE HOST, ASKED OF THE HOST'S ONE JUDGE (`dest.judge`, BUSBAR-1.6.0.md Appendix C B.3 item 11):
 /// the plane reads the host and holds no rule about it. `judge`'s verdict is rendered as the
 /// refusal; a host that gave none refuses the value.
+///
+/// The host is asked as spelled, and then, when it differs, in the one form a fetching client dials
+/// ([`whatwg_dialled`]): `ｌｏｃａｌｈｏｓｔ` is dialled as `localhost`, `１２７.０.０.１` as
+/// `127.0.0.1`, `0x` as `0.0.0.0`. Both must be admitted; a host the WHATWG host parser refuses
+/// is refused (fail closed), because the guard cannot say what a client would dial for it.
 fn judge_host(raw: &str, judge: &mut Judge<'_>) -> Result<(), ArgWhy> {
     let host = normalize_host(raw).ok_or_else(|| ArgWhy::NoHost(raw.to_string()))?;
     let dest = if host.contains(':') {
@@ -580,7 +585,33 @@ fn judge_host(raw: &str, judge: &mut Judge<'_>) -> Result<(), ArgWhy> {
     } else {
         host.clone()
     };
-    match judge(&dest) {
+    ask(&host, &dest, judge)?;
+    let dialled = whatwg_dialled(&dest).ok_or_else(|| ArgWhy::NoHost(host.clone()))?;
+    if dialled != dest {
+        let bare = dialled
+            .strip_prefix('[')
+            .and_then(|h| h.strip_suffix(']'))
+            .unwrap_or(&dialled)
+            .to_string();
+        ask(&bare, &dialled, judge)?;
+    }
+    Ok(())
+}
+
+/// THE HOST A WHATWG CLIENT DIALS for `dest` (a host, an IPv6 literal bracketed): `url`'s special
+/// host parser, the one `fetch`-style clients read with — percent-decoded, mapped by UTS #46
+/// (fullwidth forms and other compatibility spellings to ASCII, lower-cased, punycode for a
+/// genuine IDN), and a name ending in a number read as an IPv4 address by the WHATWG number rules
+/// (`0x7f.1`, `2130706433`, `0x`). Serialised as `dest.judge` reads it (an IPv6 literal
+/// bracketed). `None` when the parser refuses the host.
+fn whatwg_dialled(dest: &str) -> Option<String> {
+    url::Host::parse(dest).ok().map(|h| h.to_string())
+}
+
+/// One host asked of the judge, its verdict rendered as the refusal.
+fn ask(host: &str, dest: &str, judge: &mut Judge<'_>) -> Result<(), ArgWhy> {
+    let host = host.to_string();
+    match judge(dest) {
         Some(DEST_ALLOWED) => Ok(()),
         Some(DEST_METADATA) => Err(ArgWhy::CloudMetadata(host)),
         Some(DEST_OBFUSCATED) => Err(ArgWhy::ObfuscatedHost(host)),
