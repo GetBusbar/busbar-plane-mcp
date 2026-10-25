@@ -460,7 +460,7 @@ fn child_leg() -> UpstreamLeg {
     }
 }
 
-/// LAW 11, A STDIO CHILD'S OWN REQUESTS (ARCHITECT Q6): busbar writes none of them, so a retry that
+/// LAW 11, A STDIO CHILD'S OWN REQUESTS: busbar writes none of them, so a retry that
 /// leaves one unanswered is refused (`ask_unanswered`) BEFORE its state is spent, and the caller can
 /// still answer it; the complete retry is the relayed retry, carrying the child's leg, spent once.
 /// RED: a forged state, and a spent one, are refused.
@@ -512,7 +512,7 @@ fn a_childs_relayed_ask_is_answered_whole_by_the_caller_and_spent_once() {
     );
 }
 
-/// THE TASK PATH'S RETRY (ARCHITECT Q6): the state `tasks/update` carries back is opened, bound to
+/// THE TASK PATH'S RETRY: the state `tasks/update` carries back is opened, bound to
 /// its principal and call, and spent once; a forged state, a spent one, another caller's, and a
 /// state of busbar's own ask (no upstream leg) are refused.
 #[test]

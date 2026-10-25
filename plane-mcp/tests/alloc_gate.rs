@@ -1,9 +1,7 @@
 //! What reading a stdio child's message is allowed to allocate.
 //!
 //! An allocation COUNT is the same number on every machine, so work that grows with the input
-//! where it should not is seen here where a stopwatch on a shared runner would miss it. (The
-//! decode-allocation pin that lived here drove the unserved `Plane` impl, deleted with it under
-//! plane-mcp finding 12.)
+//! where it should not is seen here where a stopwatch on a shared runner would miss it.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
