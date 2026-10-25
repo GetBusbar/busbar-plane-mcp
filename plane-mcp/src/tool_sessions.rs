@@ -312,12 +312,6 @@ impl SessionTable {
         }
     }
 
-    /// The ceilings this table enforces.
-    #[must_use]
-    pub const fn bounds(&self) -> Bounds {
-        self.bounds
-    }
-
     /// Whether `id` names a session the table still holds, whoever owns it (state kept beside a
     /// session is dropped once this is false).
     #[must_use]
@@ -728,12 +722,6 @@ impl UpstreamTable {
     #[must_use]
     pub fn len(&self) -> usize {
         self.entries.len()
-    }
-
-    /// Whether nothing is remembered.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
     }
 
     /// Bytes charged.

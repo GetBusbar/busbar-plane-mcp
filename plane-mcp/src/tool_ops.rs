@@ -108,8 +108,6 @@ pub enum Sender {
     Client,
     /// An upstream sends it back mid-call, opening a unit of its own.
     Provider,
-    /// Either side sends it and nobody answers it.
-    Notice,
 }
 
 /// One row of the vocabulary.

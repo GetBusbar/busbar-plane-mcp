@@ -1837,7 +1837,6 @@ pub(super) fn exchange_request(
     busbar_contract::abi::sdk::exchange::Request {
         method: match verb {
             Verb::Post => b"POST".to_vec(),
-            Verb::Delete => b"DELETE".to_vec(),
         },
         target: crate::call::path_of(&request.url).into_bytes(),
         fields: request

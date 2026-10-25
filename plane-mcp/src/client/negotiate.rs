@@ -46,8 +46,6 @@ use crate::tool_sessions::Remembered;
 pub enum Verb {
     /// A JSON-RPC message.
     Post,
-    /// The end of a session.
-    Delete,
 }
 
 /// What came back from one hop.
