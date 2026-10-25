@@ -88,7 +88,7 @@ dependencies = [
 [[package]]
 name = "busbar-plugin-loader"
 version = "1.5.0"
-source = "git+https://github.com/GetBusbar/busbar?rev=93d8a0f6887a65d9e69cc62982b54dcbf4a00bae#93d8a0f6887a65d9e69cc62982b54dcbf4a00bae"
+source = "git+https://github.com/GetBusbar/busbar?rev=1768a6e1db639389d8d1396f6d0b1e0f144adefc#1768a6e1db639389d8d1396f6d0b1e0f144adefc"
 dependencies = [
  "busbar-contract",
  "ed25519-dalek",
