@@ -727,7 +727,7 @@ fn out_head<T>() -> OutHead {
 
 fn ops() -> &'static Ops {
     // SAFETY: the door is a `'static` table whose ops are the plane kind's.
-    unsafe { &*(*tool_door::door()).ops.cast::<Ops>() }
+    unsafe { &*(*tool_door::door()).ops().cast::<Ops>() }
 }
 
 fn lifecycle() -> &'static OpsHead {
