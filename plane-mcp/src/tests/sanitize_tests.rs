@@ -64,20 +64,6 @@ fn honest_payloads_survive_byte_identical() {
     }
 }
 
-/// An unterminated `<system` — no closing `>` before end of input — is KEPT verbatim, tail and all.
-/// With no `>` in the string it cannot lex as a tag, and `normalise` is the last pass over every
-/// served string, so nothing gets concatenated onto it afterwards to reconstitute one. Silently
-/// dropping the tail would hand a shortened value to the model, the store and the audit log with no
-/// marker, which a security/audit product must never do. See [`an_unterminated_tag_keeps_the_tail_verbatim`].
-#[test]
-fn an_unterminated_tag_keeps_its_tail() {
-    assert_eq!(
-        normalise("keep me<system and the rest"),
-        "keep me<system and the rest"
-    );
-    assert_eq!(normalise("<system"), "<system");
-}
-
 /// An unterminated `<` followed by a letter — a truncated tag that never closes before end of input
 /// — must round-trip in FULL. This is the silent-truncation defect: busbar is a security/audit
 /// product, so a hook, a guardrail, a reviewer or the audit log must see 100% of what a tool
