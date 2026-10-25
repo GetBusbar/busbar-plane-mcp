@@ -43,13 +43,14 @@ dependencies = [
 [[package]]
 name = "busbar-contract"
 version = "1.6.0"
-source = "git+https://www.github.com/GetBusbar/busbar?rev=93d8a0f6887a65d9e69cc62982b54dcbf4a00bae#93d8a0f6887a65d9e69cc62982b54dcbf4a00bae"
+source = "git+https://www.github.com/GetBusbar/busbar?rev=1768a6e1db639389d8d1396f6d0b1e0f144adefc#1768a6e1db639389d8d1396f6d0b1e0f144adefc"
 dependencies = [
  "async-trait",
  "base64",
  "futures",
  "hex",
  "http",
+ "idna",
  "indexmap",
  "memchr",
  "serde",
