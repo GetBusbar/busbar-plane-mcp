@@ -5,6 +5,7 @@
 //! contract describes, answering as each revision's server would.
 
 use super::*;
+use crate::client::compat::tests::ev;
 use crate::client::jsonrpc::envelope;
 use crate::codec::{H_PROTOCOL_VERSION, META_CLIENT_CAPABILITIES, META_PROTOCOL_VERSION};
 use serde_json::json;
@@ -66,14 +67,6 @@ fn header<'a>(r: &'a OutboundRequest, name: &str) -> Option<&'a str> {
 
 fn result(id: Value, result: Value) -> Value {
     json!({"jsonrpc":"2.0","id":id,"result":result})
-}
-
-fn event(name: Option<&str>, data: &str) -> StreamEvent {
-    StreamEvent {
-        event: name.map(str::to_string),
-        id: None,
-        data: data.to_string(),
-    }
 }
 
 #[test]
@@ -194,14 +187,14 @@ fn an_event_stream_upstream_is_reached_through_the_address_its_stream_names() {
     assert_eq!(header(&request, "accept"), Some("text/event-stream"));
     assert_eq!(header(&request, "authorization"), Some("Bearer tok"));
     assert_eq!(n.on_answer(answer(200, json!(null))), Action::AwaitEvent);
-    let init = n.on_event(&event(Some("endpoint"), "/messages?sessionId=s1"));
+    let init = n.on_event(&ev(Some("endpoint"), "/messages?sessionId=s1"));
     let (req, body) = sent(&init);
     assert_eq!(req.url, "https://up.example/messages?sessionId=s1");
     assert_eq!(body["params"]["protocolVersion"], "2024-11-05");
     assert_eq!(header(req, H_PROTOCOL_VERSION), None);
     let id = body["id"].clone();
     assert_eq!(n.on_answer(accepted()), Action::AwaitEvent);
-    let initialized = n.on_event(&event(
+    let initialized = n.on_event(&ev(
         Some("message"),
         &result(id, json!({"protocolVersion":"2024-11-05"})).to_string(),
     ));
@@ -213,10 +206,10 @@ fn an_event_stream_upstream_is_reached_through_the_address_its_stream_names() {
     assert_eq!(n.on_answer(accepted()), Action::AwaitEvent);
     let unrelated = result(json!(77), json!({})).to_string();
     assert_eq!(
-        n.on_event(&event(Some("message"), &unrelated)),
+        n.on_event(&ev(Some("message"), &unrelated)),
         Action::AwaitEvent
     );
-    let fin = n.on_event(&event(
+    let fin = n.on_event(&ev(
         Some("message"),
         &result(json!(5), json!({"content":[]})).to_string(),
     ));
@@ -239,7 +232,7 @@ fn red_a_cross_origin_message_address_gets_no_request() {
     let mut n = Negotiator::new(call(), Some(memo), "1.6.0");
     assert!(matches!(n.start(), Action::OpenStream { .. }));
     n.on_answer(answer(200, json!(null)));
-    let a = n.on_event(&event(Some("endpoint"), "https://evil.example/steal"));
+    let a = n.on_event(&ev(Some("endpoint"), "https://evil.example/steal"));
     assert_eq!(a, Action::Fail(Refusal::AddressRefused));
 }
 
@@ -337,10 +330,10 @@ fn red_a_notification_on_the_held_link_finishes_on_its_post() {
     let open = n.on_answer(answer(404, json!({})));
     assert!(matches!(open, Action::OpenStream { .. }), "{open:?}");
     assert_eq!(n.on_answer(answer(200, json!(null))), Action::AwaitEvent);
-    let init = n.on_event(&event(Some("endpoint"), "/messages?sessionId=s1"));
+    let init = n.on_event(&ev(Some("endpoint"), "/messages?sessionId=s1"));
     let id = sent(&init).1["id"].clone();
     assert_eq!(n.on_answer(accepted()), Action::AwaitEvent);
-    let initialized = n.on_event(&event(
+    let initialized = n.on_event(&ev(
         Some("message"),
         &result(id, json!({"protocolVersion":"2024-11-05"})).to_string(),
     ));

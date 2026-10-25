@@ -7,7 +7,9 @@
 use serde_json::{json, Value};
 
 use super::*;
+use crate::ask::tests::Plain;
 use crate::catalogue::{Catalogue, ToolEntry};
+use crate::tests::everyone;
 
 /// One server: an approved tool whose `path` argument is mirrored in `Mcp-Param-Path`, a tool
 /// awaiting approval, a tool that must be answered as a task, and a tool that asks its caller.
@@ -26,10 +28,6 @@ fn section() -> crate::tools_config::ToolsCfg {
 
 fn catalogue() -> Catalogue {
     Catalogue::build(1, &section())
-}
-
-fn everyone(_: &str, _: &str) -> bool {
-    true
 }
 
 fn params(name: &str, arguments: Value) -> Value {
@@ -1214,35 +1212,6 @@ fn input_responses_default_cap_is_one_mebibyte() {
 // answers of the round the retry closes.
 // ---------------------------------------------------------------------------------------------
 
-/// A seal that writes the state as JSON behind a marker and spends each nonce once (the ask
-/// tests' own stand-in for the host's).
-#[derive(Default)]
-struct PlainSeal {
-    spent: std::collections::BTreeSet<String>,
-    next: u32,
-}
-
-const PLAIN: &str = "sealed:";
-
-impl crate::ask::Seal for PlainSeal {
-    fn mint(&mut self, state: &crate::ask::AskState) -> Option<String> {
-        Some(format!("{PLAIN}{}", serde_json::to_string(state).ok()?))
-    }
-    fn open(&mut self, blob: &str) -> Result<crate::ask::AskState, crate::ask::Rejected> {
-        let body = blob
-            .strip_prefix(PLAIN)
-            .ok_or(crate::ask::Rejected::BadSignature)?;
-        serde_json::from_str(body).map_err(|_| crate::ask::Rejected::Malformed)
-    }
-    fn nonce(&mut self) -> Option<String> {
-        self.next += 1;
-        Some(format!("n{}", self.next))
-    }
-    fn redeem(&mut self, nonce: &str, _: u64, _: u64) -> bool {
-        self.spent.insert(nonce.to_string())
-    }
-}
-
 /// A tool whose operator asks its caller in TWO rounds before it runs.
 const TWO_ROUNDS: &str = r#"{"fs": {"url": "https://mcp.example/fs", "pin": {"mechanism": "unpinned"},
   "tools_allow": {
@@ -1253,7 +1222,7 @@ const TWO_ROUNDS: &str = r#"{"fs": {"url": "https://mcp.example/fs", "pin": {"me
   }}}"#;
 
 /// `p` admitted with busbar's own ask decided over `seal`, as the door decides it.
-fn admit_asking(cat: &Catalogue, seal: &mut PlainSeal, p: &Value) -> Admission {
+fn admit_asking(cat: &Catalogue, seal: &mut Plain, p: &Value) -> Admission {
     let mut ask = |entry: &ToolEntry, arguments: &Value| {
         let retry = crate::ask::Retry {
             responses: p.get("inputResponses"),
@@ -1299,7 +1268,7 @@ fn asked_state(a: Admission) -> String {
 fn a_two_round_exchange_goes_out_with_every_rounds_answers() {
     let section = crate::door::read_tools_section(TWO_ROUNDS.as_bytes()).expect("reads");
     let cat = Catalogue::build(1, &section);
-    let mut seal = PlainSeal::default();
+    let mut seal = Plain::default();
     let first = json!({ "name": "fs_pay", "arguments": { "amount": 5 }, "_meta": {} });
     let s0 = asked_state(admit_asking(&cat, &mut seal, &first));
     let mut second = first.clone();

@@ -149,7 +149,7 @@ fn the_walk_visits_every_declared_url_field_and_says_how_many() {
     );
     assert_eq!(scan.undeclared_judged, 0, "the note is prose, not a URL");
     assert_eq!(scan.strings_seen, 6);
-    assert!(scan.judged() >= 5);
+    assert!(scan.declared_judged + scan.undeclared_judged >= 5);
 }
 
 /// Each element of an array of URLs is judged on its own, so a hostile entry cannot hide behind

@@ -598,7 +598,7 @@ pub(super) fn tick(plane: &McpDoor, ticket: Ticket, now_ns: u64) {
     let Some(held) = plane.current() else {
         return;
     };
-    let gone = plane.line_listens.with_all(|m| {
+    plane.line_listens.with_all(|m| {
         let mut gone = Vec::new();
         for ((session, key), kept) in m.iter_mut() {
             let (mut bytes, ended) = match kept.step_at(&held.catalogue, now_ns) {
@@ -626,9 +626,7 @@ pub(super) fn tick(plane: &McpDoor, ticket: Ticket, now_ns: u64) {
         for key in &gone {
             m.remove(key);
         }
-        gone
     });
-    let _ = gone;
 }
 
 #[cfg(test)]

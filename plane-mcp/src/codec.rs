@@ -41,16 +41,6 @@ impl ResourceUpdatedParam {
     }
 }
 
-/// The single mount path. MCP names the operation in the BODY (`method`), not the path — the
-/// opposite of OpenAI, and the reason [`handler::McpRequestHandler::resolve_operation`] reads the
-/// body.
-///
-/// `pub` for the same reason [`PROTOCOL_VERSION`] is: `busbar-plane-mcp` declares its transport
-/// claims against this path and may not name the server half, so it reads the value here. A path
-/// the plane copied instead of read is a plane claiming a route nothing is served at.
-#[cfg(test)]
-pub const PATH_MCP: &str = "/mcp";
-
 /// THE PREFIX THE PROTECTED-RESOURCE METADATA DOCUMENT IS SERVED UNDER (RFC 9728).
 ///
 /// It sits on the CODEC side because two halves read it and they must agree: the server half

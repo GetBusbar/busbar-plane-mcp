@@ -18,6 +18,19 @@ fn tkey(server: &str, tool: &str) -> crate::identity::ToolKey {
     crate::identity::ToolKey::new(server, tool).expect("test tool key must be valid")
 }
 
+/// EVERY byte `req` will put on the wire, concatenated: URL, then each header name and value, then
+/// the body, read from the same fields the transport writes.
+fn wire_bytes(req: &crate::client::jsonrpc::OutboundRequest) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(req.url.as_bytes());
+    for (name, value) in &req.headers {
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(value.as_bytes());
+    }
+    out.extend_from_slice(&req.body);
+    out
+}
+
 fn body_of(req: &crate::client::jsonrpc::OutboundRequest) -> serde_json::Value {
     serde_json::from_slice(&req.body).expect("the body we build must be JSON")
 }
@@ -45,7 +58,7 @@ fn the_outbound_name_is_the_un_namespaced_tool() {
     assert_eq!(body["params"]["name"], "read_file");
     assert_eq!(header(&req, "mcp-name"), Some("read_file"));
     // ...and the namespaced form appears nowhere on the wire.
-    assert!(!String::from_utf8_lossy(&req.wire_bytes()).contains("filesystem_read_file"));
+    assert!(!String::from_utf8_lossy(&wire_bytes(&req)).contains("filesystem_read_file"));
 }
 
 #[test]

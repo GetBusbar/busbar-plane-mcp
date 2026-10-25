@@ -8,6 +8,7 @@
 use serde_json::{json, Value};
 
 use super::*;
+use crate::tests::everyone;
 
 /// Two servers: `fs` with an approved tool, a pending tool, a renamed tool, a prompt, a resource
 /// and a template; `db` with one approved tool.
@@ -41,10 +42,6 @@ fn catalogue(generation: u64, section: &[u8]) -> Catalogue {
 /// A caller holding exactly `grants`, each `kind:name`.
 fn holding(grants: &'static [&'static str]) -> impl Fn(&str, &str) -> bool {
     move |kind, name| grants.contains(&format!("{kind}:{name}").as_str())
-}
-
-fn everyone(_: &str, _: &str) -> bool {
-    true
 }
 
 fn read(bytes: Vec<u8>) -> Value {

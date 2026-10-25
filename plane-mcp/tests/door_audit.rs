@@ -1081,46 +1081,11 @@ impl Answered {
     }
 }
 
-/// Two callers' opaque references, as the kernel lends them.
+/// A caller's opaque reference, as the kernel lends it.
 const ALICE: &str = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
-const BOB: &str = "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2";
-
-const INIT_2025: &[u8] = br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"client","version":"1"}}}"#;
-const LIST_2025: &[u8] = br#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#;
-const INITIALIZED: &[u8] = br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
-const ACCEPT_BOTH: (&str, &str) = ("accept", "application/json, text/event-stream");
-
-/// `initialize` on the endpoint, as `caller`: the answer.
-fn initialize(d: &Door, unit: u64, caller: &str) -> Answered {
-    let arrived = d.arrive(unit, "POST", "/mcp", INIT_2025, &[ACCEPT_BOTH]);
-    assert_eq!(
-        arrived.outcome,
-        Outcome::Ready,
-        "a 2025-06-18 `initialize` is served, not refused: {arrived:?}"
-    );
-    d.piece(unit, &Given::caller(caller, INIT_2025))
-}
-
-/// A `tools/list` in session `session` as `caller`.
-fn listed(d: &Door, unit: u64, session: &str, caller: &str) -> Answered {
-    let fields = [
-        ACCEPT_BOTH,
-        ("mcp-session-id", session),
-        ("mcp-protocol-version", "2025-06-18"),
-    ];
-    let arrived = d.arrive(unit, "POST", "/mcp", LIST_2025, &fields);
-    assert_eq!(arrived.outcome, Outcome::Ready, "{arrived:?}");
-    d.piece(unit, &Given::caller(caller, LIST_2025))
-}
 
 // ── (e): busbar as a client ──────────────────────────────────────────────────────────────────────
 
-const CALL: &[u8] = br#"{"jsonrpc":"2.0","id":30,"method":"tools/call","params":{"name":"fs_read_file","arguments":{},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#;
-const CALL_FIELDS: &[(&str, &str)] = &[
-    ("mcp-protocol-version", "2026-07-28"),
-    ("mcp-method", "tools/call"),
-    ("mcp-name", "fs_read_file"),
-];
 const ST_CALL: &[u8] = br#"{"jsonrpc":"2.0","id":31,"method":"tools/call","params":{"name":"st_read_file","arguments":{},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#;
 const ST_FIELDS: &[(&str, &str)] = &[
     ("mcp-protocol-version", "2026-07-28"),
@@ -1185,24 +1150,6 @@ fn relayed(d: &Door, unit: u64, caller: &str, body: &[u8], fields: &[(&str, &str
 /// held stream. One entry: what it came to (PENDING while its answer is not on the stream).
 fn walk_refused<'a>(caller: &'a str) -> Given<'a> {
     Given::far(caller, 405, Vec::new(), REFUSED)
-}
-
-/// The `tools/call` POSTs the legacy server received, by the session they were POSTed in and the
-/// path they asked for.
-fn legacy_calls() -> Vec<(String, String)> {
-    seen()
-        .into_iter()
-        .filter(|s| s.body["method"] == json!("tools/call"))
-        .filter_map(|s| {
-            let session = s.url.split(LEGACY_MESSAGES).nth(1)?.to_string();
-            let path = s
-                .body
-                .pointer("/params/arguments/path")?
-                .as_str()?
-                .to_string();
-            Some((session, path))
-        })
-        .collect()
 }
 
 /// The one legacy server's text answer to `answered`, with the caller's own id.

@@ -94,7 +94,7 @@ fn lowering_drops_the_stateless_meta_and_mirror_and_keeps_the_credential() {
     );
     assert_eq!(body["params"]["arguments"], json!({"x":"y"}));
     assert_eq!(header(&lowered, H_PROTOCOL_VERSION), Some("2025-06-18"));
-    assert_eq!(header(&lowered, H_SESSION), Some("sid1"));
+    assert_eq!(header(&lowered, H_SESSION_ID), Some("sid1"));
     assert_eq!(header(&lowered, H_MCP_METHOD), None);
     assert_eq!(header(&lowered, H_MCP_NAME), None);
     assert_eq!(header(&lowered, "authorization"), Some("Bearer tok"));
@@ -146,7 +146,7 @@ fn initialize_asks_for_a_revision_and_names_busbar() {
     );
     let body: Value = serde_json::from_slice(&done.body).unwrap();
     assert!(body.get("id").is_none());
-    assert_eq!(header(&done, H_SESSION), Some("s"));
+    assert_eq!(header(&done, H_SESSION_ID), Some("s"));
 }
 
 #[test]
@@ -209,7 +209,7 @@ fn the_event_reader_joins_split_chunks_and_is_bounded() {
     );
 }
 
-fn ev(event: Option<&str>, data: &str) -> StreamEvent {
+pub(in crate::client) fn ev(event: Option<&str>, data: &str) -> StreamEvent {
     StreamEvent {
         event: event.map(str::to_string),
         id: None,

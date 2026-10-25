@@ -9,6 +9,11 @@
 //! crate through `door` alone. (The per-module unit tests beside these in this directory are wired
 //! from their own modules.)
 
+/// A grant check that admits every grant: the unit suites' stand-in for a caller entitled to all.
+pub(crate) fn everyone(_: &str, _: &str) -> bool {
+    true
+}
+
 /// The crate's one `#[global_allocator]`, every allocation gate's count: busbar-contract's
 /// test-only `alloc-counter` (a dev-dependency feature), so this crate holds no `unsafe`.
 #[global_allocator]

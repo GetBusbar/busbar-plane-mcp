@@ -1922,6 +1922,15 @@ fn never_sent_answer(
         .unbilled()
 }
 
+/// Whether the unit's entitlements (`kind:name`, as [`ask_entitlements`] keyed them) grant `name`
+/// under `kind`; one the host was not asked about is not granted.
+fn granted(entitled: &BTreeMap<String, bool>, kind: &str, name: &str) -> bool {
+    entitled
+        .get(&format!("{kind}:{name}"))
+        .copied()
+        .unwrap_or(false)
+}
+
 fn answer_body(
     instance: &Instance<'_, McpDoor>,
     plane: &McpDoor,
@@ -2007,14 +2016,17 @@ fn answer_body(
         }
         _ => None,
     };
+    // The tool a call names, resolved once.
+    let called = named_tool
+        .as_ref()
+        .and(params.as_ref())
+        .and_then(|p| p.get("name"))
+        .and_then(Value::as_str)
+        .and_then(|name| held.catalogue.tool(name));
     // The grants this answer can ask: a call asks its own tool's two, any other request every
     // grant the catalogue holds.
     let grants = match &named_tool {
-        Some(_) => params
-            .as_ref()
-            .and_then(|p| p.get("name"))
-            .and_then(Value::as_str)
-            .and_then(|name| held.catalogue.tool(name))
+        Some(_) => called
             .map(|t| {
                 vec![
                     (door::SCOPE, t.server.as_str()),
@@ -2027,60 +2039,36 @@ fn answer_body(
     ask_entitlements(services, ticket, unit, &grants);
     // VERIFY-ON-CALL, for a call the caller is entitled to make: the gate below judges what the
     // server serves now.
-    if named_tool.is_some() {
-        let called = params
-            .as_ref()
-            .and_then(|p| p.get("name"))
-            .and_then(Value::as_str)
-            .and_then(|name| held.catalogue.tool(name))
-            .map(|t| (t.server.clone(), t.namespaced.clone()));
-        if let Some((server, namespaced)) = called {
-            let entitled = |kind: &str, name: &str| {
-                unit.entitled
-                    .get(&format!("{kind}:{name}"))
-                    .copied()
-                    .unwrap_or(false)
-            };
-            if entitled(door::SCOPE, &server) && entitled(door::SCOPE_TOOL, &namespaced) {
-                if let Looked::Pending =
-                    verify_on_call(instance, plane, ticket, unit, &held, (&server, caller))
-                {
+    if let Some(t) = called {
+        if granted(&unit.entitled, door::SCOPE, &t.server)
+            && granted(&unit.entitled, door::SCOPE_TOOL, &t.namespaced)
+        {
+            if let Looked::Pending =
+                verify_on_call(instance, plane, ticket, unit, &held, (&t.server, caller))
+            {
+                return Some(Step::Pending);
+            }
+            // A stdio member's child is greeted (once per generation) before the call.
+            if let Some(member) = unit.member.clone() {
+                if let Looked::Pending = door_program::ready(plane, ticket, unit, &held, &member) {
                     return Some(Step::Pending);
-                }
-                // A stdio member's child is greeted (once per generation) before the call.
-                if let Some(member) = unit.member.clone() {
-                    if let Looked::Pending =
-                        door_program::ready(plane, ticket, unit, &held, &member)
-                    {
-                        return Some(Step::Pending);
-                    }
                 }
             }
         }
     }
     // THE KERNEL'S APPROVE, asked on the route leg after the re-fetch (ARCHITECT Q3): the called
     // tool's verdict, and on a listing every granted tool's, each its own `trust.serves`.
-    let verdict = named_tool.as_ref().and_then(|_| {
-        let entry = params
-            .as_ref()
-            .and_then(|p| p.get("name"))
-            .and_then(Value::as_str)
-            .and_then(|name| held.catalogue.tool(name))?;
-        Some((
+    let verdict = called.map(|entry| {
+        (
             entry.namespaced.clone(),
             trust_of(plane, ticket, &mut unit.issued, entry),
-        ))
+        )
     });
     let listing = matches!(&disposition, Disposition::Request { row, .. }
         if row.op == crate::tool_ops::OP_TOOLS_LIST);
     let mut hidden = std::collections::BTreeSet::new();
     if listing {
-        let entitled = |kind: &str, name: &str| {
-            unit.entitled
-                .get(&format!("{kind}:{name}"))
-                .copied()
-                .unwrap_or(false)
-        };
+        let entitled = |kind: &str, name: &str| granted(&unit.entitled, kind, name);
         let listed: Vec<crate::catalogue::ToolEntry> = held
             .catalogue
             .tools_for(&entitled)
@@ -2116,12 +2104,7 @@ fn answer_body(
         pending: false,
     });
     let entitled = &unit.entitled;
-    let admit = |kind: &str, name: &str| {
-        entitled
-            .get(&format!("{kind}:{name}"))
-            .copied()
-            .unwrap_or(false)
-    };
+    let admit = |kind: &str, name: &str| granted(entitled, kind, name);
     if let Some(id) = named_tool {
         let fields = &unit.param_fields;
         let header = |name: &str| {
@@ -2925,7 +2908,7 @@ fn send_to_member(
         }
     } else if door_program::is_program(def) {
         // A stdio member: the call carries the unit's own id on the child.
-        let id = door_program::id_of(unit.key, round);
+        let id = crate::tool_program::call_id(unit.key, round);
         relay.program = Some(door_program::ProgramRelay::waiting(plane, member, id));
         crate::call::outbound_program(&relay.admitted, member, def, continuation.as_ref(), id)?
     } else {
