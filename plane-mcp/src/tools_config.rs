@@ -1102,7 +1102,7 @@ impl ServerTransport {
 /// put plaintext in a value that is compared on every config apply and printed by the admin surface,
 /// and it would make rotating the secret require a restart. The same reasoning
 /// `mcp::upstream::credential_mode` records for the RFC 8693 subject token, one transport over.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum ChildEnvValue {
     /// A literal value: `LOG_LEVEL: debug`. A YAML scalar, and this arm is FIRST so a scalar can
@@ -1123,6 +1123,47 @@ pub enum ChildEnvValue {
 /// JSON settings, none of them a float — and the snapshot types this rides in must be comparable so
 /// a config apply can be recognised as a no-op.
 impl Eq for ChildEnvValue {}
+
+/// `Debug` by hand so a literal never reaches a log line or a panic message: the arm is named, the
+/// value is not. A literal is meant for values like `LOG_LEVEL: debug`, but nothing stops an
+/// operator pasting a key there, and `Debug` is the one rendering nobody reviews per call site. A
+/// reference prints in full — it names WHERE the value lives, never the value.
+impl std::fmt::Debug for ChildEnvValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ChildEnvValue::Plain(_) => f.write_str("Plain(<redacted>)"),
+            ChildEnvValue::Secret(r) => f.debug_tuple("Secret").field(r).finish(),
+        }
+    }
+}
+
+/// A URL as a refusal may echo it: the userinfo (`user:password@`) replaced by `***`, every other
+/// byte as written.
+///
+/// A refusal reaches `busbar --validate`'s stderr and the READ-ONLY admin dry-run validate
+/// endpoint, so a password an operator put in a URL must not ride out in the sentence that tells
+/// them the URL is wrong. The authority is read the way a URL parser reads it: after `scheme://`
+/// (or from the start, when the text has no scheme), up to the first `/`, `?`, `#` or `\`, with the
+/// LAST `@` in it ending the userinfo. A URL with no userinfo is returned unchanged, so a refusal
+/// that never carried a credential reads byte for byte as before.
+pub(crate) fn url_for_display(url: &str) -> std::borrow::Cow<'_, str> {
+    let start = match url.find("://") {
+        Some(i)
+            if url[..i]
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')) =>
+        {
+            i + 3
+        }
+        _ => 0,
+    };
+    let rest = &url[start..];
+    let end = rest.find(['/', '?', '#', '\\']).unwrap_or(rest.len());
+    match rest[..end].rfind('@') {
+        Some(at) => std::borrow::Cow::Owned(format!("{}***{}", &url[..start], &rest[at..])),
+        None => std::borrow::Cow::Borrowed(url),
+    }
+}
 
 /// The top-level `tools:` map, carrying the two `RESERVED_SECTION_KEYS`
 /// alongside the servers.
@@ -1213,7 +1254,7 @@ fn validate_endpoint(at: &str, def: &McpServerDefCfg) -> Result<(), String> {
         if !(def.url.starts_with("https://") || def.url.starts_with("http://")) {
             return Err(format!(
                 "{at}: `url:` must be an http:// or https:// endpoint, got `{}`",
-                def.url
+                url_for_display(&def.url)
             ));
         }
         return Ok(());
@@ -1519,7 +1560,7 @@ pub fn validate_server(name: &str, def: &McpServerDefCfg) -> Result<(), String> 
                 "{at}: `token_exchange.token_url:` must be https (it receives busbar's own subject \
                  token); plaintext http is permitted only on a registration that also sets \
                  `allow_private: true`. Got `{}`.",
-                tx.token_url
+                url_for_display(&tx.token_url)
             ));
         }
         // An exchange mints BUSBAR's credential. `passthrough` says the CALLER supplies the
