@@ -35,12 +35,12 @@ repository = "https://github.com/GetBusbar/busbar-plane-mcp"
 needless_update = "allow"
 
 [workspace.dependencies]
-busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "93d8a0f6887a65d9e69cc62982b54dcbf4a00bae" }
-busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "93d8a0f6887a65d9e69cc62982b54dcbf4a00bae" }
+busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "1768a6e1db639389d8d1396f6d0b1e0f144adefc" }
+busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "1768a6e1db639389d8d1396f6d0b1e0f144adefc" }
 # THE SUITE'S HOST CONNECTOR (dev-only; plane-mcp-plugin/tests/support/conformance_host.rs,
 # rendered because the declares file states network needs): busbar's connector and its TLS
 # test kit at the pin, and the transport framers those needs name, at the revs busbar links.
-busbar-core-connector = { git = "https://github.com/GetBusbar/busbar", rev = "93d8a0f6887a65d9e69cc62982b54dcbf4a00bae", features = ["test-support"] }
+busbar-core-connector = { git = "https://github.com/GetBusbar/busbar", rev = "1768a6e1db639389d8d1396f6d0b1e0f144adefc", features = ["test-support"] }
 busbar-transport-http = { git = "https://github.com/GetBusbar/busbar-transport-http", rev = "12b078389496d4c1fd81b730f5d9d0887537c3b0" }
 busbar-transport-tcp = { git = "https://github.com/GetBusbar/busbar-transport-tcp", rev = "223ec3f02000de94089a1752635b9e206f7492e5" }
 # busbar's root [workspace.dependencies], third-party rows, at 93d8a0f6887a65d9e69cc62982b54dcbf4a00bae
