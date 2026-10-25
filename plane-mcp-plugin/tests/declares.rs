@@ -85,10 +85,7 @@ fn the_signed_declaration_states_the_breaker_and_the_diagnostics_and_no_contract
 
 /// This plugin's own door, named for the loader.
 fn loaded_door() -> busbar_plugin_loader::dispatch::LoadedDoor {
-    // SAFETY: `busbar_plane_mcp::door` is this crate's own door: it answers the `'static` door of
-    // this plugin.
-    #[allow(unused_unsafe)]
-    let loaded =
-        unsafe { busbar_plugin_loader::dispatch::LoadedDoor::from_raw(busbar_plane_mcp::door) };
-    loaded
+    // This crate's sealed door function (`&'static Door`), taken by the loader's safe conversion.
+    let door: busbar_contract::abi::mechanism::door::DoorFn = busbar_plane_mcp::door;
+    busbar_plugin_loader::dispatch::LoadedDoor::from(door)
 }

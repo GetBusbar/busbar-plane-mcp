@@ -573,9 +573,10 @@ struct CallUnit {
     relay: Option<Relay>,
     /// What it is writing, part way through.
     pending: Option<Pending>,
-    /// The approval it is claiming on the host's ledger: the nonce and the handle the claim was
-    /// issued under, re-issued when the unit is called again after the claim pended.
-    claim: Option<(String, u32)>,
+    /// The approval it is claiming on the host's ledger: the nonce, the handle the claim was
+    /// issued under and the `ttl_ms` it was issued with, re-issued as it was when the unit is
+    /// called again after the claim pended.
+    claim: Option<(String, u32, u64)>,
     /// Verify-on-call's sighting, kept while the kernel's trust book stamps it.
     verified: Option<crate::trust::Sighting>,
     /// The door's own exchange with a stdio member's child, while it pends ([`door_program`]).
@@ -662,12 +663,20 @@ struct Pending {
     /// The unit's admin audit rows, written with its first call as `RECORD_AUDIT` writes (the
     /// kernel folds them into its own audit chain under the principal it verified).
     audits: Vec<crate::call::AuditRow>,
-    /// The unit's ledger lane, named with its first call: the published tool a call resolved to
-    /// (`{server}_{tool}`), the identity the rate card prices and the usage rows read; `None` = the
-    /// route entry the walk picked.
+    /// The unit's ledger lane, named with its first call: the registered SERVER the call resolved
+    /// to, as `mcp_server:<server>` ([`server_lane`]), the key the rate card prices and the usage
+    /// rows read (architect ruling 2026-10-23, R-11); `None` = the route entry the walk picked.
     lane: Option<String>,
     /// The counts its first call reports (the unit's cumulative usage, read off the far end).
     units: Vec<UnitCount>,
+}
+
+/// THE LEDGER LANE OF A CALL TO `server` (architect ruling 2026-10-23, R-11): the plane bills each
+/// call under its registered SERVER, `mcp_server:<server>` (the door's first scope kind and the
+/// registration's name), as the a2a plane bills an agent under `agent:<id>` and as the kernel holds
+/// a present `tools.rate_card` to every registration at boot. A per-tool key names no lane.
+pub(crate) fn server_lane(server: &str) -> String {
+    format!("{}:{server}", door::SCOPE)
 }
 
 /// The host's clock, for the call log's `ts`: the kernel's one clock (`clock.now`), whole Unix
@@ -767,7 +776,7 @@ impl Pending {
         if let Some(line) = line {
             self.audits.extend(line.audit.clone());
             if !line.server.is_empty() {
-                self.lane = Some(line.tool.clone());
+                self.lane = Some(server_lane(&line.server));
             }
         }
         self
@@ -787,9 +796,9 @@ impl Pending {
         self
     }
 
-    /// Laned by the published tool `tool`.
-    fn laned(mut self, tool: &str) -> Self {
-        self.lane = Some(tool.to_string());
+    /// Laned by the registered server `server` ([`server_lane`]).
+    fn laned(mut self, server: &str) -> Self {
+        self.lane = Some(server_lane(server));
         self
     }
 
@@ -1434,7 +1443,7 @@ pub struct DoorSeal<'a> {
     pub services: StaticServices,
     pub ticket: Ticket,
     pub issued: &'a mut u32,
-    pub claim: &'a mut Option<(String, u32)>,
+    pub claim: &'a mut Option<(String, u32, u64)>,
     pub spent: &'a Keyed<String, u64>,
     pub pending: bool,
 }
@@ -1519,9 +1528,12 @@ impl crate::ask::Seal for DoorSeal<'_> {
 
     fn redeem(&mut self, nonce: &str, expires_at: u64, now: u64) -> bool {
         // THE LOCAL HALF, test-and-set: a nonce this instance already took is refused here. Taken
-        // on the first call only: a re-call after the claim pended re-issues the claim.
-        let seq = match self.claim.as_ref() {
-            Some((claimed, seq)) if claimed == nonce => *seq,
+        // on the first call only: a re-call after the claim pended re-issues the claim, AS IT WAS
+        // FIRST ISSUED. Its window is fixed then too: `now` is read afresh on the re-call, and a
+        // claim re-issued on its handle with another `ttl_ms` is another request on a used handle,
+        // which the host refuses by quarantining the instance (the replay rule).
+        let (seq, ttl_ms) = match self.claim.as_ref() {
+            Some((claimed, seq, ttl_ms)) if claimed == nonce => (*seq, *ttl_ms),
             _ => {
                 let fresh = self.spent.with_all(|seen| {
                     seen.retain(|_, expiry| *expiry >= now);
@@ -1531,8 +1543,9 @@ impl crate::ask::Seal for DoorSeal<'_> {
                     return false;
                 }
                 let seq = self.handle().seq;
-                *self.claim = Some((nonce.to_string(), seq));
-                seq
+                let ttl_ms = expires_at.saturating_sub(now).max(1).saturating_mul(1000);
+                *self.claim = Some((nonce.to_string(), seq, ttl_ms));
+                (seq, ttl_ms)
             }
         };
         let handle = CompletionHandle {
@@ -1540,7 +1553,6 @@ impl crate::ask::Seal for DoorSeal<'_> {
             seq,
             _reserved: 0,
         };
-        let ttl_ms = expires_at.saturating_sub(now).max(1).saturating_mul(1000);
         match self
             .services
             .records_claim(handle, door::KIND_APPROVAL, nonce.as_bytes(), ttl_ms)
@@ -1849,7 +1861,7 @@ fn queued_turn(plane: &McpDoor, ticket: Ticket, unit: &mut CallUnit) -> Option<R
     if first {
         let (outbound, _) = relay.queued.take()?;
         relay.dispatched_ms = now;
-        unit.pending = Some(Pending::far(outbound).laned(&relay.admitted.entry.namespaced));
+        unit.pending = Some(Pending::far(outbound).laned(&relay.admitted.entry.server));
         return Some(Ok(Step::Write));
     }
     if deadline == 0 || now.is_none_or(|now| now < deadline) {
@@ -2495,7 +2507,7 @@ fn relay_ask(
     plane: &McpDoor,
     ticket: Ticket,
     (principal, generation, member): (&str, u64, String),
-    (issued, claim): (&mut u32, &mut Option<(String, u32)>),
+    (issued, claim): (&mut u32, &mut Option<(String, u32, u64)>),
     relay: &mut Relay,
     (result, round, child): (Value, u32, Option<crate::ask::ChildLeg>),
 ) -> Relayed {
@@ -2954,7 +2966,7 @@ fn send_to_member(
         )));
     }
     relay.dispatched_ms = now;
-    unit.pending = Some(Pending::far(outbound).laned(&relay.admitted.entry.namespaced));
+    unit.pending = Some(Pending::far(outbound).laned(&relay.admitted.entry.server));
     unit.relay = Some(relay);
     Some(MemberSend::Step(Step::Write))
 }

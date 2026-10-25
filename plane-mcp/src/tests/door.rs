@@ -95,6 +95,36 @@ fn the_tails_trust_keys_are_the_grammars() {
     }
 }
 
+/// The tail declares exactly the task kind as TerminalOnly: every other kind is purged by age.
+#[test]
+fn the_tail_declares_the_task_kind_as_terminal_only() {
+    // Each rule's kind is read by its index from the plane's own kind table, which
+    // `the_tail_names_the_planes_own_classes_and_kinds` holds equal to the tail's, entry by entry.
+    // Not through `text`: `RECORD_KINDS` is a const, so this function's use of it is its own
+    // promotion, and whether its strings share an address with the list `text` searches is the
+    // codegen's choice (ModernCI's build answered no).
+    assert_eq!(RECORD_KINDS.len(), crate::tool_records::RECORD_KINDS.len());
+    let retentions: Vec<(String, u32)> = RECORD_RETENTIONS
+        .iter()
+        .map(|r| {
+            (
+                crate::tool_records::RECORD_KINDS[r.kind as usize].to_string(),
+                r.rule,
+            )
+        })
+        .collect();
+    assert_eq!(
+        retentions,
+        [(
+            crate::tool_records::KIND_TASK.to_string(),
+            Retention::TerminalOnly.code()
+        )]
+    );
+    // The tail points at that table, not a copy.
+    assert_eq!(TAIL.record_retentions, RECORD_RETENTIONS.as_ptr());
+    assert_eq!(TAIL.record_retentions_len, RECORD_RETENTIONS.len());
+}
+
 /// The record kinds and billable classes are the plane's own symbols, stated once.
 #[test]
 fn the_tail_names_the_planes_own_classes_and_kinds() {

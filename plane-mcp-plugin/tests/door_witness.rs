@@ -30,12 +30,9 @@ mod door_facts;
 /// that stopped answering from what the plane holds cannot pass for this one.
 /// This plugin's own door, named for the loader.
 fn loaded_door() -> busbar_plugin_loader::dispatch::LoadedDoor {
-    // SAFETY: `busbar_plane_mcp::door` is this crate's own door: it answers the `'static` door of
-    // this plugin.
-    #[allow(unused_unsafe)]
-    let loaded =
-        unsafe { busbar_plugin_loader::dispatch::LoadedDoor::from_raw(busbar_plane_mcp::door) };
-    loaded
+    // This crate's sealed door function (`&'static Door`), taken by the loader's safe conversion.
+    let door: busbar_contract::abi::mechanism::door::DoorFn = busbar_plane_mcp::door;
+    busbar_plugin_loader::dispatch::LoadedDoor::from(door)
 }
 
 mod both_ways {
@@ -1455,8 +1452,10 @@ mod both_ways {
             "one call record"
         );
         // THE AUDIT ROW (SEAM-L(k)): the dispatched call's one `mcp_tool.call` row, applied, on the
-        // published tool; and THE LEDGER LANE (SEAM-L(j)): the published tool, as the served engine
-        // priced and ledgered a call.
+        // published tool; and THE LEDGER LANE (SEAM-L(j)): the call's registered server,
+        // `mcp_server:<server>`, never the published tool (architect ruling 2026-10-23, R-11): the
+        // kernel holds a present `tools.rate_card` to its registrations, so a per-tool key prices
+        // nothing.
         assert_eq!(
             ok.audits,
             vec![(
@@ -1468,8 +1467,13 @@ mod both_ways {
         );
         assert_eq!(
             send.lane.as_deref(),
+            Some("mcp_server:fs"),
+            "the call's lane is its server's"
+        );
+        assert_ne!(
+            send.lane.as_deref(),
             Some("fs_read_file"),
-            "the call's lane"
+            "a per-tool lane is no lane the card can price"
         );
 
         let error = step(&t, "answer error");
@@ -1662,17 +1666,16 @@ mod both_ways {
 
     /// The mcp door with `on_piece` swapped for [`Echo`].
     extern "C" fn echo_door() -> *const Door {
-        // SAFETY: the macro's `'static` door and its plane table.
-        let (d, mut ops) = unsafe {
-            let d = &*door();
-            (d, *d.ops.cast::<plane::Ops>())
-        };
+        let d = door();
+        // SAFETY: the macro's `'static` door states a plane table.
+        let mut ops = unsafe { *d.ops().cast::<plane::Ops>() };
         ops.on_piece = kind_op::<plane::Ops, Safe<Echo>, TestCapture, { slot::ON_PIECE }>();
         let ops: &'static plane::Ops = Box::leak(Box::new(ops));
-        Box::leak(Box::new(Door {
-            ops: std::ptr::from_ref(ops).cast(),
-            ..*d
-        }))
+        let mut parts = d.parts();
+        parts.ops = std::ptr::from_ref(ops).cast();
+        // SAFETY: the mcp door's own `'static` Statement, over a leaked plane table whose every
+        // slot honours the call convention (one swapped for the SDK's own `kind_op`).
+        Box::leak(Box::new(unsafe { Door::__from_parts(parts) }))
     }
 
     #[test]
@@ -1711,7 +1714,6 @@ mod bounds {
         REFUSAL_GATE,
     };
     use busbar_contract::abi::sdk::door::abi_str;
-    use busbar_plane_mcp::door;
 
     use crate::door_facts::{claim, H_MCP_METHOD, H_PROTOCOL_VERSION, PROTOCOL_VERSION};
     use busbar_plugin_loader::dispatch::kinds::plane::Plane;

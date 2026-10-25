@@ -102,7 +102,7 @@ fn str_bytes(s: AbiStr) -> Vec<u8> {
 
 /// The bytes a `Blob` names.
 fn blob_bytes(b: Blob) -> Vec<u8> {
-    if b.is_absent() || b.is_empty() {
+    if b.ptr().is_null() || b.is_empty() {
         return Vec::new();
     }
     // SAFETY: the SDK's bytes, live for the call.
@@ -767,7 +767,7 @@ fn out_head<T>() -> OutHead {
 
 fn ops() -> &'static Ops {
     // SAFETY: the door is a `'static` table whose ops are the plane kind's.
-    unsafe { &*(*door()).ops.cast::<Ops>() }
+    unsafe { &*door().ops().cast::<Ops>() }
 }
 
 fn lifecycle() -> &'static OpsHead {

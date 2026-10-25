@@ -98,6 +98,52 @@ pub const RECORD_SCHEMAS: &[RecordSchemaId] = &[
     SCHEMA_TASK,
 ];
 
+/// Read one record back by key.
+#[cfg(test)]
+pub const OP_GET: &str = "get";
+
+/// Write one record, replacing any earlier one under the same key.
+#[cfg(test)]
+pub const OP_PUT: &str = "put";
+
+/// Read every record of a schema under one parent.
+#[cfg(test)]
+pub const OP_SCAN: &str = "scan";
+
+/// Add one record to a schema's append-only side.
+#[cfg(test)]
+pub const OP_APPEND: &str = "append";
+
+/// Remove one record.
+#[cfg(test)]
+pub const OP_DELETE: &str = "delete";
+
+/// Spend a one-time grant, exactly once, and say whether this caller is the one who spent it.
+#[cfg(test)]
+pub const OP_REDEEM: &str = "redeem";
+
+/// Which operations one schema declares.
+///
+/// A leg naming an operation its schema does not declare is refused by the trust unit, so the answer
+/// has to be a declaration rather than a convention.
+#[must_use]
+#[cfg(test)]
+pub fn operations_for(schema: RecordSchemaId) -> &'static [&'static str] {
+    match schema.as_str() {
+        // The call log is append-and-read. It is the answer to "what happened", and an answer whose
+        // middle can be replaced is not an answer.
+        s if s == SCHEMA_CALL.as_str() => &[OP_APPEND, OP_SCAN],
+        s if s == SCHEMA_DEMOTION.as_str() => &[OP_GET, OP_PUT, OP_SCAN, OP_DELETE],
+        s if s == SCHEMA_CATALOGUE.as_str() => &[OP_GET, OP_PUT, OP_SCAN],
+        // An approval is spent, never read and then spent: the two-step version is the race the
+        // redeem operation exists to close.
+        s if s == SCHEMA_APPROVAL.as_str() => &[OP_PUT, OP_REDEEM],
+        s if s == SCHEMA_SETTINGS.as_str() => &[OP_GET, OP_PUT, OP_SCAN],
+        s if s == SCHEMA_TASK.as_str() => &[OP_GET, OP_PUT, OP_SCAN, OP_DELETE],
+        _ => &[],
+    }
+}
+
 #[cfg(test)]
 #[path = "tests/records.rs"]
 mod tests;

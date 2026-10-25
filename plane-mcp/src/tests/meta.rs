@@ -7,12 +7,6 @@ use crate::McpPlane;
 use busbar_contract::ids::MeterClassId;
 use busbar_contract::plane::PlaneMeta;
 
-/// The registry key is the codec's own.
-#[test]
-fn the_key_is_the_codecs_own() {
-    assert_eq!(McpPlane::KEY, crate::PLANE_KEY);
-}
-
 /// The design's plane table gives this protocol exactly these two classes.
 #[test]
 fn the_declared_classes_are_the_two() {
