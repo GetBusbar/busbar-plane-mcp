@@ -1086,7 +1086,11 @@ impl ServerTransport {
     }
 }
 
-/// ONE VALUE in a stdio child's environment: a plain string, or a reference to a secret module.
+/// ONE VALUE in a stdio child's environment: a literal, or a reference to a secret module. The
+/// plane reads neither: the HOST spawns the child (the member-program need, [`crate::door::NEEDS`])
+/// from the registration it holds, resolves each reference itself and admits only the program,
+/// arguments and environment the registration names. The plane keeps the value only to judge the
+/// registration and to tell a no-op config apply.
 ///
 /// ## Why both, and why the secret arm is not optional
 ///
@@ -1096,38 +1100,35 @@ impl ServerTransport {
 /// would be to paste that key into `config.yaml`, which is the one thing every other credential on
 /// this engine is designed to avoid.
 ///
-/// ## Why the secret is NOT resolved into the catalogue snapshot
+/// ## Why a literal is a `Cred`
 ///
-/// The reference is carried, unresolved, all the way to the spawn. Resolving at snapshot build would
-/// put plaintext in a value that is compared on every config apply and printed by the admin surface,
-/// and it would make rotating the secret require a restart. The same reasoning
-/// `mcp::upstream::credential_mode` records for the RFC 8693 subject token, one transport over.
-#[derive(Clone, PartialEq, Deserialize, Serialize)]
+/// Nothing stops an operator pasting a key as a literal, so the plane holds no literal as text
+/// (CHIP-DESIGN v4.1 change 12): it is sealed as it is read, has no getter, no `Debug`, no
+/// `Display`, and the registration refuses to be written back rather than spell it.
+#[derive(Clone, PartialEq, Eq, Deserialize)]
 #[serde(untagged)]
 pub enum ChildEnvValue {
     /// A literal value: `LOG_LEVEL: debug`. A YAML scalar, and this arm is FIRST so a scalar can
     /// never be mistaken for a malformed reference.
-    Plain(String),
-    /// A secret reference: `API_KEY: { env: UPSTREAM_KEY }` or `{ file: /run/secrets/key }`.
-    ///
-    /// Resolved at spawn, never earlier, and through the BUILT-IN resolver (`env` / `file`) — the
-    /// same one the RFC 8693 subject token one transport over is read with, and for the same
-    /// reason: a spawn happens on the dispatch path, which holds no plugin host handle. A
-    /// `kind: secret` PLUGIN module here fails the spawn with a named refusal rather than silently
-    /// handing the child an empty variable.
+    Plain(busbar_contract::abi::sdk::cred::Cred),
+    /// A secret reference: `API_KEY: { env: UPSTREAM_KEY }` or `{ file: /run/secrets/key }`. It
+    /// names where the value lives, never the value; the host resolves it for the spawn.
     Secret(busbar_contract::secret_ref::SecretRef),
 }
 
-/// `Eq` is asserted rather than derived because [`busbar_contract::secret_ref::SecretRef`] derives only
-/// `PartialEq`. The relation is still a true equivalence — a `String` and a module name plus opaque
-/// JSON settings, none of them a float — and the snapshot types this rides in must be comparable so
-/// a config apply can be recognised as a no-op.
-impl Eq for ChildEnvValue {}
+/// A reference is written back as written; a literal is not written back at all.
+impl Serialize for ChildEnvValue {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            ChildEnvValue::Plain(_) => Err(serde::ser::Error::custom(
+                "a stdio child's `env:` literal is sealed and is not written back",
+            )),
+            ChildEnvValue::Secret(r) => r.serialize(s),
+        }
+    }
+}
 
-/// `Debug` by hand so a literal never reaches a log line or a panic message: the arm is named, the
-/// value is not. A literal is meant for values like `LOG_LEVEL: debug`, but nothing stops an
-/// operator pasting a key there, and `Debug` is the one rendering nobody reviews per call site. A
-/// reference prints in full — it names WHERE the value lives, never the value.
+/// The arm is named; a literal has no bytes to show. A reference names WHERE the value lives.
 impl std::fmt::Debug for ChildEnvValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
