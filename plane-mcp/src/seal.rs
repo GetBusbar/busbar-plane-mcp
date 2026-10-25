@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE SEALED `requestState`: busbar's own ask state, minted and opened by the door over the host's
-//! `sign` (ARCHITECT Q-L3B-ASK). The payload is the [`AskState`] as JSON; the seal is the host's
+//! `sign`. The payload is the [`AskState`] as JSON; the seal is the host's
 //! signature of it under the door's declared signing domain, a subkey derived from the deployment's
 //! fleet-shared signing key, so a state minted on one node opens on every node of the deployment.
 //!
