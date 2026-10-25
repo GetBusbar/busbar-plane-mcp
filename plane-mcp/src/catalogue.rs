@@ -85,23 +85,6 @@ pub struct ResourceEntry {
     pub(crate) blob: Option<String>,
 }
 
-impl ResourceEntry {
-    /// Its rendered fields, in order: uri, name, description, mime type, text, blob (a blank one
-    /// for each it has not).
-    #[must_use]
-    #[cfg(test)]
-    pub fn rendered(&self) -> [&str; 6] {
-        [
-            self.uri.as_str(),
-            self.name.as_deref().unwrap_or(""),
-            self.description.as_deref().unwrap_or(""),
-            self.mime_type.as_deref().unwrap_or(""),
-            self.text.as_deref().unwrap_or(""),
-            self.blob.as_deref().unwrap_or(""),
-        ]
-    }
-}
-
 /// One listed resource template.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResourceTemplateEntry {

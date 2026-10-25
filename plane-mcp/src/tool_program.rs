@@ -658,12 +658,6 @@ impl ProgramExchange {
         self
     }
 
-    /// The progress frames the exchange relayed.
-    #[must_use]
-    pub fn progress(&self) -> &[Value] {
-        &self.corr.progress
-    }
-
     /// Drive the exchange on `ticket`, its services numbered from `base`: READY with what it came
     /// to, PENDING (to be driven again on the op's next entry), or why it failed. `greeted` says
     /// whether the door already greeted a generation.

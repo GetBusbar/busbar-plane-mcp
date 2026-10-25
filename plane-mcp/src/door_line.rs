@@ -399,7 +399,7 @@ pub(super) const MAX_LIVE_ASKS_PER_SESSION: usize = 64;
 /// LIVEN a line unit's answer: an `input_required` result (busbar's own ask, or an upstream's
 /// relayed) is put to the caller as live requests on the session, its first ask emitted now, and
 /// the unit answers nothing. Any other answer, or one that cannot be emitted, is left as it is.
-pub(super) fn liven(plane: &McpDoor, ticket: Ticket, principal: &str, unit: &mut CallUnit) {
+pub(super) fn liven(plane: &McpDoor, ticket: Ticket, unit: &mut CallUnit) {
     let Some(line_unit) = unit.line.as_ref() else {
         return;
     };
@@ -439,8 +439,7 @@ pub(super) fn liven(plane: &McpDoor, ticket: Ticket, principal: &str, unit: &mut
     if held >= MAX_LIVE_ASKS_PER_SESSION {
         return;
     }
-    let Some(mut live) = LiveAsk::of(principal, original, pending.bytes.clone(), result, round)
-    else {
+    let Some(mut live) = LiveAsk::of(original, pending.bytes.clone(), result, round) else {
         return;
     };
     live.session = session;

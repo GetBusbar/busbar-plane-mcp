@@ -3531,12 +3531,7 @@ slot!(
                     // A line's `input_required` answer is put to its caller as live requests on
                     // the carrier session ([`door_line::liven`]), before its first byte goes.
                     if unit.line.is_some() && unit.pending.as_ref().is_some_and(|p| !p.headed) {
-                        let principal = if caller.is_empty() {
-                            crate::ask::UNGOVERNED
-                        } else {
-                            caller.as_str()
-                        };
-                        door_line::liven(plane, ticket, principal, unit);
+                        door_line::liven(plane, ticket, unit);
                     }
                     let pending = unit.pending.as_mut()?;
                     Some(write(&input, &mut out, pending))
