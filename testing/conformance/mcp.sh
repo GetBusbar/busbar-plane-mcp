@@ -32,9 +32,45 @@ json.dump({"suite": "mcp", "status": status, "armed": True, "standard": "Model C
 PY
 }
 
-# pnpm builds the control peer (the typescript-sdk fixture); corepack ships with node 22.
-if ! command -v pnpm >/dev/null 2>&1 && command -v corepack >/dev/null 2>&1; then
-  mkdir -p "$out/bin" && corepack enable --install-directory "$out/bin" pnpm 2>/dev/null && PATH="$out/bin:$PATH"
+# pnpm builds the control peer (the typescript-sdk fixture; its package.json pins pnpm@10.26.1).
+# corepack ships in the node 22 tarball; npm at the same pinned version is the fallback.
+if ! command -v pnpm >/dev/null 2>&1; then
+  mkdir -p "$out/bin"
+  if command -v corepack >/dev/null 2>&1 && corepack enable --install-directory "$out/bin" pnpm >&2; then
+    :
+  else
+    say "corepack unavailable; installing pnpm@10.26.1 with npm"
+    npm install --silent --no-audit --no-fund --prefix "$out/pnpm" pnpm@10.26.1 >&2 && ln -sf "$out/pnpm/node_modules/.bin/pnpm" "$out/bin/pnpm"
+  fi
+  PATH="$out/bin:$PATH"; export PATH
+  command -v pnpm >/dev/null 2>&1 || say "pnpm is not available; the official control leg will fail"
+fi
+
+# The battery's control (python `mcp`) needs python >= 3.10; ModernCI compute has older. Fetch the
+# pinned python-build-standalone 3.12.16 (sha256 checked) when python3 is too old.
+if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null; then
+  case "$(uname -m)" in
+    x86_64|amd64) pyasset="cpython-3.12.16+20261026-x86_64-unknown-linux-gnu-install_only.tar.gz"
+                  pysha=6a79e922e50006b601f29e688407659da1c2b86ebcd4e9c7254cf234be8b89de ;;
+    aarch64|arm64) pyasset="cpython-3.12.16+20261026-aarch64-unknown-linux-gnu-install_only.tar.gz"
+                  pysha=a945427411dc6851a1393533b74a4a1ac434321ae397f2ec69897a9b4fde032b ;;
+    *) pyasset="" ;;
+  esac
+  pycache="${MODERNCI_CACHE_DIR:-$HOME/.cache}/conformance-tools"
+  if [ -n "$pyasset" ] && [ "$(uname -s)" = Linux ]; then
+    mkdir -p "$pycache"
+    tgz="$pycache/$pyasset"
+    if [ ! -x "$pycache/python-3.12.16-$(uname -m)/python/bin/python3" ]; then
+      curl -fsSL --retry 3 -o "$tgz" "https://github.com/astral-sh/python-build-standalone/releases/download/20261026/${pyasset//+/%2B}" \
+        && [ "$(sha256sum "$tgz" | cut -d' ' -f1)" = "$pysha" ] \
+        && mkdir -p "$pycache/python-3.12.16-$(uname -m)" && tar -xzf "$tgz" -C "$pycache/python-3.12.16-$(uname -m)" \
+        || say "could not provision the pinned python"
+    fi
+    if [ -x "$pycache/python-3.12.16-$(uname -m)/python/bin/python3" ]; then
+      export PYTHON="$pycache/python-3.12.16-$(uname -m)/python/bin/python3"
+      say "python: pinned 3.12.16 at $PYTHON"
+    fi
+  fi
 fi
 
 leg() { # <name> <command...>: run, tee to $out/<name>.log, record failure
