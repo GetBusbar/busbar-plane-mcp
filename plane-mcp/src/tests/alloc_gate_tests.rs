@@ -4,9 +4,7 @@
 //! test build's one `#[global_allocator]` (`src/tests/mod.rs`), so the crate holds no `unsafe`.
 //!
 //! An allocation COUNT is the same number on every machine, so work that grows with the input
-//! where it should not is seen here where a stopwatch on a shared runner would miss it. (The
-//! decode-allocation pin that lived here drove the unserved `Plane` impl, deleted with it under
-//! plane-mcp finding 12.)
+//! where it should not is seen here where a stopwatch on a shared runner would miss it.
 
 use busbar_contract::alloc_counter::allocations_of;
 
