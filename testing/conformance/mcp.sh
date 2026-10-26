@@ -73,6 +73,9 @@ if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' 
   fi
 fi
 
+# a venv left by an earlier run may have been made with an older python
+rm -rf testing/mcp-conformance/.venv-control
+
 leg() { # <name> <command...>: run, tee to $out/<name>.log, record failure
   local name="$1"; shift
   say "== $name"
