@@ -72,17 +72,11 @@ fn tool_error(answer: &Pending) {
 }
 
 /// $ A CALL THAT NEVER LEFT ITS QUEUE EARNS NO FEE UNIT AND IS NOT LOGGED DISPATCHED
-/// (ARCHITECT ruling 2026-10-14 (1) on busbar-plane-mcp#14: #62 "bill what was delivered",
-/// BUSBAR-1.6.0.md l.2252; Q35 "a hop refused before the socket is refunded", 1.6.0-QUESTIONS.md,
-/// applied uniformly across planes). A call queued behind another call on its stdio member's child,
+/// A call queued behind another call on its stdio member's child,
 /// whose deadline passed before its turn came, was never sent. Its caller is still answered the
 /// upstream-failure tool error, 200 `isError`, but the plane reports NO fee unit, so the kernel gives
 /// back the fee its admission counted. The call log names it `refused` / `queue_deadline`, audited
 /// rejected, never `dispatched`, because that word means the call went out.
-///
-/// RED before the ruling: the door answered this call through `call::upstream_failed`, which logs
-/// `dispatched` / `upstream_failed` and audits the call; and through `Pending::answer` alone,
-/// which reports the fee unit `(CLASS_FEE_INDEX, 1)` for the 200.
 #[test]
 fn a_call_that_never_left_its_queue_earns_no_fee_unit_and_is_not_logged_dispatched() {
     let crate::call::Settled::Answer { status, body, line } =
@@ -113,8 +107,7 @@ fn a_call_that_never_left_its_queue_earns_no_fee_unit_and_is_not_logged_dispatch
 }
 
 /// The twin of the queued call: a call that WAS sent and whose upstream then failed keeps its fee
-/// unit and its `dispatched` line. The fee follows what went out, not how the far end answered (Q35,
-/// "a hop that left is billed whatever the backend then answered").
+/// unit and its `dispatched` line. The fee follows what went out, not how the far end answered.
 #[test]
 fn a_call_that_went_out_and_failed_keeps_its_fee_unit_and_its_dispatched_line() {
     let crate::call::Settled::Answer { status, body, line } =
@@ -139,15 +132,10 @@ fn a_call_that_went_out_and_failed_keeps_its_fee_unit_and_its_dispatched_line() 
     );
 }
 
-/// $ A CALL WHOSE SERVER THE TOOL-LIST CHECK COULD NOT REACH EARNS NO FEE UNIT (ARCHITECT ruling
-/// 2026-10-14 (a) on busbar-plane-mcp#14, the same as (1): #62, BUSBAR-1.6.0.md l.2252; Q35). The
-/// door's live re-fetch of the server's tool list failed (ARCHITECT Q3 (c)), so the call never left.
+/// $ A CALL WHOSE SERVER THE TOOL-LIST CHECK COULD NOT REACH EARNS NO FEE UNIT. The
+/// door's live re-fetch of the server's tool list failed, so the call never left.
 /// Its caller is answered the upstream-failure tool error, 200 `isError`, and the plane reports NO
 /// fee unit, so the kernel gives back the fee its admission counted.
-///
-/// RED before the ruling: the door answered `Admission::Unreached` as it answers busbar's own ask of
-/// its caller, through `Pending::answer` alone, which reports the fee unit `(CLASS_FEE_INDEX, 1)`
-/// for the 200.
 #[test]
 fn a_call_whose_server_the_tool_list_check_could_not_reach_earns_no_fee_unit() {
     let (body, line) = unreached();
