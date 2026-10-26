@@ -180,7 +180,7 @@ pub fn request_log(method: &str, target: Option<Value>, status: u32) -> Vec<LogR
 /// One answer as an event stream: each progress frame, then each log record, then the answer, one
 /// `message` event each. `None` when `body` is not one JSON document (it goes out as it was).
 ///
-/// THE ANSWER IS ITS OWN BYTES (Law 11, row 159 finding A-M2): the body is never parsed into a value
+/// THE ANSWER IS ITS OWN BYTES (Law 11): the body is never parsed into a value
 /// and printed again, which would re-order its members and re-spell its numbers. Each of its lines
 /// is one `data:` line, and a client joins them back with `\n`: a JSON document carries a line
 /// break only between its tokens, so the one change the event-stream framing can make is a `\r`
