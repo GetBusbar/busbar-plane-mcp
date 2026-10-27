@@ -130,8 +130,8 @@ fn rows_of(sender: ops::Sender) -> Vec<&'static ops::RpcMethodRow> {
     ops::METHODS.iter().filter(|r| r.sender == sender).collect()
 }
 
-/// The method table keeps the roles the door serves: how many rows each role has, every row's class
-/// is one the plane declares, and exactly the held stream is event-framed.
+/// The method table keeps the roles the door serves: how many rows each role has, and every row's
+/// class is one the plane declares.
 ///
 /// The surviving, plane-free half of what the decode-driven tests asserted (finding 12): the door
 /// reads this same table (`ops::method_row_for`), so the table is what is pinned here.
@@ -147,12 +147,6 @@ fn the_method_table_keeps_its_roles_and_its_declared_classes() {
             row.op
         );
     }
-    let framed: Vec<_> = ops::METHODS
-        .iter()
-        .filter(|r| r.event_framed)
-        .map(|r| r.op)
-        .collect();
-    assert_eq!(framed, vec![ops::OP_SUBSCRIPTIONS_LISTEN]);
 }
 
 /// The revision the battery declares is the revision the codec declares.

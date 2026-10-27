@@ -18,23 +18,21 @@ pub fn call_suffix(
     tool_digest: &str,
     pin_generation: u64,
 ) -> Vec<u8> {
-    fn text(out: &mut Vec<u8>, s: &str) {
-        out.extend_from_slice(&(s.len() as u64).to_be_bytes());
-        out.extend_from_slice(s.as_bytes());
-    }
-    fn num(out: &mut Vec<u8>, v: u64) {
-        let b = v.to_be_bytes();
-        out.extend_from_slice(&(b.len() as u64).to_be_bytes());
-        out.extend_from_slice(&b);
-    }
+    let (ts, pin) = (ts.to_be_bytes(), pin_generation.to_be_bytes());
+    let fields: [&[u8]; 7] = [
+        &ts,
+        server.as_bytes(),
+        tool.as_bytes(),
+        outcome.as_bytes(),
+        reason.as_bytes(),
+        tool_digest.as_bytes(),
+        &pin,
+    ];
     let mut out = Vec::new();
-    num(&mut out, ts);
-    text(&mut out, server);
-    text(&mut out, tool);
-    text(&mut out, outcome);
-    text(&mut out, reason);
-    text(&mut out, tool_digest);
-    num(&mut out, pin_generation);
+    for f in fields {
+        out.extend_from_slice(&(f.len() as u64).to_be_bytes());
+        out.extend_from_slice(f);
+    }
     out
 }
 

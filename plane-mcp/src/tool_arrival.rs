@@ -15,7 +15,7 @@
 
 use serde_json::Value;
 
-use crate::checks::{check_request, Refused, STATUS};
+use crate::checks::{check_request, STATUS};
 use crate::codec::CODE_METHOD_NOT_FOUND;
 use crate::tool_ops::{self as ops, RpcMethodRow, Sender};
 
@@ -26,7 +26,7 @@ pub const NOT_JSON: &str = "Request body is not valid JSON.";
 pub const STATUS_NOT_FOUND: u32 = 404;
 
 /// A refusal decided at arrival: its status, the id it echoes, and its code, sentence and data.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 pub struct Refusal {
     /// The status.
     pub status: u32,
@@ -41,16 +41,6 @@ pub struct Refusal {
 }
 
 impl Refusal {
-    fn of(id: Option<Value>, refused: Refused) -> Self {
-        Refusal {
-            status: STATUS,
-            id,
-            code: refused.code,
-            message: refused.message.to_string(),
-            data: refused.data,
-        }
-    }
-
     /// The refusal as the wire carries it: the one JSON-RPC error envelope.
     #[must_use]
     pub fn body(&self) -> Vec<u8> {
@@ -112,9 +102,14 @@ pub fn decide<'a>(body: &[u8], field: impl Fn(&str) -> Option<&'a str>) -> Dispo
         }
         busbar_contract::jsonrpc::Envelope::Request { id, method } => (id, method),
     };
-    let checked = check_request(&value, &method, field);
-    if let Err(refused) = checked {
-        return Disposition::Refused(Refusal::of(Some(id), refused));
+    if let Err(refused) = check_request(&value, &method, field) {
+        return Disposition::Refused(Refusal {
+            status: STATUS,
+            id: Some(id),
+            code: refused.code,
+            message: refused.message.to_string(),
+            data: refused.data,
+        });
     }
     match ops::method_row_for(&method).filter(|row| row.sender == Sender::Client) {
         Some(row) => Disposition::Request { row, id },
