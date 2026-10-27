@@ -305,45 +305,6 @@ pub struct ResourceTemplateAllowCfg {
     pub text: Option<String>,
 }
 
-/// `tools.<server>.grants`: the server-initiated ask grants, consulted on every relay. Deny by default.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ServerRequestGrants {
-    /// May this server ask busbar's caller for a model completion (`sampling/createMessage`)? When
-    /// granted, the ask is relayed to the caller, who runs the completion or not; busbar runs none
-    /// on its behalf (Law 11).
-    #[serde(default)]
-    pub sampling: bool,
-    /// May this server ask busbar's caller to solicit user input? Relayed, as `sampling`.
-    #[serde(default)]
-    pub elicitation: bool,
-    /// May this server ask busbar's caller to disclose filesystem roots? Relayed, as `sampling`.
-    #[serde(default)]
-    pub roots: bool,
-}
-
-impl ServerRequestGrants {
-    /// Whether the grant named by an `InputRequiredResult`'s kind is held; an unknown kind is refused.
-    pub fn allows(&self, kind: &str) -> bool {
-        match kind {
-            "sampling" => self.sampling,
-            "elicitation" => self.elicitation,
-            "roots" => self.roots,
-            _ => false,
-        }
-    }
-
-    /// The same three grants as the plane's value type, which the child-message classifier
-    /// (`client::peer`) decides against. Field for field; nothing widens.
-    pub fn as_ask_grants(self) -> crate::client::jsonrpc::ServerRequestGrants {
-        crate::client::jsonrpc::ServerRequestGrants {
-            sampling: self.sampling,
-            elicitation: self.elicitation,
-            roots: self.roots,
-        }
-    }
-}
-
 /// `tools.<server>.sampling_bounds`: the size bounds on a relayed `sampling/createMessage` ask
 /// (owner ruling Q22c); past any bound it is refused by name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -494,7 +455,7 @@ pub struct McpServerDefCfg {
     pub aud: Option<String>,
     /// The server-initiated request grants. Absent ⇒ all denied.
     #[serde(default)]
-    pub grants: ServerRequestGrants,
+    pub grants: crate::client::jsonrpc::ServerRequestGrants,
     /// Whether this upstream may live on a private / loopback / CGNAT address. Metadata stays refused.
     #[serde(default)]
     pub allow_private: bool,

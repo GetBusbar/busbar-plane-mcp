@@ -25,7 +25,7 @@
 
 use super::*;
 use crate::tool_program::{
-    call_id, first_in_line, list_id, AskOwner, Correlator, Exchanged, Peer, ProgramExchange,
+    first_in_line, list_id, AskOwner, Correlator, Exchanged, Peer, ProgramExchange,
 };
 
 /// THE LINE OF CALLS RELAYED TO STDIO CHILDREN, by serial (arrival order) (finding 5): every
@@ -96,7 +96,7 @@ pub(super) struct ProgramRelay {
     pub(super) wait: u64,
     /// The generation of the child the walk's lease reached.
     pub(super) generation: u64,
-    corr: Correlator,
+    pub(super) corr: Correlator,
     /// The exchange writing the replies the child is owed, while it pends.
     replying: Option<ProgramExchange>,
     /// How many reply exchanges this call made.
@@ -375,7 +375,7 @@ fn exchange_child(
     let mut peer = DoorPeer {
         plane,
         member,
-        grants: def.grants.as_ask_grants(),
+        grants: def.grants,
     };
     let answer = exchange.drive(host, ticket, base, &greeted, &mut peer);
     if let std::task::Poll::Ready(Ok(done)) = &answer {
@@ -556,7 +556,7 @@ pub(super) fn far(
         let mut peer = DoorPeer {
             plane,
             member,
-            grants: def.grants.as_ask_grants(),
+            grants: def.grants,
         };
         relay.hold = 0;
         match relay
@@ -636,16 +636,6 @@ pub(super) fn refuse_asks(
     } else {
         Far::Taken
     }
-}
-
-/// The progress frames the relay's reading kept, taken.
-pub(super) fn progress(relay: &mut ProgramRelay) -> Vec<Value> {
-    std::mem::take(&mut relay.corr.progress)
-}
-
-/// The id unit `key`'s call carries on a child, round `round`.
-pub(super) fn id_of(key: u64, round: u32) -> u64 {
-    call_id(key, round)
 }
 
 #[cfg(test)]

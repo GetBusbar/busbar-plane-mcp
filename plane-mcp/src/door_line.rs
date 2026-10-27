@@ -30,7 +30,7 @@ use super::{door_listen, CallUnit, McpDoor, Pending};
 use crate::catalogue::Catalogue;
 use crate::line::{self, Era, LiveAsk, Reply};
 use crate::subscribe::{Listen, Standing, Step as ListenStep, KEEPALIVE_NS};
-use busbar_contract::abi::mechanism::ticket::{CompletionHandle, Ticket};
+use busbar_contract::abi::mechanism::ticket::Ticket;
 
 /// What a line unit is to the carrier.
 #[derive(Debug, Clone, Default)]
@@ -101,7 +101,7 @@ impl LineListen {
     fn step_at(&mut self, catalogue: &Catalogue, now_ns: u64) -> ListenStep {
         let standing = self.standing_at(now_ns);
         let updates = std::mem::take(&mut self.updates);
-        let admit = door_listen::admit(&self.entitled);
+        let admit = super::admit(&self.entitled);
         self.listen
             .step(catalogue, &admit, &standing, &updates, now_ns)
     }
@@ -286,12 +286,9 @@ fn emit(plane: &McpDoor, ticket: Ticket, seq: u32, session: u64, bytes: &[u8]) -
     let Some(services) = plane.services else {
         return false;
     };
-    let handle = CompletionHandle {
-        ticket,
-        seq,
-        _reserved: 0,
-    };
-    services.session_emit(handle, session, bytes).is_ok()
+    services
+        .session_emit(super::handle_at(ticket, seq), session, bytes)
+        .is_ok()
 }
 
 /// THE PRESET ANSWER of a line unit, or the next ask of its round emitted (the unit then answers
@@ -403,7 +400,7 @@ pub(super) fn listen(
         Ok(opened) => opened,
         Err(refused) => return Some(*refused),
     };
-    let admit = door_listen::admit(&unit.entitled);
+    let admit = super::admit(&unit.entitled);
     let frames = match listen.step(&held.catalogue, &admit, &Standing::Live, &[], now) {
         ListenStep::Frames(frames) | ListenStep::End(frames) => frames,
         _ => Vec::new(),

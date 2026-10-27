@@ -28,7 +28,7 @@
 //!   body then either is answered from what the plane holds ([`crate::answer`]) or, for a
 //!   `tools/call` the caller may make ([`crate::call::admit_call`]), becomes the request bound for that
 //!   member ([`crate::call::outbound`]). The far end's answer is settled into the caller's
-//!   ([`crate::call::settle_call`]). An answer the reply buffer cannot hold is written over several
+//!   ([`crate::call::settle_call_as`]). An answer the reply buffer cannot hold is written over several
 //!   calls (`more = 1`).
 //! * Every visibility question a request asks is the kernel's ENTITLEMENT answer for the unit's
 //!   principal (`entitlement.check`), asked once per grant per unit: nothing is visible to a unit
@@ -558,6 +558,12 @@ fn clock(
 /// written (a record never carries a time the plane made up).
 fn clock_s(services: Option<Services>, ticket: Ticket, unit: &mut CallUnit) -> Option<u64> {
     clock(services, ticket, &mut unit.issued).map(|r| r.wall_ns / 1_000_000_000)
+}
+
+/// The kernel's wall clock in Unix milliseconds; `None` with no clock or a failed read, which is
+/// never a time (row 159 finding P-M4): its caller refuses, stamps nothing or keeps its last time.
+fn wall_ms(services: Option<Services>, ticket: Ticket, issued: &mut u32) -> Option<u64> {
+    clock(services, ticket, issued).map(|r| r.wall_ns / 1_000_000)
 }
 
 /// The kernel's monotonic clock, whole milliseconds.
@@ -1142,12 +1148,15 @@ fn dest_verdict(
     }
 }
 
-/// Whether the kernel's entitlement answers hold `"<kind>:<name>"` (never asked = no).
-fn granted(entitled: &BTreeMap<String, bool>, kind: &str, name: &str) -> bool {
-    entitled
-        .get(&format!("{kind}:{name}"))
-        .copied()
-        .unwrap_or(false)
+/// Whether the kernel's entitlement answers hold `"<kind>:<name>"` (never asked = no), as a
+/// catalogue lookup asks it.
+fn admit(entitled: &BTreeMap<String, bool>) -> impl Fn(&str, &str) -> bool + '_ {
+    |kind, name| {
+        entitled
+            .get(&format!("{kind}:{name}"))
+            .copied()
+            .unwrap_or(false)
+    }
 }
 
 /// The principal a caller reference names: the ungoverned chain's when it is empty.
@@ -1179,7 +1188,7 @@ enum Step {
 /// THE DOOR'S SEAL ([`crate::ask::Seal`]) over the host's services for one unit: the state signed
 /// by the host's `sign` under the door's signing domain ([`crate::seal`]), a nonce from its
 /// `random.fill`, and a completed exchange's approval spent once, first against the instance's own
-/// ledger and then by the host's one-time `records.claim` of [`door::KIND_APPROVAL`]. A claim that
+/// ledger and then by the host's one-time `records.claim` of [`crate::tool_records::KIND_APPROVAL`]. A claim that
 /// pends leaves [`Self::pending`] set; the unit answers PENDING and decides again on the wake, the
 /// claim re-issued under the handle it was first issued under.
 #[doc(hidden)]
@@ -1261,10 +1270,12 @@ impl crate::ask::Seal for DoorSeal<'_> {
             }
         };
         let handle = handle_at(self.ticket, seq);
-        match self
-            .services
-            .records_claim(handle, door::KIND_APPROVAL, nonce.as_bytes(), ttl_ms)
-        {
+        match self.services.records_claim(
+            handle,
+            crate::tool_records::KIND_APPROVAL,
+            nonce.as_bytes(),
+            ttl_ms,
+        ) {
             std::task::Poll::Pending => {
                 self.pending = true;
                 false
@@ -1322,7 +1333,7 @@ fn verify_on_call(
     };
     // A failed read is never a time (row 159 finding P-M4): the cached list is then stale and
     // fetched again, and what that fetch landed is not stamped.
-    let now_ms = clock(Some(services), ticket, &mut unit.issued).map(|r| r.wall_ns / 1_000_000);
+    let now_ms = wall_ms(Some(services), ticket, &mut unit.issued);
     let sighting = match unit.verified.take() {
         Some(kept) => kept,
         None => {
@@ -1360,12 +1371,12 @@ fn verify_on_call(
                 // an upstream is not trusted to answer.
                 let timeout_ms = def.timeout_ms();
                 // The fetch is the stateless `tools/list` first, NEGOTIATED with an upstream that
-                // requires a session ([`door_sessions::fetch`]), every hop on the connector.
+                // requires a session ([`door_sessions::fetch_in`]), every hop on the connector.
                 let request = list_request(held, server, def);
-                let answer = door_sessions::fetch(
+                let answer = door_sessions::fetch_in(
                     instance,
                     plane,
-                    unit,
+                    &mut unit.negotiating,
                     (base, server, caller, timeout_ms),
                     request,
                 );
@@ -1688,8 +1699,8 @@ fn answer_body(
     // VERIFY-ON-CALL, for a call the caller is entitled to make: the gate below judges what the
     // server serves now.
     if let Some(t) = called.filter(|t| {
-        granted(&unit.entitled, door::SCOPE, &t.server)
-            && granted(&unit.entitled, door::SCOPE_TOOL, &t.namespaced)
+        let admit = admit(&unit.entitled);
+        admit(door::SCOPE, &t.server) && admit(door::SCOPE_TOOL, &t.namespaced)
     }) {
         if let Looked::Pending =
             verify_on_call(instance, plane, ticket, unit, &held, (&t.server, caller))
@@ -1716,10 +1727,9 @@ fn answer_body(
         if row.op == crate::tool_ops::OP_TOOLS_LIST);
     let mut hidden = std::collections::BTreeSet::new();
     if listing {
-        let entitled = &unit.entitled;
         let listed: Vec<crate::catalogue::ToolEntry> = held
             .catalogue
-            .tools_for(&|kind: &str, name: &str| granted(entitled, kind, name))
+            .tools_for(&admit(&unit.entitled))
             .into_iter()
             .cloned()
             .collect();
@@ -1742,16 +1752,9 @@ fn answer_body(
             }
         }
     }
-    let mut seal = services.map(|services| DoorSeal {
-        services,
-        ticket,
-        issued: &mut unit.issued,
-        claim: &mut unit.claim,
-        spent: &plane.spent,
-        pending: false,
-    });
-    let entitled = &unit.entitled;
-    let admit = |kind: &str, name: &str| granted(entitled, kind, name);
+    let mut seal = services
+        .map(|s| door_tasks::door_seal(plane, s, ticket, (&mut unit.issued, &mut unit.claim)));
+    let admit = |kind: &str, name: &str| admit(&unit.entitled)(kind, name);
     if let Some(id) = named_tool {
         let fields = &unit.param_fields;
         let header = |name: &str| {
@@ -2111,14 +2114,7 @@ fn relay_ask(
     };
     // No signing key, no sealer: checked before a work handle is opened for an ask that could not
     // be sealed anyway.
-    let mut seal = DoorSeal {
-        services,
-        ticket,
-        issued,
-        claim,
-        spent: &plane.spent,
-        pending: false,
-    };
+    let mut seal = door_tasks::door_seal(plane, services, ticket, (issued, claim));
     if seal.sign(b"").is_none() {
         relay.asked = None;
         return refused(child, no_sealer);
@@ -2199,11 +2195,17 @@ fn open_child_work(
     let h = door_tasks::handle(ticket, issued, work_slot);
     let record = child_record(member, &c);
     let (mut buf, mut spans) = ([0u8; 64], [door_tasks::blank(); 2]);
-    match services.work_open(h, door::KIND_APPROVAL, &record, &mut buf, &mut spans) {
+    match services.work_open(
+        h,
+        crate::tool_records::KIND_APPROVAL,
+        &record,
+        &mut buf,
+        &mut spans,
+    ) {
         std::task::Poll::Pending => ChildOpened::Pending,
         std::task::Poll::Ready(Ok(opened)) => {
             c.work = Some(opened.reference.to_string());
-            let now_ms = clock(Some(services), ticket, issued).map(|r| r.wall_ns / 1_000_000);
+            let now_ms = wall_ms(Some(services), ticket, issued);
             // A failed clock read gives the handle no lapse (never one at the epoch): it is
             // settled at once and the ask refused (row 159 finding P-M4).
             let Some(now_ms) = now_ms else {
@@ -2439,17 +2441,22 @@ fn send_to_member(
     // what would be forwarded, as it would be serialised, is measured before anything
     // is sent, and a reply over the cap is refused by name and never forwarded.
     let judged = match (&child, &continuation) {
-        (Some(child), _) => crate::tool_program::judge_child_replies(
+        (Some(child), _) => crate::call::judge_input_response(
             member,
-            def,
-            &crate::tool_program::child_replies(
+            &def.sampling_bounds,
+            crate::tool_program::child_replies(
                 child,
                 continuation.as_ref().and_then(|c| c.get("inputResponses")),
-            ),
+            )
+            .iter()
+            .map(Vec::len)
+            .sum(),
         ),
-        (None, Some(continuation)) => {
-            crate::call::judge_continuation(member, &def.sampling_bounds, continuation)
-        }
+        (None, Some(continuation)) => crate::call::judge_input_response(
+            member,
+            &def.sampling_bounds,
+            continuation.to_string().len(),
+        ),
         (None, None) => Ok(()),
     };
     if let Err(refusal) = judged {
@@ -2493,7 +2500,7 @@ fn send_to_member(
         }
     } else if door_program::is_program(def) {
         // A stdio member: the call carries the unit's own id on the child.
-        let id = door_program::id_of(unit.key, round);
+        let id = crate::tool_program::call_id(unit.key, round);
         relay.program = Some(door_program::ProgramRelay::waiting(plane, member, id));
         crate::call::outbound_program(&relay.admitted, member, def, continuation.as_ref(), id)?
     } else {
@@ -2575,7 +2582,8 @@ fn exchange_scope(
         .map(|n| (door::SCOPE_TOOL, n.as_str()))
         .collect();
     ask_entitlements(services, ticket, unit, &grants);
-    let entitled = |name: &str| granted(&unit.entitled, door::SCOPE_TOOL, name);
+    let admit = admit(&unit.entitled);
+    let entitled = |name: &str| admit(door::SCOPE_TOOL, name);
     Some(crate::tool_scope::caller_downscope(
         &held.catalogue,
         member,
@@ -2683,7 +2691,7 @@ slot!(
                                 plane, ticket, member, def, program, head, bytes, last,
                             );
                             let wait = program.wait;
-                            relay.frames.extend(door_program::progress(program));
+                            relay.frames.extend(std::mem::take(&mut program.corr.progress));
                             match far {
                                 door_program::Far::Taken => return Some(Step::Taken),
                                 door_program::Far::Pending => return Some(Step::Pending),
@@ -2703,7 +2711,11 @@ slot!(
                                             cap,
                                         })
                                     } else {
-                                        crate::tool_program::judge_child_asks(server, def, &asks)
+                                        crate::call::judge_sampling_bounds(
+                                            server,
+                                            &def.sampling_bounds,
+                                            asks.iter().map(|a| &a.request),
+                                        )
                                     };
                                     if let Err(refusal) = judged {
                                         let ids: Vec<Value> =
@@ -2940,7 +2952,7 @@ slot!(
                         let owner = door_sessions::owner_of(&caller);
                         // The caller's session is touched only at a time the clock gave.
                         let now = in_session.as_ref().and_then(|_| {
-                            door_sessions::wall_ms(plane.services, ticket, &mut unit.issued)
+                            wall_ms(plane.services, ticket, &mut unit.issued)
                         });
                         door_sessions::heard(
                             plane,

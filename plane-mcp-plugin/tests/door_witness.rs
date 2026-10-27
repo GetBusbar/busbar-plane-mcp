@@ -1644,13 +1644,14 @@ mod both_ways {
 
     fn settled(far: &[u8], sse: bool) -> (u32, Vec<u8>) {
         let section = door::read_tools_section(RELAY_SECTION).expect("the section reads");
-        match busbar_plane_mcp::call::settle_call(
+        match busbar_plane_mcp::call::settle_call_as(
             &admitted(),
             section.servers.get("fs"),
             200,
             far,
             sse,
             0,
+            busbar_plane_mcp::client::jsonrpc::dispatch_request_id(0),
         ) {
             busbar_plane_mcp::call::Settled::Answer { status, body, .. } => (status, body),
             other => panic!("an answer: {other:?}"),

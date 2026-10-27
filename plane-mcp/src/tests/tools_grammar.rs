@@ -20,6 +20,7 @@ use busbar_contract::abi::mechanism::door::SECTION_DECLARING;
 use serde_json::{json, Value};
 
 use super::{namespaced, validate_published_names, ToolsCfg, SECTION, SUBJECT_NOUN};
+use crate::client::jsonrpc::ServerAsk;
 
 /// The section read by the grammar alone, as the door reads its settings (no rule spanning
 /// registrations): what one server's well-formedness is judged by.
@@ -127,10 +128,15 @@ fn server_initiated_grants_default_to_denied() {
         .unwrap();
     let g = cfg.servers["s"].grants;
     assert!(!g.sampling && !g.elicitation && !g.roots);
-    for kind in ["sampling", "elicitation", "roots", "some_future_ask"] {
+    for method in [
+        "sampling/createMessage",
+        "elicitation/create",
+        "roots/list",
+        "some/future_ask",
+    ] {
         assert!(
-            !g.allows(kind),
-            "an unwritten grant must deny `{kind}` — including a kind this build has never heard of"
+            !g.allows(ServerAsk::of_method(Some(method))),
+            "an unwritten grant must deny `{method}` — including one this build has never heard of"
         );
     }
     // And a granted one is granted, so the default is a default and not a hardcoded refusal.
@@ -143,8 +149,8 @@ fn server_initiated_grants_default_to_denied() {
     }))
     .unwrap();
     let g = cfg.servers["s"].grants;
-    assert!(g.allows("sampling"));
-    assert!(!g.allows("elicitation") && !g.allows("roots"));
+    assert!(g.allows(ServerAsk::Sampling));
+    assert!(!g.allows(ServerAsk::Elicitation) && !g.allows(ServerAsk::Roots));
 }
 
 /// `tools.<server>.sampling_bounds` (owner ruling Q22c): omitted ⇒ the shipped defaults; written ⇒
