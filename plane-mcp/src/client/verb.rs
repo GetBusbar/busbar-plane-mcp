@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE CLOSED SET OF METHODS BUSBAR ISSUES TO AN UPSTREAM MCP SERVER, one enum so the column
-//! `mcp × stdio × busbar-as-client × client-originated` of `qa/method-inventory.json` is
+//! `mcp × stdio × busbar-as-client × client-originated` of `tests/data/method-inventory.json` is
 //! enumerable (`tests/method_inventory.rs` compares it in both directions). `initialize` is built
 //! here because a stdio child demands a handshake. Params are data on the child's stdin, never argv.
 

@@ -7,9 +7,9 @@
 //! The failure this file exists to catch is the one `tests/method_coverage.rs` was written for, one
 //! level down: a column of the matrix whose contents are a property of its call sites drifts from
 //! the specification silently, because an absent verb and a considered-and-inapplicable verb look
-//! identical in source. `all_verbs` is compared against busbar's `qa/method-inventory.json`
-//! — which is generated from rmcp's own model — in BOTH directions by `tests/method_inventory.rs`
-//! (it reads busbar at the pin); this file holds the enum's own closure.
+//! identical in source. `all_verbs` is compared against `tests/data/method-inventory.json`
+//! — which is generated from rmcp's own model — in BOTH directions by `tests/method_inventory.rs`;
+//! this file holds the enum's own closure.
 
 use super::super::verb::UpstreamVerb;
 
