@@ -58,19 +58,11 @@ pub struct McpCfg {
 pub struct McpResource {
     /// The canonical URI verbatim, as configured. THE audience.
     canonical_uri: String,
-    /// The path component of `canonical_uri`, normalised to a leading and no trailing slash. The
-    /// ingress mount.
-    mount_path: String,
-    /// The RFC 9728 section 3.1 metadata path: `/.well-known/oauth-protected-resource` with the resource's
-    /// path INSERTED AFTER it, not before. This is the one detail of RFC 9728 that is easy to get
-    /// backwards, and getting it backwards means every compliant client's discovery 404s.
-    metadata_path: String,
-    /// The absolute form of `metadata_path`, which is what goes in the challenge — a client that has
-    /// no credential also has no reason to trust its own reconstruction of our origin.
+    /// The absolute RFC 9728 section 3.1 metadata URL (the well-known prefix, then the resource's
+    /// path), which is what goes in the challenge.
     metadata_url: String,
     authorization_servers: Vec<String>,
     scopes_supported: Vec<String>,
-    allowed_origins: Vec<String>,
 }
 
 /// Why an `mcp:` block was refused at boot. Every arm names the field and what a correct value looks
@@ -201,19 +193,15 @@ impl McpResource {
                 return Err(McpCfgError::AuthorizationServerNotAbsolute(issuer.clone()));
             }
         }
-        let metadata_path = protected_resource_metadata_path(&mount_path);
         Ok(Self {
-            metadata_url: format!("{origin}{metadata_path}"),
+            metadata_url: format!("{origin}{}", protected_resource_metadata_path(&mount_path)),
             canonical_uri: uri.to_string(),
-            mount_path,
-            metadata_path,
             authorization_servers: cfg
                 .authorization_servers
                 .iter()
                 .map(|s| s.trim().to_string())
                 .collect(),
             scopes_supported: cfg.scopes_supported.clone(),
-            allowed_origins: cfg.allowed_origins.clone(),
         })
     }
 
@@ -270,12 +258,6 @@ fn normalise_path(path: &str) -> String {
     }
     format!("/{trimmed}")
 }
-
-// THE ENGINE BINDING for the plane's test binary: the one module that names the engine crate. Every
-// App-needing test below reaches the engine through it (the neutral `testkit::engine_kit` seam).
-// Gated on `test-support` alone (never bare `cfg(test)`, where no engine is in the closure): that is
-// also the feature a dependent crate's test binary compiles the plane batteries in under
-// (`admin_view::adminverbs_tests`), so those reach it too; in that feature-only build its helpers
 
 #[cfg(test)]
 #[path = "tests/endpoint.rs"]

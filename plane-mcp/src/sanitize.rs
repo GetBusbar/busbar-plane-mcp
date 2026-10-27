@@ -103,19 +103,15 @@ pub fn normalise(input: &str) -> String {
             // `<letter` in this string is likewise `>`-less and takes the same inert path, so the
             // remainder round-trips byte-for-byte.
         }
-        // Copy one whole UTF-8 character, never one byte: slicing a multi-byte character in half
-        // would produce invalid UTF-8, and `String::push_str` on a bad slice would panic.
-        let ch_len = utf8_len(bytes[i]);
-        let end = (i + ch_len).min(bytes.len());
-        out.push_str(&input[i..end]);
-        i = end;
+        // Copy one whole character, never one byte (`i` is always on a boundary: it only ever
+        // moves by a character or past an ASCII `>`).
+        let Some(c) = input[i..].chars().next() else {
+            break;
+        };
+        out.push(c);
+        i += c.len_utf8();
     }
     out
-}
-
-/// [`normalise`] applied to an optional string, which is the shape every catalogue field has.
-pub fn normalise_opt(input: Option<&str>) -> Option<String> {
-    input.map(normalise)
 }
 
 /// Remove the tag that the just-completed deletion may have reconstituted across the seam between
@@ -150,8 +146,7 @@ fn collapse_reconstituted_tags(
 /// The length of the `<` or `</` left dangling at the end of `out` that `bytes[i..]` would complete
 /// into a tag, or `None` when the seam is inert.
 fn pending_opener(out: &str, bytes: &[u8], i: usize) -> Option<usize> {
-    let head =
-        matches!(bytes.get(i), Some(c) if c.is_ascii_alphabetic() || *c == b'!' || *c == b'?');
+    let head = names_tag(bytes.get(i));
     if out.ends_with("</") {
         // `</` needs only the name to follow.
         return head.then_some(2);
@@ -159,8 +154,7 @@ fn pending_opener(out: &str, bytes: &[u8], i: usize) -> Option<usize> {
     if out.ends_with('<') {
         // A bare `<` takes either form: the name may follow directly, or after a `/` that is still
         // in the input rather than in `out`.
-        let closing = bytes.get(i) == Some(&b'/')
-            && matches!(bytes.get(i + 1), Some(c) if c.is_ascii_alphabetic() || *c == b'!' || *c == b'?');
+        let closing = bytes.get(i) == Some(&b'/') && names_tag(bytes.get(i + 1));
         return (head || closing).then_some(1);
     }
     None
@@ -173,25 +167,17 @@ fn starts_tag(bytes: &[u8], i: usize) -> bool {
     if bytes.get(j) == Some(&b'/') {
         j += 1;
     }
-    matches!(bytes.get(j), Some(c) if c.is_ascii_alphabetic() || *c == b'!' || *c == b'?')
+    names_tag(bytes.get(j))
+}
+
+/// Whether `c` can open a tag's name: an ASCII letter, `!` or `?`.
+fn names_tag(c: Option<&u8>) -> bool {
+    matches!(c, Some(c) if c.is_ascii_alphabetic() || *c == b'!' || *c == b'?')
 }
 
 /// The index of the `>` closing the tag opened at `i`, or `None` when the input ends first.
 fn find_tag_end(bytes: &[u8], i: usize) -> Option<usize> {
     bytes[i..].iter().position(|b| *b == b'>').map(|p| i + p)
-}
-
-/// The byte length of the UTF-8 character starting with `b`. A continuation byte answers 1, which
-/// cannot happen for well-formed input reached through `&str` and keeps the loop total if it ever
-/// did.
-fn utf8_len(b: u8) -> usize {
-    match b {
-        0x00..=0x7F => 1,
-        0xC0..=0xDF => 2,
-        0xE0..=0xEF => 3,
-        0xF0..=0xF7 => 4,
-        _ => 1,
-    }
 }
 
 #[cfg(test)]

@@ -99,20 +99,6 @@ const MAX_VALUE_DEPTH: usize = 64;
 /// arguments go.
 const MAX_COMBINATOR_DEPTH: usize = 8;
 
-/// The `format` values that make a string field URL-ish. Matched case-insensitively: JSON Schema
-/// spells these lowercase, and an upstream writing `URI` should not thereby remove a field from the
-/// walk.
-const URLISH_FORMATS: &[&str] = &[
-    "uri",
-    "uri-reference",
-    "iri",
-    "url",
-    "hostname",
-    "idn-hostname",
-    "ipv4",
-    "ipv6",
-];
-
 /// What a URL-ish format says the value IS, which decides how it is read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Urlish {
@@ -247,16 +233,6 @@ pub struct ArgScan {
     pub strings_seen: usize,
 }
 
-impl ArgScan {
-    /// Total values that were actually put through the guard.
-    /// Not read on the dispatch path: `mcp::upstream` acts on the REFUSAL, and the counts exist
-    /// for the floor assertions that stop a walker which visits nothing from passing.
-    #[allow(dead_code)]
-    pub fn judged(&self) -> usize {
-        self.declared_judged + self.undeclared_judged
-    }
-}
-
 /// THE ENTRY POINT: walk `arguments` against the PINNED `schema` and refuse on the first
 /// inadmissible value.
 ///
@@ -298,9 +274,14 @@ fn walk(
                 let mark = pointer.len();
                 pointer.push('/');
                 pointer.push_str(&escape_token(k));
-                let child = child_for_key(schemas, k);
-                let child_refs: Vec<&Value> = child;
-                walk(&child_refs, v, pointer, depth + 1, judge, scan)?;
+                walk(
+                    &child_for_key(schemas, k),
+                    v,
+                    pointer,
+                    depth + 1,
+                    judge,
+                    scan,
+                )?;
                 pointer.truncate(mark);
             }
             Ok(())
@@ -310,9 +291,14 @@ fn walk(
                 let mark = pointer.len();
                 pointer.push('/');
                 pointer.push_str(&i.to_string());
-                let child = child_for_index(schemas, i);
-                let child_refs: Vec<&Value> = child;
-                walk(&child_refs, v, pointer, depth + 1, judge, scan)?;
+                walk(
+                    &child_for_index(schemas, i),
+                    v,
+                    pointer,
+                    depth + 1,
+                    judge,
+                    scan,
+                )?;
                 pointer.truncate(mark);
             }
             Ok(())
@@ -332,33 +318,28 @@ fn judge_string(
 ) -> Result<(), ArgRefusal> {
     scan.strings_seen += 1;
     let trimmed = s.trim();
+    let refused = |declared_format: Option<String>| {
+        move |why| ArgRefusal {
+            pointer: pointer.to_string(),
+            declared_format,
+            why,
+        }
+    };
     if let Some((format, kind)) = first_urlish(schemas) {
         scan.declared_judged += 1;
-        return judge_argument(kind, trimmed, judge).map_err(|why| ArgRefusal {
-            pointer: pointer.to_string(),
-            declared_format: Some(format),
-            why,
-        });
+        return judge_argument(kind, trimmed, judge).map_err(refused(Some(format)));
     }
     if starts_with_http(trimmed) {
         scan.undeclared_judged += 1;
-        return judge_argument(Urlish::AbsoluteUrl, trimmed, judge).map_err(|why| ArgRefusal {
-            pointer: pointer.to_string(),
-            declared_format: None,
-            why,
-        });
+        return judge_argument(Urlish::AbsoluteUrl, trimmed, judge).map_err(refused(None));
     }
     if let Some(found) = whatwg_host(s) {
         scan.undeclared_judged += 1;
-        let judged = match found {
+        return match found {
             Some(host) => judge_host(&host, judge),
             None => Err(ArgWhy::NoHost(s.to_string())),
-        };
-        return judged.map_err(|why| ArgRefusal {
-            pointer: pointer.to_string(),
-            declared_format: None,
-            why,
-        });
+        }
+        .map_err(refused(None));
     }
     Ok(())
 }
@@ -575,7 +556,7 @@ fn judge_absolute(url: &str, judge: &mut Judge<'_>) -> Result<(), ArgWhy> {
 /// refusal; a host that gave none refuses the value.
 ///
 /// The host is asked as spelled, and then, when it differs, in the one form a fetching client dials
-/// ([`whatwg_dialled`]): `ｌｏｃａｌｈｏｓｔ` is dialled as `localhost`, `１２７.０.０.１` as
+/// (`url`'s WHATWG host parser, UTS #46 and the IPv4 number rules): `ｌｏｃａｌｈｏｓｔ` is dialled as `localhost`, `１２７.０.０.１` as
 /// `127.0.0.1`, `0x` as `0.0.0.0`. Both must be admitted; a host the WHATWG host parser refuses
 /// is refused (fail closed), because the guard cannot say what a client would dial for it.
 fn judge_host(raw: &str, judge: &mut Judge<'_>) -> Result<(), ArgWhy> {
@@ -586,7 +567,9 @@ fn judge_host(raw: &str, judge: &mut Judge<'_>) -> Result<(), ArgWhy> {
         host.clone()
     };
     ask(&host, &dest, judge)?;
-    let dialled = whatwg_dialled(&dest).ok_or_else(|| ArgWhy::NoHost(host.clone()))?;
+    let dialled = url::Host::parse(&dest)
+        .map(|h| h.to_string())
+        .map_err(|_| ArgWhy::NoHost(host.clone()))?;
     if dialled != dest {
         let bare = dialled
             .strip_prefix('[')
@@ -596,16 +579,6 @@ fn judge_host(raw: &str, judge: &mut Judge<'_>) -> Result<(), ArgWhy> {
         ask(&bare, &dialled, judge)?;
     }
     Ok(())
-}
-
-/// THE HOST A WHATWG CLIENT DIALS for `dest` (a host, an IPv6 literal bracketed): `url`'s special
-/// host parser, the one `fetch`-style clients read with — percent-decoded, mapped by UTS #46
-/// (fullwidth forms and other compatibility spellings to ASCII, lower-cased, punycode for a
-/// genuine IDN), and a name ending in a number read as an IPv4 address by the WHATWG number rules
-/// (`0x7f.1`, `2130706433`, `0x`). Serialised as `dest.judge` reads it (an IPv6 literal
-/// bracketed). `None` when the parser refuses the host.
-fn whatwg_dialled(dest: &str) -> Option<String> {
-    url::Host::parse(dest).ok().map(|h| h.to_string())
 }
 
 /// One host asked of the judge, its verdict rendered as the refusal.
@@ -626,15 +599,13 @@ fn ask(host: &str, dest: &str, judge: &mut Judge<'_>) -> Result<(), ArgWhy> {
 /// the same reader: an IPv6 literal is bracketed so the reader sees an authority rather than a
 /// host:port, and everything else is passed as written.
 fn normalize_host(raw: &str) -> Option<String> {
-    extract_normalized_host(&probe_url(raw))
-}
-
-fn probe_url(host: &str) -> String {
-    if busbar_contract::net::host_ip(host).is_some_and(|ip| ip.is_ipv6()) {
-        format!("https://[{host}]/")
-    } else {
-        format!("https://{host}/")
-    }
+    extract_normalized_host(
+        &if busbar_contract::net::host_ip(raw).is_some_and(|ip| ip.is_ipv6()) {
+            format!("https://[{raw}]/")
+        } else {
+            format!("https://{raw}/")
+        },
+    )
 }
 
 /// Drop a `:port` suffix from an authority, leaving a bracketed IPv6 literal intact for
@@ -662,14 +633,12 @@ fn first_urlish(schemas: &[&Value]) -> Option<(String, Urlish)> {
         let Some(format) = node.get("format").and_then(Value::as_str) else {
             continue;
         };
-        let lower = format.to_ascii_lowercase();
-        if !URLISH_FORMATS.contains(&lower.as_str()) {
-            continue;
-        }
-        let kind = match lower.as_str() {
+        // The URL-ish formats, matched case-insensitively (`URI` must not hide a field).
+        let kind = match format.to_ascii_lowercase().as_str() {
             "uri-reference" => Urlish::Reference,
             "hostname" | "idn-hostname" | "ipv4" | "ipv6" => Urlish::Host,
-            _ => Urlish::AbsoluteUrl,
+            "uri" | "iri" | "url" => Urlish::AbsoluteUrl,
+            _ => continue,
         };
         return Some((format.to_string(), kind));
     }

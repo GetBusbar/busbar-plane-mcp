@@ -24,7 +24,7 @@ use serde_json::{json, Map, Value};
 
 use crate::catalogue::{granted, Catalogue, ToolEntry};
 use crate::checks::decode_sentinel;
-use crate::client::jsonrpc::{self as wire, AdvertisedCaps, RpcOutcome, ServerAsk};
+use crate::client::jsonrpc::{self as wire, AdvertisedCaps, RpcOutcome};
 use crate::codec::RESULT_TYPE_COMPLETE;
 use crate::codec::{
     CODE_HEADER_MISMATCH, CODE_INVALID_PARAMS, CODE_MISSING_CLIENT_CAPABILITY, CODE_REFUSED,
@@ -69,15 +69,12 @@ pub const REASON_ANSWER_UNDECLARED: &str = "caller_ask_answer_undeclared";
 /// The call-log reason of a complete result still carrying an ask's field, refused at the terminal
 /// check (an ask is relayed only as an input-required result).
 pub const REASON_ASK_NOT_PROXIED: &str = "ask_not_proxied";
-/// The call-log reason of a call whose upstream asked its caller something, relayed to the caller.
-pub const REASON_ASK_RELAYED: &str = "ask_relayed";
 /// The call-log reason of a call that NEVER LEFT ITS QUEUE: it waited its turn on a stdio member's
 /// child (another call held it) and its deadline passed first. It rides `refused`, because the call
 /// did not go out ([`never_sent`]).
 pub const REASON_QUEUE_DEADLINE: &str = "queue_deadline";
 
-/// The tasks extension's identifier.
-pub const TASKS_EXTENSION_ID: &str = crate::answer::TASKS_EXTENSION_ID;
+use crate::answer::TASKS_EXTENSION_ID;
 
 /// ONE LINE OF THE PER-CALL LOG, as the call ended: what it named, what it resolved to, and how it
 /// ended. `server` and `tool_digest` stay empty on a refusal that never reached a registration.
@@ -98,12 +95,8 @@ pub struct CallLine {
     pub audit: Option<AuditRow>,
 }
 
-/// The audit action of a `tools/call` decision.
-pub const ACTION_TOOL_CALL: &str = "mcp_tool.call";
 /// The audit action of busbar's own ask of its caller (asked, or the answer refused).
 pub const ACTION_CALLER_ASK: &str = "mcp.caller_ask";
-/// The audit action of a task a caller cancelled.
-pub const ACTION_TASK_CANCEL: &str = "mcp_task.cancel";
 
 /// ONE ADMIN AUDIT ROW, in the served engine's words: the action, the resource it names, and whether
 /// the action was applied or rejected. The kernel writes it on its own audit chain under the
@@ -123,7 +116,7 @@ impl AuditRow {
     #[must_use]
     pub fn tool(name: &str, applied: bool) -> Self {
         AuditRow {
-            action: ACTION_TOOL_CALL,
+            action: "mcp_tool.call",
             resource: format!("mcp_tool:{name}"),
             applied,
         }
@@ -143,7 +136,7 @@ impl AuditRow {
     #[must_use]
     pub fn task_cancel(task_id: &str) -> Self {
         AuditRow {
-            action: ACTION_TASK_CANCEL,
+            action: "mcp_task.cancel",
             resource: format!("mcp_task:{task_id}"),
             applied: true,
         }
@@ -248,7 +241,13 @@ pub enum Admission {
 }
 
 /// A JSON-RPC error answer.
-fn error(status: u32, id: &Value, code: i64, message: String, data: Option<Value>) -> Refusal {
+pub(crate) fn error(
+    status: u32,
+    id: &Value,
+    code: i64,
+    message: String,
+    data: Option<Value>,
+) -> Refusal {
     Refusal {
         status,
         id: Some(id.clone()),
@@ -417,12 +416,6 @@ pub enum Trust {
     Unreached(String),
 }
 
-/// The refusal reason of a tool whose server the kernel quarantined.
-pub const REASON_QUARANTINED: &str = "quarantined";
-/// The refusal reason of a tool the operator has not approved.
-pub const REASON_NOT_APPROVED: &str = "not_approved";
-/// The refusal reason of a tool whose server was never verified.
-pub const REASON_UNVERIFIED: &str = "pending";
 /// The refusal reason of a tool the server does not offer (the catalogue's own word).
 pub const REASON_UNKNOWN_TOOL: &str = "unknown_tool";
 
@@ -431,28 +424,17 @@ pub const REASON_UNKNOWN_TOOL: &str = "unknown_tool";
 /// operator has not granted, and every other distrust, is refused (`403`). A server the re-fetch
 /// could not reach is no verdict at all: the call fails as an upstream failure, a tool error.
 fn trust_answer(id: &Value, name: &str, entry: &ToolEntry, trust: Trust) -> Option<Admission> {
-    trust_refusal(id, name, entry, trust)
-        .map(|either| either.unwrap_or_else(|(r, line)| Admission::Refused(r, Some(line))))
-}
-
-/// [`trust_answer`]'s two shapes: a refusal (`Err`) or the unreached call's answer (`Ok`).
-fn trust_refusal(
-    id: &Value,
-    name: &str,
-    entry: &ToolEntry,
-    trust: Trust,
-) -> Option<Result<Admission, (Refusal, CallLine)>> {
     let server = &entry.server;
     let refused = |message: String, reason: &str| {
-        (
+        Admission::Refused(
             catalogue_refusal(STATUS_FORBIDDEN, id, message, reason),
-            CallLine::resolved(entry, vocab::OUTCOME_REFUSED, reason),
+            Some(CallLine::resolved(entry, vocab::OUTCOME_REFUSED, reason)),
         )
     };
     let code = match trust {
         Trust::Verdict(code) => code,
         Trust::Unreached(reason) => {
-            return Some(Ok(Admission::Unreached(
+            return Some(Admission::Unreached(
                 result(
                     id,
                     upstream_failure_result(
@@ -461,23 +443,23 @@ fn trust_refusal(
                     ),
                 ),
                 CallLine::resolved(entry, vocab::OUTCOME_REFUSED, vocab::REASON_UPSTREAM_FAILED),
-            )))
+            ))
         }
     };
-    Some(Err(match code {
+    Some(match code {
         DISTRUST_NONE => return None,
-        DISTRUST_UNKNOWN_ITEM => (
+        DISTRUST_UNKNOWN_ITEM => Admission::Refused(
             catalogue_refusal(STATUS_NOT_FOUND, id, not_exposed(name), REASON_UNKNOWN_TOOL),
-            CallLine::asked(name, REASON_UNKNOWN_TOOL),
+            Some(CallLine::asked(name, REASON_UNKNOWN_TOOL)),
         ),
-        DISTRUST_NOT_APPROVED => (
+        DISTRUST_NOT_APPROVED => Admission::Refused(
             catalogue_refusal(
                 STATUS_FORBIDDEN,
                 id,
                 format!("`{name}` is registered but has not been approved, so it does not serve"),
-                REASON_NOT_APPROVED,
+                "not_approved",
             ),
-            CallLine::asked(name, REASON_NOT_APPROVED),
+            Some(CallLine::asked(name, "not_approved")),
         ),
         // A tool offered at another digest than the one approved is the rug-pull: its server is
         // quarantined (ARCHITECT Q3: changed digest -> quarantined), the served engine's words.
@@ -486,22 +468,22 @@ fn trust_refusal(
                 "MCP server `{server}` is quarantined, so it serves nothing; review its changes \
                  and approve it again"
             ),
-            REASON_QUARANTINED,
+            "quarantined",
         ),
         DISTRUST_UNSIGHTED => refused(
             format!("MCP server `{server}` has not been verified yet, so it serves nothing"),
-            REASON_UNVERIFIED,
+            "pending",
         ),
         _ => refused(
             format!("MCP server `{server}` is not one this door may trust, so it serves nothing"),
             vocab::REASON_NOT_SERVING,
         ),
-    }))
+    })
 }
 
 /// [`admit`], with THE KERNEL'S TRUST VERDICT: `trust` answers, for the named tool, what the
 /// kernel's Approve said of it ([`Trust`], `trust.serves` over the tool's registration and trust
-/// key after the door's re-fetch sighted it), rendered by [`trust_refusal`]. Asked after the name
+/// key after the door's re-fetch sighted it), rendered by [`trust_answer`]. Asked after the name
 /// and the grants, before the header mirror and the ask: a refused dispatch never reaches the wire.
 /// The arguments it admits are judged next, by [`judge_arguments`].
 pub fn admit_trusted(
@@ -739,12 +721,11 @@ pub fn judge_arguments(
     match crate::argguard::guard(&schema, &admitted.arguments, |dest| judge(entry, dest)) {
         Ok(_) => Admission::Go(admitted),
         Err(refused) => Admission::Refused(
-            error(
+            catalogue_refusal(
                 STATUS_FORBIDDEN,
                 &admitted.id,
-                crate::codec::CODE_REFUSED,
                 refused.to_string(),
-                Some(json!({ "reason": REASON_TOOL_ARGUMENT_REFUSED })),
+                REASON_TOOL_ARGUMENT_REFUSED,
             ),
             Some(CallLine::resolved(
                 entry,
@@ -867,16 +848,14 @@ pub fn outbound(
     if def.url.is_empty() {
         return None;
     }
-    let key = ToolKey::new(ServerId::new(member).ok()?, &admitted.entry.tool).ok()?;
-    let request = wire::tools_call(
+    let request = call_request(
+        admitted,
+        member,
+        def,
         &def.url,
-        &key,
-        &admitted.arguments,
         wire::dispatch_request_id(round),
-        None,
-        advertised(admitted, def),
         continuation,
-    );
+    )?;
     Some(OutboundCall {
         verb: "POST",
         target: path_of(&request.url),
@@ -903,22 +882,33 @@ pub fn outbound_program(
     {
         return None;
     }
+    Some(OutboundCall {
+        verb: "POST",
+        target: "/".to_string(),
+        fields: Vec::new(),
+        body: call_request(admitted, member, def, "", id, continuation)?.body,
+    })
+}
+
+/// The `tools/call` request of `admitted` to `member` at `url`, under `id`.
+fn call_request(
+    admitted: &AdmittedCall,
+    member: &str,
+    def: &McpServerDefCfg,
+    url: &str,
+    id: u64,
+    continuation: Option<&Value>,
+) -> Option<wire::OutboundRequest> {
     let key = ToolKey::new(ServerId::new(member).ok()?, &admitted.entry.tool).ok()?;
-    let request = wire::tools_call(
-        "",
+    Some(wire::tools_call(
+        url,
         &key,
         &admitted.arguments,
         id,
         None,
         advertised(admitted, def),
         continuation,
-    );
-    Some(OutboundCall {
-        verb: "POST",
-        target: "/".to_string(),
-        fields: Vec::new(),
-        body: request.body,
-    })
+    ))
 }
 
 /// A relayed call that was NEVER SENT: it waited its turn on its member and its deadline passed first
@@ -930,18 +920,12 @@ pub fn outbound_program(
 /// refused before the socket is refunded", applied uniformly across planes).
 #[must_use]
 pub fn never_sent(admitted: &AdmittedCall, reason: &str) -> Settled {
-    Settled::Answer {
-        status: STATUS_OK,
-        body: result(
-            &admitted.id,
-            upstream_failure_result(&admitted.entry.server, reason),
-        ),
-        line: CallLine::resolved(
-            &admitted.entry,
-            vocab::OUTCOME_REFUSED,
-            REASON_QUEUE_DEADLINE,
-        ),
-    }
+    failure_answer(
+        admitted,
+        reason,
+        vocab::OUTCOME_REFUSED,
+        REASON_QUEUE_DEADLINE,
+    )
 }
 
 /// A relayed call whose upstream leg failed before an answer (`reason`, in the previous release's
@@ -949,17 +933,28 @@ pub fn never_sent(admitted: &AdmittedCall, reason: &str) -> Settled {
 /// failed.
 #[must_use]
 pub fn upstream_failed(admitted: &AdmittedCall, reason: &str) -> Settled {
+    failure_answer(
+        admitted,
+        reason,
+        vocab::OUTCOME_DISPATCHED,
+        vocab::REASON_UPSTREAM_FAILED,
+    )
+}
+
+/// The upstream-failure tool error, `200`, logged under `outcome` and `why`.
+fn failure_answer(
+    admitted: &AdmittedCall,
+    reason: &str,
+    outcome: &'static str,
+    why: &str,
+) -> Settled {
     Settled::Answer {
         status: STATUS_OK,
         body: result(
             &admitted.id,
             upstream_failure_result(&admitted.entry.server, reason),
         ),
-        line: CallLine::resolved(
-            &admitted.entry,
-            vocab::OUTCOME_DISPATCHED,
-            vocab::REASON_UPSTREAM_FAILED,
-        ),
+        line: CallLine::resolved(&admitted.entry, outcome, why),
     }
 }
 
@@ -1037,17 +1032,7 @@ pub fn upstream_failure_result(server: &str, reason: &str) -> Value {
 }
 
 /// A success envelope with `resultType: complete` stamped on the result.
-#[must_use]
-pub fn result(id: &Value, mut value: Value) -> Vec<u8> {
-    if let Some(obj) = value.as_object_mut() {
-        obj.insert("resultType".into(), RESULT_TYPE_COMPLETE.into());
-    }
-    let mut envelope = Map::new();
-    envelope.insert("jsonrpc".into(), "2.0".into());
-    envelope.insert("id".into(), id.clone());
-    envelope.insert("result".into(), value);
-    serde_json::to_vec(&Value::Object(envelope)).unwrap_or_default()
-}
+pub use crate::catalogue::complete as result;
 
 /// Why busbar declined to carry an upstream's ask to its caller, in the engine's words. Every arm is
 /// busbar enforcing the operator's policy or the limits of the deployment; none answers the ask on
@@ -1195,15 +1180,6 @@ pub enum Settled {
     },
 }
 
-/// The kind word of an ask.
-fn kind_word(kind: ServerAsk) -> &'static str {
-    match kind {
-        ServerAsk::Sampling => "sampling",
-        ServerAsk::Elicitation => "elicitation",
-        ServerAsk::Roots => "roots",
-    }
-}
-
 /// SETTLE ONE ROUND's far-end answer. `status` is the far end's, `sse` = its answer is an event
 /// stream, `round` the round it answered and `def` the registration of the member that answered.
 #[must_use]
@@ -1238,31 +1214,17 @@ pub fn settle_call_as(
     round: u32,
     sent_id: u64,
 ) -> Settled {
-    let entry = &admitted.entry;
-    let id = &admitted.id;
-    let body = if sse {
-        last_sse_data(raw)
-    } else {
-        raw.to_vec()
-    };
-    let failed = |reason: String| Settled::Answer {
-        status: STATUS_OK,
-        body: result(id, upstream_failure_result(&entry.server, &reason)),
-        line: CallLine::resolved(
-            entry,
-            vocab::OUTCOME_DISPATCHED,
-            vocab::REASON_UPSTREAM_FAILED,
-        ),
-    };
+    let body = answer_body(raw, sse);
     match wire::parse_response(&body, sent_id) {
         RpcOutcome::Result(value) => completed(admitted, &value, &body),
         failure @ (RpcOutcome::Error { .. }
         | RpcOutcome::Malformed(_)
-        | RpcOutcome::Uncorrelated(_)) => {
-            failed(failure_reason(status, &failure).unwrap_or_default())
-        }
+        | RpcOutcome::Uncorrelated(_)) => upstream_failed(
+            admitted,
+            &failure_reason(status, &failure).unwrap_or_default(),
+        ),
         RpcOutcome::InputRequired { kind } => {
-            let kind = kind_word(kind);
+            let kind = kind.key();
             let payload = serde_json::from_slice::<Value>(&body)
                 .ok()
                 .and_then(|v| v.get("result").cloned())
@@ -1272,6 +1234,15 @@ pub fn settle_call_as(
                 Err(refusal) => ask_refused(admitted, &refusal),
             }
         }
+    }
+}
+
+/// The answer's JSON-RPC body: the last event of an event stream, else the body itself.
+fn answer_body(raw: &[u8], sse: bool) -> Vec<u8> {
+    if sse {
+        last_sse_data(raw)
+    } else {
+        raw.to_vec()
     }
 }
 
@@ -1311,11 +1282,7 @@ pub enum Leg {
 /// task reads it ([`Leg`]).
 #[must_use]
 pub fn leg_of(status: u32, raw: &[u8], sse: bool, round: u32) -> Leg {
-    let body = if sse {
-        last_sse_data(raw)
-    } else {
-        raw.to_vec()
-    };
+    let body = answer_body(raw, sse);
     let outcome = wire::parse_response(&body, wire::dispatch_request_id(round));
     if let Some(reason) = failure_reason(status, &outcome) {
         return Leg::Failed(reason);
@@ -1538,7 +1505,7 @@ pub fn judge_sampling_bounds<'a>(
 /// answered (`dispatched`, `ask_relayed`), audited as busbar's ask of its caller, applied.
 #[must_use]
 pub fn relayed_line(entry: &ToolEntry) -> CallLine {
-    CallLine::resolved(entry, vocab::OUTCOME_DISPATCHED, REASON_ASK_RELAYED).asking(true)
+    CallLine::resolved(entry, vocab::OUTCOME_DISPATCHED, "ask_relayed").asking(true)
 }
 
 /// The call-log line of a relayed ask's retry refused under `reason` (its state, or the work handle
