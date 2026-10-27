@@ -20,6 +20,7 @@
 
 use std::collections::BTreeSet;
 
+use busbar_contract::jsonrpc::{error_body, INVALID_REQUEST};
 use serde_json::{json, Map, Value};
 
 use crate::catalogue::{Catalogue, Lookup};
@@ -41,12 +42,6 @@ pub const ACKNOWLEDGED: &str = "notifications/subscriptions/acknowledged";
 
 /// The `_meta` key a frame names its subscription under.
 pub const SUBSCRIPTION_ID: &str = "io.modelcontextprotocol/subscriptionId";
-
-/// The JSON-RPC code for invalid params.
-const INVALID_PARAMS: i64 = -32602;
-
-/// The base protocol's invalid request (a lapsed permission's closing frame).
-const INVALID_REQUEST: i64 = -32600;
 
 /// The three list-changed categories, and the notification each becomes.
 const KINDS: [(&str, &str); 3] = [
@@ -176,11 +171,7 @@ pub struct Listen {
 
 /// A refusal envelope for an invalid listen request.
 fn invalid(id: &Value, message: &str) -> Value {
-    json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "error": { "code": INVALID_PARAMS, "message": message },
-    })
+    error_body(id.clone(), crate::codec::CODE_INVALID_PARAMS, message, None)
 }
 
 impl Listen {
@@ -239,12 +230,6 @@ impl Listen {
         })
     }
 
-    /// The accepted filter.
-    #[must_use]
-    pub fn accepted(&self) -> &Filter {
-        &self.accepted
-    }
-
     /// One notification tagged with this subscription.
     fn notification(&self, method: &str, extra: Value) -> Value {
         let mut params = match extra {
@@ -280,15 +265,14 @@ impl Listen {
         }
         if let Standing::Lapsed { message, reason } = standing {
             self.phase = Phase::Ended;
-            return Step::End(vec![json!({
-                "jsonrpc": "2.0",
-                "id": self.id,
-                "error": {
-                    "code": INVALID_REQUEST,
-                    "message": message,
-                    "data": { "reason": reason },
-                },
-            })]);
+            // The base protocol's invalid request closes it.
+            let data = Some(json!({ "reason": reason }));
+            return Step::End(vec![error_body(
+                self.id.clone(),
+                INVALID_REQUEST,
+                message,
+                data,
+            )]);
         }
         if now_ns.saturating_sub(self.opened_ns) >= MAX_LIFETIME_NS {
             self.phase = Phase::Ended;
@@ -357,13 +341,6 @@ impl Listen {
             }
             Phase::Ended => Step::Closed,
         }
-    }
-
-    /// When the stream next has something to say with nothing changing: its keepalive or its bound.
-    #[must_use]
-    pub fn next_due_ns(&self) -> u64 {
-        (self.last_write_ns.saturating_add(KEEPALIVE_NS))
-            .min(self.opened_ns.saturating_add(MAX_LIFETIME_NS))
     }
 }
 

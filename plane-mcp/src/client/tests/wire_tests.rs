@@ -7,10 +7,19 @@
 //! the engine's `mcp::envelope` reader, and must be accepted. busbar refusing a request busbar sent
 //! would be a silent, mutual misunderstanding that no single-direction test can see.
 
-use crate::client::jsonrpc::{
-    parse_response, tools_call, tools_list, RpcOutcome, META_CLIENT_CAPABILITIES,
-    META_PROTOCOL_VERSION,
-};
+use crate::client::jsonrpc::{parse_response, tools_call, tools_list, RpcOutcome};
+use crate::codec::{META_CLIENT_CAPABILITIES, META_PROTOCOL_VERSION};
+
+/// EVERY byte a request puts on the wire, concatenated: URL, each header name and value, the body.
+fn wire_bytes(req: &crate::client::jsonrpc::OutboundRequest) -> Vec<u8> {
+    let mut out = req.url.as_bytes().to_vec();
+    for (name, value) in &req.headers {
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(value.as_bytes());
+    }
+    out.extend_from_slice(&req.body);
+    out
+}
 
 /// A routing key for a valid test server and tool.
 fn tkey(server: &str, tool: &str) -> crate::identity::ToolKey {
@@ -45,7 +54,7 @@ fn the_outbound_name_is_the_un_namespaced_tool() {
     assert_eq!(body["params"]["name"], "read_file");
     assert_eq!(header(&req, "mcp-name"), Some("read_file"));
     // ...and the namespaced form appears nowhere on the wire.
-    assert!(!String::from_utf8_lossy(&req.wire_bytes()).contains("filesystem_read_file"));
+    assert!(!String::from_utf8_lossy(&wire_bytes(&req)).contains("filesystem_read_file"));
 }
 
 #[test]

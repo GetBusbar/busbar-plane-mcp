@@ -175,7 +175,7 @@ fn no_task_shape_ever_carries_request_state() {
 /// The extension is declared by PRESENCE under `extensions`, and `null` is not a declaration.
 #[test]
 fn the_extension_is_declared_by_presence_and_null_is_not_a_declaration() {
-    use crate::call::{client_declares_tasks, TASKS_EXTENSION_ID};
+    use crate::{answer::TASKS_EXTENSION_ID, call::client_declares_tasks};
     assert!(client_declares_tasks(
         &json!({ "extensions": { TASKS_EXTENSION_ID: {} } })
     ));
@@ -524,7 +524,7 @@ fn a_live_tasks_state_reads_back_from_its_records() {
         assert_eq!(read.detailed(), held.detailed());
         assert_eq!(read.answers(), held.answers());
         assert_eq!(read.asked, held.asked);
-        assert_eq!(read.relayed(), held.relayed());
+        assert_eq!(read.relay.is_some(), held.relay.is_some());
         assert_eq!(read.take_relay(), held.clone().take_relay());
     }
 }
