@@ -73,8 +73,8 @@ use crate::framing::{
 use crate::tool_arrival::Disposition;
 use crate::tools_config::ToolsCfg;
 
-/// The version the Statement names: the crate's (a test pins the two equal).
-pub const VERSION: &str = "1.6.0";
+/// The version the Statement names: the crate's own, so a version bump is one edit.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// The names of the diagnostics the door raises, as its Statement's diagnostic ids spell them
 /// (`door_sessions::DIAG_NAMES`): what the tests hold `declares.json` to.
