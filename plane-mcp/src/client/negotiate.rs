@@ -171,21 +171,11 @@ impl Negotiator {
 
     fn in_session(&mut self, revision: Revision, session: Option<String>) -> Action {
         let url = self.original.url.clone();
-        let mut request = lower_request(&self.original, &url, revision, session.as_deref());
         // A REQUEST IN A SESSION CARRIES THAT SESSION'S OWN NEXT ID, never the stateless round's
-        // that every concurrent call carries: a session revision forbids reusing an id, and a server
-        // that maps ids to answers would hand one call's answer to another.
-        if let (Some(id), Some(_)) = (self.session_id, self.original_id.as_ref()) {
-            if let Ok(mut body) = serde_json::from_slice::<Value>(&request.body) {
-                if let Some(obj) = body.as_object_mut() {
-                    obj.insert("id".to_string(), Value::from(id));
-                    if let Ok(bytes) = serde_json::to_vec(&body) {
-                        request.body = bytes;
-                        self.sent_id = Some(id);
-                    }
-                }
-            }
-        }
+        // that every concurrent call carries.
+        let id = self.session_id.filter(|_| self.original_id.is_some());
+        let request = lower_request(&self.original, &url, revision, session.as_deref(), id);
+        self.sent_id = id;
         self.send(Phase::InSession { revision, session }, request)
     }
 

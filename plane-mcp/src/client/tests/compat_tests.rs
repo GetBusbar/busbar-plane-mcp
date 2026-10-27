@@ -52,6 +52,7 @@ fn lowering_drops_the_stateless_meta_and_mirror_and_keeps_the_credential() {
         "https://up.example/rpc",
         Revision::R2025_06_18,
         Some("sid1"),
+        None,
     );
     let body: Value = serde_json::from_slice(&lowered.body).unwrap();
     assert_eq!(
@@ -78,6 +79,7 @@ fn the_event_stream_revision_carries_no_version_header_and_an_empty_meta_goes() 
         &req,
         "https://up.example/messages?sessionId=a",
         Revision::R2024_11_05,
+        None,
         None,
     );
     assert_eq!(lowered.url, "https://up.example/messages?sessionId=a");

@@ -36,7 +36,7 @@ use crate::codec::{
 use crate::framing::{CONTENT_LENGTH, CONTENT_TYPE, EVENT_STREAM};
 use crate::revision::{self, Revision};
 use crate::tool_arrival::{Disposition, Refusal};
-use crate::tool_sessions::{Carriage, OpenRefused, Owner, Remembered, SessionTable, UpstreamTable};
+use crate::tool_sessions::{OpenRefused, Owner, Remembered, SessionTable, UpstreamTable};
 use busbar_contract::abi::mechanism::call::{Outcome, SEVERITY_WARN};
 use busbar_contract::abi::mechanism::ticket::{CompletionHandle, Ticket};
 use busbar_contract::abi::plane::{OnPieceIn, OnPieceOut, FROM_CALLER, FROM_KERNEL, PIECE_LAST};
@@ -97,6 +97,16 @@ const LEVELS: &[&str] = &[
     "alert",
     "emergency",
 ];
+
+/// How a session message arrived. A session is carried on the event stream exactly when its
+/// revision is the event-stream revision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Carriage {
+    /// The single endpoint, the session named in `Mcp-Session-Id`.
+    Endpoint,
+    /// The `2024-11-05` message address, the session named in its query.
+    EventStream,
+}
 
 /// What a unit is to the session machinery.
 #[derive(Debug, Clone)]
@@ -344,11 +354,7 @@ pub(super) fn disposition(unit: &SessionUnit) -> Disposition {
         SessionUnit::Open { id, .. } => request("server/discover", id.clone()),
         SessionUnit::Stream { .. } => request("subscriptions/listen", Value::Null),
         SessionUnit::Message { kind, .. } => match kind {
-            Kind::Here(v) => request(
-                "server/discover",
-                v.get("id").cloned().unwrap_or(Value::Null),
-            ),
-            Kind::Refused(r) => request("server/discover", r.id.clone().unwrap_or(Value::Null)),
+            Kind::Here(_) | Kind::Refused(_) => request("server/discover", id_of(kind)),
             Kind::Accept(v) => Disposition::Notice {
                 method: v
                     .get("method")
@@ -433,7 +439,6 @@ fn open_session(
     unit: &mut CallUnit,
     owner: &Owner,
     revision: Revision,
-    carriage: Carriage,
     now: u64,
 ) -> Result<String, &'static str> {
     for _ in 0..2 {
@@ -445,9 +450,7 @@ fn open_session(
         if !drawn {
             return Err("the host's random source did not answer, so no session id can be minted");
         }
-        let opened = with_sessions(plane, |t| {
-            t.open(entropy, owner.clone(), revision, carriage, now)
-        });
+        let opened = with_sessions(plane, |t| t.open(entropy, owner.clone(), revision, now));
         match opened {
             Some(Ok(id)) => return Ok(id),
             Some(Err(OpenRefused::Collision)) => {}
@@ -548,17 +551,13 @@ pub(super) fn answer(
             kind,
             ..
         } => {
-            let held = with_sessions(plane, |t| {
-                let revision = t.revision(&session, &owner, now)?;
-                (t.carriage(&session, &owner, now)? == carriage).then_some(revision)
-            })
-            .flatten();
+            let held = with_sessions(plane, |t| t.revision(&session, &owner, now))
+                .flatten()
+                .filter(|r| r.is_event_stream_revision() == (carriage == Carriage::EventStream));
             let Some(revision) = held else {
                 return Some(written(unit, not_found(&id_of(&kind))));
             };
-            if carriage == Carriage::Endpoint
-                && revision::header_disagrees(revision, header.as_deref())
-            {
+            if revision::header_disagrees(revision, header.as_deref()) {
                 let body = rpc_error(
                     &id_of(&kind),
                     CODE_INVALID_REQUEST,
@@ -571,12 +570,7 @@ pub(super) fn answer(
             }
             match kind {
                 Kind::Dispatch => return None,
-                Kind::Accept(v) => {
-                    if v.get("method").and_then(Value::as_str) == Some(adapt::METHOD_INITIALIZED) {
-                        with_sessions(plane, |t| t.mark_initialized(&session, &owner, now));
-                    }
-                    answer_of(STATUS_ACCEPTED, Vec::new())
-                }
+                Kind::Accept(_) => answer_of(STATUS_ACCEPTED, Vec::new()),
                 Kind::Refused(r) => answer_of(r.status, r.body()),
                 Kind::Here(v) => {
                     let body = here(
@@ -585,7 +579,6 @@ pub(super) fn answer(
                         unit,
                         (session.as_str(), &owner),
                         revision,
-                        carriage,
                         &v,
                     );
                     answer_of(200, body)
@@ -631,15 +624,7 @@ fn open_endpoint(
     let Some(discovered) = discovery(plane, ticket, unit, id) else {
         return unavailable(id, "this node publishes no MCP catalogue yet");
     };
-    let session = match open_session(
-        plane,
-        ticket,
-        unit,
-        owner,
-        revision,
-        Carriage::Endpoint,
-        now,
-    ) {
+    let session = match open_session(plane, ticket, unit, owner, revision, now) {
         Ok(session) => session,
         Err(why) => return unavailable(id, why),
     };
@@ -659,7 +644,6 @@ fn here(
     unit: &mut CallUnit,
     (session, owner): (&str, &Owner),
     revision: Revision,
-    carriage: Carriage,
     value: &Value,
 ) -> Vec<u8> {
     let id = value.get("id").cloned().unwrap_or(Value::Null);
@@ -671,7 +655,7 @@ fn here(
     match method {
         adapt::METHOD_PING => ok(json!({})),
         // The `2024-11-05` session opened with its stream; its `initialize` arrives inside it.
-        adapt::METHOD_INITIALIZE if carriage == Carriage::EventStream => {
+        adapt::METHOD_INITIALIZE if revision.is_event_stream_revision() => {
             match discovery(plane, ticket, unit, &id) {
                 Some(d) => ok(adapt::initialize_result(&d, revision)),
                 None => rpc_error(
@@ -1196,15 +1180,7 @@ fn open_stream(
     let ungoverned = owner.principal == crate::ask::UNGOVERNED;
     let (session, stream, delivered, legacy, bytes) = match session {
         None => {
-            let opened = open_session(
-                plane,
-                ticket,
-                unit,
-                owner,
-                Revision::R2024_11_05,
-                Carriage::EventStream,
-                now,
-            );
+            let opened = open_session(plane, ticket, unit, owner, Revision::R2024_11_05, now);
             let session = match opened {
                 Ok(session) => session,
                 Err(why) => {
@@ -1217,8 +1193,8 @@ fn open_stream(
             (session, stream, 0, true, endpoint.into_bytes())
         }
         Some(session) => {
-            let carriage = with_sessions(plane, |t| t.carriage(&session, owner, now)).flatten();
-            if carriage != Some(Carriage::Endpoint) {
+            let revision = with_sessions(plane, |t| t.revision(&session, owner, now)).flatten();
+            if !revision.is_some_and(|r| !r.is_event_stream_revision()) {
                 unit.pending = Some(not_found(&Value::Null));
                 return Some((true, false));
             }
