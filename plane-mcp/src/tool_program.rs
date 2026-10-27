@@ -255,17 +255,6 @@ pub struct ChildAsk {
     pub request: Value,
 }
 
-impl Correlator {
-    /// The reading of an exchange that relays a caller's call ([`Self::relays`]).
-    #[must_use]
-    pub fn relaying() -> Self {
-        Correlator {
-            relays: true,
-            ..Correlator::default()
-        }
-    }
-}
-
 /// A STDIO CHILD'S granted asks judged against the operator's `tools.<server>.sampling_bounds`
 /// (owner ruling Q22c), by the one judgement the http path uses ([`crate::call::judge_sampling_bounds`]).
 /// The first ask past a bound is the refusal; the door writes it on the child's input.
@@ -343,6 +332,15 @@ pub fn child_replies(child: &crate::ask::ChildLeg, responses: Option<&Value>) ->
 }
 
 impl Correlator {
+    /// The reading of an exchange that relays a caller's call ([`Self::relays`]).
+    #[must_use]
+    pub fn relaying() -> Self {
+        Correlator {
+            relays: true,
+            ..Correlator::default()
+        }
+    }
+
     /// Read `bytes` of member `member`'s messages (its child of `generation`), waiting for the
     /// answer to `wait`: that answer (its bytes) once it came. Messages of the child's own are
     /// handled on the way.

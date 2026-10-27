@@ -236,32 +236,49 @@ impl std::fmt::Display for Rejected {
 }
 
 impl AskState {
-    /// Whether this state was minted for this principal, request and generation, and is still
-    /// inside its window at `now`.
+    /// A fresh state for `bind`'s request over `args_digest`, round `round`, standing `ttl_secs`.
+    fn minted(bind: Bind<'_>, args_digest: &str, round: u32, nonce: String, ttl_secs: u64) -> Self {
+        AskState {
+            principal: bind.principal.to_string(),
+            method: bind.method.to_string(),
+            capability: bind.capability.to_string(),
+            args_digest: args_digest.to_string(),
+            generation: bind.generation,
+            round,
+            nonce,
+            issued_at: bind.now,
+            ttl_secs,
+            roots_epoch: None,
+            upstream: None,
+            answers: None,
+        }
+    }
+
+    /// When its window closes.
+    fn expires_at(&self) -> u64 {
+        self.issued_at.saturating_add(self.ttl_secs)
+    }
+
+    /// Whether this state was minted for `bind`'s principal, request and generation over
+    /// `args_digest`, and is still inside its window at `bind.now`.
     ///
     /// # Errors
     ///
     /// The first check it fails.
-    pub fn matches(
-        &self,
-        principal: &str,
-        method: &str,
-        capability: &str,
-        args_digest: &str,
-        generation: u64,
-        now: u64,
-    ) -> Result<(), Rejected> {
-        if now > self.issued_at.saturating_add(self.ttl_secs) {
+    pub fn matches(&self, bind: Bind<'_>, args_digest: &str) -> Result<(), Rejected> {
+        if bind.now > self.expires_at() {
             return Err(Rejected::Expired);
         }
-        if self.principal != principal {
+        if self.principal != bind.principal {
             return Err(Rejected::WrongPrincipal);
         }
-        if self.method != method || self.capability != capability || self.args_digest != args_digest
+        if self.method != bind.method
+            || self.capability != bind.capability
+            || self.args_digest != args_digest
         {
             return Err(Rejected::WrongRequest);
         }
-        if self.generation != generation {
+        if self.generation != bind.generation {
             return Err(Rejected::WrongGeneration);
         }
         Ok(())
@@ -300,8 +317,6 @@ pub enum AskDecision {
         asks: Vec<CallerAsk>,
         /// The sealed state the retry presents.
         request_state: String,
-        /// The round.
-        round: u32,
     },
     /// Refused.
     Refuse(AskRefusal),
@@ -484,7 +499,6 @@ pub fn digest_arguments(arguments: &Value) -> String {
     busbar_contract::redacted::sha256_hex(&serde_json::to_vec(arguments).unwrap_or_default())
 }
 
-/// Whether the caller's capabilities declare `key`.
 /// THE ASKS OF ONE ROUND busbar makes of its caller from inside a task, filtered to the capabilities
 /// the caller declared (the served engine's `asks_for_round`): an ask whose capability the caller
 /// did not declare is not made.
@@ -495,13 +509,9 @@ pub fn asks_for_round(round: &AskRoundCfg, capabilities: &Value) -> Vec<CallerAs
         .map(|(key, cfg)| CallerAsk::from_config(key, cfg))
         .filter(|ask| {
             ask.capability_key()
-                .is_some_and(|k| declared(capabilities, k))
+                .is_some_and(|k| capabilities.get(k).is_some_and(|v| !v.is_null()))
         })
         .collect()
-}
-
-fn declared(capabilities: &Value, key: &str) -> bool {
-    capabilities.get(key).is_some_and(|v| !v.is_null())
 }
 
 /// THE DECISION, in the engine's order: no rounds; the presented state opened and matched; the
@@ -522,14 +532,7 @@ pub fn decide(
     if let (Some(blob), Some(sealer)) = (retry.state, seal.as_deref_mut()) {
         if let Ok(opened) = sealer.open(blob) {
             if let Some(leg) = opened.upstream.clone() {
-                if let Err(e) = opened.matches(
-                    bind.principal,
-                    bind.method,
-                    bind.capability,
-                    args_digest,
-                    bind.generation,
-                    bind.now,
-                ) {
+                if let Err(e) = opened.matches(bind, args_digest) {
                     return AskDecision::Refuse(AskRefusal::StateRejected(e));
                 }
                 // A CHILD'S REQUESTS are each answered on its input, and busbar writes none of
@@ -541,8 +544,7 @@ pub fn decide(
                         missing,
                     });
                 }
-                let expires_at = opened.issued_at.saturating_add(opened.ttl_secs);
-                if !sealer.redeem(&opened.nonce, expires_at, bind.now) {
+                if !sealer.redeem(&opened.nonce, opened.expires_at(), bind.now) {
                     return AskDecision::Refuse(AskRefusal::StateRejected(Rejected::AlreadySpent));
                 }
                 return AskDecision::Relayed(leg);
@@ -574,14 +576,7 @@ pub fn decide(
                 Ok(s) => s,
                 Err(e) => return AskDecision::Refuse(AskRefusal::StateRejected(e)),
             };
-            if let Err(e) = opened.matches(
-                bind.principal,
-                bind.method,
-                bind.capability,
-                args_digest,
-                bind.generation,
-                bind.now,
-            ) {
+            if let Err(e) = opened.matches(bind, args_digest) {
                 return AskDecision::Refuse(AskRefusal::StateRejected(e));
             }
             if opened
@@ -591,10 +586,7 @@ pub fn decide(
                 return AskDecision::Refuse(AskRefusal::StateRejected(Rejected::StaleRoots));
             }
             answers = opened.answers.clone().unwrap_or_default();
-            presented = Some((
-                opened.nonce.clone(),
-                opened.issued_at.saturating_add(opened.ttl_secs),
-            ));
+            presented = Some((opened.nonce.clone(), opened.expires_at()));
             opened.round.saturating_add(1)
         }
     };
@@ -637,14 +629,7 @@ pub fn decide(
         }
         return AskDecision::Answered(answers);
     };
-    let asks: Vec<CallerAsk> = this_round
-        .iter()
-        .map(|(key, cfg)| CallerAsk::from_config(key, cfg))
-        .filter(|a| {
-            a.capability_key()
-                .is_some_and(|k| declared(caller_capabilities, k))
-        })
-        .collect();
+    let asks = asks_for_round(this_round, caller_capabilities);
     if asks.is_empty() {
         let mut required: Vec<&'static str> = Vec::new();
         for (key, cfg) in this_round {
@@ -671,25 +656,15 @@ pub fn decide(
         .flat_map(|round| round.values())
         .any(|cfg| cfg.method == ASK_ROOTS);
     let Some(request_state) = seal.mint(&AskState {
-        principal: bind.principal.to_string(),
-        method: bind.method.to_string(),
-        capability: bind.capability.to_string(),
-        args_digest: args_digest.to_string(),
-        generation: bind.generation,
-        round: next_round,
-        nonce,
-        issued_at: bind.now,
-        ttl_secs: DEFAULT_TTL_SECS,
         roots_epoch: exchange_asks_roots.then_some(bind.roots_epoch),
-        upstream: None,
         answers: (!answers.is_empty()).then_some(answers),
+        ..AskState::minted(bind, args_digest, next_round, nonce, DEFAULT_TTL_SECS)
     }) else {
         return no_sealer();
     };
     AskDecision::Ask {
         asks,
         request_state,
-        round: next_round,
     }
 }
 
@@ -697,25 +672,19 @@ pub fn decide(
 /// operator keyed them, and the sealed state.
 #[must_use]
 pub fn input_required_result(id: &Value, asks: &[CallerAsk], request_state: &str) -> Vec<u8> {
-    let mut requests = Map::new();
-    for ask in asks {
-        requests.insert(
-            ask.key().to_string(),
-            json!({ "method": ask.method(), "params": ask.params() }),
-        );
-    }
-    let mut value = Map::new();
-    value.insert(
-        "resultType".into(),
-        crate::codec::RESULT_TYPE_INPUT_REQUIRED.into(),
-    );
-    value.insert("inputRequests".into(), Value::Object(requests));
-    value.insert("requestState".into(), request_state.into());
-    let mut envelope = Map::new();
-    envelope.insert("jsonrpc".into(), "2.0".into());
-    envelope.insert("id".into(), id.clone());
-    envelope.insert("result".into(), Value::Object(value));
-    serde_json::to_vec(&Value::Object(envelope)).unwrap_or_default()
+    let requests: Map<String, Value> = asks
+        .iter()
+        .map(|ask| {
+            let request = json!({ "method": ask.method(), "params": ask.params() });
+            (ask.key().to_string(), request)
+        })
+        .collect();
+    let result = json!({
+        "resultType": crate::codec::RESULT_TYPE_INPUT_REQUIRED,
+        "inputRequests": requests,
+        "requestState": request_state,
+    });
+    serde_json::to_vec(&json!({ "jsonrpc": "2.0", "id": id, "result": result })).unwrap_or_default()
 }
 
 /// The keys of a child's requests the retry did not answer, joined; `None` when it answered all.
@@ -743,18 +712,8 @@ pub fn relay_state_for(
 ) -> Option<String> {
     let nonce = seal.nonce()?;
     seal.mint(&AskState {
-        principal: bind.principal.to_string(),
-        method: bind.method.to_string(),
-        capability: bind.capability.to_string(),
-        args_digest: args_digest.to_string(),
-        generation: bind.generation,
-        round: 0,
-        nonce,
-        issued_at: bind.now,
-        ttl_secs,
-        roots_epoch: None,
         upstream: Some(leg),
-        answers: None,
+        ..AskState::minted(bind, args_digest, 0, nonce, ttl_secs)
     })
 }
 
@@ -776,16 +735,8 @@ pub fn open_relayed(
     let Some(leg) = opened.upstream.clone() else {
         return Err(Rejected::WrongRequest);
     };
-    opened.matches(
-        bind.principal,
-        bind.method,
-        bind.capability,
-        args_digest,
-        bind.generation,
-        bind.now,
-    )?;
-    let expires_at = opened.issued_at.saturating_add(opened.ttl_secs);
-    if !seal.redeem(&opened.nonce, expires_at, bind.now) {
+    opened.matches(bind, args_digest)?;
+    if !seal.redeem(&opened.nonce, opened.expires_at(), bind.now) {
         return Err(Rejected::AlreadySpent);
     }
     Ok(leg)

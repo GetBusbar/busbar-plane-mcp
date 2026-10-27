@@ -17,35 +17,17 @@ use std::collections::BTreeMap;
 
 use serde_json::{json, Map, Value};
 
+use crate::call::error;
 use crate::catalogue::{
     complete, Catalogue, Lookup, PromptEntry, ResourceEntry, ResourceTemplateEntry,
 };
 use crate::codec::{CODE_INVALID_PARAMS, CODE_REFUSED};
-use crate::sanitize::{normalise, normalise_opt};
+use crate::sanitize::normalise;
 use crate::tool_arrival::Refusal;
 use crate::tools_config::PromptContentCfg;
 
 /// The status of a read that names nothing the caller may see.
-pub const STATUS_NOT_FOUND: u32 = 404;
-
-/// The status of a uri more than one reachable approval answers.
-pub const STATUS_CONFLICT: u32 = 409;
-
-fn read_refusal(
-    status: u32,
-    id: &Value,
-    code: i64,
-    message: String,
-    data: Option<Value>,
-) -> Refusal {
-    Refusal {
-        status,
-        id: Some(id.clone()),
-        code,
-        message,
-        data,
-    }
-}
+const STATUS_NOT_FOUND: u32 = 404;
 
 fn string_param<'a>(params: Option<&'a Value>, key: &str) -> Option<&'a str> {
     params.and_then(|p| p.get(key)).and_then(Value::as_str)
@@ -144,7 +126,7 @@ pub fn prompt_named<'c>(
     admit: &impl Fn(&str, &str) -> bool,
 ) -> Result<&'c PromptEntry, Refusal> {
     let Some(name) = string_param(params, "name") else {
-        return Err(read_refusal(
+        return Err(error(
             crate::checks::STATUS,
             id,
             CODE_INVALID_PARAMS,
@@ -153,7 +135,7 @@ pub fn prompt_named<'c>(
         ));
     };
     catalogue.prompt_for(admit, name).ok_or_else(|| {
-        read_refusal(
+        error(
             STATUS_NOT_FOUND,
             id,
             CODE_REFUSED,
@@ -169,30 +151,29 @@ pub fn prompts_get(prompt: &PromptEntry, id: &Value, params: Option<&Value>) -> 
     complete(
         id,
         json!({
-            "description": normalise_opt(prompt.description.as_deref()),
+            "description": prompt.description.as_deref().map(normalise),
             "messages": render_messages(prompt, params),
         }),
     )
 }
 
-fn concrete_content(res: &ResourceEntry) -> Value {
+/// One `contents` entry: the uri, its media type, and the blob or else the text (normalised).
+fn content(uri: &str, mime_type: Option<&String>, blob: Option<&String>, text: &str) -> Value {
     let mut content = Map::new();
-    content.insert("uri".into(), res.uri.clone().into());
-    if let Some(m) = &res.mime_type {
+    content.insert("uri".into(), uri.into());
+    if let Some(m) = mime_type {
         content.insert("mimeType".into(), m.clone().into());
     }
-    match &res.blob {
-        Some(blob) => {
-            content.insert("blob".into(), blob.clone().into());
-        }
-        None => {
-            content.insert(
-                "text".into(),
-                normalise(res.text.as_deref().unwrap_or("")).into(),
-            );
-        }
-    }
+    match blob {
+        Some(blob) => content.insert("blob".into(), blob.clone().into()),
+        None => content.insert("text".into(), normalise(text).into()),
+    };
     Value::Object(content)
+}
+
+fn concrete_content(res: &ResourceEntry) -> Value {
+    let text = res.text.as_deref().unwrap_or("");
+    content(&res.uri, res.mime_type.as_ref(), res.blob.as_ref(), text)
 }
 
 fn templated_content(
@@ -204,18 +185,12 @@ fn templated_content(
     for (name, value) in bindings {
         text = text.replace(&format!("{{{name}}}"), value);
     }
-    let mut content = Map::new();
-    content.insert("uri".into(), requested.into());
-    if let Some(m) = &template.mime_type {
-        content.insert("mimeType".into(), m.clone().into());
-    }
-    content.insert("text".into(), normalise(&text).into());
-    Value::Object(content)
+    content(requested, template.mime_type.as_ref(), None, &text)
 }
 
 fn ambiguous(id: &Value, uri: &str, candidates: &[String]) -> Refusal {
-    read_refusal(
-        STATUS_CONFLICT,
+    error(
+        409,
         id,
         CODE_REFUSED,
         format!(
@@ -240,7 +215,7 @@ pub fn resources_read(
     admit: &impl Fn(&str, &str) -> bool,
 ) -> Result<Vec<u8>, Refusal> {
     let Some(uri) = string_param(params, "uri") else {
-        return Err(read_refusal(
+        return Err(error(
             crate::checks::STATUS,
             id,
             CODE_INVALID_PARAMS,
@@ -255,7 +230,7 @@ pub fn resources_read(
             Lookup::One((template, bindings)) => templated_content(uri, template, &bindings),
             Lookup::Ambiguous(candidates) => return Err(ambiguous(id, uri, &candidates)),
             Lookup::NotFound => {
-                return Err(read_refusal(
+                return Err(error(
                     STATUS_NOT_FOUND,
                     id,
                     CODE_REFUSED,
@@ -265,11 +240,7 @@ pub fn resources_read(
             }
         },
     };
-    let mut result = json!({ "contents": [content] });
-    if let Some(obj) = result.as_object_mut() {
-        obj.insert("cacheScope".into(), crate::catalogue::CACHE_SCOPE.into());
-        obj.insert("ttlMs".into(), crate::catalogue::CACHE_TTL_MS.into());
-    }
+    let result = crate::catalogue::cache_hints(json!({ "contents": [content] }));
     Ok(complete(id, result))
 }
 
