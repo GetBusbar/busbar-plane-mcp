@@ -317,8 +317,6 @@ pub enum AskDecision {
         asks: Vec<CallerAsk>,
         /// The sealed state the retry presents.
         request_state: String,
-        /// The round.
-        round: u32,
     },
     /// Refused.
     Refuse(AskRefusal),
@@ -667,7 +665,6 @@ pub fn decide(
     AskDecision::Ask {
         asks,
         request_state,
-        round: next_round,
     }
 }
 
