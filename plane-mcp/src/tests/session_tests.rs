@@ -26,8 +26,6 @@ fn open(t: &mut SessionTable, n: u64, who: &str, now: u64) -> String {
         now,
     )
     .unwrap()
-    .as_str()
-    .to_string()
 }
 
 fn small(max_sessions: usize, per: usize, total: usize) -> SessionTable {
@@ -232,7 +230,6 @@ fn red_the_upstream_memory_is_bounded() {
     let r = |s: &str| Remembered {
         revision: Revision::R2025_06_18,
         session: Some(s.to_string()),
-        message_address: None,
     };
     u.put("a", r("1"));
     u.put("b", r("2"));
@@ -362,7 +359,6 @@ fn in_session(s: &str) -> Remembered {
     Remembered {
         revision: Revision::R2025_06_18,
         session: Some(s.to_string()),
-        message_address: None,
     }
 }
 
@@ -425,7 +421,6 @@ fn red_every_request_in_a_session_takes_its_own_id() {
         Remembered {
             revision: Revision::R2026_07_28,
             session: None,
-            message_address: None,
         },
     );
     assert_eq!(u.next_id(&s), None);

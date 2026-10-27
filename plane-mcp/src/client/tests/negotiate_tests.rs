@@ -125,7 +125,6 @@ fn a_lost_session_is_reinitialized_once_and_never_looped() {
     let memo = Remembered {
         revision: Revision::R2025_11_25,
         session: Some("old".into()),
-        message_address: None,
     };
     let mut n = Negotiator::new(call(), Some(memo), "1.6.0");
     let first = n.start();
@@ -185,7 +184,6 @@ fn an_event_stream_upstream_is_handed_to_the_stream() {
     let memo = Remembered {
         revision: Revision::R2024_11_05,
         session: None,
-        message_address: None,
     };
     let mut n = Negotiator::new(call(), Some(memo), "1.6.0");
     assert_eq!(n.start(), Action::OpenStream);
@@ -200,7 +198,6 @@ fn red_calls_in_one_session_never_share_an_id() {
     let memo = Remembered {
         revision: Revision::R2025_06_18,
         session: Some("sess-1".to_string()),
-        message_address: None,
     };
     let lowered = |id: Option<u64>| {
         let mut n = Negotiator::new(call(), Some(memo.clone()), "1.6.0").with_session_id(id);

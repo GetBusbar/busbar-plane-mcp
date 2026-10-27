@@ -12,8 +12,8 @@
 
 use super::super::jsonrpc::ServerAsk;
 use super::super::peer::{
-    answer, classify, decide_ask, method_not_found, AskOutcome, NotificationEffect, ServerMessage,
-    ServerNotification, ServerRequestVerb,
+    answer, classify, method_not_found, NotificationEffect, ServerMessage, ServerNotification,
+    ServerRequestVerb,
 };
 use crate::client::jsonrpc::ServerRequestGrants;
 
@@ -162,9 +162,8 @@ fn the_three_authority_asks_are_denied_by_default_and_name_their_grant() {
     ] {
         let ask = verb.ask().expect("an authority ask names a grant");
         assert_eq!(ask.key(), kind);
-        assert_eq!(
-            decide_ask(ask, &none),
-            AskOutcome::Ungranted,
+        assert!(
+            !none.allows(ask),
             "{kind} must be denied when the operator granted nothing"
         );
         let reply = answer(&serde_json::json!(3), verb, &none, "fs")
@@ -203,11 +202,8 @@ fn a_granted_ask_is_relayed_and_never_answered_by_busbar() {
         (ServerRequestVerb::ElicitationCreate, ServerAsk::Elicitation),
         (ServerRequestVerb::RootsList, ServerAsk::Roots),
     ] {
-        assert_eq!(decide_ask(ask, &all), AskOutcome::Relay, "{}", ask.key());
-        assert_eq!(
-            decide_ask(ask, &ServerRequestGrants::default()),
-            AskOutcome::Ungranted
-        );
+        assert!(all.allows(ask), "{}", ask.key());
+        assert!(!ServerRequestGrants::default().allows(ask));
         assert_eq!(
             answer(&serde_json::json!(1), verb, &all, "fs"),
             None,
@@ -235,15 +231,9 @@ fn each_grant_opens_only_its_own_ask() {
         roots: true,
         ..ServerRequestGrants::default()
     };
-    assert_eq!(decide_ask(ServerAsk::Roots, &roots_only), AskOutcome::Relay);
-    assert_eq!(
-        decide_ask(ServerAsk::Sampling, &roots_only),
-        AskOutcome::Ungranted
-    );
-    assert_eq!(
-        decide_ask(ServerAsk::Elicitation, &roots_only),
-        AskOutcome::Ungranted
-    );
+    assert!(roots_only.allows(ServerAsk::Roots));
+    assert!(!roots_only.allows(ServerAsk::Sampling));
+    assert!(!roots_only.allows(ServerAsk::Elicitation));
 }
 
 /// THE FOUR "SOMETHING CHANGED" NOTIFICATIONS CAN ONLY BRING A REFRESH FORWARD, and no others can.

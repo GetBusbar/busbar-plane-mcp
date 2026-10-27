@@ -1,40 +1,25 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE `2024-11-05` HTTP+SSE CLIENT RUNG, HELD (row 159 finding 1; ARCHITECT ruling H1 (a)): busbar
-//! reaches a registered server that speaks only the legacy event-stream revision.
+//! THE `2024-11-05` HTTP+SSE CLIENT RUNG, HELD (row 159 finding 1): busbar reaches a registered
+//! server that speaks only the legacy event-stream revision.
 //!
-//! * ONE HELD STREAM per member AND caller binding ([`crate::tool_sessions::upstream_key`]; the H3
-//!   per-caller rule): the `GET` that opens it, its `endpoint` event, the message address the POSTs
-//!   go to, the `initialize` handshake, and correlation by JSON-RPC id are the plane's. Two callers'
-//!   bindings never share a stream.
-//! * THE CONNECTOR HOLDS THE CONNECTION, as it does for every dial. The stream is read on the
-//!   instance's ONE driver ticket ([`drive`]): the connector's readiness wakes the driver, `drive`
-//!   reads what arrived, and each answer is handed to the call waiting for its id, whose ticket is
-//!   woken. Driver-ticket answers are kept only for one tick cycle, so the link numbers its
-//!   services per cycle and never re-issues a step that already answered.
-//! * A call POSTs its own request (and the first call on a link its `initialize`) on its own
-//!   ticket, the answer's id registered BEFORE the POST leaves, then waits for the driver to hand it
-//!   the answer under that id.
-//! * A REPLY WHOSE ID NO CALL WAITS FOR is dropped, never delivered to another call, and counted:
-//!   the next answer on that caller's link carries one rejected `mcp_upstream.reply` audit row per
-//!   reply dropped, at most [`MAX_DROPPED_AUDITED`] rows however many were dropped.
-//! * THE SERVER'S OWN MESSAGES are routed as the other rungs route them: `ping` is answered, an
-//!   authority ask (`sampling/createMessage`, `elicitation/create`, `roots/list`) is refused on the
-//!   stream's message address (an ungranted one by the operator's grant; a granted one because
-//!   the event stream carries no relay of a server's ask to busbar's caller), a request busbar does
-//!   not know is `-32601`, each reply POSTed on the driver ticket so no server waits on an answer
-//!   nobody gives; a resource update is announced to the subscriptions watching it, and a call's
-//!   progress and the stream's log records ride the next answer on the link as event-stream frames.
-//! * THE STREAM DROPPING fails every call waiting on it as any upstream failure fails a call
-//!   ([`crate::call::upstream_failed`]), with [`STREAM_CLOSED`]'s words; the next call opens a new
-//!   stream.
-//! * THE INSTANCE'S HANDLES ON THE DRIVER TICKET are numbered by ONE counter per tick cycle, shared
-//!   by every link: the host answers a re-issued `(ticket, seq)` from what it kept that cycle, so a
-//!   handle that answered is never issued again before the next tick, whichever link asks.
-//! * BOUNDED: at most [`MAX_LINKS`] live streams per instance (past it, an idle one is let go, and
-//!   with none idle the call is refused; nothing a call waits on is closed for another), and a
-//!   stream no call used for [`IDLE_NS`] of tick clock is closed.
+//! * ONE HELD STREAM per member AND caller binding: its `GET`, its `endpoint` event, the message
+//!   address, the `initialize` handshake and correlation by JSON-RPC id are the plane's.
+//! * The connector holds the connection; the stream is read on the instance's ONE driver ticket
+//!   ([`drive`]), whose handles are numbered by one counter per tick cycle shared by every link, so
+//!   a handle that answered is never re-issued in that cycle.
+//! * A call POSTs its own request on its own ticket, its id registered BEFORE the POST leaves, and
+//!   waits for the driver to hand it the answer under that id.
+//! * A reply whose id no call waits for is dropped and counted: the next answer on that link
+//!   carries one rejected `mcp_upstream.reply` audit row per reply, at most
+//!   [`MAX_DROPPED_AUDITED`].
+//! * The server's own messages are routed as the other rungs route them (`ping` answered, an ask
+//!   refused, an unknown request `-32601`, each reply POSTed on the driver ticket); a resource
+//!   update is announced, and a call's progress and the stream's log records ride its answer.
+//! * The stream dropping fails every waiting call with [`STREAM_CLOSED`]'s words.
+//! * BOUNDED: at most [`MAX_LINKS`] live streams (past it an idle one is let go; with none idle the
+//!   call is refused), and a stream unused for [`IDLE_NS`] is closed.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::task::Poll;
@@ -51,11 +36,10 @@ use serde_json::Value;
 
 use super::McpDoor;
 use crate::client::compat::{
-    initialize_request, initialized_notification, lower_request, offered_revision, EventReader,
-    EventStreamLink, LinkEffect,
+    initialize_request, initialized_notification, lower_request, message_address, offered_revision,
+    EventReader, INITIALIZE_ID,
 };
 use crate::client::jsonrpc::{OutboundRequest, ServerRequestGrants};
-use crate::client::negotiate::INITIALIZE_ID;
 use crate::client::peer::{NotificationEffect, ServerMessage, ServerNotification};
 use crate::revision::Revision;
 
@@ -178,14 +162,15 @@ pub(super) struct Link {
     /// is let go at the connector, never left open behind a new one.
     stale: Vec<u64>,
     reader: EventReader,
-    link: EventStreamLink,
+    /// The message address, once the stream named an acceptable one.
+    address: Option<String>,
     init: Init,
     /// The ticket of the call running `initialize`, while one is.
     init_by: Option<Ticket>,
     /// Answers read, by their id's JSON text, with the ticket of the call they are for, until it
     /// takes them.
     answers: BTreeMap<String, (Ticket, Vec<u8>)>,
-    /// The ticket of the call waiting for each id.
+    /// The ticket of the call waiting for each id (at most [`MAX_WAITING`]).
     waiters: BTreeMap<String, Ticket>,
     /// Calls waiting for the link to be usable (its address named, its `initialize` done).
     parked: Vec<Ticket>,
@@ -215,37 +200,20 @@ impl Link {
         // revision (no stateless mirror: a 2024-11-05 server reads none of it), minus what a body
         // states, and asks for the event stream.
         let fields = lower_request(template, url, Revision::R2024_11_05, None).headers;
-        let path = crate::call::path_of(url);
-        let mut head = Vec::new();
-        head.extend_from_slice(b"GET");
-        head.extend_from_slice(path.as_bytes());
-        let block_at = head.len();
-        for (name, value) in fields.iter().filter(|(n, _)| {
+        let kept = fields.iter().filter(|(n, _)| {
             !n.eq_ignore_ascii_case("content-type") && !n.eq_ignore_ascii_case("accept")
-        }) {
-            head.extend_from_slice(name.as_bytes());
-            head.extend_from_slice(fields::SEPARATOR);
-            head.extend_from_slice(value.as_bytes());
-            head.extend_from_slice(fields::LINE_END);
-        }
-        head.extend_from_slice(b"accept");
-        head.extend_from_slice(fields::SEPARATOR);
-        head.extend_from_slice(crate::framing::EVENT_STREAM.as_bytes());
-        head.extend_from_slice(fields::LINE_END);
-        let head_piece = RequestPiece {
-            kind: REQUEST_HEAD,
-            _reserved: 0,
-            method: span(0, 3),
-            target: span(3, path.len()),
-            fields: span(block_at, head.len() - block_at),
-            timeout_ms: 0,
-        };
+        });
+        let accept = (
+            "accept".to_string(),
+            crate::framing::EVENT_STREAM.to_string(),
+        );
+        let (head, head_piece) = head_of("GET", url, kept.chain(std::iter::once(&accept)));
         Self {
             generation,
             url: url.to_string(),
             member: member.to_string(),
-            head: head.into_boxed_slice(),
-            head_piece: Box::new(head_piece),
+            head,
+            head_piece,
             end_piece: Box::new(RequestPiece {
                 kind: REQUEST_END,
                 ..RequestPiece::default()
@@ -260,7 +228,7 @@ impl Link {
             dead: None,
             stale: Vec::new(),
             reader: EventReader::new(MAX_EVENT),
-            link: EventStreamLink::new(url, MAX_WAITING),
+            address: None,
             init: Init::Idle,
             init_by: None,
             answers: BTreeMap::new(),
@@ -319,21 +287,40 @@ impl Link {
                     }
                 }
             }
-            match self.link.on_event(&event) {
-                LinkEffect::Ready(_) => woken.append(&mut self.parked),
-                LinkEffect::Refused(_) => self.die(
-                    "the MCP server's 2024-11-05 event stream named a message address busbar \
-                     will not POST to",
-                    woken,
-                ),
-                LinkEffect::Answer { id, body } => {
-                    if let Some(t) = self.waiters.remove(&id) {
-                        self.answers.insert(id, (t, body));
-                        woken.push(t);
+            // The `endpoint` event names the message address, once; a path joins the endpoint's
+            // origin, and another origin is refused.
+            if event.event.as_deref() == Some("endpoint") {
+                if self.address.is_none() {
+                    match message_address(&self.url, &event.data) {
+                        Ok(a) => {
+                            self.address = Some(a);
+                            woken.append(&mut self.parked);
+                        }
+                        Err(_) => self.die(
+                            "the MCP server's 2024-11-05 event stream named a message address \
+                             busbar will not POST to",
+                            woken,
+                        ),
                     }
                 }
-                LinkEffect::FromPeer(v) => self.peer_message(&v, grants, woken, announced),
-                LinkEffect::Ignored => {}
+                continue;
+            }
+            if !matches!(
+                event.event.as_deref(),
+                None | Some(crate::adapt::EVENT_MESSAGE)
+            ) {
+                continue;
+            }
+            let Ok(v) = serde_json::from_str::<Value>(&event.data) else {
+                continue;
+            };
+            if v.get("method").is_some() {
+                self.peer_message(&v, grants, woken, announced);
+            } else if let Some(id) = v.get("id").map(Value::to_string) {
+                if let Some(t) = self.waiters.remove(&id) {
+                    self.answers.insert(id, (t, event.data.into_bytes()));
+                    woken.push(t);
+                }
             }
         }
         if self.reader.overflowed() {
@@ -563,7 +550,7 @@ impl Link {
             }
             return;
         }
-        let Some(address) = self.link.address().map(str::to_string) else {
+        let Some(address) = self.address.clone() else {
             return;
         };
         loop {
@@ -648,32 +635,51 @@ impl Link {
 
     /// The POST of `body` to the message address `address`.
     fn reply_to(&self, address: &str, body: Vec<u8>) -> Reply {
-        let path = crate::call::path_of(address);
-        let mut head = Vec::new();
-        head.extend_from_slice(b"POST");
-        head.extend_from_slice(path.as_bytes());
-        let block_at = head.len();
-        for (name, value) in &self.fields {
-            head.extend_from_slice(name.as_bytes());
-            head.extend_from_slice(fields::SEPARATOR);
-            head.extend_from_slice(value.as_bytes());
-            head.extend_from_slice(fields::LINE_END);
-        }
-        let head_piece = RequestPiece {
-            kind: REQUEST_HEAD,
-            _reserved: 0,
-            method: span(0, 4),
-            target: span(4, path.len()),
-            fields: span(block_at, head.len() - block_at),
-            timeout_ms: 0,
-        };
+        let (head, head_piece) = head_of("POST", address, self.fields.iter());
         Reply {
             step: ReplyStep::Establish,
             stream: None,
-            head: head.into_boxed_slice(),
-            head_piece: Box::new(head_piece),
+            head,
+            head_piece,
             body: body.into_boxed_slice(),
             sent: 0,
+        }
+    }
+}
+
+/// A request head (`method`, the path of `url`, then `fields`) and its descriptor.
+fn head_of<'a>(
+    method: &str,
+    url: &str,
+    named: impl Iterator<Item = &'a (String, String)>,
+) -> (Box<[u8]>, Box<RequestPiece>) {
+    let path = crate::call::path_of(url);
+    let mut head = Vec::new();
+    head.extend_from_slice(method.as_bytes());
+    head.extend_from_slice(path.as_bytes());
+    let block_at = head.len();
+    for (name, value) in named {
+        head.extend_from_slice(name.as_bytes());
+        head.extend_from_slice(fields::SEPARATOR);
+        head.extend_from_slice(value.as_bytes());
+        head.extend_from_slice(fields::LINE_END);
+    }
+    let piece = RequestPiece {
+        kind: REQUEST_HEAD,
+        _reserved: 0,
+        method: span(0, method.len()),
+        target: span(method.len(), path.len()),
+        fields: span(block_at, head.len() - block_at),
+        timeout_ms: 0,
+    };
+    (head.into_boxed_slice(), Box::new(piece))
+}
+
+/// Wakes every call in `woken`.
+fn wake_all(plane: &McpDoor, woken: Vec<Ticket>) {
+    if let Some(wake) = plane.wake.as_ref() {
+        for t in woken {
+            wake.wake(t);
         }
     }
 }
@@ -745,11 +751,7 @@ pub(super) fn drive(instance: &Instance<'_, McpDoor>, plane: &McpDoor) {
     for (server, uri) in announced {
         super::door_sessions::announce(plane, &server, &uri);
     }
-    if let Some(wake) = plane.wake.as_ref() {
-        for t in woken {
-            wake.wake(t);
-        }
-    }
+    wake_all(plane, woken);
 }
 
 /// `dropped` replies a call took from the stream of `key` but has no answer to audit them on: counted
@@ -782,9 +784,6 @@ pub(super) fn cancelled(plane: &McpDoor, ticket: Ticket) {
             for id in gone {
                 l.waiters.remove(&id);
                 l.notes.remove(&id);
-                if let Ok(v) = serde_json::from_str::<Value>(&id) {
-                    l.link.abandon(&v);
-                }
             }
             l.answers.retain(|id, (t, _)| {
                 let mine = *t == ticket;
@@ -802,11 +801,7 @@ pub(super) fn cancelled(plane: &McpDoor, ticket: Ticket) {
         }
         woken
     });
-    if let Some(wake) = plane.wake.as_ref() {
-        for t in woken {
-            wake.wake(t);
-        }
-    }
+    wake_all(plane, woken);
 }
 
 /// One call's place on a held stream, parked on its unit across PENDING entries.
@@ -929,7 +924,7 @@ pub(super) fn call(
                 }
                 return Next::Fail(why.clone());
             }
-            let Some(address) = l.link.address().map(str::to_string) else {
+            let Some(address) = l.address.clone() else {
                 l.parked.push(ticket);
                 return Next::Wait;
             };
@@ -939,9 +934,8 @@ pub(super) fn call(
                     // registered before the POST leaves.
                     l.init = Init::Running;
                     l.init_by = Some(ticket);
-                    let id = Value::from(INITIALIZE_ID);
-                    l.link.expect(&id);
-                    l.waiters.insert(id.to_string(), ticket);
+                    l.waiters
+                        .insert(Value::from(INITIALIZE_ID).to_string(), ticket);
                     Next::PostInit(address)
                 }
                 (Init::Running, 1) => {
@@ -963,14 +957,13 @@ pub(super) fn call(
                         None => {
                             let id = l.next_id;
                             l.next_id = l.next_id.saturating_add(1);
-                            let v = Value::from(id);
-                            if !l.link.expect(&v) {
+                            if l.waiters.len() >= MAX_WAITING {
                                 return Next::Fail(format!(
                                     "MCP server `{member}`: its 2024-11-05 event stream already \
                                      waits on {MAX_WAITING} calls"
                                 ));
                             }
-                            l.waiters.insert(v.to_string(), ticket);
+                            l.waiters.insert(Value::from(id).to_string(), ticket);
                             st.id = Some(id);
                             id
                         }
@@ -991,13 +984,8 @@ pub(super) fn call(
             }
             Next::Wait => return Poll::Pending,
             Next::PostInit(address) => {
-                let request = initialize_request(
-                    original,
-                    &address,
-                    Revision::R2024_11_05,
-                    INITIALIZE_ID,
-                    super::VERSION,
-                );
+                let request =
+                    initialize_request(original, &address, Revision::R2024_11_05, super::VERSION);
                 match post(instance, plane, (base, member), &request, timeout_ms) {
                     Poll::Pending => return Poll::Pending,
                     Poll::Ready(Ok(())) => st.init = 1,
@@ -1035,11 +1023,7 @@ pub(super) fn call(
                             })
                             .unwrap_or_default()
                         });
-                        if let Some(wake) = plane.wake.as_ref() {
-                            for t in woken {
-                                wake.wake(t);
-                            }
-                        }
+                        wake_all(plane, woken);
                     }
                     Poll::Ready(Err(why)) => return Poll::Ready(Err(fail_link(plane, key, &why))),
                 }
@@ -1076,9 +1060,7 @@ pub(super) fn call(
                     Poll::Ready(Err(why)) => {
                         plane.legacy.with(&key.to_string(), |l| {
                             if let Some(l) = l {
-                                let v = Value::from(id);
-                                l.waiters.remove(&v.to_string());
-                                l.link.abandon(&v);
+                                l.waiters.remove(&Value::from(id).to_string());
                             }
                         });
                         *state = None;
@@ -1109,11 +1091,7 @@ fn fail_link(plane: &McpDoor, key: &str, why: &str) -> String {
             l.die(why, &mut woken);
         }
     });
-    if let Some(wake) = plane.wake.as_ref() {
-        for t in woken {
-            wake.wake(t);
-        }
-    }
+    wake_all(plane, woken);
     why.to_string()
 }
 
