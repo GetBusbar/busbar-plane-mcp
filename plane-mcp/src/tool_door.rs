@@ -3654,16 +3654,10 @@ slot!(
 );
 
 slot!(
-    /// `hydrate`: nothing to restore. The plane's durable records (the call log, the demotions) are
-    /// the host's, kept and verified on its record seam, and the trust state they feed is the
-    /// kernel's: no plane-side state outlives a restart.
-    Hydrate, GenIn, OutHead, |_, _, _| { Outcome::Ready }
-);
-
-slot!(
-    /// `start`: no background work. Re-verification is the kernel's trust tick, and a stale server is
-    /// re-verified on the call that names it.
-    Start, GenIn, OutHead, |_, _, _| { Outcome::Ready }
+    /// `hydrate` and `start`: nothing to restore (the plane's durable records are the host's, and
+    /// the trust state they feed is the kernel's) and no background work (re-verification is the
+    /// kernel's trust tick, and a stale server is re-verified on the call that names it).
+    Inert, GenIn, OutHead, |_, _, _| { Outcome::Ready }
 );
 
 slot!(
@@ -3784,7 +3778,7 @@ busbar_contract::plugin_door! {
     },
     kind_ops: {
         arrive: Safe<Arrive>, on_piece: Safe<OnPiece>, refusal: Safe<RefusalSlot>,
-        serve: Safe<Serve>, hydrate: Safe<Hydrate>, start: Safe<Start>, project: Safe<Project>,
+        serve: Safe<Serve>, hydrate: Safe<Inert>, start: Safe<Inert>, project: Safe<Project>,
     },
 }
 
