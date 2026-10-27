@@ -22,9 +22,6 @@ use crate::tool_ops::{
     OP_TOOLS_LIST,
 };
 
-/// The status of a successful answer.
-pub const STATUS_OK: u32 = 200;
-
 /// The status a notification is acknowledged with on a request-response carrier: no body.
 pub const STATUS_ACCEPTED: u32 = 202;
 
@@ -47,10 +44,7 @@ pub enum Answer {
 
 impl Answer {
     fn ok(body: Vec<u8>) -> Self {
-        Answer::Here {
-            status: STATUS_OK,
-            body,
-        }
+        Answer::Here { status: 200, body }
     }
 
     fn refused(refusal: &Refusal) -> Self {

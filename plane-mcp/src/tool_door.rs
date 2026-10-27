@@ -57,7 +57,7 @@ use busbar_contract::abi::sdk::exchange::{REPLY_MAX, REPLY_OVER_BOUND};
 use busbar_contract::abi::sdk::life::Refusal;
 use busbar_contract::abi::sdk::publish::{Generations, Keyed};
 use busbar_contract::abi::sdk::services::ServiceError;
-use busbar_contract::abi::sdk::{Instance, Lent, Out, Safe, SafeSlot, Services};
+use busbar_contract::abi::sdk::{HostBuf, Instance, Lent, LentList, Out, Safe, SafeSlot, Services};
 use serde_json::Value;
 
 use crate::answer::Answer;
@@ -70,9 +70,6 @@ use crate::framing::{
 };
 use crate::tool_arrival::Disposition;
 use crate::tools_config::ToolsCfg;
-
-/// The most calls the kernel keeps in flight on one instance, as the transport doors state it.
-const MAX_INFLIGHT: u32 = 64;
 
 /// The version the Statement names: the crate's (a test pins the two equal).
 pub const VERSION: &str = "1.6.0";
@@ -91,7 +88,8 @@ pub const STATEMENT: Statement = Statement {
     // ([`door_sessions::UNGOVERNED_LEGACY_STREAM`]).
     diag_ids: door_sessions::DIAG_IDS.as_ptr(),
     diag_ids_len: door_sessions::DIAG_IDS.len(),
-    ..statement(crate::PLANE_KEY, VERSION, MAX_INFLIGHT)
+    // At most 64 calls in flight on one instance, as the transport doors state it.
+    ..statement(crate::PLANE_KEY, VERSION, 64)
 };
 
 /// WHAT THE PLANE HOLDS FOR ONE GENERATION: the catalogue built from its section, and the section
@@ -117,19 +115,6 @@ impl Held {
         }
     }
 
-    /// What a generation holds over `section`, its servers in `pools`.
-    #[must_use]
-    pub fn pooled(
-        generation: u64,
-        section: ToolsCfg,
-        pools: BTreeMap<String, door::ToolPool>,
-    ) -> Self {
-        Held {
-            pools,
-            ..Held::of(generation, section)
-        }
-    }
-
     /// The pool `server` is a member of, by name, when it is one (the first in name order).
     #[must_use]
     pub fn pool_of(&self, server: &str) -> Option<(&str, &door::ToolPool)> {
@@ -142,6 +127,7 @@ impl Held {
 
 /// One instance: the public base URL `open` was given, the host services, every live generation's
 /// snapshot with what the plane holds for it, and the units in flight.
+#[derive(Default)]
 pub struct McpDoor {
     /// The endpoint its claims are stated under: its audience and metadata document
     /// ([`door::admitted`]).
@@ -234,16 +220,6 @@ impl McpDoor {
     }
 }
 
-/// The dealt settings blob read at its `tools:` section, or the refusal in the grammar's words.
-fn section(bytes: &[u8]) -> Result<ToolsCfg, Refusal> {
-    door::read_dealt_tools(bytes).map_err(Refusal::refused)
-}
-
-/// The settings `open`/`refresh` are handed: the section and its pools.
-fn opened_section(bytes: &[u8]) -> Result<(ToolsCfg, BTreeMap<String, door::ToolPool>), Refusal> {
-    door::read_open(bytes).map_err(Refusal::refused)
-}
-
 /// One slot body on the SDK's safe surface, over this plane's [`McpDoor`].
 macro_rules! slot {
     ($(#[$doc:meta])* $name:ident, $in:ty, $out:ty,
@@ -263,9 +239,9 @@ macro_rules! slot {
 slot!(
     /// `validate`: the settings read as the section, or refused in the grammar's words.
     Validate, ValidateIn, OutHead, |_, input, mut out| {
-        match section(input.field(|i| &i.settings).bytes()) {
+        match door::read_dealt_tools(input.field(|i| &i.settings).bytes()) {
             Ok(_) => Outcome::Ready,
-            Err(refusal) => out.fail(refusal),
+            Err(text) => out.fail(Refusal::refused(text)),
         }
     }
 );
@@ -274,9 +250,9 @@ slot!(
     /// `open`: the instance over the section, the public base URL and the host services, and the
     /// first generation's snapshot.
     Open, PlaneOpenIn, PlaneOpenOut, |instance, input, mut out| {
-        let (cfg, pools) = match opened_section(input.field(|i| &i.open.settings).bytes()) {
+        let (cfg, pools) = match door::read_open(input.field(|i| &i.open.settings).bytes()) {
             Ok(opened) => opened,
-            Err(refusal) => return out.fail(refusal),
+            Err(text) => return out.fail(Refusal::refused(text)),
         };
         let generation = input.get().open.generation;
         let owned = input.field(|i| &i.owned).bytes();
@@ -295,48 +271,16 @@ slot!(
             Ok(origins) => origins,
             Err(text) => return out.fail(Refusal::refused(text)),
         };
+        let open = input.field(|i| &i.open);
+        let host = open.host();
         let plane = McpDoor {
             admitted,
             facts,
             origins,
-            services: input
-                .field(|i| &i.open)
-                .host()
-                .and_then(|h| Services::of(&h)),
-            host: input
-                .field(|i| &i.open)
-                .host()
-                .map(|h| busbar_contract::abi::sdk::conn::Host::of(&h)),
-            sightings: Keyed::new(),
-            spent: Keyed::new(),
-            checked: Keyed::new(),
-            wake: input
-                .field(|i| &i.open)
-                .host()
-                .and_then(|h| busbar_contract::abi::sdk::services::Wake::of(&h)),
-            listens: Keyed::new(),
-            driver: Keyed::new(),
-            tasks: Keyed::new(),
-            strikes: Keyed::new(),
-            generations: Generations::new(),
-            units: Keyed::new(),
-            roots: Keyed::new(),
-            greeted: Keyed::new(),
-            answered: Keyed::new(),
-            relaying: Arc::default(),
-            live_asks: Keyed::new(),
-            line_listens: Keyed::new(),
-            ask_seq: Keyed::new(),
-            relays: Keyed::new(),
-            sessions: Keyed::new(),
-            session_state: Keyed::new(),
-            streams: Keyed::new(),
-            upstreams: Keyed::new(),
-            legacy: Keyed::new(),
-            legacy_seq: Keyed::new(),
-            said_ungoverned: Keyed::new(),
-            line_revisions: Keyed::new(),
-            connecting: Keyed::new(),
+            services: host.and_then(|h| Services::of(&h)),
+            host: host.map(|h| busbar_contract::abi::sdk::conn::Host::of(&h)),
+            wake: host.and_then(|h| busbar_contract::abi::sdk::services::Wake::of(&h)),
+            ..McpDoor::default()
         };
         plane.sessions.insert(
             (),
@@ -344,10 +288,15 @@ slot!(
         );
         plane.upstreams.insert(
             (),
-            crate::tool_sessions::UpstreamTable::new(UPSTREAMS_KEPT, UPSTREAM_BYTES_KEPT),
+            // The upstreams busbar remembers a negotiated revision for, and their bytes: forgetting
+            // one costs one renegotiation.
+            crate::tool_sessions::UpstreamTable::new(1024, 1 << 20),
         );
         let spec = door::snapshot_spec_with(plane.admitted.clone(), plane.facts.clone());
-        let held = Held::pooled(generation, cfg, pools);
+        let held = Held {
+            pools,
+            ..Held::of(generation, cfg)
+        };
         out.publish_with(|o| &o.snapshot, &plane.generations, generation, &spec, held);
         instance.open(plane);
         Outcome::Ready
@@ -361,13 +310,16 @@ slot!(
         let Some(plane) = instance.get() else {
             return Outcome::Failed;
         };
-        let (cfg, pools) = match opened_section(input.field(|i| &i.settings).bytes()) {
+        let (cfg, pools) = match door::read_open(input.field(|i| &i.settings).bytes()) {
             Ok(opened) => opened,
-            Err(refusal) => return out.fail(refusal),
+            Err(text) => return out.fail(Refusal::refused(text)),
         };
         let generation = input.get().generation;
         let spec = door::snapshot_spec_with(plane.admitted.clone(), plane.facts.clone());
-        let held = Held::pooled(generation, cfg, pools);
+        let held = Held {
+            pools,
+            ..Held::of(generation, cfg)
+        };
         out.publish_with(|o| &o.snapshot, &plane.generations, generation, &spec, held);
         // A subscription held as a session compares what its caller can see on the move.
         door_listen::wake_all(plane);
@@ -433,13 +385,7 @@ slot!(
         // The rows ride the one cancel answer (it is never re-called): what fits is written.
         let (mut records, mut arena) = (input.records_buf(), input.arena_buf());
         for id in &stopped {
-            let row = crate::call::AuditRow::task_cancel(id);
-            records.push(RecordWrite {
-                kind: AUDIT_APPLIED,
-                op: RECORD_AUDIT,
-                key: arena.span(row.action.as_bytes()),
-                value: arena.span(row.resource.as_bytes()),
-            });
+            records.push(audit_write(&mut arena, &crate::call::AuditRow::task_cancel(id)));
         }
         let short = !(records.fits() && arena.fits());
         let (rw, _) = records.settle(short);
@@ -465,16 +411,6 @@ slot!(
 
 /// The most units the instance keeps state for at once; past it, a new arrival is refused.
 pub const MAX_UNITS: usize = 4096;
-
-/// The open breaker's reason as the kernel spells it (`RefusalCode::BreakerOpen`'s word): the words
-/// this door says a walk's exhaustion in where it repeats them, as predev's door said it.
-const BREAKER_OPEN_WORD: &str = "breaker_open";
-
-/// The most upstreams busbar remembers a negotiated revision for, and their bytes: forgetting one
-/// costs one renegotiation.
-const UPSTREAMS_KEPT: usize = 1024;
-/// See [`UPSTREAMS_KEPT`].
-const UPSTREAM_BYTES_KEPT: usize = 1 << 20;
 
 /// One unit's state, from its arrival to its end.
 struct CallUnit {
@@ -555,8 +491,6 @@ struct Relay {
     frames: Vec<Value>,
     /// A call relayed to a stdio member: its answer read by id among its child's messages.
     program: Option<door_program::ProgramRelay>,
-    /// A `token_exchange:` member's down-scope for this caller, stated on every round's request.
-    scope: Option<String>,
     /// A stdio child's relayed ask, held while the work handle it is correlated under is opened:
     /// its `input_required` result, the round and the child's leg.
     asked: Option<(Value, u32, crate::ask::ChildLeg)>,
@@ -571,12 +505,9 @@ struct Relay {
     queued: Option<(crate::call::OutboundCall, u64)>,
 }
 
-/// The most progress frames one request relays: a progress stream is untrusted upstream input,
-/// bounded across every round of one call as the served engine bounded it.
-const MAX_PROGRESS_FRAMES: usize = 256;
-
 /// An answer part way through being written: its head (written with its first bytes), its bytes
 /// and how many went, and where it goes.
+#[derive(Default)]
 struct Pending {
     /// The status the caller's answer starts with; `0` for a request bound for the far end.
     status: u32,
@@ -611,37 +542,27 @@ pub(crate) fn server_lane(server: &str) -> String {
     format!("{}:{server}", door::SCOPE)
 }
 
-/// The host's clock, for the call log's `ts`: the kernel's one clock (`clock.now`), whole Unix
-/// seconds, on a fresh handle of the unit's ticket. `None` when the host serves no clock, and then
-/// no call record is written (a record never carries a time the plane made up).
-fn clock_s(services: Option<Services>, ticket: Ticket, unit: &mut CallUnit) -> Option<u64> {
-    let services = services?;
-    let handle = CompletionHandle {
-        ticket,
-        seq: unit.issued,
-        _reserved: 0,
-    };
-    unit.issued += 1;
-    services
-        .clock_now(handle)
+/// The kernel's one clock (`clock.now`) on a fresh handle of the unit's ticket; `None` when the
+/// host serves none or the read fails (a failed read is never a time).
+fn clock(
+    services: Option<Services>,
+    ticket: Ticket,
+    issued: &mut u32,
+) -> Option<busbar_contract::abi::host::service::ClockReading> {
+    services?
+        .clock_now(door_tasks::handle(ticket, issued, &mut None))
         .ok()
-        .map(|r| r.wall_ns / 1_000_000_000)
 }
 
-/// The kernel's monotonic clock (`clock.now`), whole milliseconds, on a fresh handle of the unit's
-/// ticket; `None` when the host serves no clock.
+/// The call log's `ts`: the kernel's wall clock in whole Unix seconds. `None` = no call record is
+/// written (a record never carries a time the plane made up).
+fn clock_s(services: Option<Services>, ticket: Ticket, unit: &mut CallUnit) -> Option<u64> {
+    clock(services, ticket, &mut unit.issued).map(|r| r.wall_ns / 1_000_000_000)
+}
+
+/// The kernel's monotonic clock, whole milliseconds.
 fn mono_ms(services: Option<Services>, ticket: Ticket, unit: &mut CallUnit) -> Option<u64> {
-    let services = services?;
-    let handle = CompletionHandle {
-        ticket,
-        seq: unit.issued,
-        _reserved: 0,
-    };
-    unit.issued += 1;
-    services
-        .clock_now(handle)
-        .ok()
-        .map(|r| r.mono_ns / 1_000_000)
+    clock(services, ticket, &mut unit.issued).map(|r| r.mono_ns / 1_000_000)
 }
 
 /// WHETHER THE WALK SPENT THE SERVER'S `timeout:` ON A DISPATCHED CALL (ARCHITECT ruling on the
@@ -668,30 +589,6 @@ fn timed_out(services: Option<Services>, ticket: Ticket, unit: &mut CallUnit) ->
     mono_ms(services, ticket, unit).is_some_and(|now| now.saturating_sub(sent) >= bound)
 }
 
-/// THE CALL LOG RECORD of one call, as it is written to the host's record seam: the call kind,
-/// keyed by the caller's chain scope, the plane's own fields ([`crate::record::call_suffix`]).
-#[must_use]
-pub fn call_record(
-    line: &crate::call::CallLine,
-    scope: &str,
-    generation: u64,
-    ts: u64,
-) -> (u32, Vec<u8>, Vec<u8>) {
-    (
-        door::RECORD_CALL,
-        scope.as_bytes().to_vec(),
-        crate::record::call_suffix(
-            ts,
-            &line.server,
-            &line.tool,
-            line.outcome,
-            &line.reason,
-            &line.tool_digest,
-            generation,
-        ),
-    )
-}
-
 impl Pending {
     /// With the call log's record of `line`, under `scope` and `generation`, at `ts` (the host
     /// clock's reading; none, no record).
@@ -702,8 +599,21 @@ impl Pending {
         generation: u64,
         ts: Option<u64>,
     ) -> Self {
+        // THE CALL LOG RECORD, keyed by the caller's chain scope ([`crate::record::call_suffix`]).
         if let (Some(line), Some(ts)) = (line, ts) {
-            self.records.push(call_record(line, scope, generation, ts));
+            self.records.push((
+                door::RECORD_CALL,
+                scope.as_bytes().to_vec(),
+                crate::record::call_suffix(
+                    ts,
+                    &line.server,
+                    &line.tool,
+                    line.outcome,
+                    &line.reason,
+                    &line.tool_digest,
+                    generation,
+                ),
+            ));
         }
         if let Some(line) = line {
             self.audits.extend(line.audit.clone());
@@ -769,15 +679,10 @@ impl Pending {
         Pending {
             status,
             fields,
-            request: None,
             bytes,
-            sent: 0,
-            headed: false,
             done: true,
-            records: Vec::new(),
-            audits: Vec::new(),
-            lane: None,
             units,
+            ..Pending::default()
         }
     }
 
@@ -787,14 +692,15 @@ impl Pending {
     /// that never reached a server is not a call this node made, and the byte class is "the length
     /// of the document it just read back"). The plane states its counts; the kernel prices them
     /// (the design's money section, "The plane reports; the kernel writes"; Law 6).
+    /// Classes by [`door::TAIL`] index: `0` tool calls, `1` bytes.
     fn counted(mut self, answered: usize) -> Self {
         self.units.push(UnitCount {
-            class: CLASS_TOOL_CALLS_INDEX,
+            class: 0,
             source: UNITS_REPORTED,
             amount: 1,
         });
         self.units.push(UnitCount {
-            class: CLASS_BYTES_INDEX,
+            class: 1,
             source: UNITS_REPORTED,
             amount: u64::try_from(answered).unwrap_or(u64::MAX),
         });
@@ -804,27 +710,13 @@ impl Pending {
     /// The request bound for the far end.
     fn far(outbound: crate::call::OutboundCall) -> Self {
         Pending {
-            status: 0,
             fields: outbound.fields,
             request: Some((outbound.verb, outbound.target)),
             bytes: outbound.body,
-            sent: 0,
-            headed: false,
-            done: false,
-            records: Vec::new(),
-            audits: Vec::new(),
-            lane: None,
-            units: Vec::new(),
+            ..Pending::default()
         }
     }
 }
-
-/// The tail index of the tool-call class ([`door::TAIL`]'s billable classes: tool calls, then
-/// bytes); a reported count names its class by it.
-const CLASS_TOOL_CALLS_INDEX: u32 = 0;
-
-/// The tail index of the byte class (the second of [`door::TAIL`]'s billable classes).
-const CLASS_BYTES_INDEX: u32 = 1;
 
 /// The operation class a disposition is counted under: its row's, or the notification class. A
 /// refused arrival is counted under none.
@@ -849,35 +741,20 @@ fn refusal_text(refusal: &crate::tool_arrival::Refusal) -> String {
     .to_string()
 }
 
-/// [`ArriveOut::refusal`]: the arrival is refused in the plane's own words, at its own status (the
-/// words ride in the head's error, and `refusal` renders them).
-pub const REFUSED_IN_OWN_WORDS: u32 = 1;
-
 /// [`ArriveOut::refusal`]: the arrival names the discovery document, which is not answered on the
 /// request path.
 pub const UNSERVED: u32 = 2;
 
-/// The status of an arrival the request path does not serve.
-const STATUS_NOT_FOUND: u32 = 404;
-
-/// REFUSED in the plane's own `text`, at `status`: `refusal` renders them.
+/// REFUSED in the plane's own `text`, at `status` ([`ArriveOut::refusal`] `1`): `refusal` renders
+/// them.
 fn refused_arrival(out: &mut Out<'_, ArriveOut>, status: u32, text: String) -> Outcome {
-    out.set(|o| &o.refusal, REFUSED_IN_OWN_WORDS);
+    out.set(|o| &o.refusal, 1);
     out.set(|o| &o.refusal_status, status);
     out.fail(Refusal::refused(text))
 }
 
 /// The words of an arrival on a verb the endpoint does not serve.
 const NOT_ALLOWED_TEXT: &str = r#"{"allow":"POST"}"#;
-
-/// The status a line naming no carrier session is refused with.
-const STATUS_BAD_REQUEST: u32 = 400;
-
-/// The status an arrival is refused with when the unit table is full.
-const STATUS_BUSY: u32 = 429;
-
-/// A line that names no carrier session: the host states one on every line it opens a unit for.
-const NO_SESSION_TEXT: &str = r#"{"status":400,"id":null,"code":-32600,"message":"a line of the line carrier names no carrier session"}"#;
 
 /// The words of an arrival from a browser origin the deployment does not admit.
 const FORBIDDEN_ORIGIN_TEXT: &str = r#"{"origin":"forbidden"}"#;
@@ -887,43 +764,19 @@ const FORBIDDEN_ORIGIN_TEXT: &str = r#"{"origin":"forbidden"}"#;
 const CLOCK_UNREAD: &str = "the host's clock could not be read, and busbar never stamps, arms or \
                             judges anything at a time it made up";
 
-/// The head field a browser names its origin in.
-const ORIGIN: &str = "origin";
-
-/// The head field a caller names its session in, for an incremental gate scan.
-const SESSION_FIELD: &str = "x-session-id";
-
-/// What a refused arrival said.
-enum Words {
-    /// A JSON-RPC refusal.
-    Rpc(crate::tool_arrival::Refusal),
-    /// A verb the endpoint does not serve.
-    NotAllowed,
-    /// A browser origin the deployment does not admit.
-    ForbiddenOrigin,
-}
-
-/// A refused arrival's words read back.
-fn words_of(text: &[u8]) -> Option<Words> {
-    if text == NOT_ALLOWED_TEXT.as_bytes() {
-        return Some(Words::NotAllowed);
-    }
-    if text == FORBIDDEN_ORIGIN_TEXT.as_bytes() {
-        return Some(Words::ForbiddenOrigin);
-    }
-    refusal_of(text).map(Words::Rpc)
-}
-
-/// A refused arrival's JSON-RPC refusal read back.
-fn refusal_of(text: &[u8]) -> Option<crate::tool_arrival::Refusal> {
-    let v: Value = serde_json::from_slice(text).ok()?;
-    Some(crate::tool_arrival::Refusal {
-        status: u32::try_from(v.get("status")?.as_u64()?).ok()?,
-        id: v.get("id").filter(|i| !i.is_null()).cloned(),
-        code: v.get("code")?.as_i64()?,
-        message: v.get("message")?.as_str()?.to_string(),
-        data: v.get("data").filter(|d| !d.is_null()).cloned(),
-    })
+/// The value of head field `name` (ASCII case-insensitive), where it is UTF-8.
+fn head<'a>(
+    fields: LentList<'a, busbar_contract::abi::mechanism::call::Field>,
+    name: &str,
+) -> Option<&'a str> {
+    fields
+        .iter()
+        .find(|f| {
+            f.field(|f| &f.name)
+                .as_str()
+                .is_ok_and(|n| n.eq_ignore_ascii_case(name))
+        })
+        .and_then(|f| f.field(|f| &f.value).as_str().ok())
 }
 
 /// The head-field name prefix of SEP-2243's custom parameter headers.
@@ -942,20 +795,13 @@ slot!(
         if claim.is_some_and(|r| r.open) {
             // The discovery document is not answered on the request path.
             out.set(|o| &o.refusal, UNSERVED);
-            out.set(|o| &o.refusal_status, STATUS_NOT_FOUND);
+            out.set(|o| &o.refusal_status, crate::tool_arrival::STATUS_NOT_FOUND);
             return out.fail(Refusal::bare());
         }
         // THE ORIGIN FIRST (the served engine's order: who may speak at all, one field read): a
         // browser origin that is neither loopback nor on the operator's allowlist is refused, the
         // DNS-rebinding defence. A request with no `Origin` is not a browser's, and goes on.
-        let origin = fields
-            .iter()
-            .find(|f| {
-                f.field(|f| &f.name)
-                    .as_str()
-                    .is_ok_and(|n| n.eq_ignore_ascii_case(ORIGIN))
-            })
-            .and_then(|f| f.field(|f| &f.value).as_str().ok());
+        let origin = head(fields, "origin");
         if origin.is_some_and(|o| !busbar_contract::jsonrpc::origin_admitted(o, &plane.origins)) {
             return refused_arrival(
                 &mut out,
@@ -971,17 +817,7 @@ slot!(
             r.target == crate::tool_claims::DEFAULT_MOUNT
                 && r.carrier == crate::tool_claims::CARRIER_HTTP
         });
-        let head_field = |name: &str| {
-            fields
-                .iter()
-                .find(|f| {
-                    f.field(|f| &f.name)
-                        .as_str()
-                        .is_ok_and(|n| n.eq_ignore_ascii_case(name))
-                })
-                .and_then(|f| f.field(|f| &f.value).as_str().ok())
-                .map(str::to_string)
-        };
+        let head_field = |name: &str| head(fields, name).map(str::to_string);
         let arrived = if endpoint {
             let held = plane.current();
             door_sessions::arrive(
@@ -1024,11 +860,6 @@ slot!(
         // A task's continuation carries its call in its body: it is decided under the fields that
         // call implies.
         let task_body = task_run.as_ref().map(|(_, _, call, _)| call.clone());
-        let mirrored = task_run
-            .as_ref()
-            .and_then(|(_, _, call, _)| serde_json::from_slice::<Value>(call).ok())
-            .map(|v| crate::codec::mirrored(&v))
-            .unwrap_or_default();
         // ADMISSION BOUNDS LIVE WORK; NOTHING EVICTS IT: a full table refuses the new arrival, before
         // anything else is stated of it, and every unit it holds goes on. Arrivals racing the last
         // free places overshoot by no more than the instance's in-flight bound. It is judged before
@@ -1040,7 +871,7 @@ slot!(
             .with_all(|held| held.len() >= MAX_UNITS && !held.contains_key(&input.get().unit));
         if at_cap {
             let refusal = crate::tool_arrival::Refusal {
-                status: STATUS_BUSY,
+                status: 429,
                 id: None,
                 code: crate::codec::CODE_REFUSED,
                 message: format!(
@@ -1055,32 +886,26 @@ slot!(
         // over, and the bytes the one dispatch decides on (none: the unit answers its preset).
         let line_route = input.get().claim as usize == door::LINE_ROUTE;
         let line_arrival = line_route.then(|| {
-            let session = fields
-                .iter()
-                .find(|f| {
-                    f.field(|f| &f.name).as_str().is_ok_and(|n| {
-                        n.eq_ignore_ascii_case(
-                            busbar_contract::abi::host::service::CARRIER_SESSION_FIELD,
-                        )
-                    })
-                })
-                .and_then(|f| f.field(|f| &f.value).as_str().ok()?.trim().parse::<u64>().ok())
+            let session = head(fields, busbar_contract::abi::host::service::CARRIER_SESSION_FIELD)
+                .and_then(|v| v.trim().parse::<u64>().ok())
                 .unwrap_or(0);
             door_line::arrive(plane, session, body)
         });
         if line_arrival.as_ref().is_some_and(|a| a.unit.session == 0) {
-            return refused_arrival(&mut out, STATUS_BAD_REQUEST, NO_SESSION_TEXT.to_string());
+            // The host states a carrier session on every line it opens a unit for.
+            let text = r#"{"status":400,"id":null,"code":-32600,"message":"a line of the line carrier names no carrier session"}"#;
+            return refused_arrival(&mut out, 400, text.to_string());
         }
         let line_dispatch = line_arrival.as_ref().map(|a| a.dispatch.clone());
         let line_silent = matches!(line_dispatch, Some(None));
         let line_body = line_dispatch.flatten();
-        let mirrored = match &line_body {
-            Some(b) => serde_json::from_slice::<Value>(b)
-                .ok()
-                .map(|v| crate::codec::mirrored(&v))
-                .unwrap_or_default(),
-            None => mirrored,
-        };
+        // A line's or a continuation's own body implies the fields it is decided under.
+        let mirrored = line_body
+            .as_deref()
+            .or(task_body.as_deref())
+            .and_then(|b| serde_json::from_slice::<Value>(b).ok())
+            .map(|v| crate::codec::mirrored(&v))
+            .unwrap_or_default();
         let line_unit = line_arrival.map(|a| a.unit);
         // A line raised from its carrier session's negotiated revision is lowered back.
         if line_unit.as_ref().is_some_and(|u| u.raised) {
@@ -1098,16 +923,7 @@ slot!(
                 .iter()
                 .find(|(n, _)| n.eq_ignore_ascii_case(name))
                 .map(|(_, v)| v.as_str())
-                .or_else(|| {
-                    fields
-                        .iter()
-                        .find(|f| {
-                            f.field(|f| &f.name)
-                                .as_str()
-                                .is_ok_and(|n| n.eq_ignore_ascii_case(name))
-                        })
-                        .and_then(|f| f.field(|f| &f.value).as_str().ok())
-                })
+                .or_else(|| head(fields, name))
                 .or_else(|| {
                     mirrored
                         .iter()
@@ -1180,15 +996,13 @@ slot!(
         // published tool is served by, a DIRECT entry of the `tools:` section; the kernel resolves
         // (plane key, entry) and never parses the name.
         let held = plane.current();
-        let relayed = match (&disposition, held.as_ref(), value.as_ref()) {
+        let called = match (&disposition, held.as_deref(), value.as_ref()) {
             (Disposition::Request { row, .. }, Some(held), Some(v))
                 if row.op == crate::tool_ops::OP_TOOL_CALL =>
             {
-                v.get("params")
-                    .and_then(|p| p.get("name"))
+                v.pointer("/params/name")
                     .and_then(Value::as_str)
-                    .and_then(|name| held.catalogue.tool(name))
-                    .map(|entry| entry.server.clone())
+                    .and_then(|name| held.catalogue.tool(name).map(|entry| (held, entry)))
             }
             _ => None,
         };
@@ -1197,24 +1011,15 @@ slot!(
         // A server that is a member of a pool routes over the POOL (ARCHITECT round 4
         // Q-L3B-SURFACES (h)): the kernel's one walk fails it over, under the breaker; a tool the
         // pool does not name `repeatable:` is performed at most once.
-        match relayed {
-            Some(server) => match held.as_ref().and_then(|h| {
-                let (name, pool) = h.pool_of(&server)?;
-                let bare = value
-                    .as_ref()
-                    .and_then(|v| v.pointer("/params/name"))
-                    .and_then(Value::as_str)
-                    .and_then(|n| h.catalogue.tool(n))
-                    .map(|t| t.tool.clone())?;
-                Some((name.to_string(), pool.repeatable.contains(&bare)))
-            }) {
-                Some((pool, repeatable)) => {
-                    out.route(ROUTE_POOL, &pool);
-                    if !repeatable {
+        match called {
+            Some((held, entry)) => match held.pool_of(&entry.server) {
+                Some((pool, members)) => {
+                    out.route(ROUTE_POOL, pool);
+                    if !members.repeatable.contains(&entry.tool) {
                         out.once();
                     }
                 }
-                None => out.route(ROUTE_DIRECT, &server),
+                None => out.route(ROUTE_DIRECT, &entry.server),
             },
             None => out.local(),
         }
@@ -1296,13 +1101,11 @@ fn ask_entitlements(
             continue;
         }
         let answer = services.is_some_and(|s| {
-            let handle = CompletionHandle {
-                ticket,
-                seq: unit.issued,
-                _reserved: 0,
-            };
-            unit.issued += 1;
-            s.entitled(handle, &target).unwrap_or(false)
+            s.entitled(
+                door_tasks::handle(ticket, &mut unit.issued, &mut None),
+                &target,
+            )
+            .unwrap_or(false)
         });
         unit.entitled.insert(target, answer);
     }
@@ -1336,6 +1139,14 @@ fn dest_verdict(
         std::task::Poll::Ready(Ok(judged)) => Some(judged.verdict),
         _ => None,
     }
+}
+
+/// Whether the kernel's entitlement answers hold `"<kind>:<name>"` (never asked = no).
+fn granted(entitled: &BTreeMap<String, bool>, kind: &str, name: &str) -> bool {
+    entitled
+        .get(&format!("{kind}:{name}"))
+        .copied()
+        .unwrap_or(false)
 }
 
 /// What one piece came to.
@@ -1374,13 +1185,7 @@ pub struct DoorSeal<'a> {
 impl DoorSeal<'_> {
     /// A fresh handle on the unit's ticket.
     fn handle(&mut self) -> CompletionHandle {
-        let handle = CompletionHandle {
-            ticket: self.ticket,
-            seq: *self.issued,
-            _reserved: 0,
-        };
-        *self.issued += 1;
-        handle
+        door_tasks::handle(self.ticket, self.issued, &mut None)
     }
 
     /// The host's signature of `data` under the door's signing domain; `None` when it signs none.
@@ -1403,11 +1208,7 @@ impl DoorSeal<'_> {
     /// sealed state's window is judged against this, so a failed read is never a time (the state
     /// would be judged at the epoch and every lapsed one would stand): the caller refuses.
     fn now(&mut self) -> Option<u64> {
-        let handle = self.handle();
-        self.services
-            .clock_now(handle)
-            .ok()
-            .map(|r| r.wall_ns / 1_000_000_000)
+        clock(Some(self.services), self.ticket, self.issued).map(|r| r.wall_ns / 1_000_000_000)
     }
 }
 
@@ -1449,11 +1250,7 @@ impl crate::ask::Seal for DoorSeal<'_> {
                 (seq, ttl_ms)
             }
         };
-        let handle = CompletionHandle {
-            ticket: self.ticket,
-            seq,
-            _reserved: 0,
-        };
+        let handle = handle_at(self.ticket, seq);
         match self
             .services
             .records_claim(handle, door::KIND_APPROVAL, nonce.as_bytes(), ttl_ms)
@@ -1513,20 +1310,9 @@ fn verify_on_call(
     let Some(services) = plane.services else {
         return Looked::Fresh;
     };
-    let now_ms = {
-        let handle = CompletionHandle {
-            ticket,
-            seq: unit.issued,
-            _reserved: 0,
-        };
-        unit.issued += 1;
-        // A failed read is never a time (row 159 finding P-M4): the cached list is then stale and
-        // fetched again, and what that fetch landed is not stamped.
-        services
-            .clock_now(handle)
-            .ok()
-            .map(|r| r.wall_ns / 1_000_000)
-    };
+    // A failed read is never a time (row 159 finding P-M4): the cached list is then stale and
+    // fetched again, and what that fetch landed is not stamped.
+    let now_ms = clock(Some(services), ticket, &mut unit.issued).map(|r| r.wall_ns / 1_000_000);
     let sighting = match unit.verified.take() {
         Some(kept) => kept,
         None => {
@@ -1588,40 +1374,18 @@ fn verify_on_call(
             }
         }
     };
-    if let Sighting::Seen(obs) = &sighting {
-        let handle = CompletionHandle {
-            ticket,
-            seq: SIGHT_SEQ,
-            _reserved: 0,
-        };
-        if services
-            .trust_sight(handle, server, &crate::trust::catalogue_hash(obs))
-            .is_pending()
-        {
-            unit.verified = Some(sighting);
-            return Looked::Pending;
-        }
-        sight_items(
-            &services,
-            ticket,
-            &mut unit.issued,
-            &held.catalogue,
-            server,
-            obs,
-        );
-    } else if matches!(sighting, Sighting::Failed(_)) {
-        // AN UNREACHABLE RE-FETCH (ARCHITECT Q3 (c)): reported to the kernel as such; the kernel
-        // keeps its last verdict and changes nothing (no drift, no quarantine from unreachability),
-        // and the call fails as an upstream failure (`trust_of`).
-        let handle = CompletionHandle {
-            ticket,
-            seq: SIGHT_SEQ,
-            _reserved: 0,
-        };
-        if services.trust_unreachable(handle, server).is_pending() {
-            unit.verified = Some(sighting);
-            return Looked::Pending;
-        }
+    // AN UNREACHABLE RE-FETCH (ARCHITECT Q3 (c)) is reported as such: the kernel keeps its last
+    // verdict, and the call fails as an upstream failure (`trust_of`).
+    if record_sighting(
+        &services,
+        ticket,
+        &mut unit.issued,
+        &held.catalogue,
+        server,
+        &sighting,
+    ) {
+        unit.verified = Some(sighting);
+        return Looked::Pending;
     }
     // THE FRESHNESS CLOCK starts only on a list that LANDED, read at a time the clock gave: an
     // unreachable server is fetched again on its next call (row 159 finding A-H1), and a failed
@@ -1639,29 +1403,48 @@ fn verify_on_call(
     Looked::Fresh
 }
 
-/// EACH TOOL'S SIGHTING (ARCHITECT Q3): the digest the live list offers each of `server`'s
-/// catalogue tools at, recorded by the kernel under the registration and the tool's trust key (its
-/// `tools_allow` name). Never pends; a tool the list no longer offers has nothing to sight.
-fn sight_items(
-    services: &busbar_contract::abi::sdk::services::Services,
+/// THE SIGHTING ON THE KERNEL'S TRUST BOOK (`trust.sight` of the observed catalogue, or
+/// `trust.unreachable`, on [`SIGHT_SEQ`]); `true` when it pended. A landed list then sights EACH TOOL
+/// (ARCHITECT Q3): the digest it offers each of `server`'s catalogue tools at, under the tool's
+/// trust key, on fresh handles from `seq`; never pends, and an unserved book leaves the item
+/// unsighted, which `trust.serves` refuses.
+fn record_sighting(
+    services: &Services,
     ticket: Ticket,
     seq: &mut u32,
-    catalogue: &crate::catalogue::Catalogue,
+    catalogue: &Catalogue,
     server: &str,
-    obs: &crate::trust::Observation,
-) {
-    for entry in catalogue.tools_of(server) {
-        let Some(digest) = obs.capabilities.get(&entry.tool) else {
-            continue;
-        };
-        let handle = CompletionHandle {
-            ticket,
-            seq: *seq,
-            _reserved: 0,
-        };
-        *seq = seq.wrapping_add(1);
-        // An unserved book leaves the item unsighted, which `trust.serves` refuses.
-        let _ = services.trust_sight_item(handle, server, &entry.tool, digest);
+    sighting: &crate::trust::Sighting,
+) -> bool {
+    use crate::trust::Sighting;
+    let handle = handle_at(ticket, SIGHT_SEQ);
+    let sighted = match sighting {
+        Sighting::Seen(obs) => {
+            services.trust_sight(handle, server, &crate::trust::catalogue_hash(obs))
+        }
+        Sighting::Failed(_) => services.trust_unreachable(handle, server),
+        Sighting::Never => std::task::Poll::Ready(Ok(0)),
+    };
+    if sighted.is_pending() {
+        return true;
+    }
+    if let Sighting::Seen(obs) = sighting {
+        for entry in catalogue.tools_of(server) {
+            if let Some(digest) = obs.capabilities.get(&entry.tool) {
+                let handle = door_tasks::handle(ticket, seq, &mut None);
+                let _ = services.trust_sight_item(handle, server, &entry.tool, digest);
+            }
+        }
+    }
+    false
+}
+
+/// The completion handle `seq` on `ticket`.
+fn handle_at(ticket: Ticket, seq: u32) -> CompletionHandle {
+    CompletionHandle {
+        ticket,
+        seq,
+        _reserved: 0,
     }
 }
 
@@ -1672,11 +1455,7 @@ fn kernel_items(plane: &McpDoor, ticket: Ticket, server: &str) -> Vec<crate::tru
     let Some(services) = plane.services else {
         return Vec::new();
     };
-    let handle = CompletionHandle {
-        ticket,
-        seq: STATE_SEQ,
-        _reserved: 0,
-    };
+    let handle = handle_at(ticket, SIGHT_SEQ + 2);
     let read = |bytes: usize, spans: usize| {
         let mut buf = vec![0_u8; bytes];
         let mut items = vec![door_tasks::blank(); spans];
@@ -1724,28 +1503,12 @@ fn trust_of(
     let Some(services) = plane.services else {
         return Trust::Verdict(busbar_contract::abi::host::service::DISTRUST_UNKNOWN);
     };
-    let handle = CompletionHandle {
-        ticket,
-        seq: *issued,
-        _reserved: 0,
-    };
-    *issued += 1;
+    let handle = door_tasks::handle(ticket, issued, &mut None);
     match services.trust_serves(handle, &entry.server, Some(&entry.tool), None) {
         Ok(code) => Trust::Verdict(code),
         // A book that does not answer serves nothing (fail closed).
         Err(_) => Trust::Verdict(busbar_contract::abi::host::service::DISTRUST_UNKNOWN),
     }
-}
-
-/// Whether a verdict hides a tool from a listing: its server is quarantined, or the tool is offered
-/// at another digest than the one approved (the rug-pull). A tool waiting on the operator stays
-/// listed, so the caller can see what exists.
-fn hides(trust: &crate::call::Trust) -> bool {
-    use busbar_contract::abi::host::service::{DISTRUST_CHANGED, DISTRUST_QUARANTINED};
-    matches!(
-        trust,
-        crate::call::Trust::Verdict(DISTRUST_QUARANTINED | DISTRUST_CHANGED)
-    )
 }
 
 /// A QUEUED STDIO CALL'S TURN, the synchronous call's and a task's continuation's alike: `Ok` the
@@ -1908,102 +1671,75 @@ fn answer_body(
         }
         _ => None,
     };
+    // The tool a call names, resolved once.
+    let called = named_tool
+        .as_ref()
+        .and_then(|_| params.as_ref()?.get("name")?.as_str())
+        .and_then(|name| held.catalogue.tool(name));
     // The grants this answer can ask: a call asks its own tool's two, any other request every
     // grant the catalogue holds.
-    let grants = match &named_tool {
-        Some(_) => params
-            .as_ref()
-            .and_then(|p| p.get("name"))
-            .and_then(Value::as_str)
-            .and_then(|name| held.catalogue.tool(name))
-            .map(|t| {
-                vec![
-                    (door::SCOPE, t.server.as_str()),
-                    (door::SCOPE_TOOL, t.namespaced.as_str()),
-                ]
-            })
-            .unwrap_or_default(),
-        None => held.catalogue.grants(),
+    let grants = match (&named_tool, called) {
+        (Some(_), Some(t)) => vec![
+            (door::SCOPE, t.server.as_str()),
+            (door::SCOPE_TOOL, t.namespaced.as_str()),
+        ],
+        (Some(_), None) => Vec::new(),
+        (None, _) => held.catalogue.grants(),
     };
     ask_entitlements(services, ticket, unit, &grants);
     // VERIFY-ON-CALL, for a call the caller is entitled to make: the gate below judges what the
     // server serves now.
-    if named_tool.is_some() {
-        let called = params
-            .as_ref()
-            .and_then(|p| p.get("name"))
-            .and_then(Value::as_str)
-            .and_then(|name| held.catalogue.tool(name))
-            .map(|t| (t.server.clone(), t.namespaced.clone()));
-        if let Some((server, namespaced)) = called {
-            let entitled = |kind: &str, name: &str| {
-                unit.entitled
-                    .get(&format!("{kind}:{name}"))
-                    .copied()
-                    .unwrap_or(false)
-            };
-            if entitled(door::SCOPE, &server) && entitled(door::SCOPE_TOOL, &namespaced) {
-                if let Looked::Pending =
-                    verify_on_call(instance, plane, ticket, unit, &held, (&server, caller))
-                {
-                    return Some(Step::Pending);
-                }
-                // A stdio member's child is greeted (once per generation) before the call.
-                if let Some(member) = unit.member.clone() {
-                    if let Looked::Pending =
-                        door_program::ready(plane, ticket, unit, &held, &member)
-                    {
-                        return Some(Step::Pending);
-                    }
-                }
+    if let Some(t) = called.filter(|t| {
+        granted(&unit.entitled, door::SCOPE, &t.server)
+            && granted(&unit.entitled, door::SCOPE_TOOL, &t.namespaced)
+    }) {
+        if let Looked::Pending =
+            verify_on_call(instance, plane, ticket, unit, &held, (&t.server, caller))
+        {
+            return Some(Step::Pending);
+        }
+        // A stdio member's child is greeted (once per generation) before the call.
+        if let Some(member) = unit.member.clone() {
+            if let Looked::Pending = door_program::ready(plane, ticket, unit, &held, &member) {
+                return Some(Step::Pending);
             }
         }
     }
     // THE KERNEL'S APPROVE, asked on the route leg after the re-fetch (ARCHITECT Q3): the called
     // tool's verdict, and on a listing every granted tool's, each its own `trust.serves`.
-    let verdict = named_tool.as_ref().and_then(|_| {
-        let entry = params
-            .as_ref()
-            .and_then(|p| p.get("name"))
-            .and_then(Value::as_str)
-            .and_then(|name| held.catalogue.tool(name))?;
-        Some((
+    let verdict = called.map(|entry| {
+        (
             entry.namespaced.clone(),
             trust_of(plane, ticket, &mut unit.issued, entry),
-        ))
+        )
     });
+    use busbar_contract::abi::host::service::{DISTRUST_CHANGED, DISTRUST_QUARANTINED};
     let listing = matches!(&disposition, Disposition::Request { row, .. }
         if row.op == crate::tool_ops::OP_TOOLS_LIST);
     let mut hidden = std::collections::BTreeSet::new();
     if listing {
-        let entitled = |kind: &str, name: &str| {
-            unit.entitled
-                .get(&format!("{kind}:{name}"))
-                .copied()
-                .unwrap_or(false)
-        };
+        let entitled = &unit.entitled;
         let listed: Vec<crate::catalogue::ToolEntry> = held
             .catalogue
-            .tools_for(&entitled)
+            .tools_for(&|kind: &str, name: &str| granted(entitled, kind, name))
             .into_iter()
             .cloned()
             .collect();
         for entry in &listed {
-            // A tool is judged changed only against a sighting: one its server was never seen to
-            // offer is listed (the caller sees what exists; a call is refused on its own verdict).
+            // A verdict hides a tool whose server is quarantined, or one offered at another digest
+            // than the one approved (the rug-pull) — judged changed only against a sighting: one its
+            // server was never seen to offer is listed. A tool waiting on the operator stays listed,
+            // so the caller can see what exists (a call is refused on its own verdict).
             let sighted = matches!(
                 plane.sightings.get(&entry.server),
                 Some(crate::trust::Sighting::Seen(_))
             );
-            let trust = trust_of(plane, ticket, &mut unit.issued, entry);
-            let changed_unsighted = !sighted
-                && matches!(
-                    trust,
-                    crate::call::Trust::Verdict(
-                        busbar_contract::abi::host::service::DISTRUST_CHANGED
-                    )
-                );
-            if hides(&trust) && !changed_unsighted {
+            let hides = match trust_of(plane, ticket, &mut unit.issued, entry) {
+                crate::call::Trust::Verdict(DISTRUST_QUARANTINED) => true,
+                crate::call::Trust::Verdict(DISTRUST_CHANGED) => sighted,
+                _ => false,
+            };
+            if hides {
                 hidden.insert(entry.namespaced.clone());
             }
         }
@@ -2017,12 +1753,7 @@ fn answer_body(
         pending: false,
     });
     let entitled = &unit.entitled;
-    let admit = |kind: &str, name: &str| {
-        entitled
-            .get(&format!("{kind}:{name}"))
-            .copied()
-            .unwrap_or(false)
-    };
+    let admit = |kind: &str, name: &str| granted(entitled, kind, name);
     if let Some(id) = named_tool {
         let fields = &unit.param_fields;
         let header = |name: &str| {
@@ -2065,56 +1796,27 @@ fn answer_body(
             return Some(Step::Pending);
         }
         let admission = crate::call::judge_arguments(admission, &mut |entry, dest| {
-            let handle = CompletionHandle {
-                ticket,
-                seq: unit.issued,
-                _reserved: 0,
-            };
-            unit.issued += 1;
+            let handle = door_tasks::handle(ticket, &mut unit.issued, &mut None);
             dest_verdict(services?, handle, &held, entry, dest)
         });
-        return Some(match admission {
-            Admission::Asked(body, line) => {
-                unit.pending = Some(
-                    Pending::answer(200, body, unit.framing.as_ref(), &[]).logged(
-                        Some(&line),
-                        principal,
-                        generation,
-                        clock_s(services, ticket, unit),
-                    ),
-                );
-                Step::Write
-            }
+        let (status, body, line, never_sent) = match admission {
+            Admission::Asked(body, line) => (200, body, Some(line), false),
             // NEVER SENT: the door's live tool-list check could not reach the server, so the call
             // did not leave and earns no fee unit ([`never_sent_answer`]).
-            Admission::Unreached(body, line) => {
-                let ts = clock_s(services, ticket, unit);
-                unit.pending = Some(never_sent_answer(
-                    200,
-                    body,
-                    &line,
-                    unit.framing.as_ref(),
-                    (principal, generation, ts),
-                ));
-                Step::Write
-            }
-            Admission::Refused(refusal, line) => {
-                unit.pending = Some(
-                    Pending::answer(refusal.status, refusal.body(), unit.framing.as_ref(), &[])
-                        .logged(
-                            line.as_ref(),
-                            principal,
-                            generation,
-                            clock_s(services, ticket, unit),
-                        ),
-                );
-                Step::Write
-            }
+            Admission::Unreached(body, line) => (200, body, Some(line), true),
+            Admission::Refused(refusal, line) => (refusal.status, refusal.body(), line, false),
             // THE TASK PATH: the call is admitted and answered, so the only question left is whether
             // the answer is a result or a task — the operator's declaration crossed with the
             // caller's (SEP-2663).
             Admission::Go(admitted) if door_tasks::creates(&admitted.entry, params.as_ref()) => {
-                door_tasks::create(plane, ticket, principal, unit, &admitted, params.as_ref())
+                return Some(door_tasks::create(
+                    plane,
+                    ticket,
+                    principal,
+                    unit,
+                    &admitted,
+                    params.as_ref(),
+                ));
             }
             Admission::Go(admitted) => {
                 let Some(member) = unit.member.clone() else {
@@ -2128,23 +1830,15 @@ fn answer_body(
                     return Some(Step::Decline);
                 }
                 match send_to_member(plane, ticket, caller, unit, &held, &member, admitted)? {
-                    MemberSend::Step(step) => step,
-                    MemberSend::Decline => Step::Decline,
+                    MemberSend::Step(step) => return Some(step),
+                    MemberSend::Decline => return Some(Step::Decline),
                     MemberSend::Judged(admitted, refusal) => {
-                        let crate::call::Settled::Answer { status, body, line } =
+                        let Settled::Answer { status, body, line } =
                             crate::call::ask_refused(&admitted, &refusal)
                         else {
                             return None;
                         };
-                        unit.pending = Some(
-                            Pending::answer(status, body, unit.framing.as_ref(), &[]).logged(
-                                Some(&line),
-                                principal,
-                                generation,
-                                clock_s(services, ticket, unit),
-                            ),
-                        );
-                        Step::Write
+                        (status, body, Some(line), false)
                     }
                     MemberSend::Spent(admitted) => {
                         let refusal = crate::ask::AskRefusal::StateRejected(
@@ -2155,27 +1849,22 @@ fn answer_body(
                             refusal.audit_reason(),
                         );
                         let refusal = refusal.refusal(&admitted.id);
-                        unit.pending = Some(
-                            Pending::answer(
-                                refusal.status,
-                                refusal.body(),
-                                unit.framing.as_ref(),
-                                &[],
-                            )
-                            .logged(
-                                Some(&line),
-                                principal,
-                                generation,
-                                clock_s(services, ticket, unit),
-                            ),
-                        );
-                        Step::Write
+                        (refusal.status, refusal.body(), Some(line), false)
                     }
                 }
             }
+        };
+        let ts = clock_s(services, ticket, unit);
+        let pending = Pending::answer(status, body, unit.framing.as_ref(), &[]);
+        let pending = pending.logged(line.as_ref(), principal, generation, ts);
+        unit.pending = Some(if never_sent {
+            pending.unbilled()
+        } else {
+            pending
         });
+        return Some(Step::Write);
     }
-    // A tool the kernel's verdict hides ([`hides`]) is gone from the listing.
+    // A tool the kernel's verdict hides is gone from the listing.
     let answer = crate::answer::answer(
         &disposition,
         params.as_ref(),
@@ -2391,9 +2080,6 @@ fn child_record(member: &str, child: &crate::ask::ChildLeg) -> Vec<u8> {
     .into_bytes()
 }
 
-/// The record a relayed ask's work handle is settled with once its retry bound it.
-const CHILD_ANSWERED: &[u8] = b"a1|answered";
-
 /// The record a relayed ask's work handle is settled with when nobody came back for it.
 const CHILD_LAPSED: &[u8] = b"a1|lapsed";
 
@@ -2529,14 +2215,11 @@ fn open_child_work(
         std::task::Poll::Pending => ChildOpened::Pending,
         std::task::Poll::Ready(Ok(opened)) => {
             c.work = Some(opened.reference.to_string());
-            let mut fresh = None;
-            let h = door_tasks::handle(ticket, issued, &mut fresh);
-            let now_ms = services.clock_now(h).ok().map(|r| r.wall_ns / 1_000_000);
+            let now_ms = clock(Some(services), ticket, issued).map(|r| r.wall_ns / 1_000_000);
             // A failed clock read gives the handle no lapse (never one at the epoch): it is
             // settled at once and the ask refused (row 159 finding P-M4).
             let Some(now_ms) = now_ms else {
-                let mut fresh = None;
-                let h = door_tasks::handle(ticket, issued, &mut fresh);
+                let h = door_tasks::handle(ticket, issued, &mut None);
                 let _unheard = services.work_settle(h, opened.handle, CHILD_LAPSED);
                 *asked = None;
                 return ChildOpened::Refused(
@@ -2617,8 +2300,7 @@ fn sweep_relays(plane: &McpDoor, services: Services, ticket: Ticket, issued: &mu
         gone
     });
     for work in lapsed {
-        let mut fresh = None;
-        let h = door_tasks::handle(ticket, issued, &mut fresh);
+        let h = door_tasks::handle(ticket, issued, &mut None);
         let _unheard = services.work_settle(h, work, CHILD_LAPSED);
     }
 }
@@ -2626,15 +2308,17 @@ fn sweep_relays(plane: &McpDoor, services: Services, ticket: Ticket, issued: &mu
 /// A STDIO CHILD'S ASKS (their `ids`) REFUSED on its input in `refusal`'s words (the operator's
 /// round cap, or a relay the deployment cannot carry): the child is never left waiting on an answer
 /// nobody will give, and the call it serves is read on.
+/// `None` when the member is unregistered or its call is not relayed to a child.
 fn refuse_child(
     plane: &McpDoor,
     ticket: Ticket,
     member: &str,
-    def: &crate::tools_config::McpServerDefCfg,
-    program: &mut door_program::ProgramRelay,
+    def: Option<&crate::tools_config::McpServerDefCfg>,
+    program: Option<&mut door_program::ProgramRelay>,
     ids: &[Value],
     refusal: &crate::call::AskRefusal,
-) -> Step {
+) -> Option<Step> {
+    let (def, program) = (def?, program?);
     let replies = ids
         .iter()
         .map(|id| {
@@ -2646,10 +2330,12 @@ fn refuse_child(
             .unwrap_or_default()
         })
         .collect();
-    match door_program::refuse_asks(plane, ticket, member, def, program, replies) {
-        door_program::Far::Pending => Step::Pending,
-        _ => Step::Taken,
-    }
+    Some(
+        match door_program::refuse_asks(plane, ticket, member, def, program, replies) {
+            door_program::Far::Pending => Step::Pending,
+            _ => Step::Taken,
+        },
+    )
 }
 
 /// THE RETRY OF A STDIO CHILD'S RELAYED ASK binds the work handle the ask is correlated under: found
@@ -2694,7 +2380,7 @@ fn bind_child_work(
         }
     }
     let h = door_tasks::handle(ticket, &mut unit.issued, &mut st.settle);
-    match services.work_settle(h, st.handle, CHILD_ANSWERED) {
+    match services.work_settle(h, st.handle, b"a1|answered") {
         Poll::Pending => return Poll::Pending,
         Poll::Ready(Ok(())) => {}
         Poll::Ready(Err(_)) => return Poll::Ready(false),
@@ -2714,7 +2400,6 @@ impl Relay {
             far: Vec::new(),
             frames: Vec::new(),
             program: None,
-            scope: None,
             asked: None,
             work_slot: None,
             dispatched_ms: None,
@@ -2829,8 +2514,8 @@ fn send_to_member(
     // A member's token_exchange down-scope / passthrough lend rides its outbound
     // (Q-L3B-DOOR-EXCHANGE); a stdio child carries none.
     if relay.program.is_none() {
-        relay.scope = exchange_scope(services, ticket, unit, held, member, &relay.admitted);
-        scoped(&mut outbound.fields, relay.scope.as_deref());
+        let scope = exchange_scope(services, ticket, unit, held, member, &relay.admitted);
+        scoped(&mut outbound.fields, scope.as_deref());
         // THE CLIENT LADDER'S FIRST HOP is the walk's: the stateless request as it
         // always was, or, to an upstream busbar holds a session with, that request
         // lowered into the session ([`door_sessions::Negotiating`]).
@@ -2902,12 +2587,7 @@ fn exchange_scope(
         .map(|n| (door::SCOPE_TOOL, n.as_str()))
         .collect();
     ask_entitlements(services, ticket, unit, &grants);
-    let entitled = |name: &str| {
-        unit.entitled
-            .get(&format!("{}:{name}", door::SCOPE_TOOL))
-            .copied()
-            .unwrap_or(false)
-    };
+    let entitled = |name: &str| granted(&unit.entitled, door::SCOPE_TOOL, name);
     Some(crate::tool_scope::caller_downscope(
         &held.catalogue,
         member,
@@ -2951,35 +2631,12 @@ slot!(
         let member = input.field(|i| &i.member).as_str().unwrap_or_default().to_string();
         let caller = input.field(|i| &i.caller_ref).as_str().unwrap_or_default().to_string();
         let bytes = input.field(|i| &i.bytes).bytes();
-        let far_type = input
-            .head_fields()
-            .iter()
-            .find(|f| {
-                f.field(|f| &f.name)
-                    .as_str()
-                    .is_ok_and(|n| n.eq_ignore_ascii_case(CONTENT_TYPE))
-            })
-            .and_then(|f| f.field(|f| &f.value).as_str().ok().map(str::to_string));
+        let far_type = head(input.head_fields(), CONTENT_TYPE);
         // A session revision's far end names its session in its head.
-        let far_session = input
-            .head_fields()
-            .iter()
-            .find(|f| {
-                f.field(|f| &f.name)
-                    .as_str()
-                    .is_ok_and(|n| n.eq_ignore_ascii_case(crate::adapt::H_SESSION_ID))
-            })
-            .and_then(|f| f.field(|f| &f.value).as_str().ok().map(str::to_string));
+        let far_session = head(input.head_fields(), crate::adapt::H_SESSION_ID).map(str::to_string);
         // A stdio member's lease names the generation of the child it reached in its head.
-        let far_generation = input
-            .head_fields()
-            .iter()
-            .find(|f| {
-                f.field(|f| &f.name).as_str().is_ok_and(|n| {
-                    n.eq_ignore_ascii_case(busbar_contract::conn::PROGRAM_GENERATION_FIELD)
-                })
-            })
-            .and_then(|f| f.field(|f| &f.value).as_str().ok()?.trim().parse::<u64>().ok());
+        let far_generation = head(input.head_fields(), busbar_contract::conn::PROGRAM_GENERATION_FIELD)
+            .and_then(|v| v.trim().parse::<u64>().ok());
         let step = plane.units.with(&key, |unit| {
             let unit = unit?;
             unit.ticket = Some(ticket);
@@ -3010,6 +2667,7 @@ slot!(
                 FROM_CALLER => answer_body(&instance, plane, ticket, &caller, unit),
                 FROM_FAR_END => {
                     let held = unit.held.clone();
+                    let generation = held.as_ref().map_or(0, |h| h.catalogue.generation());
                     let framing = unit.framing.clone();
                     let task_run = door_tasks::is_run(unit);
                     let relay = unit.relay.as_mut()?;
@@ -3041,62 +2699,37 @@ slot!(
                                 plane, ticket, member, def, program, head, bytes, last,
                             );
                             let wait = program.wait;
-                            let progress = door_program::progress(program);
+                            relay.frames.extend(door_program::progress(program));
                             match far {
-                                door_program::Far::Taken => {
-                                    relay.frames.extend(progress);
-                                    return Some(Step::Taken);
-                                }
-                                door_program::Far::Pending => {
-                                    relay.frames.extend(progress);
-                                    return Some(Step::Pending);
-                                }
+                                door_program::Far::Taken => return Some(Step::Taken),
+                                door_program::Far::Pending => return Some(Step::Pending),
                                 // THE CHILD ASKED busbar's caller (Law 11): its requests, verbatim,
                                 // are relayed under the call's next round; past the operator's round
                                 // cap they are refused on the child's input and the call read on.
                                 door_program::Far::Asked(asks) => {
-                                    relay.frames.extend(progress);
                                     let cap = def.max_input_required_rounds.unwrap_or(
                                         crate::tools_config::DEFAULT_MAX_INPUT_REQUIRED_ROUNDS,
                                     );
-                                    if relay.round >= cap {
-                                        let refusal = crate::call::AskRefusal::RoundCapExceeded {
-                                            server: relay.admitted.entry.server.clone(),
-                                            cap,
-                                        };
-                                        let ids: Vec<Value> =
-                                            asks.into_iter().map(|a| a.id).collect();
-                                        return Some(refuse_child(
-                                            plane, ticket, member, def, program, &ids, &refusal,
-                                        ));
-                                    }
                                     // An ask past the operator's `sampling_bounds` is refused by
                                     // name on the child's input, as the round cap is.
-                                    if let Err(refusal) =
-                                        crate::tool_program::judge_child_asks(
-                                            &relay.admitted.entry.server,
-                                            def,
-                                            &asks,
-                                        )
-                                    {
+                                    let server = &relay.admitted.entry.server;
+                                    let judged = if relay.round >= cap {
+                                        Err(crate::call::AskRefusal::RoundCapExceeded {
+                                            server: server.clone(),
+                                            cap,
+                                        })
+                                    } else {
+                                        crate::tool_program::judge_child_asks(server, def, &asks)
+                                    };
+                                    if let Err(refusal) = judged {
                                         let ids: Vec<Value> =
                                             asks.into_iter().map(|a| a.id).collect();
-                                        return Some(refuse_child(
-                                            plane, ticket, member, def, program, &ids, &refusal,
-                                        ));
+                                        let (def, program) = (Some(def), Some(program));
+                                        return refuse_child(plane, ticket, member, def, program, &ids, &refusal);
                                     }
                                     // The child still serves the call: its place in the line
                                     // is held for the retry, until the ask's state lapses.
-                                    if let Some(now) = plane
-                                        .services
-                                        .and_then(|s| {
-                                            s.clock_now(door_tasks::handle(
-                                                ticket,
-                                                &mut unit.issued,
-                                                &mut None,
-                                            ))
-                                            .ok()
-                                        })
+                                    if let Some(now) = clock(plane.services, ticket, &mut unit.issued)
                                         .map(|r| r.mono_ns / 1_000_000)
                                     {
                                         program.hold(now.saturating_add(
@@ -3116,7 +2749,6 @@ slot!(
                                     }
                                 }
                                 door_program::Far::Settled(Ok(answer)) => {
-                                    relay.frames.extend(progress);
                                     relay.status = 200;
                                     relay.far = answer;
                                     crate::call::settle_call_as(
@@ -3130,7 +2762,6 @@ slot!(
                                     )
                                 }
                                 door_program::Far::Settled(Err(reason)) => {
-                                    relay.frames.extend(progress);
                                     relay.status = 0;
                                     crate::call::upstream_failed(&relay.admitted, &reason)
                                 }
@@ -3145,7 +2776,6 @@ slot!(
                                 if piece.flags & PIECE_HAS_STATUS != 0 {
                                     relay.status = piece.status_code;
                                     relay.sse = far_type
-                                        .as_deref()
                                         .is_some_and(|t| t.starts_with(EVENT_STREAM));
                                     if let Some(n) = unit.negotiating.as_mut() {
                                         n.walk_session = far_session.clone();
@@ -3221,25 +2851,17 @@ slot!(
                                     Some(reason) => {
                                         crate::call::upstream_failed(&relay.admitted, &reason)
                                     }
-                                    None => match sent {
-                                        Some(id) => crate::call::settle_call_as(
-                                            &relay.admitted,
-                                            def,
-                                            relay.status,
-                                            &relay.far,
-                                            relay.sse,
+                                    None => crate::call::settle_call_as(
+                                        &relay.admitted,
+                                        def,
+                                        relay.status,
+                                        &relay.far,
+                                        relay.sse,
+                                        relay.round,
+                                        sent.unwrap_or(crate::client::jsonrpc::dispatch_request_id(
                                             relay.round,
-                                            id,
-                                        ),
-                                        None => crate::call::settle_call(
-                                            &relay.admitted,
-                                            def,
-                                            relay.status,
-                                            &relay.far,
-                                            relay.sse,
-                                            relay.round,
-                                        ),
-                                    },
+                                        )),
+                                    ),
                                 }
                             }
                         }
@@ -3274,15 +2896,8 @@ slot!(
                                         ChildOpened::Refused(c, refusal) => {
                                             let ids: Vec<Value> =
                                                 c.asks.iter().map(|(_, id)| id.clone()).collect();
-                                            let (Some(def), Some(program)) =
-                                                (def, relay.program.as_mut())
-                                            else {
-                                                return None;
-                                            };
-                                            return Some(refuse_child(
-                                                plane, ticket, &member, def, program, &ids,
-                                                &refusal,
-                                            ));
+                                            let program = relay.program.as_mut();
+                                            return refuse_child(plane, ticket, &member, def, program, &ids, &refusal);
                                         }
                                     }
                                 }
@@ -3308,7 +2923,6 @@ slot!(
                             child,
                         } => {
                             let member = unit.member.clone().unwrap_or_default();
-                            let generation = held.as_ref().map_or(0, |h| h.catalogue.generation());
                             let asked = relay_ask(
                                 plane,
                                 ticket,
@@ -3323,13 +2937,8 @@ slot!(
                                 // The child is told, and the call it serves read on.
                                 Relayed::RefuseChild(ids, refusal) => {
                                     let member = unit.member.as_deref().unwrap_or_default();
-                                    let (Some(def), Some(program)) = (def, relay.program.as_mut())
-                                    else {
-                                        return None;
-                                    };
-                                    return Some(refuse_child(
-                                        plane, ticket, member, def, program, &ids, &refusal,
-                                    ));
+                                    let program = relay.program.as_mut();
+                                    return refuse_child(plane, ticket, member, def, program, &ids, &refusal);
                                 }
                             }
                         }
@@ -3337,7 +2946,9 @@ slot!(
                     };
                     if relay.sse {
                         frames.extend(crate::call::progress_frames(&relay.far));
-                        frames.truncate(MAX_PROGRESS_FRAMES);
+                        // A progress stream is untrusted upstream input: at most 256 frames across
+                        // every round of one call, as the served engine bounded it.
+                        frames.truncate(256);
                         // What the upstream said beside its answer: its resource updates reach the
                         // sessions watching them, its log records the caller's own session.
                         let server = unit.member.clone().unwrap_or_default();
@@ -3354,7 +2965,6 @@ slot!(
                             in_session.as_deref().zip(now).map(|(s, now)| (s, &owner, now)),
                         );
                     }
-                    let progress = frames;
                     let Settled::Answer { status, body, line } = settled else {
                         return None;
                     };
@@ -3367,25 +2977,16 @@ slot!(
                             plane, ticket, principal, unit, leg, answered, &body,
                         ));
                     }
-                    let progress = relay_progress(&relay.admitted, progress);
-                    let scope = if caller.is_empty() {
-                        crate::ask::UNGOVERNED
-                    } else {
-                        caller.as_str()
-                    };
-                    let generation = held.as_ref().map_or(0, |h| h.catalogue.generation());
+                    let progress = relay_progress(&relay.admitted, frames);
                     let answered = relay.status != 0;
                     let far_len = relay.far.len();
                     let ts = clock_s(plane.services, ticket, unit);
                     let mut pending = Pending::answer(status, body, framing.as_ref(), &progress)
-                        .logged(Some(&line), scope, generation, ts);
+                        .logged(Some(&line), principal, generation, ts);
                     for _ in 0..dropped_replies {
                         pending = pending.audited(crate::call::AuditRow {
                             action: door_legacy::ACTION_REPLY_DROPPED,
-                            resource: format!(
-                                "mcp_server:{}",
-                                unit.member.as_deref().unwrap_or_default()
-                            ),
+                            resource: server_lane(unit.member.as_deref().unwrap_or_default()),
                             applied: false,
                         });
                     }
@@ -3433,8 +3034,7 @@ slot!(
                     Some(write(&input, &mut out, pending))
                 });
                 match finished {
-                    None => Outcome::Failed,
-                    Some(Err(())) => Outcome::Failed,
+                    None | Some(Err(())) => Outcome::Failed,
                     Some(Ok(Written::More)) => Outcome::Ready,
                     Some(Ok(Written::Sent)) => {
                         plane.units.with(&key, |unit| {
@@ -3466,6 +3066,21 @@ fn relay_progress(admitted: &AdmittedCall, mut frames: Vec<Value>) -> Vec<Value>
         }
     }
     frames
+}
+
+/// An admin audit row as the `RECORD_AUDIT` write it rides as (the kernel folds it into its own
+/// audit chain under the principal it verified).
+fn audit_write(arena: &mut HostBuf<'_, u8>, row: &crate::call::AuditRow) -> RecordWrite {
+    RecordWrite {
+        kind: if row.applied {
+            AUDIT_APPLIED
+        } else {
+            AUDIT_REJECTED
+        },
+        op: RECORD_AUDIT,
+        key: arena.span(row.action.as_bytes()),
+        value: arena.span(row.resource.as_bytes()),
+    }
 }
 
 /// What one write came to.
@@ -3507,16 +3122,7 @@ fn write(
             });
         }
         for row in &pending.audits {
-            records.push(RecordWrite {
-                kind: if row.applied {
-                    AUDIT_APPLIED
-                } else {
-                    AUDIT_REJECTED
-                },
-                op: RECORD_AUDIT,
-                key: arena.span(row.action.as_bytes()),
-                value: arena.span(row.resource.as_bytes()),
-            });
+            records.push(audit_write(&mut arena, row));
         }
         let lane = pending
             .lane
@@ -3581,14 +3187,29 @@ slot!(
     /// rendered as the one error envelope with no id.
     RefusalSlot, RefusalIn, RefusalOut, |instance, input, mut out| {
         let given = input.get();
-        // The request id the refused unit's caller sent, where its arrival read one: an answer the
-        // caller cannot correlate is not an answer.
-        let unit_id = instance.get().and_then(|plane| {
-            plane.units.with(&given.unit, |unit| match unit.map(|u| &u.disposition) {
-                Some(Disposition::Request { id, .. }) => Some(id.clone()),
-                _ => None,
+        // What the refused unit's arrival read: the request id its caller sent (an answer the
+        // caller cannot correlate is not an answer), the tool a refused `tools/call` named, and
+        // what it is to the tasks extension: a call that would have created a task (its budget
+        // refusal is the served engine's task-path words), or a task's continuation (its task
+        // fails).
+        let (unit_id, called, creates_task, run_reference) = instance
+            .get()
+            .and_then(|plane| {
+                plane.units.with(&given.unit, |unit| {
+                    let unit = unit?;
+                    let (id, called) = match &unit.disposition {
+                        Disposition::Request { row, id } => (
+                            Some(id.clone()),
+                            (row.op == crate::tool_ops::OP_TOOL_CALL)
+                                .then(|| unit.params.as_ref()?.get("name")?.as_str().map(str::to_string))
+                                .flatten(),
+                        ),
+                        _ => (None, None),
+                    };
+                    Some((id, called, door_tasks::creates_task(unit), door_tasks::run_reference(unit)))
+                })
             })
-        });
+            .unwrap_or_default();
         // THE WORDS the refusal is said in: the kernel's text, but for the walk's exhaustion (an open
         // breaker, a walk out of members or out of time) the reason's own word, as predev's door said
         // it, wherever this door repeats the words (its generic error, a task's failure): the
@@ -3596,36 +3217,16 @@ slot!(
         let text: &[u8] = if given.cause != REFUSAL_ARRIVE
             && given.reason == busbar_contract::abi::plane::RefusalCode::BreakerOpen.code()
         {
-            BREAKER_OPEN_WORD.as_bytes()
+            // `RefusalCode::BreakerOpen`'s word (`caps` is kernel-side, never named here).
+            b"breaker_open"
         } else {
             input.field(|i| &i.text).bytes()
         };
-        // The tool a refused `tools/call` named, where its arrival read one.
-        let called = instance.get().and_then(|plane| {
-            plane.units.with(&given.unit, |unit| {
-                let unit = unit?;
-                matches!(&unit.disposition, Disposition::Request { row, .. }
-                    if row.op == crate::tool_ops::OP_TOOL_CALL)
-                .then(|| unit.params.as_ref()?.get("name")?.as_str().map(str::to_string))
-                .flatten()
-            })
-        });
         // The registration the refused call resolved to (its server), where the catalogue holds it.
         let called_server = instance.get().and_then(|plane| {
             let held = plane.current()?;
             Some(held.catalogue.tool(called.as_deref()?)?.server.clone())
         });
-        // What the refused unit is to the tasks extension: a call that would have created a task
-        // (its budget refusal is the served engine's task-path words), or a task's continuation
-        // (its task fails).
-        let (creates_task, run_reference) = instance
-            .get()
-            .and_then(|plane| {
-                plane.units.with(&given.unit, |unit| {
-                    unit.map(|u| (door_tasks::creates_task(u), door_tasks::run_reference(u)))
-                })
-            })
-            .unwrap_or((false, None));
         if let (Some(plane), Some(reference)) = (instance.get(), run_reference.as_deref()) {
             let message = std::str::from_utf8(text).unwrap_or_default();
             door_tasks::continuation_refused(plane, given.unit, reference, message);
@@ -3643,19 +3244,16 @@ slot!(
             // `0`: the kernel's status stands.
             (0, body.to_vec(), false)
         } else if given.cause == REFUSAL_ARRIVE {
-            match words_of(text) {
-                Some(Words::Rpc(refusal)) => (refusal.status, refusal.body(), false),
-                Some(Words::NotAllowed) => (
-                    door::STATUS_METHOD_NOT_ALLOWED,
-                    door::method_not_allowed_body(),
-                    true,
-                ),
-                Some(Words::ForbiddenOrigin) => (
-                    door::STATUS_FORBIDDEN_ORIGIN,
-                    door::forbidden_origin_body(),
-                    false,
-                ),
-                None => return Outcome::Failed,
+            // A refused arrival's words read back.
+            if text == NOT_ALLOWED_TEXT.as_bytes() {
+                (door::STATUS_METHOD_NOT_ALLOWED, door::method_not_allowed_body(), true)
+            } else if text == FORBIDDEN_ORIGIN_TEXT.as_bytes() {
+                (door::STATUS_FORBIDDEN_ORIGIN, door::forbidden_origin_body(), false)
+            } else {
+                let Ok(refusal) = serde_json::from_slice::<crate::tool_arrival::Refusal>(text) else {
+                    return Outcome::Failed;
+                };
+                (refusal.status, refusal.body(), false)
             }
         } else {
             let message = std::str::from_utf8(text).unwrap_or_default();
@@ -3712,7 +3310,7 @@ slot!(
                     )
                 };
                 let refusal = crate::tool_arrival::Refusal {
-                    status: STATUS_UNAVAILABLE_UPSTREAM,
+                    status: 503,
                     id: unit_id.clone(),
                     code: crate::codec::CODE_UPSTREAM_UNAVAILABLE,
                     message,
@@ -3788,16 +3386,7 @@ slot!(
         }
         let mut records = input.records_buf();
         if let Some(row) = &audit {
-            records.push(RecordWrite {
-                kind: if row.applied {
-                    AUDIT_APPLIED
-                } else {
-                    AUDIT_REJECTED
-                },
-                op: RECORD_AUDIT,
-                key: arena.span(row.action.as_bytes()),
-                value: arena.span(row.resource.as_bytes()),
-            });
+            records.push(audit_write(&mut arena, row));
         }
         let short = !(reply.fits() && field_buf.fits() && arena.fits() && records.fits());
         let (rw, rnd) = reply.settle(short);
@@ -3825,9 +3414,6 @@ slot!(
     }
 );
 
-/// The status of a call no member of its server's pool could be sent to (its breaker is open).
-const STATUS_UNAVAILABLE_UPSTREAM: u32 = 503;
-
 /// The server name a trust verb's target names (`/tools/{name}/<verb>`), its query cut.
 fn verb_subject(target: &[u8]) -> Option<String> {
     let path = std::str::from_utf8(target).ok()?;
@@ -3841,15 +3427,9 @@ fn verb_subject(target: &[u8]) -> Option<String> {
 struct Sighted(crate::trust::Sighting);
 
 /// The completion handle `trust.sight` is issued on: past every handle the connect's exchange
-/// issues on the request's ticket.
+/// issues on the request's ticket. Past it: a `connect`'s clock reading at `+1`, an admin view's
+/// `trust.state` at `+2`, and `connect`'s per-tool `trust.sight_item`s from `+3`.
 const SIGHT_SEQ: u32 = 1 << 30;
-
-/// The completion handle a `connect`'s clock reading is issued on: past `trust.sight`'s.
-const CONNECT_CLOCK_SEQ: u32 = SIGHT_SEQ + 1;
-/// The handle seq an admin view reads the kernel's trust state on (`trust.state`).
-const STATE_SEQ: u32 = SIGHT_SEQ + 2;
-/// The first handle seq `connect`'s per-tool sightings (`trust.sight_item`) take.
-const ITEM_SEQ: u32 = SIGHT_SEQ + 3;
 
 /// The first handle verify-on-call's fetch numbers its connector services from on a unit's ticket:
 /// clear of the unit's own handles (counted from `0`) and of the further rounds'.
@@ -3906,11 +3486,6 @@ fn exchange_at(
 /// The JSON-RPC id a `connect`'s `tools/list` carries: one request, correlated by this id.
 const CONNECT_REQUEST_ID: u64 = 1;
 
-/// The binding an operator `connect`'s conversation is kept under: never a caller reference (those
-/// are the kernel's opaque hex, or empty for the ungoverned chain), so the operator's upstream
-/// session is never a caller's (row 159 finding 3).
-const CONNECT_BINDING: &str = "operator:connect";
-
 /// THE SIGHTING a `connect`'s exchange landed: the server's tool list re-hashed, or why the contact
 /// failed, in the served engine's words.
 fn sighting_of(
@@ -3923,7 +3498,7 @@ fn sighting_of(
         Ok(r) => r,
         Err(reason) => return Sighting::Failed(reason),
     };
-    let failed = |reason: String| Sighting::Failed(reason);
+    let failed = Sighting::Failed;
     match parse_response(&response.body, sent_id) {
         RpcOutcome::Result(value) => match crate::trust::observe(&value) {
             Ok(obs) => Sighting::Seen(obs),
@@ -3950,18 +3525,6 @@ fn sighting_of(
     }
 }
 
-/// Write a trust verb's answer: `status` and `body` (`content_type`), and the audit outcome.
-fn served(
-    input: &Lent<'_, ServeIn>,
-    out: &mut Out<'_, ServeOut>,
-    status: u32,
-    body: &[u8],
-    content_type: &str,
-    audit: u32,
-) -> Outcome {
-    out.answer(input, status, &[(CONTENT_TYPE, content_type)], body, audit)
-}
-
 slot!(
     /// `serve`: the trust verbs over the section's registrations (ARCHITECT Q-L3B-VERBS):
     /// `connect` fetches the server's live tool list over the door's own need, re-hashes it, records
@@ -3972,7 +3535,6 @@ slot!(
     /// belongs to a caller, and an operator's refresh has none). An error answer's body is the
     /// operator-facing message alone: the kernel frames it in the admin taxonomy.
     Serve, ServeIn, ServeOut, |instance, input, mut out| {
-        use busbar_contract::abi::plane::{AUDIT_APPLIED, AUDIT_REJECTED};
         use crate::trust::Sighting;
         let Some(plane) = instance.get() else {
             return Outcome::Failed;
@@ -3980,28 +3542,25 @@ slot!(
         let route = input.get().route as usize;
         let held = plane.current();
         let name = verb_subject(input.field(|i| &i.target).bytes());
+        let verb = door::ADMIN_VERBS.get(route).map_or("", |(_, t)| t.rsplit('/').next().unwrap_or(""));
         let found = held
             .as_ref()
             .zip(name.as_ref())
-            .and_then(|(h, n)| h.section.servers.get(n).cloned().map(|d| (h, n, d)));
+            .and_then(|(h, n)| h.section.servers.get(n).cloned().map(|d| (h, n, d)))
+            .filter(|_| matches!(verb, "changes" | "health" | "connect"));
         let Some((held, name, def)) = found else {
-            return served(&input, &mut out, crate::tool_arrival::STATUS_NOT_FOUND, b"", "text/plain", 0);
+            let not_found = crate::tool_arrival::STATUS_NOT_FOUND;
+            return out.answer(&input, not_found, &[(CONTENT_TYPE, "text/plain")], b"", 0);
         };
-        let verb = door::ADMIN_VERBS.get(route).map_or("", |(_, t)| t.rsplit('/').next().unwrap_or(""));
-        let last = plane.sightings.get(name).unwrap_or_default();
-        match verb {
-            "changes" => {
-                let items = kernel_items(plane, instance.ticket(), name);
-                let view = crate::trust::trust_view(name, &def, &last, &items);
-                return served(&input, &mut out, 200, view.as_bytes(), JSON, 0);
-            }
-            "health" => {
-                let items = kernel_items(plane, instance.ticket(), name);
-                let view = crate::trust::health_view(name, &last, &items);
-                return served(&input, &mut out, 200, view.as_bytes(), JSON, 0);
-            }
-            "connect" => {}
-            _ => return served(&input, &mut out, crate::tool_arrival::STATUS_NOT_FOUND, b"", "text/plain", 0),
+        if verb != "connect" {
+            let last = plane.sightings.get(name).unwrap_or_default();
+            let items = kernel_items(plane, instance.ticket(), name);
+            let view = if verb == "changes" {
+                crate::trust::trust_view(name, &def, &last, &items)
+            } else {
+                crate::trust::health_view(name, &last, &items)
+            };
+            return out.answer(&input, 200, &[(CONTENT_TYPE, JSON)], view.as_bytes(), 0);
         }
         if held.section.effective_upstream_credentials(name)
             == Some(busbar_contract::config::UpstreamCreds::Passthrough)
@@ -4011,7 +3570,8 @@ slot!(
                  credential belongs to a caller; an operator-driven refresh has no caller and \
                  busbar will not substitute its own"
             );
-            return served(&input, &mut out, 400, message.as_bytes(), "text/plain", AUDIT_REJECTED);
+            let plain = [(CONTENT_TYPE, "text/plain")];
+            return out.answer(&input, 400, &plain, message.as_bytes(), AUDIT_REJECTED);
         }
         // THE FETCH, unless a pause on the trust book already holds what it landed.
         let sighting = match instance.resume::<Sighted>() {
@@ -4062,7 +3622,9 @@ slot!(
                     &instance,
                     plane,
                     &mut slot,
-                    (0, name.as_str(), CONNECT_BINDING, def.timeout_ms()),
+                    // The operator's own binding, never a caller reference (those are the kernel's
+                    // opaque hex, or empty), so its upstream session is never a caller's.
+                    (0, name.as_str(), "operator:connect", def.timeout_ms()),
                     request,
                 );
                 let std::task::Poll::Ready(answer) = answer else {
@@ -4077,26 +3639,10 @@ slot!(
         // THE KERNEL'S TRUST BOOK records the observed catalogue (it stamps the re-verification
         // clock); the answer is the plane's comparison, which is what the operator is looking at.
         if let Some(services) = plane.services {
-            let handle = CompletionHandle {
-                ticket: instance.ticket(),
-                seq: SIGHT_SEQ,
-                _reserved: 0,
-            };
-            let sighted = match &sighting {
-                Sighting::Seen(obs) => {
-                    services.trust_sight(handle, name, &crate::trust::catalogue_hash(obs))
-                }
-                // An unreachable server is reported as such: the kernel keeps its last verdict.
-                Sighting::Failed(_) => services.trust_unreachable(handle, name),
-                Sighting::Never => std::task::Poll::Ready(Ok(0)),
-            };
-            if sighted.is_pending() {
+            let mut seq = SIGHT_SEQ + 3;
+            if record_sighting(&services, instance.ticket(), &mut seq, &held.catalogue, name, &sighting) {
                 instance.park(Sighted(sighting));
                 return Outcome::Pending;
-            }
-            if let Sighting::Seen(obs) = &sighting {
-                let mut seq = ITEM_SEQ;
-                sight_items(&services, instance.ticket(), &mut seq, &held.catalogue, name, obs);
             }
         }
         plane.sightings.insert(name.clone(), sighting.clone());
@@ -4106,18 +3652,13 @@ slot!(
         // answered "never sent" off the operator's failed refresh for `verify_ttl`.
         plane.checked.remove(name);
         if let (Some(services), Sighting::Seen(_)) = (plane.services, &sighting) {
-            let handle = CompletionHandle {
-                ticket: instance.ticket(),
-                seq: CONNECT_CLOCK_SEQ,
-                _reserved: 0,
-            };
-            if let Ok(now) = services.clock_now(handle) {
+            if let Ok(now) = services.clock_now(handle_at(instance.ticket(), SIGHT_SEQ + 1)) {
                 plane.checked.insert(name.clone(), now.wall_ns / 1_000_000);
             }
         }
         let items = kernel_items(plane, instance.ticket(), name);
         let view = crate::trust::trust_view(name, &def, &sighting, &items);
-        served(&input, &mut out, 200, view.as_bytes(), JSON, AUDIT_APPLIED)
+        out.answer(&input, 200, &[(CONTENT_TYPE, JSON)], view.as_bytes(), AUDIT_APPLIED)
     }
 );
 
@@ -4183,15 +3724,7 @@ slot!(
             .unwrap_or_default();
         // THE SESSION an incremental gate scan is keyed on: the caller's `x-session-id`, as the
         // served engine read it; none when the caller sent none.
-        let session = input
-            .fields()
-            .iter()
-            .find(|f| {
-                f.field(|f| &f.name)
-                    .as_str()
-                    .is_ok_and(|n| n.eq_ignore_ascii_case(SESSION_FIELD))
-            })
-            .and_then(|f| f.field(|f| &f.value).as_str().ok())
+        let session = head(input.fields(), "x-session-id")
             .filter(|v| !v.is_empty())
             .map(str::to_string);
         let projected = serde_json::to_vec(&serde_json::json!({
