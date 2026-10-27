@@ -1,25 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! ONE UPSTREAM CALL, NEGOTIATED: the client ladder as a sans-I/O state machine (OWNER 2026-09-29
-//! compat scope, both directions).
-//!
-//! busbar builds every request in the stateless `2026-07-28` shape. [`Negotiator`] carries ONE such
-//! request to an upstream whose revision busbar may not know, and says, one [`Action`] at a time,
-//! what the driver must put on the wire: the stateless request itself; on a refusal an `initialize`
-//! and `notifications/initialized` and then the request lowered into the session revision the
-//! upstream chose; and on a refusal of `initialize`, [`Action::OpenStream`]: the driver carries the
-//! call over the `2024-11-05` event stream itself (`door_legacy`).
-//!
-//! [`Action::Send`]: POST the request; feed the answer to [`Negotiator::on_answer`] as a
-//! [`HopAnswer`], or `None` when there was no answer at all. [`Action::Finish`] is the answer to hand
-//! back; [`Negotiator::remembered`] is what to keep for the next call to this upstream.
+//! ONE UPSTREAM CALL, NEGOTIATED: the client ladder as a sans-I/O state machine. [`Negotiator`]
+//! carries one stateless request and says, one [`Action`] at a time, what to put on the wire: the
+//! request itself; on a refusal `initialize`, `notifications/initialized` and the request lowered
+//! into the revision the upstream chose; on a refusal of `initialize`, [`Action::OpenStream`] (the
+//! driver carries the call over the `2024-11-05` event stream, `door_legacy`).
 
 use serde_json::Value;
 
 use super::compat::{
     initialize_request, initialized_notification, lower_request, offered_revision, probe_outcome,
-    stateless_outcome, H_SESSION,
+    stateless_outcome,
 };
 use super::jsonrpc::OutboundRequest;
 use crate::revision::{self, Revision, StepOutcome};
@@ -70,8 +62,6 @@ pub enum Action {
     },
     /// Carry the call over the `2024-11-05` event stream.
     OpenStream,
-    /// Read the next event off the open stream.
-    AwaitEvent,
     /// The answer to hand back.
     Finish(HopAnswer),
     /// Stop.
@@ -92,13 +82,6 @@ enum Phase {
     },
     Done,
 }
-
-/// The id busbar's own `initialize` carries, on a session upstream and on a `2024-11-05` stream:
-/// `2^53 - 1`, the largest integer a JavaScript peer reads back exactly (an id past it comes back
-/// rounded and correlates with nothing). Busbar's other request ids stay below it: a stateless
-/// round's ([`super::jsonrpc::dispatch_request_id`]), a session's own from
-/// [`crate::tool_sessions::SESSION_FIRST_ID`] (`2^32`) up, a held stream's from `1` up.
-pub(crate) const INITIALIZE_ID: u64 = (1 << 53) - 1;
 
 /// ONE CALL'S NEGOTIATION. See the module header for the driver's side.
 #[derive(Debug)]
@@ -142,8 +125,7 @@ impl Negotiator {
     }
 
     /// The id a request lowered into the remembered session carries: that session's next id
-    /// (`UpstreamTable::next_id`), never the stateless round's, which every call shares (row 159
-    /// finding 3). `None`: the original's id.
+    /// (`UpstreamTable::next_id`), never the stateless round's. `None`: the original's id.
     #[must_use]
     pub fn with_session_id(mut self, id: Option<u64>) -> Self {
         self.session_id = id;
@@ -173,12 +155,9 @@ impl Negotiator {
     /// The first action.
     pub fn start(&mut self) -> Action {
         match self.remembered.clone() {
-            None => self.send(Phase::Probe, self.original.clone()),
-            Some(r) if r.revision == Revision::R2026_07_28 => {
-                self.send(Phase::Probe, self.original.clone())
-            }
             Some(r) if r.revision.is_event_stream_revision() => self.open_stream(),
-            Some(r) => self.in_session(r.revision, r.session),
+            Some(r) if r.revision.has_sessions() => self.in_session(r.revision, r.session),
+            _ => self.send(Phase::Probe, self.original.clone()),
         }
     }
 
@@ -188,22 +167,12 @@ impl Negotiator {
     }
 
     fn in_session(&mut self, revision: Revision, session: Option<String>) -> Action {
-        let url = self.original.url.clone();
-        let mut request = lower_request(&self.original, &url, revision, session.as_deref());
         // A REQUEST IN A SESSION CARRIES THAT SESSION'S OWN NEXT ID, never the stateless round's
-        // that every concurrent call carries: a session revision forbids reusing an id, and a server
-        // that maps ids to answers would hand one call's answer to another.
-        if let (Some(id), Some(_)) = (self.session_id, self.original_id.as_ref()) {
-            if let Ok(mut body) = serde_json::from_slice::<Value>(&request.body) {
-                if let Some(obj) = body.as_object_mut() {
-                    obj.insert("id".to_string(), Value::from(id));
-                    if let Ok(bytes) = serde_json::to_vec(&body) {
-                        request.body = bytes;
-                        self.sent_id = Some(id);
-                    }
-                }
-            }
-        }
+        // that every concurrent call carries.
+        let id = self.session_id.filter(|_| self.original_id.is_some());
+        let (original, url) = (&self.original, &self.original.url);
+        let request = lower_request(original, url, revision, session.as_deref(), id);
+        self.sent_id = id;
         self.send(Phase::InSession { revision, session }, request)
     }
 
@@ -212,7 +181,6 @@ impl Negotiator {
             &self.original,
             &self.original.url,
             revision::SESSION_REVISIONS[0],
-            INITIALIZE_ID,
             &self.client_version,
         );
         self.send(Phase::Initialize, request)
@@ -244,7 +212,6 @@ impl Negotiator {
                     self.remembered = Some(Remembered {
                         revision: Revision::R2026_07_28,
                         session: None,
-                        message_address: None,
                     });
                     self.finish(answer)
                 }
@@ -261,10 +228,10 @@ impl Negotiator {
                         if r.is_event_stream_revision() {
                             return self.fail(Refusal::OfferedUnsupported);
                         }
-                        let session = answer.field(H_SESSION).map(str::to_string);
-                        let url = self.original.url.clone();
+                        let session = answer.field(crate::adapt::H_SESSION_ID).map(str::to_string);
+                        let (original, url) = (&self.original, &self.original.url);
                         let request =
-                            initialized_notification(&self.original, &url, r, session.as_deref());
+                            initialized_notification(original, url, r, session.as_deref());
                         return self.send(
                             Phase::Initialized {
                                 revision: r,
@@ -287,7 +254,6 @@ impl Negotiator {
                 self.remembered = Some(Remembered {
                     revision,
                     session: session.clone(),
-                    message_address: None,
                 });
                 self.in_session(revision, session)
             }
@@ -301,7 +267,7 @@ impl Negotiator {
                 }
                 self.finish(answer)
             }
-            Phase::Done => Action::AwaitEvent,
+            Phase::Done => Action::OpenStream,
         }
     }
 }

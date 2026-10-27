@@ -1,68 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! SESSION STATE FOR THE SESSION REVISIONS: plane state, bounded, and bound to its owner.
+//! SESSION STATE FOR THE SESSION REVISIONS: plane state, per process, bounded, and bound to its
+//! owner. No statics, no clock (the caller passes `now_ms`), no randomness (the caller passes the
+//! entropy).
 //!
-//! The `2025-06-18`, `2025-11-25` and `2024-11-05` revisions open a conversation with `initialize`
-//! and keep it in a session the server names. That state belongs to this plane and to no other
-//! kind, and it is held here as a plain value with `&mut` methods: the caller owns the one table per
-//! plane instance and serialises access to it. Nothing here is process-global (no statics), reads a
-//! clock (the caller passes `now_ms`), or draws randomness (the caller passes the entropy).
-//!
-//! ## Bounded, in count and in bytes, with eviction
-//!
-//! A session costs memory for as long as it lives, and a client that never sends DELETE never gives
-//! it back. So every dimension has a ceiling in [`Bounds`]:
-//!
-//! - `max_owner_sessions`: an owner opening one more evicts ITS OWN least recently used session.
-//! - `max_sessions`: when the whole table is full, the opener's own least recently used session
-//!   gives way; an opener with none is refused ([`OpenRefused::Full`]).
-//! - `idle_ms`: a session untouched for this long is gone at the next lookup or sweep.
-//! - `max_session_bytes`: a session's buffered events are trimmed OLDEST FIRST to fit. A trimmed
-//!   event can no longer be replayed; the replay says so instead of pretending the tail is whole.
-//! - `max_owner_bytes` and `max_total_bytes`: an owner over its byte share, or a table over its
-//!   total, is brought back under by evicting THAT OWNER'S other sessions, least recently used
-//!   first, then trimming the session being written.
-//!
-//! ONE OWNER'S PRESSURE NEVER EVICTS ANOTHER OWNER'S SESSION OR EVENTS (reviewer follow-up 1,
-//! ARCHITECT 2026-09-29). Every eviction and every trim above lands on the owner whose open or
-//! write caused it, so a caller filling its quota can cost itself sessions and replayable events and
-//! can cost nobody else anything.
-//! - `stream_cap`: how many resumable event stream cursors one session may hold; opening one more drops
-//!   the oldest.
-//!
-//! An evicted or expired session answers exactly as an unknown one does. The spec's rule for that
-//! (404, and the client re-initialises) is what makes eviction safe to do at all.
-//!
-//! ## Per-process memory, deliberately
-//!
-//! Sessions are not shared between replicas. A client whose next request lands on another replica
-//! is told its session is unknown and re-initialises, which is the spec's own recovery path. A
-//! shared session store would make every replica a reader of every other replica's conversation
-//! for no gain the protocol does not already give.
-//!
-//! ## Which GET opens which stream
-//!
-//! A GET naming a session opens that session's stream (or resumes it with `Last-Event-ID`). A GET
-//! naming no session opens a `2024-11-05` event stream only when it accepts `text/event-stream` AND
-//! carries no `MCP-Protocol-Version` header, which every later revision's client sends and a
-//! `2024-11-05` client never does; any other sessionless GET, and a sessionless DELETE, is `405`,
-//! as the single-endpoint revisions say (ARCHITECT ruling 2026-09-29;
-//! [`crate::revision::sessionless_get`]).
-//!
-//! ## Bound to the principal that opened it
-//!
-//! A session id is a bearer of nothing. The table records the [`Owner`] (principal and credential) that
-//! opened each session, and a lookup under any other owner answers "unknown", indistinguishable from
-//! a session that never existed, so a leaked id is not a probe. The id is 128 bits from the caller's
-//! CSPRNG, and an all-zero entropy buffer (the failure shape of a refused entropy source) is refused
-//! rather than minted. Log only [`log_prefix`] of an id, never the whole of it.
-//!
-//! The ungoverned open chain has ONE principal and ONE credential for every caller, so there the
-//! binding isolates nothing, which matches that posture's wildcard grants. It matters most for the
-//! `2024-11-05` transport, whose session id travels in the message address's URL query (where logs
-//! and intermediaries can read it): the serving side emits one operator warning per instance the
-//! first time such a stream opens without governance (reviewer follow-up 2, ARCHITECT 2026-09-29).
+//! Every dimension has a ceiling in [`Bounds`], and ONE OWNER'S PRESSURE NEVER EVICTS ANOTHER
+//! OWNER'S SESSION OR EVENTS: every eviction and trim lands on the owner whose open or write caused
+//! it. An evicted, expired or foreign session answers exactly as an unknown one does (404, and the
+//! client re-initialises), so a leaked id is not a probe. An all-zero entropy buffer is refused.
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -118,27 +64,6 @@ pub struct Owner {
     pub credential: String,
 }
 
-/// How a session's messages are carried.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Carriage {
-    /// The single endpoint: POST, the GET stream and DELETE.
-    Endpoint,
-    /// The `2024-11-05` event stream, with messages POSTed to the address it named.
-    EventStream,
-}
-
-/// A minted session id: 32 lowercase hex digits, 128 bits.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SessionId(String);
-
-impl SessionId {
-    /// The id as the wire carries it.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
 /// Why a session could not be opened.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OpenRefused {
@@ -182,8 +107,6 @@ struct Stream {
 struct Session {
     owner: Owner,
     revision: Revision,
-    carriage: Carriage,
-    initialized: bool,
     last_ms: u64,
     open: Vec<Stream>,
     next_stream: u32,
@@ -290,7 +213,8 @@ impl SessionTable {
         self.sessions.contains_key(id)
     }
 
-    /// Opens a session for `owner`. `entropy` is 16 bytes from the caller's CSPRNG.
+    /// Opens a session for `owner`: its id, 32 lowercase hex digits from `entropy` (16 bytes from
+    /// the caller's CSPRNG).
     ///
     /// # Errors
     /// [`OpenRefused::NoEntropy`] for an all-zero buffer, [`OpenRefused::Collision`] when the id is
@@ -300,9 +224,8 @@ impl SessionTable {
         entropy: [u8; 16],
         owner: Owner,
         revision: Revision,
-        carriage: Carriage,
         now_ms: u64,
-    ) -> Result<SessionId, OpenRefused> {
+    ) -> Result<String, OpenRefused> {
         if entropy.iter().all(|b| *b == 0) {
             return Err(OpenRefused::NoEntropy);
         }
@@ -334,8 +257,6 @@ impl SessionTable {
             Session {
                 owner,
                 revision,
-                carriage,
-                initialized: false,
                 last_ms: now_ms,
                 open: Vec::new(),
                 next_stream: 0,
@@ -347,7 +268,7 @@ impl SessionTable {
             self.remove(&id);
             return Err(OpenRefused::Full);
         }
-        Ok(SessionId(id))
+        Ok(id)
     }
 
     /// Finds `id` for `owner`, refreshing its idle clock. Unknown, expired and foreign sessions all
@@ -370,18 +291,6 @@ impl SessionTable {
     /// The revision `id` negotiated, when `owner` holds it.
     pub fn revision(&mut self, id: &str, owner: &Owner, now_ms: u64) -> Option<Revision> {
         self.find(id, owner, now_ms).map(|s| s.revision)
-    }
-
-    /// How `id` is carried, when `owner` holds it.
-    pub fn carriage(&mut self, id: &str, owner: &Owner, now_ms: u64) -> Option<Carriage> {
-        self.find(id, owner, now_ms).map(|s| s.carriage)
-    }
-
-    /// Records `notifications/initialized`. `false` when `owner` does not hold `id`.
-    pub fn mark_initialized(&mut self, id: &str, owner: &Owner, now_ms: u64) -> bool {
-        self.find(id, owner, now_ms)
-            .map(|s| s.initialized = true)
-            .is_some()
     }
 
     /// Ends `id` (DELETE). `false` when `owner` does not hold it.
@@ -559,23 +468,18 @@ impl SessionTable {
 }
 
 /// WHAT BUSBAR REMEMBERS ABOUT ONE UPSTREAM, as a client: the revision it negotiated and, on a
-/// session revision, the upstream's session and the message address it named.
+/// session revision, the upstream's session.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Remembered {
     /// The negotiated revision.
     pub revision: Revision,
     /// The upstream's session id, on a session revision.
     pub session: Option<String>,
-    /// The `2024-11-05` message address the upstream's event stream named.
-    pub message_address: Option<String>,
 }
 
 impl Remembered {
     fn bytes(&self, key: &str) -> usize {
-        SESSION_OVERHEAD
-            + key.len()
-            + self.session.as_ref().map_or(0, String::len)
-            + self.message_address.as_ref().map_or(0, String::len)
+        SESSION_OVERHEAD + key.len() + self.session.as_ref().map_or(0, String::len)
     }
 }
 
