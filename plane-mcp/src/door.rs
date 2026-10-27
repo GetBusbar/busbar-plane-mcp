@@ -262,33 +262,21 @@ const TRUST_KEYS: &[TrustKey] = &[
     },
 ];
 
-const fn op_class(i: usize) -> OpClass {
-    OpClass {
-        op: abi_str(crate::tool_ops::OP_CLASSES[i].as_str()),
-        name: abi_str(crate::tool_ops::OP_CLASSES[i].as_str()),
+/// The operation classes, in [`crate::tool_ops::OP_CLASSES`] order, each named by its own key.
+const OP_CLASS_TABLE: &[OpClass] = &{
+    const N: usize = crate::tool_ops::OP_CLASSES.len();
+    let mut table = [OpClass {
+        op: NONE,
+        name: NONE,
+    }; N];
+    let mut i = 0;
+    while i < N {
+        let key = abi_str(crate::tool_ops::OP_CLASSES[i].as_str());
+        table[i] = OpClass { op: key, name: key };
+        i += 1;
     }
-}
-
-/// The operation classes, in [`crate::tool_ops::OP_CLASSES`] order.
-const OP_CLASS_TABLE: &[OpClass] = &[
-    op_class(0),
-    op_class(1),
-    op_class(2),
-    op_class(3),
-    op_class(4),
-    op_class(5),
-    op_class(6),
-    op_class(7),
-    op_class(8),
-    op_class(9),
-    op_class(10),
-    op_class(11),
-    op_class(12),
-    op_class(13),
-    op_class(14),
-    op_class(15),
-    op_class(16),
-];
+    table
+};
 
 /// The tail index of an operation class, where the table holds it (the SDK's one index rule,
 /// [`class_index`]).
@@ -415,53 +403,33 @@ pub const TAIL: &PlaneTail = &PlaneTail {
 /// EVERY ROUTE THE PLANE SERVES, in the order the engine mounts them: the discovery document, the
 /// endpoint's three verbs, and the event-framed answer on the same path.
 pub const ROUTES: &[ServedRoute] = &[
-    ServedRoute {
-        verb: "GET",
-        target: DEFAULT_METADATA,
-        carrier: CARRIER_HTTP,
-        open: true,
-    },
-    ServedRoute {
-        verb: "POST",
-        target: DEFAULT_MOUNT,
-        carrier: CARRIER_HTTP,
-        open: false,
-    },
-    ServedRoute {
-        verb: "GET",
-        target: DEFAULT_MOUNT,
-        carrier: CARRIER_HTTP,
-        open: false,
-    },
-    ServedRoute {
-        verb: "DELETE",
-        target: DEFAULT_MOUNT,
-        carrier: CARRIER_HTTP,
-        open: false,
-    },
-    ServedRoute {
-        verb: "POST",
-        target: DEFAULT_MOUNT,
-        carrier: CARRIER_SSE,
-        open: false,
-    },
+    route("GET", DEFAULT_METADATA, CARRIER_HTTP, true),
+    route("POST", DEFAULT_MOUNT, CARRIER_HTTP, false),
+    route("GET", DEFAULT_MOUNT, CARRIER_HTTP, false),
+    route("DELETE", DEFAULT_MOUNT, CARRIER_HTTP, false),
+    route("POST", DEFAULT_MOUNT, CARRIER_SSE, false),
     // THE TASK-RUN CLAIM (ARCHITECT round 5 Q-L3B-TASKS (b) → (A)): a task's continuation, nested
     // by the unit that created the task.
-    ServedRoute {
-        verb: "POST",
-        target: TASK_RUN_MOUNT,
-        carrier: CARRIER_HTTP,
-        open: false,
-    },
+    route("POST", TASK_RUN_MOUNT, CARRIER_HTTP, false),
     // THE LINE CARRIER (ARCHITECT Q1a, round 4 Q-L3B-STDIO-SHAPE (B)): the host holds the process's
     // own stdin/stdout open as one carrier session and opens a unit per line.
-    ServedRoute {
-        verb: "POST",
-        target: DEFAULT_MOUNT,
-        carrier: CARRIER_STDIO,
-        open: false,
-    },
+    route("POST", DEFAULT_MOUNT, CARRIER_STDIO, false),
 ];
+
+/// One [`ROUTES`] row.
+const fn route(
+    verb: &'static str,
+    target: &'static str,
+    carrier: &'static str,
+    open: bool,
+) -> ServedRoute {
+    ServedRoute {
+        verb,
+        target,
+        carrier,
+        open,
+    }
+}
 
 /// The index of the task-run claim in [`ROUTES`].
 pub const TASK_RUN_ROUTE: usize = 5;

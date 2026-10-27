@@ -600,7 +600,10 @@ impl Pending {
         ts: Option<u64>,
     ) -> Self {
         // THE CALL LOG RECORD, keyed by the caller's chain scope ([`crate::record::call_suffix`]).
-        if let (Some(line), Some(ts)) = (line, ts) {
+        let Some(line) = line else {
+            return self;
+        };
+        if let Some(ts) = ts {
             self.records.push((
                 door::RECORD_CALL,
                 scope.as_bytes().to_vec(),
@@ -615,11 +618,9 @@ impl Pending {
                 ),
             ));
         }
-        if let Some(line) = line {
-            self.audits.extend(line.audit.clone());
-            if !line.server.is_empty() {
-                self.lane = Some(server_lane(&line.server));
-            }
+        self.audits.extend(line.audit.clone());
+        if !line.server.is_empty() {
+            self.lane = Some(server_lane(&line.server));
         }
         self
     }
@@ -1149,6 +1150,15 @@ fn granted(entitled: &BTreeMap<String, bool>, kind: &str, name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// The principal a caller reference names: the ungoverned chain's when it is empty.
+fn principal_of(caller: &str) -> &str {
+    if caller.is_empty() {
+        crate::ask::UNGOVERNED
+    } else {
+        caller
+    }
+}
+
 /// What one piece came to.
 enum Step {
     /// Nothing to write: the piece was taken.
@@ -1346,20 +1356,12 @@ fn verify_on_call(
             } else {
                 // The verify fetch carries the member's down-scope (token_exchange) or the caller's
                 // lent credential (passthrough) through the connector binding (Q-L3B-DOOR-EXCHANGE).
-                let url = def.url.clone();
                 // The fetch is bounded by the server's own `timeout:` (ARCHITECT timeout ruling):
                 // an upstream is not trusted to answer.
                 let timeout_ms = def.timeout_ms();
-                let scope = crate::tool_scope::exchanges(
-                    def,
-                    held.section.effective_upstream_credentials(server),
-                )
-                .then(|| crate::tool_scope::registration_scope(server, def));
                 // The fetch is the stateless `tools/list` first, NEGOTIATED with an upstream that
                 // requires a session ([`door_sessions::fetch`]), every hop on the connector.
-                let mut request =
-                    crate::client::jsonrpc::tools_list(&url, CONNECT_REQUEST_ID, None);
-                scoped(&mut request.headers, scope.as_deref());
+                let request = list_request(held, server, def);
                 let answer = door_sessions::fetch(
                     instance,
                     plane,
@@ -1594,11 +1596,7 @@ fn answer_body(
     unit: &mut CallUnit,
 ) -> Option<Step> {
     let services = plane.services;
-    let principal = if caller.is_empty() {
-        crate::ask::UNGOVERNED
-    } else {
-        caller
-    };
+    let principal = principal_of(caller);
     // Every line of a carrier session's caller re-asks the standing and grants its subscriptions on
     // that session are stepped under ([`door_line::reconfirm`]).
     door_line::reconfirm(plane, ticket, principal, unit);
@@ -2113,24 +2111,22 @@ fn relay_ask(
     };
     // No signing key, no sealer: checked before a work handle is opened for an ask that could not
     // be sealed anyway.
-    let signs = DoorSeal {
+    let mut seal = DoorSeal {
         services,
         ticket,
-        issued: &mut *issued,
-        claim: &mut *claim,
+        issued,
+        claim,
         spent: &plane.spent,
         pending: false,
-    }
-    .sign(b"")
-    .is_some();
-    if !signs {
+    };
+    if seal.sign(b"").is_none() {
         relay.asked = None;
         return refused(child, no_sealer);
     }
     let child = match child {
         Some(c) if c.work.is_none() => match open_child_work(
             plane,
-            (services, ticket, &mut *issued),
+            (services, ticket, &mut *seal.issued),
             (&mut relay.asked, &mut relay.work_slot),
             (&server, &member),
             (&result, round, c),
@@ -2148,14 +2144,6 @@ fn relay_ask(
         round: round.saturating_add(1),
         child: child.clone(),
         answers: crate::call::own_answers(&relay.admitted),
-    };
-    let mut seal = DoorSeal {
-        services,
-        ticket,
-        issued,
-        claim,
-        spent: &plane.spent,
-        pending: false,
     };
     let bind = |now| crate::ask::Bind {
         principal,
@@ -2645,11 +2633,7 @@ slot!(
                 return Some(Step::Write);
             }
             // A task's continuation, called again part way through a phase that waits.
-            let principal = if caller.is_empty() {
-                crate::ask::UNGOVERNED
-            } else {
-                caller.as_str()
-            };
+            let principal = principal_of(&caller);
             if let Some(step) = door_tasks::resume(plane, ticket, principal, unit) {
                 return Some(step);
             }
@@ -3486,6 +3470,21 @@ fn exchange_at(
 /// The JSON-RPC id a `connect`'s `tools/list` carries: one request, correlated by this id.
 const CONNECT_REQUEST_ID: u64 = 1;
 
+/// The door's own `tools/list` of registration `server` (verify-on-call's and `connect`'s): a
+/// `token_exchange:` registration's binding exchanges for its approved set.
+fn list_request(
+    held: &Held,
+    server: &str,
+    def: &crate::tools_config::McpServerDefCfg,
+) -> crate::client::jsonrpc::OutboundRequest {
+    let mut request = crate::client::jsonrpc::tools_list(&def.url, CONNECT_REQUEST_ID, None);
+    let upstream = held.section.effective_upstream_credentials(server);
+    let scope = crate::tool_scope::exchanges(def, upstream)
+        .then(|| crate::tool_scope::registration_scope(server, def));
+    scoped(&mut request.headers, scope.as_deref());
+    request
+}
+
 /// THE SIGHTING a `connect`'s exchange landed: the server's tool list re-hashed, or why the contact
 /// failed, in the served engine's words.
 fn sighting_of(
@@ -3597,13 +3596,6 @@ slot!(
                 "server `{name}` registers no `url:` this door can reach it at"
             )),
             None => {
-                let url = def.url.clone();
-                // A `token_exchange:` registration's binding exchanges for its approved set.
-                let scope = crate::tool_scope::exchanges(
-                    &def,
-                    held.section.effective_upstream_credentials(name),
-                )
-                .then(|| crate::tool_scope::registration_scope(name, &def));
                 // THE FETCH IS VERIFY-ON-CALL'S (row 159 finding A-H1): the stateless `tools/list`
                 // first, NEGOTIATED with a server that requires a session or speaks only the
                 // `2024-11-05` event stream ([`door_sessions::fetch_in`]), every hop on the
@@ -3611,8 +3603,7 @@ slot!(
                 // bounded by the server's own `timeout:` (an operator verb that hangs is one that
                 // gets killed and retried). The conversation is the operator's own binding, never a
                 // caller's.
-                let mut request = crate::client::jsonrpc::tools_list(&url, CONNECT_REQUEST_ID, None);
-                scoped(&mut request.headers, scope.as_deref());
+                let request = list_request(held, name, &def);
                 let mut slot = plane
                     .connecting
                     .remove(name)
