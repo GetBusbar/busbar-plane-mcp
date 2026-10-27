@@ -930,7 +930,6 @@ fn an_ask_of_the_caller_and_a_task_are_audited_in_the_engines_words() {
     let mut ask = |_: &ToolEntry, _: &Value| crate::ask::AskDecision::Ask {
         asks: Vec::new(),
         request_state: "s".to_string(),
-        round: 1,
     };
     let line = match admit_call(
         &catalogue(),

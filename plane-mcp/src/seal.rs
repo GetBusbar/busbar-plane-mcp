@@ -14,6 +14,7 @@
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
+use busbar_contract::redacted::constant_time_eq;
 
 use crate::ask::{AskState, Rejected};
 
@@ -48,7 +49,7 @@ pub fn unseal_state(
     let payload = strict(payload).ok_or(Rejected::Malformed)?;
     let presented = strict(signature).ok_or(Rejected::Malformed)?;
     let made = sign(&payload).ok_or(Rejected::BadSignature)?;
-    if presented.len() != SIGNATURE_LEN || !same(&presented, &made) {
+    if presented.len() != SIGNATURE_LEN || !constant_time_eq(&presented, &made) {
         return Err(Rejected::BadSignature);
     }
     serde_json::from_slice(&payload).map_err(|_| Rejected::Malformed)
@@ -66,18 +67,13 @@ pub fn opens(data: &[u8], presented: &str, sign: &mut dyn FnMut(&[u8]) -> Option
     let (Some(presented), Some(made)) = (strict(presented), sign(data)) else {
         return false;
     };
-    presented.len() == SIGNATURE_LEN && same(&presented, &made)
+    presented.len() == SIGNATURE_LEN && constant_time_eq(&presented, &made)
 }
 
 /// `text` decoded as unpadded base64url, and only when it is that value's one spelling.
 fn strict(text: &str) -> Option<Vec<u8>> {
     let bytes = URL_SAFE_NO_PAD.decode(text).ok()?;
     (URL_SAFE_NO_PAD.encode(&bytes) == text).then_some(bytes)
-}
-
-/// Whether `a` and `b` are equal, in time that depends only on their lengths.
-fn same(a: &[u8], b: &[u8]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 #[cfg(test)]

@@ -1,79 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE `tools:` SECTION — the MCP plane's config grammar, and the one place its values are judged.
-//!
-//! ## The section IS the plane
-//!
-//! There is deliberately no `plane:`, `bind:` or `target:` selector anywhere in here.
-//! `pools:`, `tools:` and `agents:` are SIBLINGS of one shape, and which plane an entry is on is
-//! decided by which map it is written in. Hooks attach BY BARE NAME from the one top-level `hooks:`
-//! map, exactly as they do on the pool plane.
-//!
-//! ## Two words are reserved at the section level, on every plane
-//!
-//! `hooks` and `upstream_credentials` are reserved here for the same reason they are on `pools:` —
-//! so the word space is IDENTICAL across planes. An operator who learns the rule once should not
-//! discover that a name legal on one plane is a section knob on another. It is no longer a claim
-//! about two constants that agree: there is ONE declaration
-//! (`RESERVED_SECTION_KEYS`), and this section is read by the shared split
-//! that consults it.
-//!
-//! ## `tools_allow` is a MAP, and that is the whole bound-identity rule compressed into one field
-//!
-//! Tool identity is `(server, tool, schema-hash)` — the bound-identity rule everything else on this
-//! plane hangs on — so every allowed tool needs a SLOT for its approved schema hash, and later for
-//! its per-tool policy. A bare list has nowhere to put either, and
-//! the two obvious repairs are both worse — a second sibling key makes "is this tool allowed"
-//! ambiguous, and re-typing after publication breaks operators' files. So the shape is
-//! `tools_allow: { <tool>: { schema_hash?: "sha256:…" } }`, where an empty value object means
-//! "allowed, no hash approved yet" and the entry is filled in by `approve`.
-//!
-//! ## The pin is an OBJECT, not a scalar
-//!
-//! The earlier `spki_pin:` scalar spelling contradicted busbar's own admin API, which already
-//! speaks `pin{mechanism,key?}`, and a scalar cannot express a sibling plane's root at all — an
-//! agent there is pinned by a JWS issuer key plus a card fingerprint, not by a certificate SPKI. The
-//! object form is canonical, and the mechanism is checked HERE against the material it requires: a
-//! registration cannot claim `cert_spki` and carry nothing to verify with. `unpinned` is spelled
-//! out loud rather than encoded as an absent field, because an operator reading a list of
-//! registrations needs to SEE which entries have no root — and because the trust-root rule requires
-//! the mechanism to be named "explicitly, and loudly", per server.
-//!
-//! ## The server-initiated grants are DENY-BY-DEFAULT, and that is a `Default` impl, not a comment
-//!
-//! `sampling`, `elicitation` and `roots` are grants on the registry entry — whether the operator lets
-//! an upstream put that ask (a model completion, a user prompt, a filesystem-root disclosure) to
-//! busbar's callers. A granted ask is relayed to the caller, who answers it; busbar answers none
-//! (Law 11). Absent means denied, and it means denied because [`ServerRequestGrants::default`] is three
-//! `false`s — a field an operator forgets to write is a field that grants nothing.
-//!
-//! ## `publish_as` moves ONE invariant from construction to validation, and pays for it
-//!
-//! `{server}{NAMESPACE_SEP}{tool}` is the DEFAULT wire name and it is unchanged: every config that
-//! never writes [`ToolAllowCfg::publish_as`] publishes byte-identical names, so there is no
-//! migration and no grant to re-audit. What the override buys is the single-upstream deployment,
-//! which today forces every client onto renamed tools for a namespace with exactly one occupant.
-//!
-//! The property `{server}_{tool}` exists to protect is **one wire name resolves to exactly one
-//! `(server, tool)`**. That property is not negotiable; only its MECHANISM is. Today it holds BY
-//! CONSTRUCTION. With an override it holds BY VALIDATION —
-//! [`validate_published_names`], which builds the FULL published set (every namespaced name AND
-//! every override) and refuses boot on any duplicate, naming both sides.
-//!
-//! **Per-TOOL and not per-server**, because `tools_allow.<tool>` is already the block where one
-//! operator vouches for one tool — its approved digest, the description busbar publishes instead of
-//! the upstream's, its input schema, its `ask_caller` gate. "And its wire name is X" is the same
-//! kind of statement by the same person at the same moment. A per-server switch would rename every
-//! tool that server exposes on one line; per-tool, the blast radius is exactly the name that was
-//! typed.
-//!
-//! **The subtle collision is the whole reason the check is against the whole set.** A bare
-//! `publish_as: foo_bar` collides with server `foo`'s tool `bar`, which namespaces to `foo_bar`.
-//! An implementation that compared overrides only to each other would pass that config and let one
-//! wire name resolve to two `(server, tool)` pairs — which, because `catalogue::granted` keys the
-//! `mcp_tool` grant on the PUBLISHED name, would silently change who can call what. That is why a
-//! collision is a LOUD BOOT REFUSAL and never an automatic rename.
+//! THE `tools:` SECTION: the MCP plane's config grammar, and the one place its values are judged.
+//! Which plane an entry is on is decided by the map it is written in; `hooks` and
+//! `upstream_credentials` are reserved at the section level as on every plane. A published wire
+//! name resolves to exactly one `(server, tool)`, enforced by [`validate_published_names`].
 
 use busbar_contract::{config::UpstreamCreds, section::split_section};
 
@@ -105,40 +36,12 @@ pub const ASK_SAMPLING: &str = "sampling/createMessage";
 /// `roots/list`: an ask for the roots the caller exposes.
 pub const ASK_ROOTS: &str = "roots/list";
 
-/// THE CLOSED SET of methods a `tools_allow.<tool>.ask_caller` round may name, matched by exact
-/// string. Boot refuses a method outside it, against the same three strings dispatch matches on.
-///
-/// Why boot has to look at all: a method outside the set is silently DROPPED at dispatch (the
-/// round's filter removes the ask), so an operator who wrote `elicitation/created` got a destructive
-/// tool that dispatches with NO confirmation. A typo must not be able to remove a confirmation gate:
-/// an unknown is REFUSED, never silently defaulted.
+/// THE CLOSED SET of methods a `tools_allow.<tool>.ask_caller` round may name. Boot refuses any
+/// other: dispatch would silently drop it and the confirmation gate with it.
 pub const ASK_METHODS: &[&str] = &[ASK_ELICITATION, ASK_SAMPLING, ASK_ROOTS];
 
-/// `tools.<server>.pin.mechanism` — WHICH authenticity root this registration has.
-///
-/// Exactly four, because four is every root an MCP endpoint can actually offer: a signed manifest's
-/// operator-pinned issuer key, the endpoint's certificate SPKI, mutual TLS, or nothing at all —
-/// `pinned_pubkey | cert_spki | mtls | unpinned`.
-///
-/// ## WHY THE `Mcp` PREFIX, and why it is on THIS one and not on the sibling plane's
-///
-/// A sibling plane's `PinMechanism` is the same concept for that plane and used to share
-/// this bare name. That was survivable only while the config-grammar fingerprint
-/// (then `scripts/config-schema.py`, now `cargo xtask gate config-schema`) did not track this file. Its snapshot is a FLAT map keyed by the
-/// bare Rust ident with no module path, so two `PinMechanism`s occupy one key: the second file read
-/// wins, and the first plane's grammar silently stops being covered. Adding `mcp/config.rs` to the
-/// tracked set with the names still clashing produced exactly that —
-/// `PinMechanism::jws_issuer_key: enum variant REMOVED`, a reported break in the sibling plane's
-/// grammar from a commit that did not touch that plane.
-///
-/// The prefix went on the MCP side, not the sibling's, for one reason: the sibling's `PinMechanism` is
-/// ALREADY FROZEN in the committed snapshot under that key, and the grammar is additive-only after
-/// 1.5.3 — so renaming it would present to the classifier as a whole-section REMOVAL and would need
-/// a waiver, i.e. laundering a real break to settle a naming argument. This type was in no snapshot
-/// yet, so renaming it costs nothing and needs no waiver.
-///
-/// **No operator's config file changes.** The ident is not wire grammar: `rename_all` below decides
-/// the spellings a document may use, and they are byte-identical before and after.
+/// `tools.<server>.pin.mechanism`: which authenticity root this registration has. The `Mcp` prefix
+/// keeps the config-schema fingerprint's flat ident map from clashing with a sibling plane's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum McpPinMechanism {
@@ -186,106 +89,38 @@ pub struct ServerPinCfg {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolAllowCfg {
-    /// The APPROVED schema/description hash — the value a background tool-list refresh diffs the
-    /// observed one against, which is the whole rug-pull defence. An empty value object means
-    /// "allowed, no hash approved yet", which is `pending` and does NOT serve — the dispatch gate
-    /// compares the observed digest against an approved one, and there is no approved one to
-    /// compare against.
+    /// The APPROVED schema/description hash; empty = pending, which does not serve.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema_hash: Option<String>,
-    /// The operator-facing description shown in the catalogue. NEVER an input to a routing
-    /// decision — routing binds `(server, tool, schema-hash)`, never attacker-supplied free text.
-    /// It is markup-normalised on the way out and is otherwise inert.
+    /// The description busbar publishes; never an input to routing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// The tool's JSON Schema, echoed verbatim in `tools/list`. Opaque to busbar.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_schema: Option<serde_json::Value>,
-    /// The tool's OUTPUT JSON Schema, published as `outputSchema` in `tools/list`.
-    ///
-    /// ## Why this is the OPERATOR's schema and not the upstream's, like every other field here
-    ///
-    /// Same rule as `description` and `input_schema`, and it bites harder. Publishing an
-    /// `outputSchema` is a PROMISE busbar makes to its own callers, and the spec turns it into a
-    /// MUST the moment it is made: *"If an output schema is provided: Servers MUST provide
-    /// structured results that conform to this schema."* An upstream that could write the schema
-    /// could rewrite the promise busbar is held to — narrowing it after a client cached it, or
-    /// widening it to legalise whatever it felt like returning that day. So it is approved here,
-    /// beside the digest, by the operator who vouches for the tool.
-    ///
-    /// ## Publishing it is all busbar does with it
-    ///
-    /// busbar does not compute the structured result; an upstream does, and its result reaches the
-    /// caller as the upstream sent it (Law 11). busbar never validates `structuredContent` against
-    /// this schema and never replaces a result that does not match it: the caller holds the schema
-    /// and judges the result.
-    ///
-    /// ABSENT ⇒ no `outputSchema` is published, which is every registration that predates this
-    /// field. There is no default and there is no inference: a schema busbar guessed would be a
-    /// promise nobody made.
+    /// The tool's OUTPUT JSON Schema, published as `outputSchema`; the operator's, never the
+    /// upstream's, and never checked against results. Absent = none published.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_schema: Option<serde_json::Value>,
-    /// THE WIRE NAME busbar publishes for this tool, overriding the default
-    /// `{server}{NAMESPACE_SEP}{tool}`. OPTIONAL — absent means the namespaced default, exactly as
-    /// before this field existed, which is why no existing config changes.
-    ///
-    /// It is the value `tools/list` emits as `name`, the value `tools/call` is dispatched on, and —
-    /// because the engine's `crate::mcp::catalogue` keys authorization on the published name — the value an
-    /// `mcp_tool:` scope grant must name. Setting it therefore CHANGES WHO CAN CALL THIS TOOL, which
-    /// is precisely why it lives in `tools_allow.<tool>` beside the approved digest rather than on
-    /// the server: the operator who vouches for the tool is the operator who names it.
-    ///
-    /// The uniqueness invariant is enforced by [`validate_published_names`] against the whole
-    /// published set, so an override that shadows another server's namespaced name refuses boot.
-    ///
-    /// NOT the RFC 8693 refresh scope: `mcp::connect::refresh_scope` keeps asking for the namespaced
-    /// spelling, because that scope is what busbar requests of an AUTHORIZATION SERVER about a
-    /// registration, not what busbar publishes to its own callers. One field, one meaning.
+    /// The wire name busbar publishes (and `mcp_tool:` grants name); absent = `{server}_{tool}`.
+    /// Uniqueness is [`validate_published_names`]'s.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publish_as: Option<String>,
     /// The input BUSBAR asks its own caller for before it dispatches this tool. ABSENT ⇒ no ask,
     /// which is deny-by-default and is every deployment that has not opted in. See [`AskEntryCfg`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ask_caller: Vec<AskRoundCfg>,
-    /// SEP-2663: whether a `tools/call` on this tool may — or must — be answered with a task rather
-    /// than a result. A REGISTRATION-TIME declaration, not a runtime property, because that is what
-    /// the `-32021` gate is keyed off: a client that did not declare the tasks extension has to be
-    /// refused BEFORE the handler runs, and the only thing that can decide that before the handler
-    /// runs is what the operator wrote here. See [`TaskSupport`].
+    /// SEP-2663: whether a `tools/call` may, or must, be answered with a task. See [`TaskSupport`].
     #[serde(default, skip_serializing_if = "TaskSupport::is_none")]
     pub task_support: TaskSupport,
-    /// The input busbar asks its own caller for FROM INSIDE the task, surfaced on `tasks/get` as
-    /// `inputRequests` and answered with `tasks/update`.
-    ///
-    /// A SEPARATE LIST from [`ask_caller`](Self::ask_caller) rather than a mode flag on it, because
-    /// the two are different exchanges and the difference is visible on the wire. `ask_caller:` is
-    /// the SEP-2322 synchronous loop: busbar answers `tools/call` with an `InputRequiredResult` and
-    /// the caller retries. This one is the SEP-2663 loop: busbar answers with a `CreateTaskResult`,
-    /// parks the task in `input_required`, and the caller answers out of band. A single list with a
-    /// mode switch would let one edit silently change which shape an existing deployment's callers
-    /// receive; two lists cannot.
-    ///
-    /// Requires [`task_support`](Self::task_support) other than `none` — see `validate_server`: a
-    /// tool that never creates a task has no task for these to be asked inside of.
+    /// The input busbar asks its caller for from INSIDE the task (SEP-2663 `inputRequests`); requires
+    /// [`task_support`](Self::task_support) other than `none`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub task_ask_caller: Vec<AskRoundCfg>,
 }
 
-/// `tools.<server>.tools_allow.<tool>.task_support` — SEP-2663's registration-time declaration.
-///
-/// THREE VALUES AND NOT A BOOLEAN, because the extension distinguishes three postures and the
-/// middle one is the common case:
-///
-/// - `none` (the DEFAULT, and every tool that predates this grammar) — this tool is answered
-///   synchronously, always. A client that declared the tasks extension still gets a plain
-///   `ToolResult`, which is exactly what the extension says a server may do.
-/// - `optional` — busbar answers with a `CreateTaskResult` when the caller declared the extension,
-///   and synchronously when it did not. No client is locked out by an operator turning this on.
-/// - `required` — busbar CANNOT answer this tool synchronously, so a caller that did not declare
-///   the extension is refused with `-32021` before the handler runs, naming the extension in
-///   `data.requiredCapabilities`. This is the posture for a tool whose work genuinely outlives a
-///   request, and it is the one an operator must opt into deliberately, because it makes the tool
-///   invisible-in-practice to every client that has not implemented the extension.
+/// `tools.<server>.tools_allow.<tool>.task_support`: SEP-2663's registration-time declaration.
+/// `required` refuses a caller that did not declare the extension with `-32021`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TaskSupport {
@@ -320,19 +155,8 @@ impl TaskSupport {
     }
 }
 
-/// `tools.<server>.prompts_allow.<name>` — one exposed prompt, markup-normalised on the way out.
-///
-/// The locked core keys name only `tools_allow`; prompts and resources belong to the MCP-SPECIFIC
-/// superset an operator "may also set per entry". They take the same MAP shape as `tools_allow` for
-/// the same reason: a capability needs a slot for what the operator approved about it.
-///
-/// TWO SPELLINGS, AND EXACTLY ONE PER PROMPT. `template:` is the text form and stays the documented
-/// spelling for the common case — one `{type:"text"}` message, which is what almost every prompt is.
-/// `messages:` is the TYPED form, and it exists because a text template cannot express an image, an
-/// audio clip or an embedded resource at all: base64 in a `text` field is prose to every client that
-/// reads it, so "put it in the template" is not a workaround, it is a different and wrong answer.
-/// Declaring both is a config refusal — see [`validate_server`] — because two statements of what one
-/// prompt says make the answer depend on which branch runs first.
+/// `tools.<server>.prompts_allow.<name>`: one exposed prompt, markup-normalised on the way out.
+/// `template:` (one text message) or `messages:` (typed), never both.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PromptAllowCfg {
@@ -355,38 +179,11 @@ pub struct PromptAllowCfg {
     pub messages: Vec<PromptMessageCfg>,
 }
 
-/// ONE ROUND of `ask_caller` — a map from the server-assigned key to the request busbar makes.
-///
-/// A MAP, keyed exactly as the `inputRequests` it becomes on the wire (`mrtr.mdx:132-180`), because
-/// the key is not decoration: the caller addresses its answer to it, and it is what makes one round
-/// answerable. A LIST OF ROUNDS, because a multi-round exchange is a real requirement and a single
-/// map could not express order.
+/// ONE ROUND of `ask_caller`: the `inputRequests` key to the request busbar makes.
 pub type AskRoundCfg = indexmap::IndexMap<String, AskEntryCfg>;
 
-/// `tools.<server>.{tools,prompts}_allow.<name>.ask_caller[<round>].<key>` — ONE request busbar
-/// makes OF ITS OWN CALLER before it will run this capability.
-///
-/// ## This is busbar asking, not busbar forwarding, and the distinction is the whole point
-///
-/// An upstream's `InputRequiredResult` is RELAYED to the caller under a grant the operator gave that
-/// server (or refused without one); busbar answers none of it (Law 11). What this grammar declares
-/// is different in kind: a demand busbar makes IN ITS OWN NAME, composed from the operator's literal
-/// bytes.
-///
-/// **There is no templating and no substitution here, and that is structural rather than a
-/// convention.** [`params`](Self::params) is cloned verbatim onto the wire. The moment a value could
-/// flow from an upstream response into this field, busbar would be laundering an upstream's demand
-/// for authority under its own name with extra steps — and it would look like a feature while it did
-/// it. `mcp/callerask.rs` is scanned at test time for any reference to the modules an upstream's
-/// values live in, precisely so that this stays true by construction.
-///
-/// ## What an operator is actually turning on
-///
-/// A declared `elicitation/create` is a human-in-the-loop confirmation gate, which is the case most
-/// deployments want. A declared `sampling/createMessage` is busbar asking the CALLER'S model to run
-/// a completion on the CALLER'S budget — the mirror image of what `grants:` protects busbar from,
-/// pointed the other way. That is why this is per capability, operator-written, and absent by
-/// default: nothing here happens to a deployment that did not ask for it.
+/// `tools.<server>.{tools,prompts}_allow.<name>.ask_caller[<round>].<key>`: ONE request busbar
+/// makes of its own caller, composed only from the operator's literal bytes.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AskEntryCfg {
@@ -404,10 +201,7 @@ pub struct AskEntryCfg {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PromptMessageCfg {
-    /// `user` or `assistant`, checked by [`validate_server`]. Defaulted to `user` because a prompt is
-    /// what the operator is asking the model, and a field an operator must retype on every line is a
-    /// field an operator eventually mistypes.
-    /// The message's role.
+    /// The message's role, `user` or `assistant` (default `user`).
     #[serde(default = "default_prompt_role")]
     pub role: String,
     /// The message's content.
@@ -418,14 +212,7 @@ fn default_prompt_role() -> String {
     "user".to_string()
 }
 
-/// One content block, INTERNALLY TAGGED by `type` — which is both the MCP wire spelling and the only
-/// discriminator that survives a typo. An untagged union would silently deserialise into whichever
-/// arm happened to fit, so a misspelled `mime_type` on an image could land as something else
-/// entirely and the operator would be told nothing.
-///
-/// No `deny_unknown_fields`: serde does not support it on an internally tagged enum, and asking for
-/// it here would be a compile error rather than the guard it looks like. The variants' own fields
-/// are all required or defaulted, so an unknown key is caught as a missing/duplicate field instead.
+/// One content block, internally tagged by `type` (serde allows no `deny_unknown_fields` here).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PromptContentCfg {
@@ -458,12 +245,7 @@ pub enum PromptContentCfg {
     },
 }
 
-/// The resource a `type: resource` content block embeds.
-///
-/// Its `uri` is an IDENTIFIER the client may echo, not a promise that `resources/read` will serve it:
-/// an embedded resource is content that has already arrived. Making it a promise would mean every
-/// embedded URI had to be separately approved in `resources_allow`, which is an approval an operator
-/// did not make by writing a prompt.
+/// The resource a `type: resource` content block embeds; its `uri` is an identifier, not a promise.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PromptResourceCfg {
@@ -497,37 +279,14 @@ pub struct ResourceAllowCfg {
     /// templates: it re-enters model context verbatim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
-    /// The BASE64 content `resources/read` returns, for a resource that is not text.
-    ///
-    /// `ResourceContents` in the schema is a union of a text form and a blob form, and this registry
-    /// answered only one half of it: an operator with a PNG had to declare it as `text` — handing a
-    /// client base64 in a field every client renders as prose — or not expose it at all.
-    ///
-    /// MUTUALLY EXCLUSIVE with `text:`, refused at boot rather than resolved. The two are the
-    /// schema's alternatives; accepting both and picking one would put the choice of what a client
-    /// reads in whichever branch happens to run first.
-    ///
-    /// NOT markup-normalised, and that is not an exemption from the sanitization rule — it is the
-    /// rule applied correctly. `normalise` strips markup from TEXT that re-enters model context; a
-    /// blob is opaque bytes the client is told the type of, and running a text filter over base64
-    /// would corrupt the payload while protecting nothing. What IS checked is that it decodes, at
-    /// boot, so the operator finds out rather than the client.
+    /// The BASE64 content `resources/read` returns: exclusive with `text:`, never markup-normalised,
+    /// checked to decode at boot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blob: Option<String>,
 }
 
-/// `tools.<server>.resource_templates_allow.<uri-template>` — one exposed RESOURCE TEMPLATE.
-///
-/// A template is a PARAMETERISED URI (`test://template/{id}/data`) that a client expands and then
-/// reads. `resources/templates/list` answered `[]` unconditionally before this, and that was the
-/// correct answer only while the registry had no concept of one: the empty list said "this
-/// deployment exposes none", which was true. It stops being true the moment an operator can declare
-/// one, and the difference is not cosmetic — that method is the ONLY way a client discovers a
-/// template, so an unconditional `[]` makes a declared template unreachable.
-///
-/// The KEY is the template. Approval is still per-declaration and still the operator's: what changes
-/// is that one declaration now approves a SHAPE rather than a single URI, which is a policy decision
-/// the operator makes by writing it here and could not previously express at all.
+/// `tools.<server>.resource_templates_allow.<uri-template>`: one exposed RESOURCE TEMPLATE (RFC
+/// 6570 level 1).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResourceTemplateAllowCfg {
@@ -540,23 +299,13 @@ pub struct ResourceTemplateAllowCfg {
     /// The media type busbar publishes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mime_type: Option<String>,
-    /// The content, with the template's own `{param}` placeholders substituted from the URI the
-    /// caller actually asked for. There is deliberately no `blob:` here: a blob cannot carry a
-    /// substitution, so a parameterised blob would be a template whose parameter changes nothing —
-    /// which is a concrete resource wearing a template's clothes, and `resources_allow` is where
-    /// those go.
+    /// The content, its `{param}` placeholders substituted from the URI asked for. No `blob:`: a blob
+    /// cannot carry a substitution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
 }
 
-/// `tools.<server>.grants` — the SERVER-INITIATED request grants.
-///
-/// DENY-BY-DEFAULT is this type's `Default`, not a rule written down somewhere else. Under revision
-/// `2026-07-28` a server cannot initiate a request at all; the ask arrives as an
-/// `InputRequiredResult` in the RESULT of a call busbar made, and these three grants are consulted
-/// at busbar's decision to relay it to the caller — on EVERY retry, because there is no handshake to consult
-/// them once — a revocation has to bite on the NEXT retry, not at the end of a conversation that
-/// has no end.
+/// `tools.<server>.grants`: the server-initiated ask grants, consulted on every relay. Deny by default.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerRequestGrants {
@@ -574,9 +323,7 @@ pub struct ServerRequestGrants {
 }
 
 impl ServerRequestGrants {
-    /// Whether the grant named by an `InputRequiredResult`'s kind is held. An UNKNOWN kind is
-    /// refused: a grant table that answers `true` for a kind it has never heard of is a grant table
-    /// that widens itself every time the protocol grows a verb.
+    /// Whether the grant named by an `InputRequiredResult`'s kind is held; an unknown kind is refused.
     pub fn allows(&self, kind: &str) -> bool {
         match kind {
             "sampling" => self.sampling,
@@ -597,30 +344,8 @@ impl ServerRequestGrants {
     }
 }
 
-/// The DEFAULT ceiling on the messages of one sampling ask.
-pub const DEFAULT_MAX_SAMPLING_MESSAGES: u32 = 64;
-/// The DEFAULT ceiling on the prompt bytes (system prompt plus every message's content parts) of one ask.
-pub const DEFAULT_MAX_SAMPLING_PROMPT_BYTES: u32 = 64 * 1024;
-/// The DEFAULT ceiling on the stop sequences of one ask.
-pub const DEFAULT_MAX_STOP_SEQUENCES: u32 = 8;
-/// The DEFAULT ceiling on the bytes of each stop sequence.
-pub const DEFAULT_MAX_STOP_SEQUENCE_BYTES: u32 = 64;
-/// The DEFAULT floor of an ask's temperature, in thousandths.
-pub const DEFAULT_TEMPERATURE_MIN_MILLI: u32 = 0;
-/// The DEFAULT ceiling of an ask's temperature, in thousandths (the protocol's own `0.0..=2.0`).
-pub const DEFAULT_TEMPERATURE_MAX_MILLI: u32 = 2000;
-/// The DEFAULT cap on the caller's reply to an ask (its `inputResponses` and the `requestState` it
-/// carries), in serialised bytes: 1 MiB.
-pub const DEFAULT_MAX_INPUT_RESPONSE_BYTES: u32 = 1024 * 1024;
-
-/// `tools.<server>.sampling_bounds` — the INPUT-SIDE bounds on a relayed `sampling/createMessage`
-/// ask (owner ruling Q22c).
-///
-/// A granted sampling ask is relayed to the caller, who runs the completion on the caller's own
-/// budget. The ask arrives on an UPSTREAM, the least trusted input this plane handles, and nothing
-/// else limits how large one is, so its size is bounded here. Every key is a COUNT or a RANGE,
-/// never a price. An ask past any bound is refused by name (`sampling_bound_exceeded`), never
-/// relayed. Absent keys take the defaults below.
+/// `tools.<server>.sampling_bounds`: the size bounds on a relayed `sampling/createMessage` ask
+/// (owner ruling Q22c); past any bound it is refused by name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SamplingBoundsCfg {
@@ -646,13 +371,13 @@ pub struct SamplingBoundsCfg {
 impl Default for SamplingBoundsCfg {
     fn default() -> Self {
         Self {
-            max_messages: DEFAULT_MAX_SAMPLING_MESSAGES,
-            max_prompt_bytes: DEFAULT_MAX_SAMPLING_PROMPT_BYTES,
-            max_stop_sequences: DEFAULT_MAX_STOP_SEQUENCES,
-            max_stop_sequence_bytes: DEFAULT_MAX_STOP_SEQUENCE_BYTES,
-            temperature_min_milli: DEFAULT_TEMPERATURE_MIN_MILLI,
-            temperature_max_milli: DEFAULT_TEMPERATURE_MAX_MILLI,
-            max_input_response_bytes: DEFAULT_MAX_INPUT_RESPONSE_BYTES,
+            max_messages: 64,
+            max_prompt_bytes: 64 * 1024,
+            max_stop_sequences: 8,
+            max_stop_sequence_bytes: 64,
+            temperature_min_milli: 0,
+            temperature_max_milli: 2000,
+            max_input_response_bytes: 1024 * 1024,
         }
     }
 }
@@ -669,14 +394,14 @@ impl SamplingBoundsCfg {
         if self.max_messages == 0 {
             return Err(format!(
                 "{at}: `sampling_bounds.max_messages: 0` would refuse every sampling ask. Set a \
-                 positive count (default {DEFAULT_MAX_SAMPLING_MESSAGES}), or leave \
+                 positive count (default 64), or leave \
                  `grants.sampling` unset to refuse the ask kind outright."
             ));
         }
         if self.max_prompt_bytes == 0 {
             return Err(format!(
                 "{at}: `sampling_bounds.max_prompt_bytes: 0` would refuse every sampling ask. Set \
-                 a positive byte count (default {DEFAULT_MAX_SAMPLING_PROMPT_BYTES}), or leave \
+                 a positive byte count (default 65536), or leave \
                  `grants.sampling` unset to refuse the ask kind outright."
             ));
         }
@@ -685,7 +410,7 @@ impl SamplingBoundsCfg {
                 "{at}: `sampling_bounds.max_input_response_bytes: 0` (the key \
                  `tools.<server>.sampling_bounds.max_input_response_bytes`) would refuse every \
                  reply to an ask, so no ask could be answered. Set a positive byte count (default \
-                 {DEFAULT_MAX_INPUT_RESPONSE_BYTES}), or leave the grants unset to refuse the ask \
+                 1048576), or leave the grants unset to refuse the ask \
                  kinds outright."
             ));
         }
@@ -701,21 +426,10 @@ impl SamplingBoundsCfg {
     }
 }
 
-/// The DEFAULT cap on input-required rounds per logical dispatch.
-///
-/// A hard cap, refused past it, not a warning. Three is chosen because it is enough for a real
-/// elicitation exchange (ask, clarify, confirm) and small enough that a hostile upstream returning
-/// `InputRequiredResult` forever amplifies cost by a bounded constant rather than an unbounded one.
+/// The DEFAULT cap on input-required rounds per logical dispatch: a hard cap.
 pub const DEFAULT_MAX_INPUT_REQUIRED_ROUNDS: u32 = 3;
 
-/// The DEFAULT cap on rounds busbar may ask ITS OWN CALLER for, per capability.
-///
-/// Three for the same reason as the upstream cap, and it bounds a different risk: every round is a
-/// fresh inbound request that busbar charges and meters, so an unbounded caller-facing exchange is a
-/// caller amplifying its own cost against its own budget — which its budget would stop, but a bound
-/// that does not depend on the budget being configured is the one worth having. Deny-by-default here
-/// is the ABSENCE of `ask_caller`, not this number: a capability that declares no ask never asks
-/// whatever this says.
+/// The DEFAULT cap on rounds busbar may ask its own caller for, per capability.
 pub const DEFAULT_MAX_CALLER_ASK_ROUNDS: u32 = 3;
 
 /// The registration key holding its tool approvals (`tools_allow:`), declared to the kernel as its
@@ -724,111 +438,40 @@ pub const TOOL_APPROVALS_KEY: &str = "tools_allow";
 /// The field of each `tools_allow` entry holding the digest the operator approved the tool at.
 pub const TOOL_APPROVAL_FIELD: &str = "schema_hash";
 
-/// THE DEPLOYMENT-WIDE MAX VERIFICATION STALENESS a registration gets when it spells no `verify_ttl:`.
-///
-/// Deliberately the same `5s` as a sibling plane's `DEFAULT_REVERIFY_TTL`,
-/// because the two are the same judgement about the same risk — how long a hash-pinned upstream may
-/// have drifted before the CALL that dispatches to it re-verifies — and an operator who learns the
-/// number on one plane should not find a different one on the other. If a reason ever emerges for
-/// them to differ, it goes in writing next to whichever one moves.
-///
-/// `5s` and not the old daemon's `6h`, because the meaning changed. This is no longer a background
-/// cadence: it is the LONGEST an observation may be reused on the request path before verify-on-call
-/// re-fetches. The intrinsic verify→dispatch race is already ms–s, so sub-second precision buys
-/// nothing, and `5s` bounds worst-case drift-serving to seconds while single-flight holds upstream
-/// load to at most one fetch per `verify_ttl` per server. `verify_ttl: 0` is strict-live (a fetch per
-/// call); a LARGER value is an explicit, docs-flagged security downgrade.
-///
-/// A DEFAULT and not an opt-in: the whole point is that the rug-pull defence runs BEFORE the call
-/// without an operator present, and a bound that has to be switched on per server is a defence that
-/// is off on every registration whose author did not know to switch it on.
+/// The longest an observation is reused before verify-on-call re-fetches, when no `verify_ttl:` is set.
 pub const DEFAULT_MCP_VERIFY_TTL: &str = "5s";
 
 /// THE DEFAULT BUDGET of a fetch this door makes of a server that writes no `timeout:` (30 s,
 /// `docs/mcp.md`'s `timeout` row).
 pub const DEFAULT_UPSTREAM_TIMEOUT_MS: u64 = 30_000;
 
-/// One entry in the top-level `tools:` NAMED-DEFINITION map — one registered external MCP server.
-///
-/// Operator INTENT only (owner ruling 3). Everything that ACCUMULATES — every observed tool list,
-/// the drift queue, the quarantine queue, the approval trail — is store state and is deliberately
-/// absent from this struct.
+/// One entry in the top-level `tools:` map: one registered external MCP server (operator intent only).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)] // a typo'd key must fail boot, not silently un-pin a server.
 pub struct McpServerDefCfg {
-    /// The real remote MCP endpoint. Never client-visible: callers reach it through busbar.
-    ///
-    /// REQUIRED for `transport: streamable_http` (the default) and REFUSED for `transport: stdio`,
-    /// which reaches no address at all. Defaulted rather than mandatory at the serde layer so the
-    /// two transports can be told apart by [`validate_server`], which can then say WHICH key the
-    /// operator is missing — `serde`'s "missing field `url`" on a stdio registration would name the
-    /// wrong repair.
+    /// The remote MCP endpoint. Required for `streamable_http`, refused for `stdio` (see [`validate_server`]).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub url: String,
-    /// `transport: stdio` ONLY — the ABSOLUTE path of the binary busbar spawns as this server.
-    ///
-    /// Absolute, and refused otherwise: a bare name is resolved through `PATH`, which would make the
-    /// binary that actually runs a property of the environment busbar was started in rather than of
-    /// the file the operator wrote. There is no shell — the program is exec'd directly, so no
-    /// character in this string has any meaning beyond being part of a path.
+    /// `transport: stdio` only: the absolute path of the binary busbar spawns (no `PATH`, no shell).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
-    /// `transport: stdio` ONLY — the child's argument vector, verbatim.
-    ///
-    /// A LIST, never a command line: busbar does not split a string on spaces, so there is no
-    /// quoting rule to get wrong and no way for a value to become a second argument. Nothing on the
-    /// dispatch path can add to it — a tool call's arguments reach the child as JSON on its stdin.
+    /// `transport: stdio` only: the child's argument vector, verbatim.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
-    /// `transport: stdio` ONLY — the child's WHOLE environment, not additions to busbar's.
-    ///
-    /// busbar's own process environment holds provider API keys, store credentials and admin
-    /// tokens. Handing that set to an operator-configured child would make every stdio registration
-    /// a credential-exfiltration primitive and would do it silently, so the child is spawned with a
-    /// CLEARED environment and exactly these variables. An operator who needs one names it; a
-    /// value that is itself a secret is written as a secret REFERENCE, like every other.
+    /// `transport: stdio` only: the child's WHOLE environment (it is spawned with a cleared one).
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub env: std::collections::BTreeMap<String, ChildEnvValue>,
-    /// `transport: stdio` ONLY — the child's working directory, absolute. Absent ⇒ busbar's own,
-    /// which is the platform default and is spelled here because a child that resolves relative
-    /// paths resolves them against whatever directory the operator happened to start busbar in.
+    /// `transport: stdio` only: the child's working directory, absolute. Absent = busbar's own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
-    /// The out-of-band trust root. REQUIRED, and required to be spelled even when it is `unpinned`.
+    /// The out-of-band trust root. Required, even when `unpinned`.
     pub pin: ServerPinCfg,
-    /// `<n><s|m|h|d>` — the LONGEST an observation may be reused on the request path before
-    /// verify-on-call re-fetches and re-hashes the upstream's tool list. Absent ⇒
-    /// [`DEFAULT_MCP_VERIFY_TTL`] (`5s`); `0` is strict-live (re-verify every call).
-    ///
-    /// This is the ONE verification knob on this plane, and it is deliberately the only one. There is
-    /// no key that slows DETECTION below what this bounds, none that delays a QUARANTINE, and no
-    /// per-server "skip if it failed last time" — every one of those would be a window an upstream
-    /// could open for itself by misbehaving, and choosing when to misbehave is entirely within its
-    /// gift. A LARGER value is an explicit security downgrade (a wider drift-serving window), which is
-    /// why the default is seconds rather than the old daemon's hours. See the kernel's `busbar_kernel::trust::verify`,
-    /// the one gate both planes run on the call path.
+    /// `<n><s|m|h|d>`: the longest an observation is reused before verify-on-call re-fetches. Absent =
+    /// [`DEFAULT_MCP_VERIFY_TTL`]; `0` = every call. Judged by the kernel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verify_ttl: Option<String>,
-    /// `<n><s|m|h|d>` — the wall-clock budget for ONE outbound leg to THIS server: the tool call,
-    /// and separately its tool-list fetches. KERNEL-OWNED (`busbar_contract::section::ENTRY_TIMEOUT_KEY`,
-    /// ARCHITECT timeout ruling): the kernel judges it and holds every relayed call's attempt to it
-    /// (the member's attempt bound); this door reads it only for the fetches it makes itself
-    /// ([`Self::timeout_ms`], absent ⇒ [`DEFAULT_UPSTREAM_TIMEOUT_MS`], `docs/mcp.md`).
-    ///
-    /// ## Why it is per SERVER and not one constant
-    ///
-    /// A deadline is a statement about a particular peer, and the peers genuinely differ: a
-    /// loopback diagnostic answers in milliseconds, a model-backed upstream can legitimately take
-    /// most of a minute. One number for all of them is either too generous for the first — a
-    /// dispatch that hangs holds a concurrency slot the caller already paid for — or too mean for
-    /// the second.
-    ///
-    /// ## And why it is a DEADLINE and not a retry or a circuit breaker
-    ///
-    /// This plane deliberately has no per-server "skip if it failed last time" and no key that
-    /// slows detection (see `verify_ttl`), because every one of those is a window an upstream can
-    /// open for itself by misbehaving. A deadline is the opposite: it is a bound the upstream
-    /// cannot lengthen by choosing to be slow.
+    /// `<n><s|m|h|d>`: the budget of one outbound leg to this server. Kernel-owned; this door reads it
+    /// only for its own fetches ([`Self::timeout_ms`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<String>,
     /// The approved tools, as a MAP so each carries its approved schema hash.
@@ -840,106 +483,58 @@ pub struct McpServerDefCfg {
     /// The exposed resources, keyed by URI — MCP-specific superset, likewise.
     #[serde(default, skip_serializing_if = "indexmap::IndexMap::is_empty")]
     pub resources_allow: indexmap::IndexMap<String, ResourceAllowCfg>,
-    /// The exposed resource TEMPLATES, keyed by URI template. Separate from `resources_allow`
-    /// deliberately: `resources/list` and `resources/templates/list` are two different methods
-    /// answering two different questions, and a client that expanded a concrete URI as a template —
-    /// or listed a template as a readable resource — would be acting on the wrong one.
+    /// The exposed resource TEMPLATES, keyed by URI template.
     #[serde(default, skip_serializing_if = "indexmap::IndexMap::is_empty")]
     pub resource_templates_allow: indexmap::IndexMap<String, ResourceTemplateAllowCfg>,
-    /// The transport generation this registration speaks. One value today, spelled because the
-    /// MCP-specific superset carries it and because a second leg would be a second wire format.
+    /// The transport this registration speaks; absent = streamable HTTP.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transport: Option<ServerTransport>,
-    /// The RFC 8707 audience busbar asks for when minting an OUTBOUND token for this server. Not
-    /// busbar's own audience — that is `mcp.canonical_uri`, and confusing the two is the
-    /// confused-deputy bug this field's name has to keep distinct.
+    /// The RFC 8707 audience of an OUTBOUND token for this server (not busbar's own audience).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aud: Option<String>,
     /// The server-initiated request grants. Absent ⇒ all denied.
     #[serde(default)]
     pub grants: ServerRequestGrants,
-    /// Whether this ONE upstream may live on a private / loopback / CGNAT address.
-    ///
-    /// Per server rather than plane-wide, because the answer genuinely differs per registration: an
-    /// MCP server on the cluster's internal network is the normal case, and a global switch would
-    /// extend that one decision to every other server at once. Cloud-metadata addresses stay refused
-    /// whatever this says — an operator saying "this server is internal" has said nothing about IMDS.
-    /// Absent ⇒ `false`, which is the fail-closed posture.
+    /// Whether this upstream may live on a private / loopback / CGNAT address. Metadata stays refused.
     #[serde(default)]
     pub allow_private: bool,
-    /// RFC 8693 token exchange for this upstream: how busbar's OWN subject token is exchanged for a
-    /// per-backend, audience-bound, DOWN-SCOPED access token.
-    ///
-    /// Absent ⇒ no credential is sent at all (a public or network-authenticated upstream). What the
-    /// exchange asks FOR is deliberately not written here: the requested scope is DERIVED from the
-    /// inbound caller's own grant at dispatch time, because a configured static scope list would be a
-    /// second place the authority is written down and the two would drift.
+    /// RFC 8693 token exchange for this upstream; absent = no credential. The scope is derived per call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_exchange: Option<TokenExchangeCfg>,
     /// The cap on input-required rounds per logical dispatch. Absent ⇒
     /// [`DEFAULT_MAX_INPUT_REQUIRED_ROUNDS`]. `0` is legal and means "never relay one".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_input_required_rounds: Option<u32>,
-    /// The cap on rounds busbar may ask ITS OWN CALLER for, per capability of this server. Absent ⇒
-    /// [`DEFAULT_MAX_CALLER_ASK_ROUNDS`]. `0` is legal and is an operator KILL SWITCH: it disables
-    /// every `ask_caller` on this server at once, without editing each capability.
-    ///
-    /// A second, independent bound beside the length of the `ask_caller` list, and it is not
-    /// redundant. The caller-facing loop is spread across INDEPENDENT requests with no session, so
-    /// the round index rides inside the integrity-protected `requestState` rather than in any
-    /// counter busbar holds — a counter held between requests would be a session by another name.
-    /// This cap is what that index is compared against.
+    /// The cap on rounds busbar may ask its own caller for, per capability. Absent =
+    /// [`DEFAULT_MAX_CALLER_ASK_ROUNDS`]; `0` disables every `ask_caller` on this server.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_caller_ask_rounds: Option<u32>,
-    /// `tools.<server>.sampling_bounds` — how LARGE one relayed `sampling/createMessage` ask may be.
-    /// Absent ⇒ the shipped defaults of [`SamplingBoundsCfg`]; an ask past a bound is refused by
-    /// name, never relayed (see [`SamplingBoundsCfg`]).
+    /// How large one relayed `sampling/createMessage` ask may be; absent = the defaults.
     #[serde(default, skip_serializing_if = "SamplingBoundsCfg::is_default")]
     pub sampling_bounds: SamplingBoundsCfg,
-    /// OutboundCall credential mode. Same vocabulary as the pool plane's, and DISTINCT from it: every
-    /// MCP server authenticates independently, so this plane deliberately has no all-plane
-    /// `tools.upstream_credentials` default at all. The reserved word space is
-    /// uniform across planes regardless, so the key is reserved at the section level and an
-    /// entry-level value overrides it (SCALAR ⇒ OVERRIDE).
+    /// The outbound credential mode; overrides the section-level default (SCALAR = OVERRIDE).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_credentials: Option<busbar_contract::config::UpstreamCreds>,
-    /// Hooks attached to THIS server, by bare name from the top-level `hooks:` map. ADDS to the
-    /// section-level `tools.hooks:` list (LIST ⇒ ADDITIVE).
+    /// Hooks attached to this server by bare name; adds to the section-level `tools.hooks:`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hooks: Vec<String>,
 }
 
-/// `tools.<server>.token_exchange` — the RFC 8693 exchange busbar performs before it calls this
-/// upstream.
-///
-/// Three fields and no fourth. In particular there is NO `scope:` here, and that absence is the
-/// design: the scope busbar asks for is derived from the INBOUND caller's grant on this server (see
-/// `crate::mcp::client::egress::downscope`). A configured scope list would be a second, independent
-/// statement of what a caller may reach, and the moment the two disagree the wider one wins — which
-/// is exactly the transitive confused deputy this plane exists to close.
-///
-/// The RFC 8707 `resource` is `tools.<server>.aud`, which already exists: the exchanged token is
-/// audience-bound to this backend so it cannot be spent at another.
+/// `tools.<server>.token_exchange`: the RFC 8693 exchange busbar performs before it calls this
+/// upstream. No `scope:`: it is derived from the caller's grant.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TokenExchangeCfg {
-    /// The operator's authorization server token endpoint. Vetted at boot for scheme, so the failure
-    /// lands on the operator who wrote it rather than on a tool call an hour later.
+    /// The operator's authorization server token endpoint (https, vetted at boot).
     pub token_url: String,
-    /// BUSBAR'S OWN token — the SUBJECT of the exchange, never the caller's. A `SecretRef` rather
-    /// than an inline string so the value follows the same resolution path (`env` / `file` / a
-    /// trusted secret plugin) every other credential on this engine does.
+    /// BUSBAR'S OWN token, the subject of the exchange, never the caller's.
     pub subject_token: busbar_contract::secret_ref::SecretRef,
-    /// RFC 8693 section 2.1 `subject_token_type`. Defaulted to an access token, which is what busbar's own
-    /// ambient credential is.
+    /// RFC 8693 section 2.1 `subject_token_type`; defaults to an access token.
     #[serde(default = "default_subject_token_type")]
     pub subject_token_type: String,
 }
 
-/// `Eq` is asserted rather than derived because [`busbar_contract::secret_ref::SecretRef`] derives only
-/// `PartialEq`. The relation is still a true equivalence — every field compares structurally and
-/// none of them is a float — and the snapshot types this is embedded in (`ToolsCfg`, `ServerEntry`,
-/// `Catalogue`) require `Eq` so a config apply can be compared for a no-op.
+/// `Eq` asserted: `SecretRef` derives only `PartialEq`, and no field is a float.
 impl Eq for TokenExchangeCfg {}
 
 fn default_subject_token_type() -> String {
@@ -952,27 +547,13 @@ fn default_subject_token_type() -> String {
 pub enum ServerTransport {
     /// Streamable HTTP, the `2026-07-28` stateless shape. The only one busbar speaks.
     StreamableHttp,
-    /// A LOCALLY SPAWNED CHILD PROCESS, newline-delimited JSON-RPC on its stdin and stdout.
-    ///
-    /// Spelled and REFUSED for two releases, because there was no supervisor to reach — the one that
-    /// existed was deleted rather than left unreachable. It is implemented now: `command:` names the
-    /// binary, `mcp/client/stdio.rs` spawns and supervises it, and
-    /// [`busbar_contract::transport::transport::Transport::upstream_wire`] is the arm a `tools/call` takes to get there.
-    ///
-    /// This registration is reached by SPAWNING, so the keys it takes are disjoint from the network
-    /// ones: `command:`, `args:`, `env:` and `cwd:` instead of `url:`, and no credential keys at all
-    /// — see [`validate_endpoint`].
+    /// A locally spawned child process, newline-delimited JSON-RPC on its stdin and stdout.
     Stdio,
 }
 
 impl ServerTransport {
-    /// Whether a registration on this transport is reached by SPAWNING A CHILD rather than by
-    /// addressing an endpoint.
-    ///
-    /// The ONE question the config grammar has of the transport, asked once and answered on the type
-    /// itself. It is a method rather than a comparison at the call site because the `structure-lint` gate
-    /// bans the core from branching on the transport axis, and because an exhaustive match here is
-    /// what makes a third transport a compile error in the one place that must decide.
+    /// Whether a registration on this transport is reached by spawning a child (the one question
+    /// the grammar asks of the transport: the `structure-lint` gate bans branching on it).
     pub fn spawns_child(self) -> bool {
         match self {
             ServerTransport::StreamableHttp => false,
@@ -981,48 +562,20 @@ impl ServerTransport {
     }
 }
 
-/// ONE VALUE in a stdio child's environment: a plain string, or a reference to a secret module.
-///
-/// ## Why both, and why the secret arm is not optional
-///
-/// A child's environment is the ONLY channel busbar has for giving it a credential — a pipe has no
-/// header block, so `token_exchange:` is refused on this transport (see [`validate_endpoint`]). If
-/// the map took plain strings only, then the single supported way to give an MCP server its API key
-/// would be to paste that key into `config.yaml`, which is the one thing every other credential on
-/// this engine is designed to avoid.
-///
-/// ## Why the secret is NOT resolved into the catalogue snapshot
-///
-/// The reference is carried, unresolved, all the way to the spawn. Resolving at snapshot build would
-/// put plaintext in a value that is compared on every config apply and printed by the admin surface,
-/// and it would make rotating the secret require a restart. The same reasoning
-/// `mcp::upstream::credential_mode` records for the RFC 8693 subject token, one transport over.
+/// ONE VALUE in a stdio child's environment: a literal, or a secret reference resolved at spawn.
 #[derive(Clone, PartialEq, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum ChildEnvValue {
-    /// A literal value: `LOG_LEVEL: debug`. A YAML scalar, and this arm is FIRST so a scalar can
-    /// never be mistaken for a malformed reference.
+    /// A literal value; first, so a scalar is never read as a reference.
     Plain(String),
-    /// A secret reference: `API_KEY: { env: UPSTREAM_KEY }` or `{ file: /run/secrets/key }`.
-    ///
-    /// Resolved at spawn, never earlier, and through the BUILT-IN resolver (`env` / `file`) — the
-    /// same one the RFC 8693 subject token one transport over is read with, and for the same
-    /// reason: a spawn happens on the dispatch path, which holds no plugin host handle. A
-    /// `kind: secret` PLUGIN module here fails the spawn with a named refusal rather than silently
-    /// handing the child an empty variable.
+    /// A secret reference (`{ env: K }` / `{ file: P }`), resolved by the built-in resolver at spawn.
     Secret(busbar_contract::secret_ref::SecretRef),
 }
 
-/// `Eq` is asserted rather than derived because [`busbar_contract::secret_ref::SecretRef`] derives only
-/// `PartialEq`. The relation is still a true equivalence — a `String` and a module name plus opaque
-/// JSON settings, none of them a float — and the snapshot types this rides in must be comparable so
-/// a config apply can be recognised as a no-op.
+/// `Eq` asserted: `SecretRef` derives only `PartialEq`, and no field is a float.
 impl Eq for ChildEnvValue {}
 
-/// `Debug` by hand so a literal never reaches a log line or a panic message: the arm is named, the
-/// value is not. A literal is meant for values like `LOG_LEVEL: debug`, but nothing stops an
-/// operator pasting a key there, and `Debug` is the one rendering nobody reviews per call site. A
-/// reference prints in full — it names WHERE the value lives, never the value.
+/// `Debug` by hand so a literal value never reaches a log line.
 impl std::fmt::Debug for ChildEnvValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -1032,15 +585,7 @@ impl std::fmt::Debug for ChildEnvValue {
     }
 }
 
-/// A URL as a refusal may echo it: the userinfo (`user:password@`) replaced by `***`, every other
-/// byte as written.
-///
-/// A refusal reaches `busbar --validate`'s stderr and the READ-ONLY admin dry-run validate
-/// endpoint, so a password an operator put in a URL must not ride out in the sentence that tells
-/// them the URL is wrong. The authority is read the way a URL parser reads it: after `scheme://`
-/// (or from the start, when the text has no scheme), up to the first `/`, `?`, `#` or `\`, with the
-/// LAST `@` in it ending the userinfo. A URL with no userinfo is returned unchanged, so a refusal
-/// that never carried a credential reads byte for byte as before.
+/// A URL as a refusal may echo it: the userinfo replaced by `***`, every other byte as written.
 pub(crate) fn url_for_display(url: &str) -> std::borrow::Cow<'_, str> {
     let start = match url.find("://") {
         Some(i)
@@ -1088,13 +633,7 @@ impl<'de> Deserialize<'de> for ToolsCfg {
     where
         D: serde::Deserializer<'de>,
     {
-        // THE SECTION SPLIT is `plane::config`'s — the reserved-key refusals, the two typed lifts
-        // and the order they happen in are a property of a plane SECTION, not of this plane. What
-        // stays here is the only thing that is this plane's: `validate_server`, the VALUE rules,
-        // run through the same function the admin write path calls so the API rejects exactly what
-        // the file rejects.
-        // The neutral substrate split, called with THIS plane's own section/noun consts (a standalone
-        // plane holds no plane registry to look up); byte-identical to the core wrapper's forward.
+        // The neutral section split, with this plane's value rules (`validate_server`).
         let section = split_section::<D, McpServerDefCfg>(
             deserializer,
             SECTION,
@@ -1110,22 +649,10 @@ impl<'de> Deserialize<'de> for ToolsCfg {
     }
 }
 
-/// WHICH ENDPOINT KEYS THIS REGISTRATION MAY CARRY, and the whole of the boot-time safety check on
-/// a registration that busbar will spawn as a child process.
-///
-/// The two transports take disjoint halves of the grammar, and mixing them is refused rather than
-/// silently resolved: a registration with both a `url:` and a `command:` has told busbar two
-/// different things about where its server is, and picking one would make the answer depend on
-/// which check ran first.
-///
-/// EVERYTHING SPAWN-RELATED IS CHECKED HERE, at boot, where the operator who wrote it is standing.
-/// The SSRF guard is what protects the HTTP wire and it has nothing to say about a child process, so
-/// this function is what stands in its place — see `mcp/client/stdio.rs`'s header for the four
-/// decisions and why each one is fail-closed.
+/// Which endpoint keys this registration may carry: the two transports take disjoint halves of the
+/// grammar, and everything spawn-related is checked here at boot.
 fn validate_endpoint(at: &str, def: &McpServerDefCfg) -> Result<(), String> {
-    // `is_some_and` on the value rather than a comparison: this file may not branch on the transport
-    // axis (the `structure-lint` gate), so the transport answers the ONE question the grammar has of it
-    // and the grammar never learns which variant answered.
+    // The transport answers the one question the grammar has of it (`structure-lint`).
     if !def.transport.is_some_and(ServerTransport::spawns_child) {
         for (key, present) in [
             ("command:", def.command.is_some()),
@@ -1172,21 +699,8 @@ fn validate_endpoint(at: &str, def: &McpServerDefCfg) -> Result<(), String> {
              spawns as this server. There is no default and busbar will not guess one."
         ));
     };
-    // ABSOLUTE, and this is a security check rather than a tidiness one. A bare name is resolved
-    // through `PATH`, so the binary that actually runs would be decided by the environment busbar
-    // happened to be started in — and anyone who can prepend a directory to that `PATH` chooses the
-    // program instead of the operator. A relative path has the same problem with the working
-    // directory in place of `PATH`.
-    // PLATFORM-CORRECT absoluteness, not `starts_with('/')`. The predicate is the same security
-    // question on every platform — "is this path decided by the operator's text alone, or by
-    // busbar's environment?" — but the SPELLING of an absolute path is not. `starts_with('/')`
-    // answers it only on unix: on Windows it refuses every legitimate absolute path an operator can
-    // write (`C:\...`, `\\?\...`, a UNC share), so the stdio transport was unconfigurable there
-    // outright. `Path::is_absolute` is byte-identical to the old check on unix (an absolute unix path
-    // is exactly one starting `/`), so this narrows nothing and refuses nothing it refused before; on
-    // Windows it accepts drive-qualified and UNC paths while still refusing a bare name (`PATH`
-    // lookup), a relative path, and a DRIVE-RELATIVE one like `\foo` — which resolves against the
-    // current drive and is therefore decided by the environment, exactly the thing being refused.
+    // ABSOLUTE (`Path::is_absolute`): a bare name is resolved through `PATH`, a relative one against
+    // the working directory, so the environment would choose the binary.
     if !std::path::Path::new(program).is_absolute() {
         return Err(format!(
             "{at}: `command: {program}` must be an ABSOLUTE path. A bare name is resolved through \
@@ -1203,10 +717,7 @@ fn validate_endpoint(at: &str, def: &McpServerDefCfg) -> Result<(), String> {
         }
     }
     for name in def.env.keys() {
-        // An empty name, or one containing `=` or NUL, is not a variable an exec can carry. The
-        // platform's own behaviour on these ranges from "ignored" to "undefined", and an operator
-        // whose credential was silently ignored is an operator whose child failed for a reason the
-        // config file does not show.
+        // An empty name, or one containing `=` or NUL, is not a variable an exec can carry.
         if name.is_empty() || name.contains('=') || name.contains('\0') {
             return Err(format!(
                 "{at}: `env:` name `{name}` is not a usable environment variable name — it must be \
@@ -1214,54 +725,39 @@ fn validate_endpoint(at: &str, def: &McpServerDefCfg) -> Result<(), String> {
             ));
         }
     }
-    // THE CREDENTIAL KEYS, refused rather than ignored. The stdio wire writes a JSON-RPC message to
-    // a pipe: there is no request line, no header block, and therefore no carrier for a bearer
-    // token. A registration that configures one and is then dispatched without it would be a
-    // credential SILENTLY DROPPED on the one path where the operator believed it was applied.
-    if def.token_exchange.is_some() {
-        return Err(format!(
-            "{at}: `token_exchange:` has no carrier on `transport: stdio` — a pipe has no header \
+    // The network keys are refused rather than ignored: a pipe has no header to carry a
+    // credential, and no address for `allow_private:` to widen.
+    for (set, why) in [
+        (
+            def.token_exchange.is_some(),
+            "`token_exchange:` has no carrier on `transport: stdio` — a pipe has no header \
              block to put a bearer token in. Give the child its credential through `env:`, which is \
-             the channel a child process actually reads one from."
-        ));
-    }
-    if def.aud.is_some() {
-        return Err(format!(
-            "{at}: `aud:` is the RFC 8707 resource indicator for an OUTBOUND token, and \
-             `transport: stdio` mints none. Drop it."
-        ));
-    }
-    if def.upstream_credentials.is_some() {
-        return Err(format!(
-            "{at}: `upstream_credentials:` selects how busbar credentials a NETWORK hop, and \
-             `transport: stdio` makes none. A child process's credential belongs in `env:`."
-        ));
-    }
-    // `allow_private:` widens the dispatch-time SSRF check, and there is no address here for it to
-    // widen. Left set, it would read to an operator as a posture busbar was applying.
-    if def.allow_private {
-        return Err(format!(
-            "{at}: `allow_private:` widens the addressing check for a network hop, and \
-             `transport: stdio` makes none. Drop it."
-        ));
+             the channel a child process actually reads one from.",
+        ),
+        (
+            def.aud.is_some(),
+            "`aud:` is the RFC 8707 resource indicator for an OUTBOUND token, and \
+             `transport: stdio` mints none. Drop it.",
+        ),
+        (
+            def.upstream_credentials.is_some(),
+            "`upstream_credentials:` selects how busbar credentials a NETWORK hop, and \
+             `transport: stdio` makes none. A child process's credential belongs in `env:`.",
+        ),
+        (
+            def.allow_private,
+            "`allow_private:` widens the addressing check for a network hop, and \
+             `transport: stdio` makes none. Drop it.",
+        ),
+    ] {
+        if set {
+            return Err(format!("{at}: {why}"));
+        }
     }
     Ok(())
 }
 
-/// REFUSE AN ASK THAT NAMES A METHOD NOTHING CAN SEND.
-///
-/// `ask_caller[].method` is a free string in the grammar, and at dispatch a method outside the
-/// closed set is silently DROPPED — the engine's `super::callerask::CallerAsk::capability_key` returns `None`
-/// and the round's filter removes the entry. So an operator who typed `elicitation/created` did not
-/// get a broken confirmation gate, they got NO confirmation gate: the destructive tool the gate was
-/// written for dispatches unconfirmed, and the only visible symptom is a refusal that blames the
-/// CALLER for declaring no capabilities. A round emptied by the filter is dropped entirely, so even
-/// that refusal disappears once the typo is the only entry.
-///
-/// Boot is the only place an operator is present to be told, and #42 is the rule: an unknown is
-/// REFUSED, never silently defaulted. The set is [`ASK_METHODS`] — the same three
-/// strings dispatch matches on, READ rather than re-spelled, so a fourth method the protocol grows
-/// is added in exactly one place.
+/// Refuse an ask method outside [`ASK_METHODS`]: dispatch would drop it, and the gate with it.
 fn refuse_unknown_ask_methods(
     at: &str,
     family: &str,
@@ -1299,30 +795,11 @@ impl McpServerDefCfg {
     }
 }
 
-/// THE VALUE-LEVEL RULES for one `tools:` entry.
-///
-/// Split out as a free function on purpose: `serde` types check SHAPE, and every rule below is about
-/// a VALUE that is well-typed and still wrong. Boot calls it from the `Deserialize` above and the
-/// admin write path calls it through the plane's `config_validate` hook, so the two paths cannot
-/// drift into different grammars — the ONE GRAMMAR, TWO PATHS rule.
+/// THE VALUE-LEVEL RULES for one `tools:` entry, run at boot and by the admin write path alike.
 pub fn validate_server(name: &str, def: &McpServerDefCfg) -> Result<(), String> {
     let at = format!("`tools.{name}`");
 
-    // THE SEPARATOR RULE, and it lands on the SERVER ID ALONE. This is a real tension in the spec
-    // and it is resolved here rather than worked around, so the resolution is visible:
-    //
-    // `{server}_{tool}` is THE ROUTING KEY, and the locked config example writes
-    // `tools_allow: { read_file: {} }` — a tool name containing the separator. Both cannot hold with
-    // an unambiguous key unless one of the two halves is separator-free, and the spec constrains
-    // neither. Constraining the SERVER ID is the choice that costs nothing and buys everything: a
-    // server id is an operator-chosen registry label with no upstream to satisfy, so renaming
-    // `my_server` to `my-server` is free — whereas a TOOL name is chosen by somebody else's server
-    // and refusing `read_file` would make busbar unable to front the very example the grammar
-    // ships.
-    //
-    // With the server id separator-free, `{server}_{tool}` splits at the FIRST separator and splits
-    // exactly one way. Without the rule, `a_b` + `c` and `a` + `b_c` render the same string, and one
-    // `mcp_tool` grant silently names two different (server, tool) pairs.
+    // The server id may not contain the separator, so `{server}_{tool}` splits exactly one way.
     if name.contains(NAMESPACE_SEP) {
         return Err(format!(
             "{at}: an MCP server id may not contain `{NAMESPACE_SEP}`. The id is the first half of \
@@ -1334,16 +811,13 @@ pub fn validate_server(name: &str, def: &McpServerDefCfg) -> Result<(), String> 
             name.replace(NAMESPACE_SEP, "-")
         ));
     }
-    // THE ROUTING KEY'S SPELLING (row 159 finding P-M11): a server id, and each `tools_allow` name
-    // under it, is the one spelling a relayed call is built under ([`crate::identity::ToolKey`]),
-    // so a name it refuses would make the tool silently undispatchable. Refused here, in its words.
+    // The routing key's spelling ([`crate::identity::ToolKey`]), refused here in its words.
     let id = crate::identity::ServerId::new(name).map_err(|e| format!("{at}: {e}"))?;
 
     validate_endpoint(&at, def)?;
     def.sampling_bounds.validate(&at)?;
 
-    // THE PIN and the `verify_ttl:` bound are not judged here: they are the kernel's trust keys
-    // (the door's trust keys), judged by the kernel before the section reaches this validator.
+    // The pin, `verify_ttl:` and `timeout:` are the kernel's keys, judged before this validator.
 
     // THE DEADLINE (`timeout:`) is not judged here either: it is the kernel's reserved per-entry key
     // (`busbar_contract::section::ENTRY_TIMEOUT_KEY`), judged by the kernel before the section
@@ -1353,18 +827,13 @@ pub fn validate_server(name: &str, def: &McpServerDefCfg) -> Result<(), String> 
         validate_capability_name(&at, "tools_allow", tool)?;
         crate::identity::ToolKey::new(id.clone(), tool)
             .map_err(|e| format!("{at}: `tools_allow.{tool}`: {e}"))?;
-        refuse_unknown_ask_methods(&at, "tools_allow", tool, "ask_caller", &allow.ask_caller)?;
-        refuse_unknown_ask_methods(
-            &at,
-            "tools_allow",
-            tool,
-            "task_ask_caller",
-            &allow.task_ask_caller,
-        )?;
-        // A task-scoped ask on a tool that never creates a task has no task to be asked inside of,
-        // so it would be silently unreachable: the caller would get a plain result and never see
-        // the confirmation gate the operator wrote. Refused at boot, where the operator is, rather
-        // than at a dispatch an hour later that simply does not ask.
+        for (field, rounds) in [
+            ("ask_caller", &allow.ask_caller),
+            ("task_ask_caller", &allow.task_ask_caller),
+        ] {
+            refuse_unknown_ask_methods(&at, "tools_allow", tool, field, rounds)?;
+        }
+        // A task-scoped ask on a tool that never creates a task would never be emitted.
         if !allow.task_ask_caller.is_empty() && allow.task_support.is_none() {
             return Err(format!(
                 "{at}: `tools_allow.{tool}.task_ask_caller:` is the input busbar asks its caller for \
@@ -1373,11 +842,7 @@ pub fn validate_server(name: &str, def: &McpServerDefCfg) -> Result<(), String> 
                  `required`), or move the rounds to `ask_caller:` for the synchronous exchange."
             ));
         }
-        // THE SHAPE of an override, not its uniqueness — uniqueness needs every OTHER server and is
-        // therefore `validate_published_names`, which runs where the whole registry is in hand. A
-        // blank or whitespace-padded wire name is refused here because it is wrong on its own
-        // without reference to anything else: `tools/list` would publish a name no client can type
-        // back, and `mcp_tool:` would grant on it.
+        // The shape of an override; its uniqueness is `validate_published_names`'s.
         if let Some(publish_as) = &allow.publish_as {
             if publish_as.trim().is_empty() {
                 return Err(format!(
@@ -1426,12 +891,9 @@ pub fn validate_server(name: &str, def: &McpServerDefCfg) -> Result<(), String> 
         }
     }
     for (template, allow) in &def.resource_templates_allow {
-        validate_uri_template(&at, template)?;
-        // A template whose CONTENT names no parameter is a template that answers the same bytes for
-        // every expansion, which is a concrete resource with a wildcard in front of it. Refused,
-        // because the wildcard is then an approval of a whole URI shape bought for nothing.
+        let names = validate_uri_template(&at, template)?;
+        // A template whose content names no parameter is a concrete resource behind a wildcard.
         if let Some(text) = &allow.text {
-            let names = template_parameter_names(template);
             if !names.iter().any(|n| text.contains(&format!("{{{n}}}"))) {
                 return Err(format!(
                     "{at}: `resource_templates_allow.{template}` has `text:` that substitutes none \
@@ -1445,10 +907,7 @@ pub fn validate_server(name: &str, def: &McpServerDefCfg) -> Result<(), String> 
     }
 
     if let Some(tx) = &def.token_exchange {
-        // The same scheme rule the `url:` gets, and for a stronger reason: this endpoint receives
-        // busbar's OWN subject token, so plaintext to a public host would put busbar's ambient
-        // credential on the wire in the clear. Private/loopback is exempted only where the operator
-        // has said this deployment's estate is internal.
+        // This endpoint receives busbar's own subject token: https, or http only with `allow_private`.
         let private_ok = def.allow_private && tx.token_url.starts_with("http://");
         if !(tx.token_url.starts_with("https://") || private_ok) {
             return Err(format!(
@@ -1458,9 +917,7 @@ pub fn validate_server(name: &str, def: &McpServerDefCfg) -> Result<(), String> 
                 url_for_display(&tx.token_url)
             ));
         }
-        // An exchange mints BUSBAR's credential. `passthrough` says the CALLER supplies the
-        // credential. Configuring both is an operator asking for two different answers to one
-        // question, and silently preferring either is how a deputy is created.
+        // An exchange mints busbar's credential; `passthrough` says the caller supplies one.
         if matches!(def.upstream_credentials, Some(UpstreamCreds::Passthrough)) {
             return Err(format!(
                 "{at}: `token_exchange:` mints BUSBAR's own down-scoped credential, and \
@@ -1468,9 +925,7 @@ pub fn validate_server(name: &str, def: &McpServerDefCfg) -> Result<(), String> 
                  other."
             ));
         }
-        // RFC 8707 is not optional on an exchange: without a resource indicator the issued token is
-        // spendable at any backend the AS serves, which is the audience-confusion the exchange
-        // exists to prevent.
+        // RFC 8707 is required on an exchange, so the token is audience-bound.
         if def.aud.is_none() {
             return Err(format!(
                 "{at}: `token_exchange:` requires `aud:` — the RFC 8707 resource indicator the \
@@ -1494,93 +949,34 @@ pub fn validate_server(name: &str, def: &McpServerDefCfg) -> Result<(), String> 
     Ok(())
 }
 
-/// Where a published wire name CAME FROM, so a collision error can name both sides the way the
-/// operator will have to fix them: one of them is a line they typed, the other may be a name nobody
-/// typed at all.
-struct PublishedName {
-    server: String,
-    tool: String,
-    /// `true` when the name came from `publish_as:`, `false` when it is the `{server}_{tool}`
-    /// default. Carried rather than re-derived, because re-deriving means comparing the name to
-    /// `namespaced(server, tool)` and getting the wrong answer for the one config where it matters:
-    /// `publish_as:` set to exactly the default.
-    overridden: bool,
-}
-
-impl PublishedName {
-    /// The half of the error message that describes ONE claimant.
-    fn describe(&self) -> String {
-        let Self {
-            server,
-            tool,
-            overridden,
-        } = self;
-        if *overridden {
-            format!("`tools.{server}.tools_allow.{tool}.publish_as:`")
-        } else {
-            format!(
-                "the default `{{server}}{NAMESPACE_SEP}{{tool}}` name of \
-                 `tools.{server}.tools_allow.{tool}`"
-            )
-        }
-    }
-}
-
-/// THE UNIQUENESS INVARIANT, once, over the WHOLE registry: one published wire name resolves to
-/// exactly one `(server, tool)`.
-///
-/// This is the validation that replaces the guarantee `{server}_{tool}` used to give by
-/// construction, so it has to be TOTAL in both directions or it is not a replacement:
-///
-/// 1. It walks EVERY tool of EVERY server, building each one's published name — the `publish_as:`
-///    override where there is one, the namespaced default where there is not.
-/// 2. It compares against that whole set. **Not overrides against each other.** The collision that
-///    a naive check misses is an override against a DEFAULT: `publish_as: foo_bar` on any server
-///    collides with server `foo`'s tool `bar`, and nobody typed `foo_bar` on the `foo` side for the
-///    naive check to compare it with. An implementation that only compared overrides to overrides
-///    would accept that config and look correct doing it.
-///
-/// A collision is refused rather than resolved. Resolving it — last-writer-wins, or an automatic
-/// suffix — would leave one wire name pointing at a `(server, tool)` the operator did not choose,
-/// and because the engine's `crate::mcp::catalogue` keys the `mcp_tool` grant on the published name, that
-/// silently moves an authorization decision. A boot refusal an operator reads is strictly better
-/// than a dispatch an hour later that reaches the wrong upstream.
-///
-/// Called from core's config resolve, through this section's `validate_registry` (the substrate's
-/// plane-section seam) — the ONE point every path converges on: boot,
-/// `busbar --validate`, the admin config-apply rebuild and the admin dry-run validate endpoint all
-/// run it over the EFFECTIVE registry (file base + applied overlay). Deliberately NOT called from
-/// `ToolsCfg`'s `Deserialize`: that sees only the file, so a server added through the API would
-/// never be compared against it — a check that looked total and was not.
+/// THE UNIQUENESS INVARIANT over the whole effective registry: one published wire name resolves to
+/// exactly one `(server, tool)`. Every name (override or default) against every other, refused
+/// rather than resolved, because the `mcp_tool` grant keys on the published name.
 pub fn validate_published_names(cfg: &ToolsCfg) -> Result<(), String> {
-    let mut published: std::collections::BTreeMap<String, PublishedName> =
-        std::collections::BTreeMap::new();
+    let mut published = std::collections::BTreeMap::new();
     for (server, def) in &cfg.servers {
         for (tool, allow) in &def.tools_allow {
-            // THE SAME TWO LINES `Catalogue::build` runs, through the SAME function, and that is
-            // load-bearing rather than tidy: this check is only meaningful if the set it walks is
-            // byte-identical to the set that is published. A second local `{server}_{tool}` formula
-            // here would validate one set and publish another the day either changed.
-            let overridden = allow.publish_as.is_some();
+            // The same name `Catalogue::build` publishes; the claimant as the operator must fix it.
             let name = allow
                 .publish_as
                 .clone()
                 .unwrap_or_else(|| namespaced(server, tool));
-            let claim = PublishedName {
-                server: server.clone(),
-                tool: tool.clone(),
-                overridden,
+            let claim = if allow.publish_as.is_some() {
+                format!("`tools.{server}.tools_allow.{tool}.publish_as:`")
+            } else {
+                format!(
+                    "the default `{{server}}{NAMESPACE_SEP}{{tool}}` name of \
+                     `tools.{server}.tools_allow.{tool}`"
+                )
             };
             if let Some(prior) = published.get(&name) {
                 return Err(format!(
-                    "`tools`: two tools would both be published as `{name}` — {} and {}. A \
+                    "`tools`: two tools would both be published as `{name}` — {prior} and {claim}. A \
                      published name is the wire name `tools/list` emits, the name `tools/call` \
                      dispatches on, AND the value an `mcp_tool:` grant names, so one name meaning \
                      two (server, tool) pairs would make one grant silently authorize both. busbar \
                      refuses to boot rather than pick one. Change one `publish_as:`, or remove it \
-                     to publish the `{{server}}{NAMESPACE_SEP}{{tool}}` default.",
-                    prior.describe(),
-                    claim.describe(),
+                     to publish the `{{server}}{NAMESPACE_SEP}{{tool}}` default."
                 ));
             }
             published.insert(name, claim);
@@ -1589,8 +985,7 @@ pub fn validate_published_names(cfg: &ToolsCfg) -> Result<(), String> {
     Ok(())
 }
 
-/// A capability name must be non-empty. It MAY contain the namespace separator, and that is a
-/// deliberate asymmetry with the server id — see [`validate_server`] for the arithmetic.
+/// A capability name must be non-empty (it may contain the separator).
 fn validate_capability_name(at: &str, field: &str, name: &str) -> Result<(), String> {
     if name.trim().is_empty() {
         return Err(format!("{at}: `{field}:` has an empty name key"));
@@ -1609,9 +1004,7 @@ fn validate_prompt(at: &str, name: &str, allow: &PromptAllowCfg) -> Result<(), S
         ));
     }
     for (i, message) in allow.messages.iter().enumerate() {
-        // The schema names exactly two roles. An unrecognised one is refused rather than passed
-        // through: a client that does not know the role has no way to place the message, and a
-        // message with no place in a conversation is a message a model reads in the wrong role.
+        // The schema names exactly two roles.
         if !matches!(message.role.as_str(), "user" | "assistant") {
             return Err(format!(
                 "{at}: `prompts_allow.{name}.messages[{i}].role` is `{}`; a PromptMessage role is \
@@ -1644,10 +1037,7 @@ fn validate_prompt(at: &str, name: &str, allow: &PromptAllowCfg) -> Result<(), S
     Ok(())
 }
 
-/// A base64 value that does not decode is refused HERE, at boot, on the operator who typed it.
-///
-/// The alternative is a client receiving bytes it cannot decode, which surfaces hours later, in
-/// somebody else's log, as "busbar sent me rubbish".
+/// A base64 value that does not decode is refused at boot.
 fn validate_base64(at: &str, field: &str, value: &str) -> Result<(), String> {
     use base64::Engine as _;
     base64::engine::general_purpose::STANDARD
@@ -1661,16 +1051,9 @@ fn validate_base64(at: &str, field: &str, value: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// THE URI-TEMPLATE RULES, and they are deliberately narrow.
-///
-/// Only RFC 6570 LEVEL 1 — `{name}`, simple string expansion — is accepted. The higher levels add
-/// operators (`{+var}` reserved expansion, `{#var}` fragments, `{/var}` path segments, `{?var}` form
-/// parameters) whose expansions and, crucially, whose MATCHING rules differ from one another. A
-/// matcher that accepted the syntax of level 3 while implementing the semantics of level 1 would
-/// resolve some URIs to the wrong template, silently, and a resource template IS an approval — so a
-/// mis-match is content served under an approval nobody gave. Refusing the syntax we do not
-/// implement is the only version of this that cannot be wrong.
-fn validate_uri_template(at: &str, template: &str) -> Result<(), String> {
+/// THE URI-TEMPLATE RULES: RFC 6570 level 1 (`{name}`) only, since the higher levels match
+/// differently and a mis-match would serve content under an approval nobody gave. Its parameter names.
+fn validate_uri_template<'t>(at: &str, template: &'t str) -> Result<Vec<&'t str>, String> {
     if template.trim().is_empty() {
         return Err(format!(
             "{at}: `resource_templates_allow:` has an empty URI-template key"
@@ -1724,22 +1107,7 @@ fn validate_uri_template(at: &str, template: &str) -> Result<(), String> {
             "{at}: `resource_templates_allow.{template}` has a `}}` with no matching `{{`"
         ));
     }
-    Ok(())
-}
-
-/// The parameter names of a template, in order. Only called on a template
-/// [`validate_uri_template`] has already accepted, so the scan cannot be tricked by unbalanced
-/// braces — and that ordering is why this returns a plain `Vec` rather than a `Result`.
-pub fn template_parameter_names(template: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut rest = template;
-    while let Some(open) = rest.find('{') {
-        let after = &rest[open + 1..];
-        let Some(close) = after.find('}') else { break };
-        out.push(after[..close].to_string());
-        rest = &after[close + 1..];
-    }
-    out
+    Ok(names)
 }
 
 #[cfg(test)]
