@@ -61,7 +61,7 @@ fn lowering_drops_the_stateless_meta_and_mirror_and_keeps_the_credential() {
     );
     assert_eq!(body["params"]["arguments"], json!({"x":"y"}));
     assert_eq!(header(&lowered, H_PROTOCOL_VERSION), Some("2025-06-18"));
-    assert_eq!(header(&lowered, H_SESSION), Some("sid1"));
+    assert_eq!(header(&lowered, crate::adapt::H_SESSION_ID), Some("sid1"));
     assert_eq!(header(&lowered, H_MCP_METHOD), None);
     assert_eq!(header(&lowered, H_MCP_NAME), None);
     assert_eq!(header(&lowered, "authorization"), Some("Bearer tok"));
@@ -92,7 +92,6 @@ fn initialize_asks_for_a_revision_and_names_busbar() {
         &stateless_call(),
         "https://up.example/rpc",
         Revision::R2025_11_25,
-        9,
         "1.6.0",
     );
     let body: Value = serde_json::from_slice(&init.body).unwrap();
@@ -113,7 +112,7 @@ fn initialize_asks_for_a_revision_and_names_busbar() {
     );
     let body: Value = serde_json::from_slice(&done.body).unwrap();
     assert!(body.get("id").is_none());
-    assert_eq!(header(&done, H_SESSION), Some("s"));
+    assert_eq!(header(&done, crate::adapt::H_SESSION_ID), Some("s"));
 }
 
 #[test]
@@ -167,66 +166,10 @@ fn the_event_reader_joins_split_chunks_and_is_bounded() {
     assert_eq!(got.len(), 2);
     assert_eq!(got[0].event.as_deref(), Some("endpoint"));
     assert_eq!(got[0].data, "/m?s=1");
-    assert_eq!(got[1].id.as_deref(), Some("0-1"));
     assert_eq!(got[1].data, "{\"a\":\n1}");
     assert!(r.feed(&[b'x'; 100]).is_empty());
     assert!(
         r.overflowed(),
         "an event that never ends is dropped, not buffered forever"
     );
-}
-
-fn ev(event: Option<&str>, data: &str) -> StreamEvent {
-    StreamEvent {
-        event: event.map(str::to_string),
-        id: None,
-        data: data.to_string(),
-    }
-}
-
-#[test]
-fn a_link_is_ready_once_and_answers_only_what_it_waits_for() {
-    let mut link = EventStreamLink::new("https://up.example/events", 2);
-    assert_eq!(link.address(), None);
-    assert_eq!(
-        link.on_event(&ev(Some("endpoint"), "/messages?sessionId=a")),
-        LinkEffect::Ready("https://up.example/messages?sessionId=a".to_string())
-    );
-    assert_eq!(
-        link.on_event(&ev(Some("endpoint"), "/elsewhere")),
-        LinkEffect::Ignored,
-        "the address is named once"
-    );
-    assert!(link.expect(&json!(7)));
-    assert!(!link.expect(&json!(7)), "one waiter per id");
-    assert!(link.expect(&json!("x")));
-    assert!(!link.expect(&json!(9)), "bounded");
-    let answer = r#"{"jsonrpc":"2.0","id":7,"result":{}}"#;
-    assert!(
-        matches!(link.on_event(&ev(Some("message"), answer)), LinkEffect::Answer { ref id, .. } if id == "7")
-    );
-    assert_eq!(
-        link.on_event(&ev(Some("message"), answer)),
-        LinkEffect::Ignored,
-        "answered once"
-    );
-    let unsolicited = r#"{"jsonrpc":"2.0","id":99,"result":{}}"#;
-    assert_eq!(link.on_event(&ev(None, unsolicited)), LinkEffect::Ignored);
-    let note = r#"{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}"#;
-    assert!(matches!(
-        link.on_event(&ev(Some("message"), note)),
-        LinkEffect::FromPeer(_)
-    ));
-    link.abandon(&json!("x"));
-    assert!(link.expect(&json!(9)));
-}
-
-#[test]
-fn red_a_link_refuses_a_cross_origin_endpoint() {
-    let mut link = EventStreamLink::new("https://up.example/events", 2);
-    assert_eq!(
-        link.on_event(&ev(Some("endpoint"), "https://evil.example/m")),
-        LinkEffect::Refused(AddressRefused::CrossOrigin)
-    );
-    assert_eq!(link.address(), None);
 }

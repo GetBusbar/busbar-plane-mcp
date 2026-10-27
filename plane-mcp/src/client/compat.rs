@@ -17,6 +17,7 @@
 use serde_json::Value;
 
 use super::jsonrpc::OutboundRequest;
+use crate::adapt::H_SESSION_ID;
 use crate::codec::{
     CODE_INVALID_PARAMS, CODE_INVALID_REQUEST, CODE_METHOD_NOT_FOUND,
     CODE_UNSUPPORTED_PROTOCOL_VERSION, H_MCP_METHOD, H_MCP_NAME, H_PROTOCOL_VERSION,
@@ -24,9 +25,9 @@ use crate::codec::{
 };
 use crate::revision::{Revision, StepOutcome};
 
-/// The response header an upstream names its session in, and the request header busbar carries it
-/// back in.
-pub const H_SESSION: &str = crate::adapt::H_SESSION_ID;
+/// The id busbar's own `initialize` carries: `2^53 - 1`, the largest integer a JavaScript peer
+/// reads back exactly, above every other id busbar sends.
+pub const INITIALIZE_ID: u64 = (1 << 53) - 1;
 
 /// Reads what a stateless request's answer says about the upstream's revision.
 ///
@@ -103,19 +104,18 @@ pub fn stateless_outcome(status: u16, body: &[u8]) -> StepOutcome {
     }
 }
 
-/// The `initialize` request, sent to `url` with the credential `template` carries. `client_version`
-/// is the caller's own version string (the plane reads no build metadata).
+/// The `initialize` request (id [`INITIALIZE_ID`]), sent to `url` with the credential `template`
+/// carries. `client_version` is the caller's own version string.
 #[must_use]
 pub fn initialize_request(
     template: &OutboundRequest,
     url: &str,
     asked: Revision,
-    request_id: u64,
     client_version: &str,
 ) -> OutboundRequest {
     let body = serde_json::json!({
         "jsonrpc": "2.0",
-        "id": request_id,
+        "id": INITIALIZE_ID,
         "method": crate::adapt::METHOD_INITIALIZE,
         "params": {
             "protocolVersion": asked.wire(),
@@ -195,7 +195,7 @@ fn session_envelope(
             k != H_PROTOCOL_VERSION
                 && k != H_MCP_METHOD
                 && k != H_MCP_NAME
-                && k != H_SESSION
+                && k != H_SESSION_ID
                 && !k.starts_with("mcp-param-")
         })
         .cloned()
@@ -204,7 +204,7 @@ fn session_envelope(
         headers.push((H_PROTOCOL_VERSION.to_string(), r.wire().to_string()));
     }
     if let Some(s) = session {
-        headers.push((H_SESSION.to_string(), s.to_string()));
+        headers.push((H_SESSION_ID.to_string(), s.to_string()));
     }
     OutboundRequest {
         url: url.to_string(),
@@ -263,8 +263,6 @@ pub fn message_address(base: &str, event_data: &str) -> Result<String, AddressRe
 pub struct StreamEvent {
     /// The `event:` name, when the event named one.
     pub event: Option<String>,
-    /// The `id:`, when the event carried one.
-    pub id: Option<String>,
     /// The `data:` lines, joined with `\n`.
     pub data: String,
 }
@@ -309,7 +307,6 @@ impl EventReader {
             let raw = String::from_utf8_lossy(&raw[..end]);
             let mut event = StreamEvent {
                 event: None,
-                id: None,
                 data: String::new(),
             };
             let mut data: Vec<&str> = Vec::new();
@@ -321,7 +318,6 @@ impl EventReader {
                 let value = value.strip_prefix(' ').unwrap_or(value);
                 match field {
                     "event" => event.event = Some(value.to_string()),
-                    "id" => event.id = Some(value.to_string()),
                     "data" => data.push(value),
                     _ => {}
                 }
@@ -336,109 +332,6 @@ impl EventReader {
             self.overflowed = true;
         }
         out
-    }
-}
-
-/// What one event on a `2024-11-05` stream means to the client holding it.
-#[derive(Clone, Debug, PartialEq)]
-pub enum LinkEffect {
-    /// The `endpoint` event named the message address: POSTs may start.
-    Ready(String),
-    /// The `endpoint` event named an address busbar will not POST to. The link is unusable.
-    Refused(AddressRefused),
-    /// The answer to a request this link is waiting on, by its id's JSON text.
-    Answer {
-        /// The request id, as JSON text.
-        id: String,
-        /// The whole JSON-RPC response, as sent.
-        body: Vec<u8>,
-    },
-    /// A request or notification from the upstream, for the peer classifier.
-    FromPeer(Value),
-    /// Nothing busbar acts on: a repeat `endpoint`, a response nobody waits for, a body that is
-    /// not JSON.
-    Ignored,
-}
-
-/// THE CLIENT STATE OF ONE `2024-11-05` STREAM: the message address once named, and the ids of the
-/// requests waiting for an answer on it. Bounded: at most `max_waiting` requests wait at once.
-#[derive(Debug)]
-pub struct EventStreamLink {
-    base: String,
-    address: Option<String>,
-    waiting: std::collections::BTreeSet<String>,
-    max_waiting: usize,
-}
-
-impl EventStreamLink {
-    /// A link to the stream opened at `base`, holding at most `max_waiting` open requests.
-    #[must_use]
-    pub fn new(base: &str, max_waiting: usize) -> Self {
-        Self {
-            base: base.to_string(),
-            address: None,
-            waiting: std::collections::BTreeSet::new(),
-            max_waiting: max_waiting.max(1),
-        }
-    }
-
-    /// The message address, once the stream named an acceptable one.
-    #[must_use]
-    pub fn address(&self) -> Option<&str> {
-        self.address.as_deref()
-    }
-
-    /// Registers a request by its `id` before it is POSTed. `false` when the link already holds
-    /// `max_waiting` requests or the id is already waiting.
-    pub fn expect(&mut self, id: &Value) -> bool {
-        if self.waiting.len() >= self.max_waiting {
-            return false;
-        }
-        self.waiting.insert(id.to_string())
-    }
-
-    /// Stops waiting for `id` (its caller gave up).
-    pub fn abandon(&mut self, id: &Value) {
-        self.waiting.remove(&id.to_string());
-    }
-
-    /// Reads one event.
-    pub fn on_event(&mut self, event: &StreamEvent) -> LinkEffect {
-        if event.event.as_deref() == Some("endpoint") {
-            if self.address.is_some() {
-                return LinkEffect::Ignored;
-            }
-            return match message_address(&self.base, &event.data) {
-                Ok(a) => {
-                    self.address = Some(a.clone());
-                    LinkEffect::Ready(a)
-                }
-                Err(r) => LinkEffect::Refused(r),
-            };
-        }
-        if !matches!(
-            event.event.as_deref(),
-            None | Some(crate::adapt::EVENT_MESSAGE)
-        ) {
-            return LinkEffect::Ignored;
-        }
-        let Ok(v) = serde_json::from_str::<Value>(&event.data) else {
-            return LinkEffect::Ignored;
-        };
-        if v.get("method").is_some() {
-            return LinkEffect::FromPeer(v);
-        }
-        let Some(id) = v.get("id").map(Value::to_string) else {
-            return LinkEffect::Ignored;
-        };
-        if self.waiting.remove(&id) {
-            LinkEffect::Answer {
-                id,
-                body: event.data.clone().into_bytes(),
-            }
-        } else {
-            LinkEffect::Ignored
-        }
     }
 }
 
