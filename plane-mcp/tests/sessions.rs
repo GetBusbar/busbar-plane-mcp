@@ -1944,6 +1944,45 @@ fn two_callers_of_one_legacy_member_never_share_a_stream() {
     );
 }
 
+/// A NOTIFICATION ON THE HELD LINK FINISHES ON ITS POST: the `2024-11-05` server answers a
+/// notification's POST `202` and never sends anything for it on the stream, so busbar POSTs it with
+/// no id and goes on at once. The handshake's `notifications/initialized` is that notification:
+/// the call after it is POSTed and answered though no event ever came for it.
+#[test]
+fn a_notification_on_the_held_link_finishes_on_its_post() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open_with(LEGACY_SECTION);
+    let (a, fields) = legacy_call(40, "n.txt");
+    relayed(&d, 78, ALICE, &a, &fields);
+    let answered = d.pump(78, &walk_refused(ALICE));
+    assert_eq!(answered.status, 200, "{}", answered.text());
+    assert_eq!(
+        legacy_text(&answered),
+        (json!(40), "legacy n.txt".to_string())
+    );
+    let posted: Vec<Value> = seen()
+        .into_iter()
+        .filter(|s| s.url.contains(LEGACY_MESSAGES))
+        .map(|s| s.body)
+        .collect();
+    let at = |method: &str| {
+        posted
+            .iter()
+            .position(|b| b["method"] == json!(method))
+            .unwrap_or_else(|| panic!("`{method}` was POSTed: {posted:?}"))
+    };
+    let note = &posted[at("notifications/initialized")];
+    assert!(
+        note.get("id").is_none(),
+        "a notification is POSTed with no id: {note}"
+    );
+    assert!(
+        at("notifications/initialized") < at("tools/call"),
+        "the call went on after the notification's POST, with no answer for it: {posted:?}"
+    );
+}
+
 // ── row 159 legacy-rung, ladder, session and subscription findings (lane q128) ──────────────────
 
 /// The largest integer a JavaScript peer reads back exactly (`Number.MAX_SAFE_INTEGER`).
