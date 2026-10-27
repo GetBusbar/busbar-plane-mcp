@@ -7,7 +7,51 @@
 use serde_json::{json, Value};
 
 use super::*;
+use crate::ask::tests::Plain;
 use crate::catalogue::{Catalogue, ToolEntry};
+use crate::tests::everyone;
+
+/// Admits one call with no trust verdict against it (every tool serves).
+fn admit_call(
+    catalogue: &Catalogue,
+    id: &Value,
+    params: Option<&Value>,
+    header: &impl Fn(&str) -> Option<String>,
+    admit: &impl Fn(&str, &str) -> bool,
+    ask: &mut dyn FnMut(&ToolEntry, &Value) -> crate::ask::AskDecision,
+) -> Admission {
+    admit_trusted(
+        catalogue,
+        id,
+        params,
+        header,
+        admit,
+        &mut |_| Trust::Verdict(DISTRUST_NONE),
+        ask,
+    )
+}
+
+/// Settles an http round's answer, correlated to the id the round's request carried.
+fn settle_call(
+    admitted: &AdmittedCall,
+    def: Option<&McpServerDefCfg>,
+    status: u32,
+    raw: &[u8],
+    sse: bool,
+    round: u32,
+) -> Settled {
+    let sent = crate::client::jsonrpc::dispatch_request_id(round);
+    settle_call_as(admitted, def, status, raw, sse, round, sent)
+}
+
+/// The http continuation (`inputResponses` and `requestState`) judged as the door judges it.
+fn judge_continuation(
+    server: &str,
+    bounds: &crate::tools_config::SamplingBoundsCfg,
+    continuation: &Value,
+) -> Result<(), AskRefusal> {
+    judge_input_response(server, bounds, continuation.to_string().len())
+}
 
 /// One server: an approved tool whose `path` argument is mirrored in `Mcp-Param-Path`, a tool
 /// awaiting approval, a tool that must be answered as a task, and a tool that asks its caller.
@@ -26,10 +70,6 @@ fn section() -> crate::tools_config::ToolsCfg {
 
 fn catalogue() -> Catalogue {
     Catalogue::build(1, &section())
-}
-
-fn everyone(_: &str, _: &str) -> bool {
-    true
 }
 
 fn params(name: &str, arguments: Value) -> Value {
@@ -930,7 +970,6 @@ fn an_ask_of_the_caller_and_a_task_are_audited_in_the_engines_words() {
     let mut ask = |_: &ToolEntry, _: &Value| crate::ask::AskDecision::Ask {
         asks: Vec::new(),
         request_state: "s".to_string(),
-        round: 1,
     };
     let line = match admit_call(
         &catalogue(),
@@ -1174,12 +1213,12 @@ fn input_responses_over_the_cap_are_refused_and_not_forwarded_at_the_cap_forward
     });
     let exact = continuation.to_string().len();
     let at = sampling_def(|b| b.max_input_response_bytes = u32::try_from(exact).expect("small"));
-    crate::call::judge_continuation("fs", &at.sampling_bounds, &continuation)
+    judge_continuation("fs", &at.sampling_bounds, &continuation)
         .expect("exactly at the cap is forwarded");
 
     let over =
         sampling_def(|b| b.max_input_response_bytes = u32::try_from(exact - 1).expect("small"));
-    let refusal = crate::call::judge_continuation("fs", &over.sampling_bounds, &continuation)
+    let refusal = judge_continuation("fs", &over.sampling_bounds, &continuation)
         .expect_err("one byte over is refused");
     assert!(matches!(
         &refusal,
@@ -1203,9 +1242,9 @@ fn input_responses_default_cap_is_one_mebibyte() {
     let def = sampling_def(|_| {});
     assert_eq!(def.sampling_bounds.max_input_response_bytes, 1_048_576);
     let big = json!({ "inputResponses": { "s": "y".repeat(1_048_576) } });
-    crate::call::judge_continuation("fs", &def.sampling_bounds, &big).expect_err("over");
+    judge_continuation("fs", &def.sampling_bounds, &big).expect_err("over");
     let small = json!({ "inputResponses": { "s": "y" }, "requestState": "z" });
-    crate::call::judge_continuation("fs", &def.sampling_bounds, &small).expect("under");
+    judge_continuation("fs", &def.sampling_bounds, &small).expect("under");
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1213,35 +1252,6 @@ fn input_responses_default_cap_is_one_mebibyte() {
 // what went out on the first call is what goes out on every retry of the same exchange, plus the
 // answers of the round the retry closes.
 // ---------------------------------------------------------------------------------------------
-
-/// A seal that writes the state as JSON behind a marker and spends each nonce once (the ask
-/// tests' own stand-in for the host's).
-#[derive(Default)]
-struct PlainSeal {
-    spent: std::collections::BTreeSet<String>,
-    next: u32,
-}
-
-const PLAIN: &str = "sealed:";
-
-impl crate::ask::Seal for PlainSeal {
-    fn mint(&mut self, state: &crate::ask::AskState) -> Option<String> {
-        Some(format!("{PLAIN}{}", serde_json::to_string(state).ok()?))
-    }
-    fn open(&mut self, blob: &str) -> Result<crate::ask::AskState, crate::ask::Rejected> {
-        let body = blob
-            .strip_prefix(PLAIN)
-            .ok_or(crate::ask::Rejected::BadSignature)?;
-        serde_json::from_str(body).map_err(|_| crate::ask::Rejected::Malformed)
-    }
-    fn nonce(&mut self) -> Option<String> {
-        self.next += 1;
-        Some(format!("n{}", self.next))
-    }
-    fn redeem(&mut self, nonce: &str, _: u64, _: u64) -> bool {
-        self.spent.insert(nonce.to_string())
-    }
-}
 
 /// A tool whose operator asks its caller in TWO rounds before it runs.
 const TWO_ROUNDS: &str = r#"{"fs": {"url": "https://mcp.example/fs", "pin": {"mechanism": "unpinned"},
@@ -1253,7 +1263,7 @@ const TWO_ROUNDS: &str = r#"{"fs": {"url": "https://mcp.example/fs", "pin": {"me
   }}}"#;
 
 /// `p` admitted with busbar's own ask decided over `seal`, as the door decides it.
-fn admit_asking(cat: &Catalogue, seal: &mut PlainSeal, p: &Value) -> Admission {
+fn admit_asking(cat: &Catalogue, seal: &mut Plain, p: &Value) -> Admission {
     let mut ask = |entry: &ToolEntry, arguments: &Value| {
         let retry = crate::ask::Retry {
             responses: p.get("inputResponses"),
@@ -1299,7 +1309,7 @@ fn asked_state(a: Admission) -> String {
 fn a_two_round_exchange_goes_out_with_every_rounds_answers() {
     let section = crate::door::read_tools_section(TWO_ROUNDS.as_bytes()).expect("reads");
     let cat = Catalogue::build(1, &section);
-    let mut seal = PlainSeal::default();
+    let mut seal = Plain::default();
     let first = json!({ "name": "fs_pay", "arguments": { "amount": 5 }, "_meta": {} });
     let s0 = asked_state(admit_asking(&cat, &mut seal, &first));
     let mut second = first.clone();

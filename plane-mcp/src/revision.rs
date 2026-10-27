@@ -77,7 +77,7 @@ impl Revision {
         !matches!(self, Self::R2026_07_28)
     }
 
-    /// Whether every request after `initialize` must carry the `MCP-Protocol-Version` header.
+    /// Whether every request after `initialize` carries the `MCP-Protocol-Version` header.
     #[must_use]
     pub const fn requires_version_header(self) -> bool {
         matches!(
@@ -92,13 +92,6 @@ impl Revision {
     pub const fn is_event_stream_revision(self) -> bool {
         matches!(self, Self::R2024_11_05)
     }
-
-    /// Whether a disconnected server stream may be resumed with `Last-Event-ID`.
-    #[must_use]
-    #[cfg(test)]
-    pub const fn resumable(self) -> bool {
-        matches!(self, Self::R2025_06_18 | Self::R2025_11_25)
-    }
 }
 
 /// THE SERVER HALF OF `initialize` NEGOTIATION. The client's requested revision is echoed when it is
@@ -112,67 +105,23 @@ pub fn negotiate(requested: Option<&str>) -> Revision {
         .unwrap_or(SESSION_REVISIONS[0])
 }
 
-/// How a session request's `MCP-Protocol-Version` header reads against the session's revision.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HeaderCheck {
-    /// The header agrees with the session, or is absent where the session's revision allows that.
-    Agrees,
-    /// The header is absent on a revision that requires it.
-    Missing,
-    /// The header names a revision other than the session's (400 per the spec).
-    Disagrees,
-}
-
-/// Judges a session request's version header. A session knows its revision, so an absent header is
-/// only a defect on a revision that requires it.
+/// Whether a session request's `MCP-Protocol-Version` header names another revision than its
+/// session's (`400` per the spec). A session knows its revision, so an absent header never does.
 #[must_use]
-pub fn check_header(session: Revision, header: Option<&str>) -> HeaderCheck {
-    match header {
-        Some(h) if h == session.wire() => HeaderCheck::Agrees,
-        Some(_) => HeaderCheck::Disagrees,
-        None if session.requires_version_header() => HeaderCheck::Missing,
-        None => HeaderCheck::Agrees,
-    }
+pub fn header_disagrees(session: Revision, header: Option<&str>) -> bool {
+    header.is_some_and(|h| h != session.wire())
 }
 
-/// What a GET that names no session, and accepts an event stream, is answered with.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SessionlessGet {
-    /// Open the `2024-11-05` event stream, whose first event names the message address.
-    EventStream,
-    /// `405`: the client speaks a single-endpoint revision, which has no sessionless GET stream.
-    NotAllowed,
-}
-
-/// THE SESSIONLESS GET (ARCHITECT ruling 2026-09-29). Every single-endpoint revision's client sends
-/// `MCP-Protocol-Version`, and a `2024-11-05` client never does, so the header alone tells the two
-/// apart. Absent: the event-stream revision's GET. Present and naming any other revision: `405`, as
-/// that revision says. Present and naming no revision this plane implements: read the way
-/// [`negotiate`] reads an unknown revision, as the latest session revision, so `405` as well. The
-/// caller answers a GET that neither names a session nor accepts an event stream with `405` before
-/// asking.
+/// THE SESSIONLESS GET (ARCHITECT ruling 2026-09-29): whether it opens the `2024-11-05` event
+/// stream (`false`: `405`). A `2024-11-05` client never sends `MCP-Protocol-Version` and every
+/// later revision's client does, so the header alone tells them apart; a revision this plane does
+/// not implement reads as the latest session revision, as [`negotiate`] reads it.
 #[must_use]
-pub fn sessionless_get(version_header: Option<&str>) -> SessionlessGet {
+pub fn sessionless_get_streams(version_header: Option<&str>) -> bool {
     match version_header {
-        None => SessionlessGet::EventStream,
-        Some(h) => match Revision::parse(h) {
-            Some(r) if r.is_event_stream_revision() => SessionlessGet::EventStream,
-            _ => SessionlessGet::NotAllowed,
-        },
+        None => true,
+        Some(h) => Revision::parse(h).is_some_and(Revision::is_event_stream_revision),
     }
-}
-
-/// THE CLIENT LADDER: the order in which busbar, as a client, tries to open a conversation with an
-/// upstream whose revision it does not yet know.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg(test)]
-pub enum ClientStep {
-    /// A stateless `2026-07-28` request.
-    Stateless,
-    /// A POSTed `initialize` naming the latest session revision.
-    Initialize,
-    /// A GET for the `2024-11-05` event stream and its message address.
-    EventStream,
 }
 
 /// What one rung of the ladder observed.
@@ -187,19 +136,6 @@ pub enum StepOutcome {
     /// No answer at all: the upstream could not be reached, or answered 5xx. Not a revision
     /// signal, so the ladder does not move.
     Unreachable,
-}
-
-/// The next rung after `step` observed `outcome`. `None` means stop: either the rung answered, or
-/// there is nothing left to try, or the failure says nothing about the revision.
-#[must_use]
-#[cfg(test)]
-pub fn next_step(step: ClientStep, outcome: StepOutcome) -> Option<ClientStep> {
-    match (step, outcome) {
-        (_, StepOutcome::Answered | StepOutcome::Unreachable) => None,
-        (ClientStep::Stateless, StepOutcome::Refused4xx) => Some(ClientStep::Initialize),
-        (ClientStep::Initialize, StepOutcome::Refused4xx) => Some(ClientStep::EventStream),
-        (ClientStep::EventStream, StepOutcome::Refused4xx) => None,
-    }
 }
 
 /// THE CLIENT HALF OF `initialize` NEGOTIATION: the revision the server answered with, if this plane

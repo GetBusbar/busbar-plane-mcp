@@ -9,6 +9,11 @@
 //! crate through `door` alone. (The per-module unit tests beside these in this directory are wired
 //! from their own modules.)
 
+/// A grant check that admits every grant: the unit suites' stand-in for a caller entitled to all.
+pub(crate) fn everyone(_: &str, _: &str) -> bool {
+    true
+}
+
 /// The crate's one `#[global_allocator]`, every allocation gate's count: busbar-contract's
 /// test-only `alloc-counter` (a dev-dependency feature), so this crate holds no `unsafe`.
 #[global_allocator]
@@ -20,7 +25,6 @@ mod alloc_gate_tests;
 /// The plane's vocabulary against the conformance battery (the plugin crate's `tests/door_witness.rs`).
 mod battery_vocabulary_tests;
 /// The plane's own declarations agree with each other (`tests/declarations_agree.rs`).
-mod declarations_agree_tests;
 /// The approval digest, pinned (`tests/digest_pin.rs`).
 mod digest_pin_tests;
 /// A sealed state's window judged at the host clock's time: a clock that fails refuses

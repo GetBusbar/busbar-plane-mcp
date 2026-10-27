@@ -6,6 +6,26 @@
 use super::*;
 use serde_json::json;
 
+/// A stdio child's asks judged against `def.sampling_bounds`, as the door judges them.
+fn judge_child_asks(
+    server: &str,
+    def: &crate::tools_config::McpServerDefCfg,
+    asks: &[ChildAsk],
+) -> Result<(), crate::call::AskRefusal> {
+    let requests = asks.iter().map(|a| &a.request);
+    crate::call::judge_sampling_bounds(server, &def.sampling_bounds, requests)
+}
+
+/// The caller's replies to a stdio child judged by their written bytes, as the door judges them.
+fn judge_child_replies(
+    server: &str,
+    def: &crate::tools_config::McpServerDefCfg,
+    replies: &[Vec<u8>],
+) -> Result<(), crate::call::AskRefusal> {
+    let written = replies.iter().map(Vec::len).sum();
+    crate::call::judge_input_response(server, &def.sampling_bounds, written)
+}
+
 /// The door, as these tests stand in for it: what it answered, what it was told, and the child's
 /// line of relayed calls (each by the id it waits on, in arrival order).
 #[derive(Default)]

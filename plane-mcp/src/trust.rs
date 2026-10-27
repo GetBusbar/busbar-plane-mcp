@@ -31,6 +31,7 @@
 
 use std::collections::BTreeMap;
 
+use busbar_contract::redacted::sha256_hex;
 use serde_json::Value;
 
 use crate::tools_config::McpServerDefCfg;
@@ -46,12 +47,7 @@ pub fn tool_digest(name: &str, description: &str, input_schema: &Value) -> Strin
         framed.extend_from_slice(&(part.len() as u64).to_be_bytes());
         framed.extend_from_slice(part.as_bytes());
     }
-    format!(
-        "sha256:{}",
-        busbar_contract::abi::sdk::digest::lower_hex(&busbar_contract::abi::sdk::digest::sha256(
-            &framed
-        ))
-    )
+    format!("sha256:{}", sha256_hex(&framed))
 }
 
 /// `value` with every object's keys sorted, recursively: key ORDER is not drift, any change of key,
@@ -142,12 +138,7 @@ pub fn catalogue_hash(observation: &Observation) -> String {
         bytes.extend_from_slice(digest.as_bytes());
         bytes.push(b'\n');
     }
-    format!(
-        "sha256:{}",
-        busbar_contract::abi::sdk::digest::lower_hex(&busbar_contract::abi::sdk::digest::sha256(
-            &bytes
-        ))
-    )
+    format!("sha256:{}", sha256_hex(&bytes))
 }
 
 /// The last contact: the SDK's one shape of a sighting
@@ -199,12 +190,6 @@ pub struct Drift {
     pub removed: Vec<String>,
 }
 
-impl Drift {
-    fn is_empty(&self) -> bool {
-        self.added.is_empty() && self.changed.is_empty() && self.removed.is_empty()
-    }
-}
-
 /// The changes queue of `sighting` against the kernel's `items`. The verdict on a tool offered at
 /// another digest is the kernel's word, never a comparison here, so a tool the kernel holds demoted
 /// is `changed` with or without a successful sighting (after a restart the plane has sighted
@@ -252,7 +237,8 @@ pub fn state(items: &[KernelItem], sighting: &Sighting) -> State {
     if !items.iter().any(KernelItem::serves) {
         return State::Pending;
     }
-    if drift(items, sighting).is_empty() {
+    let d = drift(items, sighting);
+    if d.added.is_empty() && d.changed.is_empty() && d.removed.is_empty() {
         State::Approved
     } else {
         State::Quarantined

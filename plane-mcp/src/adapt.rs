@@ -138,58 +138,32 @@ pub fn session_method(method: Option<&str>, has_id: bool) -> SessionMethod {
     }
 }
 
-/// The header values a raised request must carry, for the caller to mirror.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Mirror {
-    /// `MCP-Protocol-Version`.
-    pub version: &'static str,
-    /// `Mcp-Method`.
-    pub method: String,
-    /// `Mcp-Name`, raw (the caller applies the header sentinel where a name needs it).
-    pub name: Option<String>,
-}
-
 /// RAISES a session request into the stateless shape: `params._meta` gains the stateless revision
-/// and an EMPTY client-capability declaration, and the header mirror is returned.
-///
-/// The capabilities are empty on purpose. A session client declared its capabilities in the
-/// session revision's own vocabulary, and the stateless dispatch would read `elicitation` or
-/// `sampling` there as consent to answer with an input-required result, a shape no session client
-/// can receive. Declaring nothing keeps every answer a complete one.
+/// and an EMPTY client-capability declaration (a session client's own capabilities would read as
+/// consent to an input-required answer it cannot receive). Its header mirror is then what
+/// [`crate::codec::mirrored`] reads off it.
 ///
 /// `None` when the message has no method or its `params` is present and not an object.
 #[must_use]
-pub fn raise(message: &mut Value) -> Option<Mirror> {
-    let method = message.get("method")?.as_str()?.to_string();
-    let obj = message.as_object_mut()?;
-    let params = obj
+pub fn raise(message: &mut Value) -> Option<()> {
+    message.get("method")?.as_str()?;
+    let params = message
+        .as_object_mut()?
         .entry("params")
-        .or_insert_with(|| Value::Object(Map::new()));
-    let params = params.as_object_mut()?;
-    let name = crate::codec::name_source_of(&method)
-        .and_then(|k| params.get(k))
-        .and_then(Value::as_str)
-        .map(str::to_string);
+        .or_insert_with(|| Value::Object(Map::new()))
+        .as_object_mut()?;
     let meta = params
         .entry("_meta")
-        .or_insert_with(|| Value::Object(Map::new()));
-    let meta = meta.as_object_mut()?;
+        .or_insert_with(|| Value::Object(Map::new()))
+        .as_object_mut()?;
     meta.insert(META_PROTOCOL_VERSION.into(), PROTOCOL_VERSION.into());
     meta.insert(META_CLIENT_CAPABILITIES.into(), Value::Object(Map::new()));
-    Some(Mirror {
-        version: PROTOCOL_VERSION,
-        method,
-        name,
-    })
+    Some(())
 }
 
-/// THE CUSTOM PARAMETER MIRROR a raised `tools/call` must carry: for every property of the tool's
-/// `inputSchema` that names an `x-mcp-header` suffix and whose argument is a string, the pair
-/// (`mcp-param-<suffix>`, the value in the name sentinel where it needs one).
-///
-/// A session client never sends these (its revision does not define them), and the one dispatch
-/// refuses a `tools/call` whose annotated argument has no mirror. The mirror is built from the
-/// client's own arguments, so it says exactly what the body says.
+/// THE CUSTOM PARAMETER MIRROR a raised `tools/call` must carry (a session client's revision has
+/// none): for every `inputSchema` property naming an `x-mcp-header` suffix whose argument is a
+/// string, (`mcp-param-<suffix>`, the value in the name sentinel where it needs one).
 #[must_use]
 pub fn param_mirror(
     input_schema: Option<&Value>,
@@ -217,26 +191,20 @@ pub fn param_mirror(
 /// The stateless revision's result members no session revision defines.
 const STATELESS_ONLY_MEMBERS: &[&str] = &["resultType", "cacheScope", "ttlMs"];
 
-/// A result the session revisions cannot express (an input-required or task answer).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct NotExpressible;
-
-/// LOWERS a stateless result into a session revision's shape.
-///
-/// # Errors
-/// [`NotExpressible`] when the result is not a complete one.
-pub fn lower_result(result: &mut Value) -> Result<(), NotExpressible> {
+/// LOWERS a stateless result into a session revision's shape: `false` when it is not a complete
+/// one (an input-required or task answer), which no session revision can express.
+pub fn lower_result(result: &mut Value) -> bool {
     let Some(obj) = result.as_object_mut() else {
-        return Ok(());
+        return true;
     };
     match obj.get("resultType").and_then(Value::as_str) {
-        None | Some("complete") => {}
-        Some(_) => return Err(NotExpressible),
+        None | Some(crate::codec::RESULT_TYPE_COMPLETE) => {}
+        Some(_) => return false,
     }
     for k in STATELESS_ONLY_MEMBERS {
         obj.remove(*k);
     }
-    Ok(())
+    true
 }
 
 /// What lowering one JSON-RPC answer came to ([`lower_answer`]).
@@ -263,7 +231,7 @@ pub fn lower_answer(answer: &[u8]) -> Option<Lowered> {
         return Some(Lowered::Unchanged);
     };
     let before = result.as_object().map(Map::len);
-    if lower_result(result).is_err() {
+    if !lower_result(result) {
         return Some(Lowered::Inexpressible);
     }
     if result.as_object().map(Map::len) == before {
@@ -369,26 +337,18 @@ fn object_members(text: &str, at: usize) -> Option<(Vec<Member>, usize)> {
     }
 }
 
-/// Builds the `initialize` result from the stateless discovery document, for `revision`.
-///
-/// Only the capability groups the session revisions define are carried, and only when discovery
-/// declared them for this caller: `tools`, `prompts`, `resources` and (from `2025-06-18`)
-/// `completions`. `listChanged` is `list_changed` for all three lists, the caller's statement of
-/// whether it delivers those notifications on the session's stream. Resource subscription and
-/// `logging` are declared on every session revision: subscribe stays for the old revisions, and the
-/// session's own state answers both (an upstream's `notifications/resources/updated` reaches the
-/// session's stream, and its `notifications/message` past the session's floor).
+/// Builds the `initialize` result from the stateless discovery document, for `revision`: only the
+/// capability groups the session revisions define and discovery declared (`tools`, `prompts`,
+/// `resources` with `subscribe`, `logging`, and from `2025-06-18` `completions`); no list-changed
+/// notifications are offered.
 #[must_use]
-pub fn initialize_result(discovery: &Value, revision: Revision, list_changed: bool) -> Value {
+pub fn initialize_result(discovery: &Value, revision: Revision) -> Value {
     let declared = discovery.get("capabilities");
     let has = |k: &str| declared.and_then(|c| c.get(k)).is_some();
     let mut caps = Map::new();
     for group in ["tools", "prompts", "resources"] {
         if has(group) {
-            caps.insert(
-                group.into(),
-                serde_json::json!({ "listChanged": list_changed }),
-            );
+            caps.insert(group.into(), serde_json::json!({ "listChanged": false }));
         }
     }
     if let Some(resources) = caps.get_mut("resources").and_then(Value::as_object_mut) {
