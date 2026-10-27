@@ -29,6 +29,28 @@ fn admit_call(
     )
 }
 
+/// Settles an http round's answer, correlated to the id the round's request carried.
+fn settle_call(
+    admitted: &AdmittedCall,
+    def: Option<&McpServerDefCfg>,
+    status: u32,
+    raw: &[u8],
+    sse: bool,
+    round: u32,
+) -> Settled {
+    let sent = crate::client::jsonrpc::dispatch_request_id(round);
+    settle_call_as(admitted, def, status, raw, sse, round, sent)
+}
+
+/// The http continuation (`inputResponses` and `requestState`) judged as the door judges it.
+fn judge_continuation(
+    server: &str,
+    bounds: &crate::tools_config::SamplingBoundsCfg,
+    continuation: &Value,
+) -> Result<(), AskRefusal> {
+    judge_input_response(server, bounds, continuation.to_string().len())
+}
+
 /// One server: an approved tool whose `path` argument is mirrored in `Mcp-Param-Path`, a tool
 /// awaiting approval, a tool that must be answered as a task, and a tool that asks its caller.
 const SECTION: &str = r#"{"fs": {"url": "https://mcp.example/fs", "pin": {"mechanism": "unpinned"},
@@ -1173,12 +1195,12 @@ fn input_responses_over_the_cap_are_refused_and_not_forwarded_at_the_cap_forward
     });
     let exact = continuation.to_string().len();
     let at = sampling_def(|b| b.max_input_response_bytes = u32::try_from(exact).expect("small"));
-    crate::call::judge_continuation("fs", &at.sampling_bounds, &continuation)
+    judge_continuation("fs", &at.sampling_bounds, &continuation)
         .expect("exactly at the cap is forwarded");
 
     let over =
         sampling_def(|b| b.max_input_response_bytes = u32::try_from(exact - 1).expect("small"));
-    let refusal = crate::call::judge_continuation("fs", &over.sampling_bounds, &continuation)
+    let refusal = judge_continuation("fs", &over.sampling_bounds, &continuation)
         .expect_err("one byte over is refused");
     assert!(matches!(
         &refusal,
@@ -1202,9 +1224,9 @@ fn input_responses_default_cap_is_one_mebibyte() {
     let def = sampling_def(|_| {});
     assert_eq!(def.sampling_bounds.max_input_response_bytes, 1_048_576);
     let big = json!({ "inputResponses": { "s": "y".repeat(1_048_576) } });
-    crate::call::judge_continuation("fs", &def.sampling_bounds, &big).expect_err("over");
+    judge_continuation("fs", &def.sampling_bounds, &big).expect_err("over");
     let small = json!({ "inputResponses": { "s": "y" }, "requestState": "z" });
-    crate::call::judge_continuation("fs", &def.sampling_bounds, &small).expect("under");
+    judge_continuation("fs", &def.sampling_bounds, &small).expect("under");
 }
 
 // ---------------------------------------------------------------------------------------------

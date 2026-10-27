@@ -184,18 +184,11 @@ const RECORD_KINDS: &[AbiStr] = &[
 const RECORD_RETENTIONS: &[RecordRetention] =
     &[record_retention(RECORD_TASK, Retention::TerminalOnly)];
 
-/// The kind a completed ask exchange's approval is claimed under, once ([`RECORD_KINDS`]): the
-/// spent-approval ledger is the host's one-time `records.claim` (ARCHITECT Q-L3B-ASK).
-pub const KIND_APPROVAL: &str = crate::tool_records::KIND_APPROVAL;
-
 /// The index of the call record's kind in [`RECORD_KINDS`].
 pub const RECORD_CALL: u32 = 0;
 
 /// The index of the task kind in [`RECORD_KINDS`]: a task's result chunks are written under it.
 pub const RECORD_TASK: u32 = 3;
-
-/// The kind a task's work handle is opened under (`work.open`, [`RECORD_KINDS`]).
-pub const KIND_TASK: &str = crate::tool_records::KIND_TASK;
 
 /// THE CALL LOG IS A CHAIN: each caller's call records are hash-chained by the host, the prelude
 /// (`prev_hash`, the scope, `seq`) LengthPrefixed with the scope in the digest, then the plane's own

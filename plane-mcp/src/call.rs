@@ -22,7 +22,7 @@
 
 use serde_json::{json, Map, Value};
 
-use crate::catalogue::{granted, Catalogue, ToolEntry};
+use crate::catalogue::{complete, granted, Catalogue, ToolEntry};
 use crate::checks::decode_sentinel;
 use crate::client::jsonrpc::{self as wire, AdvertisedCaps, RpcOutcome};
 use crate::codec::RESULT_TYPE_COMPLETE;
@@ -285,6 +285,16 @@ pub fn not_granted(id: &Value, name: &str) -> Refusal {
     )
 }
 
+/// The client capabilities the caller declared in `params._meta` (`null` when none).
+#[must_use]
+pub fn client_capabilities(params: Option<&Value>) -> Value {
+    params
+        .and_then(|p| p.get("_meta"))
+        .and_then(|m| m.get(META_CLIENT_CAPABILITIES))
+        .cloned()
+        .unwrap_or(Value::Null)
+}
+
 /// Whether the caller's `_meta` client capabilities declare the tasks extension.
 #[must_use]
 pub fn client_declares_tasks(capabilities: &Value) -> bool {
@@ -320,11 +330,7 @@ pub fn missing_tasks_capability(id: &Value) -> Refusal {
 /// answer for an id that does not exist and one that is another caller's.
 #[must_use]
 pub fn task_verb(id: &Value, params: Option<&Value>) -> Refusal {
-    let capabilities = params
-        .and_then(|p| p.get("_meta"))
-        .and_then(|m| m.get(META_CLIENT_CAPABILITIES))
-        .unwrap_or(&Value::Null);
-    if !client_declares_tasks(capabilities) {
+    if !client_declares_tasks(&client_capabilities(params)) {
         return missing_tasks_capability(id);
     }
     let message = match params.and_then(|p| p.get("taskId")).and_then(Value::as_str) {
@@ -432,7 +438,7 @@ fn trust_answer(id: &Value, name: &str, entry: &ToolEntry, trust: Trust) -> Opti
         Trust::Verdict(code) => code,
         Trust::Unreached(reason) => {
             return Some(Admission::Unreached(
-                result(
+                complete(
                     id,
                     upstream_failure_result(
                         server,
@@ -560,10 +566,8 @@ pub fn admit_trusted(
         );
     }
     let meta = params.and_then(|p| p.get("_meta"));
-    let capabilities = meta.and_then(|m| m.get(META_CLIENT_CAPABILITIES));
-    if entry.task_support == TaskSupport::Required
-        && !client_declares_tasks(capabilities.unwrap_or(&Value::Null))
-    {
+    let capabilities = client_capabilities(params);
+    if entry.task_support == TaskSupport::Required && !client_declares_tasks(&capabilities) {
         return Admission::Refused(missing_tasks_capability(id), line(REASON_TASKS_UNDECLARED));
     }
     // BUSBAR'S OWN ASK, decided over the arguments as the caller sent them: the state is sealed over
@@ -671,7 +675,7 @@ pub fn admit_trusted(
             .and_then(|m| m.get("progressToken"))
             .filter(|v| !v.is_null())
             .cloned(),
-        capabilities: capabilities.cloned().unwrap_or(Value::Null),
+        capabilities,
         sent_digest,
         relay,
     })
@@ -946,7 +950,7 @@ fn failure_answer(
 ) -> Settled {
     Settled::Answer {
         status: STATUS_OK,
-        body: result(
+        body: complete(
             &admitted.id,
             upstream_failure_result(&admitted.entry.server, reason),
         ),
@@ -1026,9 +1030,6 @@ pub fn upstream_failure_result(server: &str, reason: &str) -> Value {
         }],
     })
 }
-
-/// A success envelope with `resultType: complete` stamped on the result.
-pub use crate::catalogue::complete as result;
 
 /// Why busbar declined to carry an upstream's ask to its caller, in the engine's words. Every arm is
 /// busbar enforcing the operator's policy or the limits of the deployment; none answers the ask on
@@ -1177,29 +1178,9 @@ pub enum Settled {
 }
 
 /// SETTLE ONE ROUND's far-end answer. `status` is the far end's, `sse` = its answer is an event
-/// stream, `round` the round it answered and `def` the registration of the member that answered.
-#[must_use]
-pub fn settle_call(
-    admitted: &AdmittedCall,
-    def: Option<&McpServerDefCfg>,
-    status: u32,
-    raw: &[u8],
-    sse: bool,
-    round: u32,
-) -> Settled {
-    settle_call_as(
-        admitted,
-        def,
-        status,
-        raw,
-        sse,
-        round,
-        wire::dispatch_request_id(round),
-    )
-}
-
-/// [`settle_call`], the answer correlated to `sent_id`: the id the round's request carried (a
-/// `transport: stdio` member's carries the unit's own, `crate::tool_program::call_id`).
+/// stream, `round` the round it answered, `def` the registration of the member that answered and
+/// `sent_id` the id the round's request carried (a `transport: stdio` member's carries the unit's
+/// own, `crate::tool_program::call_id`).
 #[must_use]
 pub fn settle_call_as(
     admitted: &AdmittedCall,
@@ -1220,7 +1201,6 @@ pub fn settle_call_as(
             &failure_reason(status, &failure).unwrap_or_default(),
         ),
         RpcOutcome::InputRequired { kind } => {
-            let kind = kind.key();
             let payload = serde_json::from_slice::<Value>(&body)
                 .ok()
                 .and_then(|v| v.get("result").cloned())
@@ -1309,7 +1289,7 @@ fn judge_ask(
     admitted: &AdmittedCall,
     def: Option<&McpServerDefCfg>,
     round: u32,
-    kind: &'static str,
+    kind: wire::ServerAsk,
     payload: &Value,
 ) -> Result<Settled, AskRefusal> {
     let server = admitted.entry.server.clone();
@@ -1320,25 +1300,21 @@ fn judge_ask(
         return Err(AskRefusal::RoundCapExceeded { server, cap });
     }
     let grants = def.map(|d| d.grants).unwrap_or_default();
-    let mut kinds: Vec<&str> = payload
+    let mut kinds: Vec<wire::ServerAsk> = payload
         .get("inputRequests")
         .and_then(Value::as_object)
         .map(|requests| {
             requests
                 .values()
-                .map(|r| match r.get("method").and_then(Value::as_str) {
-                    Some("elicitation/create") => "elicitation",
-                    Some("roots/list") => "roots",
-                    _ => "sampling",
-                })
+                .map(|r| wire::ServerAsk::of_method(r.get("method").and_then(Value::as_str)))
                 .collect()
         })
         .unwrap_or_default();
     kinds.push(kind);
-    if let Some(denied) = kinds.into_iter().find(|k| !grants.allows(k)) {
+    if let Some(denied) = kinds.into_iter().find(|k| !grants.allows(*k)) {
         return Err(AskRefusal::Ungranted {
             server,
-            kind: denied.to_string(),
+            kind: denied.key().to_string(),
         });
     }
     judge_sampling_bounds(
@@ -1376,17 +1352,8 @@ pub fn judge_input_response(
     Ok(())
 }
 
-/// The http continuation (`inputResponses` and `requestState`) judged by [`judge_input_response`].
-pub fn judge_continuation(
-    server: &str,
-    bounds: &SamplingBoundsCfg,
-    continuation: &Value,
-) -> Result<(), AskRefusal> {
-    judge_input_response(server, bounds, continuation.to_string().len())
-}
-
 /// THE ONE JUDGEMENT of a relayed ask's size (owner ruling Q22c), shared by the http path
-/// ([`judge_ask`]) and the stdio relay (`tool_program::judge_child_asks`): every request whose
+/// ([`judge_ask`]) and the stdio relay (the door's child-ask judgement): every request whose
 /// `method` is `sampling/createMessage` is measured against the server's `sampling_bounds`, and the
 /// first bound it exceeds is returned as a named refusal. Other methods are not measured.
 ///
@@ -1552,7 +1519,7 @@ fn completed(admitted: &AdmittedCall, value: &Value, body: &[u8]) -> Settled {
 /// object that carries no `resultType` at all; a `resultType` the upstream sent is its own.
 fn relayed(id: &Value, value: &Value, body: &[u8]) -> Vec<u8> {
     let Some(sent) = result_bytes(body) else {
-        return result(id, value.clone());
+        return complete(id, value.clone());
     };
     let mut out = format!("{{\"id\":{id},\"jsonrpc\":\"2.0\",\"result\":");
     match sent.trim_start().strip_prefix('{') {

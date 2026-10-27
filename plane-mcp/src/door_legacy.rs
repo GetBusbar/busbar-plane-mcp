@@ -733,7 +733,7 @@ pub(super) fn drive(instance: &Instance<'_, McpDoor>, plane: &McpDoor) {
     let grants_of = |member: &str| {
         held.as_ref()
             .and_then(|h| h.section.servers.get(member))
-            .map(|d| d.grants.as_ask_grants())
+            .map(|d| d.grants)
             .unwrap_or_default()
     };
     let mut woken = Vec::new();

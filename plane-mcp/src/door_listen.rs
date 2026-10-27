@@ -20,7 +20,7 @@
 //! - Every frame is one `message` event (`event: message`, `data: <json>`), as predev wrote them.
 //! - THE SESSION'S ONE LINE carries the request's fee unit, reported with the acknowledgement.
 
-use super::{ask_entitlements, write, CallUnit, Held, McpDoor, Pending, Written, MAX_UNITS};
+use super::{admit, ask_entitlements, write, CallUnit, Held, McpDoor, Pending, Written, MAX_UNITS};
 use crate::catalogue::Lookup;
 use crate::framing::{events, CACHE_CONTROL, CONTENT_TYPE, EVENT_STREAM, NO_STORE};
 use crate::subscribe::{Listen, Standing, Step as ListenStep, KEEPALIVE_NS, MAX_LIFETIME_NS};
@@ -32,7 +32,6 @@ use busbar_contract::abi::plane::{
 };
 use busbar_contract::abi::sdk::{Lent, Out, Services};
 use serde_json::Value;
-use std::collections::BTreeMap;
 
 /// How often the instance's tick steps its held subscriptions (predev re-read the generation and
 /// re-asked the permission every 250 ms of a stream's life).
@@ -124,11 +123,7 @@ pub(super) fn piece(
         .as_str()
         .unwrap_or_default()
         .to_string();
-    let principal = if caller.is_empty() {
-        crate::ask::UNGOVERNED
-    } else {
-        caller.as_str()
-    };
+    let principal = super::principal_of(&caller);
     let step = plane.units.with(&key, |unit| {
         let unit = unit?;
         unit.ticket = Some(ticket);
@@ -262,16 +257,6 @@ pub(super) fn open_listen(
         let body = serde_json::to_vec(&refusal).unwrap_or_default();
         Box::new(Pending::answer(400, body, None, &[]))
     })
-}
-
-/// Whether the grants `entitled` admit `kind`'s `name`.
-pub(super) fn admit(entitled: &BTreeMap<String, bool>) -> impl Fn(&str, &str) -> bool + '_ {
-    |kind, name| {
-        entitled
-            .get(&format!("{kind}:{name}"))
-            .copied()
-            .unwrap_or(false)
-    }
 }
 
 /// Whether `owner` holds as many subscriptions among the held ones' `owners` as one caller may
@@ -464,9 +449,7 @@ pub(super) fn mono_ns(
     ticket: Ticket,
     unit: &mut CallUnit,
 ) -> Option<u64> {
-    let services = services?;
-    let h = super::door_tasks::handle(ticket, &mut unit.issued, &mut None);
-    services.clock_now(h).ok().map(|r| r.mono_ns)
+    super::clock(services, ticket, &mut unit.issued).map(|r| r.mono_ns)
 }
 
 /// The catalogue's every grant, entitled afresh for this frame: a held unit re-asks what its caller

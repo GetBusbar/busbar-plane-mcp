@@ -25,10 +25,10 @@ use busbar_contract::abi::sdk::services::ServiceError;
 use serde_json::{json, Map, Value};
 
 use super::{
-    clock_s, twin_of, CallUnit, CompletionHandle, DoorSeal, Held, McpDoor, Pending, Services, Step,
-    Ticket, Twin,
+    clock_s, handle_at, twin_of, wall_ms, CallUnit, CompletionHandle, DoorSeal, Held, McpDoor,
+    Pending, Services, Step, Ticket, Twin,
 };
-use crate::call::{AdmittedCall, Leg, RelayedRetry};
+use crate::call::{client_capabilities, AdmittedCall, Leg, RelayedRetry};
 use crate::door::RECORD_TASK;
 use crate::tool_arrival::Refusal;
 use crate::tool_tasks::{
@@ -231,29 +231,7 @@ pub(super) fn handle(ticket: Ticket, issued: &mut u32, slot: &mut Option<u32>) -
         *issued += 1;
         seq
     });
-    CompletionHandle {
-        ticket,
-        seq,
-        _reserved: 0,
-    }
-}
-
-/// The kernel's wall clock in Unix milliseconds, on a fresh handle of `ticket`; `None` when the
-/// read fails, which is never a time (row 159 finding P-M4): a task is never stamped at the epoch.
-/// A create refuses; a transition keeps the task's own last time; a lease is not renewed.
-fn task_clock_ms(services: Services, ticket: Ticket, issued: &mut u32) -> Option<u64> {
-    let mut fresh = None;
-    let h = handle(ticket, issued, &mut fresh);
-    services.clock_now(h).ok().map(|r| r.wall_ns / 1_000_000)
-}
-
-/// The caller's declared capabilities in `params`.
-fn capabilities(params: Option<&Value>) -> Value {
-    params
-        .and_then(|p| p.get("_meta"))
-        .and_then(|m| m.get(crate::codec::META_CLIENT_CAPABILITIES))
-        .cloned()
-        .unwrap_or(Value::Null)
+    handle_at(ticket, seq)
 }
 
 /// Whether `entry` answers this caller's call (`params`) with a task: the operator's declaration
@@ -261,7 +239,9 @@ fn capabilities(params: Option<&Value>) -> Value {
 pub(super) fn creates(entry: &crate::catalogue::ToolEntry, params: Option<&Value>) -> bool {
     entry
         .task_support
-        .creates_task(crate::call::client_declares_tasks(&capabilities(params)))
+        .creates_task(crate::call::client_declares_tasks(&client_capabilities(
+            params,
+        )))
 }
 
 /// Whether `unit`'s arrival is a `tools/call` that creates a task (its refusal by the caller's
@@ -474,7 +454,7 @@ fn list_records(
             let mut spans = vec![blank(); sizes.1];
             match services.records_list(
                 h,
-                crate::door::KIND_TASK,
+                crate::tool_records::KIND_TASK,
                 prefix,
                 l.after.as_deref(),
                 PAGE,
@@ -621,7 +601,7 @@ fn creating(
     let now = match st.at {
         Some(at) => at,
         None => {
-            let Some(at) = task_clock_ms(services, ticket, &mut unit.issued) else {
+            let Some(at) = wall_ms(Some(services), ticket, &mut unit.issued) else {
                 return unavailable(unit, &mut st.struck, super::CLOCK_UNREAD);
             };
             st.at = Some(at);
@@ -710,7 +690,7 @@ fn creating(
         let mut spans = [blank(); 2];
         match services.work_open(
             h,
-            crate::door::KIND_TASK,
+            crate::tool_records::KIND_TASK,
             &row.bytes(),
             &mut buf,
             &mut spans,
@@ -865,7 +845,7 @@ pub(super) fn resume(
 }
 
 /// THE FAR END ASKED THE CONTINUATION'S CALLER (Law 11, ARCHITECT Q6), the ask granted
-/// ([`crate::call::settle_call`]): the task parks `input_required` with the upstream's `result`'s
+/// ([`crate::call::settle_call_as`]): the task parks `input_required` with the upstream's `result`'s
 /// `inputRequests` verbatim under busbar's sealed state, bound to the principal, the tool (`digest`:
 /// the arguments as sent) and the member that asked, nesting the upstream's own state; the
 /// continuation ends with the handle live, and `tasks/update` answers it. A deployment that cannot
@@ -919,7 +899,7 @@ fn asking(
         .unwrap_or("")
         .to_string();
     let sealed = {
-        let mut seal = door_seal(plane, services, ticket, unit);
+        let mut seal = door_seal(plane, services, ticket, (&mut unit.issued, &mut unit.claim));
         let bind = |now| relay_bind(principal, &name, now);
         crate::tool_door::seal_relayed(
             &mut seal,
@@ -943,7 +923,7 @@ fn asking(
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
-    let now = task_clock_ms(services, ticket, &mut unit.issued);
+    let now = wall_ms(Some(services), ticket, &mut unit.issued);
     let params = run.params.clone();
     let parked = plane.tasks.with(&run.reference, |t| match t {
         Some(t) if !t.status().is_terminal() => {
@@ -1097,7 +1077,7 @@ fn relayed_leg(
     );
     let digest = crate::ask::digest_arguments(&arguments);
     let name = run.params.get("name").and_then(Value::as_str).unwrap_or("");
-    let mut seal = door_seal(plane, services, ticket, unit);
+    let mut seal = door_seal(plane, services, ticket, (&mut unit.issued, &mut unit.claim));
     // A clock that cannot be read opens nothing: the state's window is not judged at the epoch.
     let opened = seal.now().map(|now| {
         crate::ask::open_relayed(state, relay_bind(principal, name, now), &digest, &mut seal)
@@ -1176,7 +1156,12 @@ fn running(
                         // It asks from that round on.
                         Some(Retry::Asked { round, seal }) => {
                             let data = resume_data(principal, &run.reference, round, &run.digest);
-                            let mut signer = door_seal(plane, services, ticket, unit);
+                            let mut signer = door_seal(
+                                plane,
+                                services,
+                                ticket,
+                                (&mut unit.issued, &mut unit.claim),
+                            );
                             let sealed = crate::seal::opens(&data, &seal, &mut |d| signer.sign(d));
                             let working = sealed
                                 && plane.tasks.with(&run.reference, |t| {
@@ -1212,7 +1197,7 @@ fn running(
                     };
                     match services.records_claim(
                         h,
-                        crate::door::KIND_APPROVAL,
+                        crate::tool_records::KIND_APPROVAL,
                         key.as_bytes(),
                         RUN_CLAIM_TTL_MS,
                     ) {
@@ -1253,9 +1238,12 @@ fn running(
             Phase::Ask => {
                 let name = run.params.get("name").and_then(Value::as_str).unwrap_or("");
                 let rounds = held.catalogue.tool(name).map_or_else(Vec::new, |entry| {
-                    tasks::task_ask_rounds(&entry.task_ask_caller, &capabilities(Some(&run.params)))
+                    tasks::task_ask_rounds(
+                        &entry.task_ask_caller,
+                        &client_capabilities(Some(&run.params)),
+                    )
                 });
-                let now = task_clock_ms(services, ticket, &mut unit.issued);
+                let now = wall_ms(Some(services), ticket, &mut unit.issued);
                 while let Some(asks) = rounds.get(run.round) {
                     enum Then {
                         Next,
@@ -1339,7 +1327,7 @@ fn running(
                                 .map_or(0, crate::tools_config::McpServerDefCfg::timeout_ms);
                             // A clock that cannot be read renews no lease: its end would be a
                             // time the plane made up.
-                            if let Some(now) = task_clock_ms(services, ticket, &mut unit.issued) {
+                            if let Some(now) = wall_ms(Some(services), ticket, &mut unit.issued) {
                                 let until = now
                                     .saturating_add(timeout)
                                     .saturating_add(tasks::RUN_LEASE_MS);
@@ -1367,7 +1355,7 @@ fn running(
                     None => {
                         // A failed read keeps the task's own last time; with no task held here
                         // there is none, and the run settles nothing.
-                        let at = task_clock_ms(services, ticket, &mut unit.issued)
+                        let at = wall_ms(Some(services), ticket, &mut unit.issued)
                             .or_else(|| plane.tasks.get(&run.reference).map(|t| t.stamps().1));
                         let Some(at) = at else {
                             return not_run(unit, run);
@@ -1539,7 +1527,7 @@ fn call(
         id: json!(0),
         progress_token: None,
         // The caller's declared capabilities: what an upstream's ask may be relayed to it for.
-        capabilities: capabilities(Some(&run.params)),
+        capabilities: client_capabilities(Some(&run.params)),
         relay,
     };
     // The binding the caller's upstream sessions are kept under: its reference, as the
@@ -1639,18 +1627,18 @@ fn resume_data(principal: &str, reference: &str, round: usize, digest: &str) -> 
     format!("busbar-mcp task resume v1\0{principal}\0{reference}\0{round}\0{digest}").into_bytes()
 }
 
-/// The door's seal for `unit`, on `ticket`.
-fn door_seal<'a>(
+/// The door's seal on `ticket`, over a unit's `issued` handles and its pending `claim`.
+pub(super) fn door_seal<'a>(
     plane: &'a McpDoor,
     services: Services,
     ticket: Ticket,
-    unit: &'a mut CallUnit,
+    (issued, claim): (&'a mut u32, &'a mut Option<(String, u32, u64)>),
 ) -> DoorSeal<'a> {
     DoorSeal {
         services,
         ticket,
-        issued: &mut unit.issued,
-        claim: &mut unit.claim,
+        issued,
+        claim,
         spent: &plane.spent,
         pending: false,
     }
@@ -1669,7 +1657,7 @@ pub(super) fn verb(
     id: &Value,
 ) -> Step {
     let params = unit.params.clone();
-    if !crate::call::client_declares_tasks(&capabilities(params.as_ref())) {
+    if !crate::call::client_declares_tasks(&client_capabilities(params.as_ref())) {
         return refuse(unit, &crate::call::missing_tasks_capability(id));
     }
     let Some(task_id) = params
@@ -1730,14 +1718,14 @@ fn verbing(
         Some(at) => at,
         None => {
             // A failed read keeps the task's own last time, never the epoch.
-            let at = task_clock_ms(services, ticket, &mut unit.issued).unwrap_or(task.stamps().1);
+            let at = wall_ms(Some(services), ticket, &mut unit.issued).unwrap_or(task.stamps().1);
             st.at = Some(at);
             at
         }
     };
-    let ack = |unit: &mut CallUnit| answer(unit, 200, crate::call::result(id, json!({})));
+    let ack = |unit: &mut CallUnit| answer(unit, 200, crate::catalogue::complete(id, json!({})));
     if op == crate::tool_ops::OP_TASK_GET {
-        return answer(unit, 200, crate::call::result(id, task.detailed()));
+        return answer(unit, 200, crate::catalogue::complete(id, task.detailed()));
     }
     if op == crate::tool_ops::OP_TASK_UPDATE {
         // ABSENT is treated as empty rather than refused.
@@ -1818,7 +1806,7 @@ fn verbing(
             // says nothing of who nested it, so the plane's own signature over `resume_data` is what
             // tells the resume this update nested from one its caller posted itself.
             let data = resume_data(principal, &t.id, round, &run_digest(&call));
-            let mut seal = door_seal(plane, services, ticket, unit);
+            let mut seal = door_seal(plane, services, ticket, (&mut unit.issued, &mut unit.claim));
             match crate::seal::seal_bytes(&data, &mut |d| seal.sign(d)) {
                 Some(seal) => {
                     let body =
@@ -2034,11 +2022,10 @@ pub(super) fn run_reference(unit: &CallUnit) -> Option<String> {
 
 /// The kernel's clock read off-unit (a call that may not pend), in Unix milliseconds.
 fn clock_now(plane: &McpDoor) -> Option<u64> {
-    let services = plane.services?;
-    let h = CompletionHandle {
-        ticket: Ticket::NONE,
-        seq: 0,
-        _reserved: 0,
-    };
-    services.clock_now(h).ok().map(|r| r.wall_ns / 1_000_000)
+    let h = handle_at(Ticket::NONE, 0);
+    plane
+        .services?
+        .clock_now(h)
+        .ok()
+        .map(|r| r.wall_ns / 1_000_000)
 }

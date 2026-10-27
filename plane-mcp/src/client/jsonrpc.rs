@@ -205,6 +205,16 @@ impl ServerAsk {
             ServerAsk::Roots => "roots",
         }
     }
+
+    /// The ask a request's `method` makes; one that names no method, or one this plane does not
+    /// know, is judged as `sampling`, so the refusal lands on a grant set deliberately.
+    pub fn of_method(method: Option<&str>) -> Self {
+        match method {
+            Some("elicitation/create") => ServerAsk::Elicitation,
+            Some("roots/list") => ServerAsk::Roots,
+            _ => ServerAsk::Sampling,
+        }
+    }
 }
 
 // THE OUTBOUND ID SPACE. A dispatch's id is its round (`0..=u32::MAX` by type); the child-process
@@ -255,8 +265,7 @@ pub fn parse_response(body: &[u8], sent_id: u64) -> RpcOutcome {
 }
 
 /// Recognise an `InputRequiredResult` (MRTR: `resultType: "input_required"`, its asks a map at
-/// `inputRequests`) and the MOST PRIVILEGED ask it names. An ask that names no method, or one this
-/// plane does not know, is judged as `sampling`, so the refusal lands on a grant set deliberately.
+/// `inputRequests`) and the MOST PRIVILEGED ask it names ([`ServerAsk::of_method`]).
 fn input_required_kind(result: &serde_json::Value) -> Option<ServerAsk> {
     let obj = result.as_object()?;
     let by_spec = obj.get("resultType").and_then(|v| v.as_str()) == Some("input_required");
@@ -271,27 +280,26 @@ fn input_required_kind(result: &serde_json::Value) -> Option<ServerAsk> {
         .and_then(|requests| {
             requests
                 .values()
-                .map(
-                    |request| match request.get("method").and_then(|v| v.as_str()) {
-                        Some("elicitation/create") => ServerAsk::Elicitation,
-                        Some("roots/list") => ServerAsk::Roots,
-                        _ => ServerAsk::Sampling,
-                    },
-                )
+                .map(|request| ServerAsk::of_method(request.get("method").and_then(|v| v.as_str())))
                 .max()
         });
     Some(kind.unwrap_or(ServerAsk::Sampling))
 }
 
-/// The per-server grants: whether the operator lets a server put each ask to callers. All false at
-/// construction; deny-by-default is a property of the type.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// `tools.<server>.grants`: whether the operator lets a server put each ask to callers, consulted
+/// on every relay. All false at construction; deny-by-default is a property of the type.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ServerRequestGrants {
-    /// The server may ask for `sampling/createMessage`.
+    /// The server may ask for `sampling/createMessage`: relayed to the caller, who runs the
+    /// completion or not; busbar runs none on its behalf (Law 11).
+    #[serde(default)]
     pub sampling: bool,
-    /// The server may ask for `elicitation/create`.
+    /// The server may ask for `elicitation/create`, relayed as `sampling`.
+    #[serde(default)]
     pub elicitation: bool,
-    /// The server may ask for `roots/list`.
+    /// The server may ask for `roots/list`, relayed as `sampling`.
+    #[serde(default)]
     pub roots: bool,
 }
 

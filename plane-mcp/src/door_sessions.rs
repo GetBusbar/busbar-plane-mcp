@@ -16,13 +16,15 @@
 //! client ladder ([`crate::client::negotiate`]) opens a session, every hop over the door's
 //! connector; its last rung, the `2024-11-05` stream, is [`super::door_legacy`]'s.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::VecDeque;
 use std::task::Poll;
 
 use serde_json::{json, Value};
 
+use super::door_listen::{self, mono_ns};
+use super::door_tasks::handle;
 use super::{
-    ask_entitlements, door_listen, exchange_at, write, CallUnit, Held, McpDoor, Pending, Step,
+    admit, ask_entitlements, exchange_at, wall_ms, write, CallUnit, Held, McpDoor, Pending, Step,
     Written,
 };
 use crate::adapt::{self, SessionMethod};
@@ -38,9 +40,9 @@ use crate::revision::{self, Revision};
 use crate::tool_arrival::{Disposition, Refusal};
 use crate::tool_sessions::{OpenRefused, Owner, Remembered, SessionTable, UpstreamTable};
 use busbar_contract::abi::mechanism::call::{Outcome, SEVERITY_WARN};
-use busbar_contract::abi::mechanism::ticket::{CompletionHandle, Ticket};
+use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::plane::{OnPieceIn, OnPieceOut, FROM_CALLER, FROM_KERNEL, PIECE_LAST};
-use busbar_contract::abi::sdk::{Instance, Lent, Out, Services};
+use busbar_contract::abi::sdk::{Instance, Lent, Out};
 
 /// THE INSTANCE'S DIAGNOSTIC that an ungoverned chain's sessions are unisolated, latched on its
 /// first `2024-11-05` stream (the index of its id in the Statement's diagnostic ids).
@@ -178,11 +180,7 @@ pub(super) enum SessionArrived {
 /// with no signing key derives each caller's reference from the deployment keyset, so callers of a
 /// governed deployment never fold into one owner.
 pub(super) fn owner_of(caller: &str) -> Owner {
-    let who = if caller.is_empty() {
-        crate::ask::UNGOVERNED
-    } else {
-        caller
-    };
+    let who = super::principal_of(caller);
     Owner {
         principal: who.to_string(),
         credential: who.to_string(),
@@ -386,36 +384,6 @@ pub(super) fn refused_in_session(unit: &mut SessionUnit, refusal: &Refusal) -> b
 
 // ── the host's services, on a unit's ticket ─────────────────────────────────────────────────────
 
-/// A fresh completion handle on `ticket`, counted in `issued`.
-fn handle(ticket: Ticket, issued: &mut u32) -> CompletionHandle {
-    let h = CompletionHandle {
-        ticket,
-        seq: *issued,
-        _reserved: 0,
-    };
-    *issued += 1;
-    h
-}
-
-/// The kernel's wall clock in milliseconds; `None` with no clock or a failed read, which is never a
-/// time (row 159 finding P-M4): its caller refuses or stamps nothing.
-pub(super) fn wall_ms(services: Option<Services>, ticket: Ticket, issued: &mut u32) -> Option<u64> {
-    let s = services?;
-    s.clock_now(handle(ticket, issued))
-        .ok()
-        .map(|r| r.wall_ns / 1_000_000)
-}
-
-/// What `entitled` admits, as a catalogue lookup asks it.
-fn admits(entitled: &BTreeMap<String, bool>) -> impl Fn(&str, &str) -> bool + '_ {
-    move |kind, name| {
-        entitled
-            .get(&format!("{kind}:{name}"))
-            .copied()
-            .unwrap_or(false)
-    }
-}
-
 /// Runs `f` on busbar's memory of its upstream conversations.
 fn upstreams(plane: &McpDoor, f: impl FnOnce(&mut UpstreamTable)) {
     plane.upstreams.with(&(), |t| t.map(f));
@@ -424,7 +392,7 @@ fn upstreams(plane: &McpDoor, f: impl FnOnce(&mut UpstreamTable)) {
 /// The wall clock (ms) and the monotonic clock (ns), both read; `None` when either failed.
 fn clocks(plane: &McpDoor, ticket: Ticket, unit: &mut CallUnit) -> Option<(u64, u64)> {
     let wall = wall_ms(plane.services, ticket, &mut unit.issued);
-    wall.zip(door_listen::mono_ns(plane.services, ticket, unit))
+    wall.zip(mono_ns(plane.services, ticket, unit))
 }
 
 /// The session table.
@@ -444,7 +412,7 @@ fn open_session(
     for _ in 0..2 {
         let mut entropy = [0_u8; 16];
         let drawn = plane.services.is_some_and(|s| {
-            s.random_fill(handle(ticket, &mut unit.issued), &mut entropy)
+            s.random_fill(handle(ticket, &mut unit.issued, &mut None), &mut entropy)
                 .is_ok()
         });
         if !drawn {
@@ -599,7 +567,7 @@ fn written(unit: &mut CallUnit, pending: Pending) -> Step {
 fn discovery(plane: &McpDoor, ticket: Ticket, unit: &mut CallUnit, id: &Value) -> Option<Value> {
     let held = unit.held.clone().or_else(|| plane.current())?;
     ask_entitlements(plane.services, ticket, unit, &held.catalogue.grants());
-    let document = crate::answer::discover(&held.catalogue, id, &admits(&unit.entitled));
+    let document = crate::answer::discover(&held.catalogue, id, &admit(&unit.entitled));
     serde_json::from_slice::<Value>(&document)
         .ok()?
         .get("result")
@@ -685,7 +653,7 @@ fn here(
                 return invalid("this node publishes no MCP catalogue yet");
             };
             ask_entitlements(plane.services, ticket, unit, &held.catalogue.grants());
-            let admit = admits(&unit.entitled);
+            let admit = admit(&unit.entitled);
             if !matches!(held.catalogue.resource_by_uri(&admit, uri), Lookup::One(_)) {
                 return invalid("`params.uri` names no resource this caller may read.");
             }
@@ -1259,7 +1227,7 @@ fn step_stream(plane: &McpDoor, ticket: Ticket, unit: &mut CallUnit) -> Option<b
     if !updates.is_empty() {
         if let Some(held) = plane.current().or_else(|| unit.held.clone()) {
             door_listen::entitled_afresh(plane, ticket, unit, &held);
-            let admit = admits(&unit.entitled);
+            let admit = admit(&unit.entitled);
             for (server, uri) in updates {
                 let theirs = matches!(
                     held.catalogue.resource_by_uri(&admit, &uri),
@@ -1664,18 +1632,8 @@ pub(super) fn exchange_request(
 ///
 /// The conversation is the CALLER's (`binding`, row 159 finding 3); an answer to a request that
 /// carried its session's own id is handed back under the original's id, which the fetch correlates.
-pub(super) fn fetch(
-    instance: &Instance<'_, McpDoor>,
-    plane: &McpDoor,
-    unit: &mut CallUnit,
-    hop: (u32, &str, &str, u64),
-    original: OutboundRequest,
-) -> Poll<Result<busbar_contract::abi::sdk::exchange::ExchangeResponse, String>> {
-    fetch_in(instance, plane, &mut unit.negotiating, hop, original)
-}
-
-/// [`fetch`], its conversation kept in `slot` while it pends: a unit's, or an operator `connect`'s
-/// (which has no unit, row 159 finding A-H1).
+/// The conversation is kept in `slot` while it pends: a unit's, or an operator `connect`'s (which
+/// has no unit, row 159 finding A-H1).
 pub(super) fn fetch_in(
     instance: &Instance<'_, McpDoor>,
     plane: &McpDoor,
