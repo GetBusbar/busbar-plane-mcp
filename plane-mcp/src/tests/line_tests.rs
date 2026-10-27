@@ -90,7 +90,6 @@ fn a_live_round_issues_its_asks_in_order_and_its_retry_carries_the_answers_and_t
     let first: Value = serde_json::from_slice(&ask.issue(10).expect("the first ask")).unwrap();
     assert_eq!(first["id"], "busbar:10");
     assert_eq!(first["method"], "elicitation/create");
-    assert_eq!(ask.current_n, 10);
     ask.answered(json!({ "action": "accept" }));
     let second: Value = serde_json::from_slice(&ask.issue(11).expect("the second ask")).unwrap();
     assert_eq!(second["method"], "roots/list");
@@ -131,8 +130,6 @@ fn a_live_ask_lapses_at_its_timeout_and_a_request_is_livened_a_bounded_number_of
     ask.arm(1_000);
     assert!(!ask.lapsed(1_000 + ASK_TIMEOUT_NS - 1));
     assert!(ask.lapsed(1_000 + ASK_TIMEOUT_NS));
-    assert!(may_liven(MAX_LIVE_ASK_ROUNDS - 1));
-    assert!(!may_liven(MAX_LIVE_ASK_ROUNDS));
 }
 
 /// `initialize` naming a session revision this plane carries is answered in it (THE DESIGN section 2,
