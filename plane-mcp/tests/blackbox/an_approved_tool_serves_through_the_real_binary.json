@@ -34,14 +34,19 @@
         }
       },
       "tools/call": {
-        "result": {
-          "content": [
-            {
-              "type": "text",
-              "text": "ping: control"
-            }
-          ],
-          "isError": false
+        "echo": {
+          "from": "/params/arguments/label",
+          "into": "/result/content/0/text",
+          "base": {
+            "content": [
+              {
+                "type": "text",
+                "text": ""
+              }
+            ],
+            "isError": false
+          },
+          "format": "ping: {}"
         }
       }
     }

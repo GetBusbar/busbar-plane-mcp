@@ -45,34 +45,13 @@ fn initialize_offers_the_latest_session_revision_otherwise() {
 
 #[test]
 fn the_version_header_is_judged_against_the_session() {
-    use HeaderCheck::*;
     let s = Revision::R2025_06_18;
-    assert_eq!(check_header(s, Some("2025-06-18")), Agrees);
-    assert_eq!(check_header(s, Some("2025-11-25")), Disagrees);
-    assert_eq!(check_header(s, None), Missing);
+    assert!(!header_disagrees(s, Some("2025-06-18")));
+    assert!(header_disagrees(s, Some("2025-11-25")));
+    assert!(!header_disagrees(s, None));
     // The event-stream revision predates the header.
-    assert_eq!(check_header(Revision::R2024_11_05, None), Agrees);
-    assert_eq!(
-        check_header(Revision::R2024_11_05, Some("2025-06-18")),
-        Disagrees
-    );
-}
-
-#[test]
-fn the_client_ladder_falls_back_on_4xx_only() {
-    use ClientStep::*;
-    use StepOutcome::*;
-    assert_eq!(next_step(Stateless, Refused4xx), Some(Initialize));
-    assert_eq!(next_step(Initialize, Refused4xx), Some(EventStream));
-    assert_eq!(next_step(EventStream, Refused4xx), None);
-    for step in [Stateless, Initialize, EventStream] {
-        assert_eq!(next_step(step, Answered), None);
-        assert_eq!(
-            next_step(step, Unreachable),
-            None,
-            "an outage is not a revision signal"
-        );
-    }
+    assert!(!header_disagrees(Revision::R2024_11_05, None));
+    assert!(header_disagrees(Revision::R2024_11_05, Some("2025-06-18")));
 }
 
 #[test]
@@ -88,25 +67,22 @@ fn a_client_accepts_only_session_revisions_it_implements() {
 }
 
 #[test]
-fn only_the_two_2025_revisions_resume() {
-    assert!(Revision::R2025_06_18.resumable());
-    assert!(Revision::R2025_11_25.resumable());
-    assert!(!Revision::R2024_11_05.resumable());
-    assert!(!Revision::R2026_07_28.resumable());
+fn only_2024_11_05_is_the_event_stream_revision() {
     assert!(Revision::R2024_11_05.is_event_stream_revision());
+    assert!(!Revision::R2025_06_18.is_event_stream_revision());
 }
 
 #[test]
 fn red_a_sessionless_get_is_told_apart_by_the_version_header() {
-    use SessionlessGet::*;
     // A 2024-11-05 client sends no version header: the event stream.
-    assert_eq!(sessionless_get(None), EventStream);
+    assert!(sessionless_get_streams(None));
+    assert!(sessionless_get_streams(Some("2024-11-05")));
     // A single-endpoint revision's client: 405, as its revision says.
     for v in ["2025-06-18", "2025-11-25", "2026-07-28"] {
-        assert_eq!(sessionless_get(Some(v)), NotAllowed, "{v}");
+        assert!(!sessionless_get_streams(Some(v)), "{v}");
     }
     // An unknown revision reads as the latest session revision, as negotiation reads it.
     for v in ["2025-03-26", "1999-01-01", ""] {
-        assert_eq!(sessionless_get(Some(v)), NotAllowed, "{v:?}");
+        assert!(!sessionless_get_streams(Some(v)), "{v:?}");
     }
 }

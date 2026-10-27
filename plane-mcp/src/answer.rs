@@ -22,9 +22,6 @@ use crate::tool_ops::{
     OP_TOOLS_LIST,
 };
 
-/// The status of a successful answer.
-pub const STATUS_OK: u32 = 200;
-
 /// The status a notification is acknowledged with on a request-response carrier: no body.
 pub const STATUS_ACCEPTED: u32 = 202;
 
@@ -47,23 +44,13 @@ pub enum Answer {
 
 impl Answer {
     fn ok(body: Vec<u8>) -> Self {
-        Answer::Here {
-            status: STATUS_OK,
-            body,
-        }
+        Answer::Here { status: 200, body }
     }
 
     fn refused(refusal: &Refusal) -> Self {
         Answer::Here {
             status: refusal.status,
             body: refusal.body(),
-        }
-    }
-
-    fn of(result: Result<Vec<u8>, Refusal>) -> Self {
-        match result {
-            Ok(body) => Answer::ok(body),
-            Err(refusal) => Answer::refused(&refusal),
         }
     }
 }
@@ -110,15 +97,6 @@ pub fn discover(catalogue: &Catalogue, id: &Value, admit: &impl Fn(&str, &str) -
     )
 }
 
-/// `completion/complete`: always the empty completion, never validated against the catalogue.
-#[must_use]
-pub fn completion(id: &Value) -> Vec<u8> {
-    complete(
-        id,
-        json!({ "completion": { "values": [], "hasMore": false, "total": 0 } }),
-    )
-}
-
 /// ANSWER ONE ARRIVAL from what the plane holds. `params` is the request body's `params`;
 /// `hidden` is the kernel's trust verdict for a listed tool: `true` hides it.
 pub fn answer(
@@ -145,7 +123,10 @@ pub fn answer(
             } else if op == OP_RESOURCE_TEMPLATES_LIST {
                 Answer::ok(catalogue.resource_templates_list(id, admit))
             } else if op == OP_RESOURCE_READ {
-                Answer::of(reads::resources_read(catalogue, id, params, admit))
+                match reads::resources_read(catalogue, id, params, admit) {
+                    Ok(body) => Answer::ok(body),
+                    Err(refusal) => Answer::refused(&refusal),
+                }
             } else if op == OP_PROMPT_GET {
                 // A prompt that asks its caller first, or a retry presenting answers or state,
                 // takes busbar's ask decision before it renders: not answered here.
@@ -160,7 +141,9 @@ pub fn answer(
             } else if op == OP_TASK_GET || op == OP_TASK_UPDATE || op == OP_TASK_CANCEL {
                 Answer::refused(&crate::call::task_verb(id, params))
             } else if op == OP_COMPLETION {
-                Answer::ok(completion(id))
+                // Always the empty completion, never validated against the catalogue.
+                let empty = json!({ "completion": { "values": [], "hasMore": false, "total": 0 } });
+                Answer::ok(complete(id, empty))
             } else if op == OP_DISCOVER {
                 Answer::ok(discover(catalogue, id, admit))
             } else {

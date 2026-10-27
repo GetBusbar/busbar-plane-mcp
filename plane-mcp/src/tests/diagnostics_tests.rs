@@ -135,7 +135,7 @@ fn the_declares_file_states_the_catalog() {
         })
         .collect();
     // Beside the catalog, the plane's one breaker fact (ARCHITECT Q4): a transient failure below
-    // the trip threshold never benches a member (the 1.5.5 MCP client leg's posture); and the
+    // the trip threshold never benches a member (the posture ruled for this plane); and the
     // carriers it needs, which the one document states for the dropped-in manifest too.
     let whole = serde_json::json!({
         "breaker": { "bench_below_trip_threshold": false },
@@ -147,5 +147,47 @@ fn the_declares_file_states_the_catalog() {
         whole,
         "declares.json drifted from the catalog; expected:\n{}",
         serde_json::to_string_pretty(&whole).unwrap()
+    );
+}
+
+/// THE DECLARED CODES ARE THE RAISED CODES: every diagnostic the door can raise is one of its
+/// Statement's diagnostic ids (`out.diag` indexes them), each spelled `BUSBAR-NNNN` so the host's
+/// log resolves its catalog entry, and the set of those codes equals the set `declares.json`
+/// states. A declared code nothing raises, or a raised one nothing declares, fails here; so does a
+/// retired entry.
+#[test]
+fn the_declared_codes_are_exactly_the_raised_codes() {
+    let names = crate::tool_door::DIAG_NAMES;
+    assert_eq!(
+        crate::tool_door::DIAG_IDS_LEN,
+        names.len(),
+        "every diagnostic id the Statement states is a named one"
+    );
+    let raised: std::collections::BTreeSet<u16> = names
+        .iter()
+        .map(|name| {
+            name.strip_prefix("BUSBAR-")
+                .and_then(|n| n.parse::<u16>().ok())
+                .unwrap_or_else(|| panic!("the raised diagnostic `{name}` names no catalog code"))
+        })
+        .collect();
+    let declared: serde_json::Value =
+        serde_json::from_str(crate::DECLARES).expect("declares.json is JSON");
+    let declared: std::collections::BTreeSet<u16> = declared["diagnostics"]
+        .as_array()
+        .expect("declares.json states its diagnostics")
+        .iter()
+        .map(|d| {
+            u16::try_from(d["code"].as_u64().expect("a declared code is a number"))
+                .expect("a declared code fits a u16")
+        })
+        .collect();
+    assert_eq!(
+        raised, declared,
+        "declares.json states other codes than the door raises"
+    );
+    assert!(
+        DIAGNOSTICS.iter().all(|d| !d.retired),
+        "a retired code is declared"
     );
 }

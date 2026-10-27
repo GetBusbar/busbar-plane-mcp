@@ -149,7 +149,7 @@ fn the_walk_visits_every_declared_url_field_and_says_how_many() {
     );
     assert_eq!(scan.undeclared_judged, 0, "the note is prose, not a URL");
     assert_eq!(scan.strings_seen, 6);
-    assert!(scan.judged() >= 5);
+    assert!(scan.declared_judged + scan.undeclared_judged >= 5);
 }
 
 /// Each element of an array of URLs is judged on its own, so a hostile entry cannot hide behind
@@ -891,4 +891,691 @@ fn a_trailing_root_dot_is_judged_as_the_name_it_roots() {
         assert!(judged.is_ok(), "`{value}`: {judged:?}");
         assert_eq!(asked, ["example.com"], "`{value}`");
     }
+}
+
+/// `ｌｏｃａｌｈｏｓｔ` in full-width letters: a fetching client's UTS-46 mapping reads `localhost`.
+const FULLWIDTH_LOCALHOST: &str =
+    "\u{ff4c}\u{ff4f}\u{ff43}\u{ff41}\u{ff4c}\u{ff48}\u{ff4f}\u{ff53}\u{ff54}";
+/// `127。0。0。1` with ideographic full stops: UTS-46 reads `127.0.0.1`.
+const IDEOGRAPHIC_LOOPBACK: &str = "127\u{3002}0\u{3002}0\u{3002}1";
+/// `１６９．２５４．１６９．２５４` in full-width digits and stops: UTS-46 reads `169.254.169.254`.
+const FULLWIDTH_METADATA: &str = "\u{ff11}\u{ff16}\u{ff19}\u{ff0e}\u{ff12}\u{ff15}\u{ff14}\u{ff0e}\
+                                  \u{ff11}\u{ff16}\u{ff19}\u{ff0e}\u{ff12}\u{ff15}\u{ff14}";
+
+/// A HOST A CLIENT MAPS ONTO A FORBIDDEN ADDRESS IS REFUSED AS THAT ADDRESS, in every field the
+/// guard reads a host from: a declared `uri` (the absolute-URL judge), a declared `hostname` (the
+/// bare-host judge), an undeclared `https://` value and a `http:/` spelling only a WHATWG reader
+/// takes for a URL. A fetching client maps each spelling through UTS-46 before it dials, so the
+/// judge must be asked about the mapped name: asked about the spelling as written, the stand-in
+/// judge (like the host's) recognises none of them and the value would pass.
+#[test]
+fn a_host_a_client_maps_to_a_forbidden_address_is_refused_as_that_address() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "uri": {"type": "string", "format": "uri"},
+            "host": {"type": "string", "format": "hostname"},
+            "free": {"type": "string"}
+        }
+    });
+    for (spelled, dialled) in [
+        (FULLWIDTH_LOCALHOST, "localhost"),
+        (IDEOGRAPHIC_LOOPBACK, "127.0.0.1"),
+        (FULLWIDTH_METADATA, "169.254.169.254"),
+    ] {
+        for (field, value) in [
+            ("uri", format!("https://{spelled}/x")),
+            ("host", spelled.to_string()),
+            ("free", format!("https://{spelled}/x")),
+            ("free", format!("http:/{spelled}/x")),
+        ] {
+            let mut asked: Vec<String> = Vec::new();
+            let mut stand_in = public();
+            let got = guard(&schema, &json!({ field: value.as_str() }), |dest: &str| {
+                asked.push(dest.to_string());
+                stand_in(dest)
+            });
+            let why = got.as_ref().err().map(|e| e.why.clone());
+            let expected = if dialled == "169.254.169.254" {
+                ArgWhy::CloudMetadata(dialled.into())
+            } else {
+                ArgWhy::InternalHost(dialled.into())
+            };
+            assert_eq!(
+                why,
+                Some(expected),
+                "`{value}` in `{field}` is the address `{dialled}` and is refused as it: {got:?}"
+            );
+            assert_eq!(asked, [dialled], "`{value}` in `{field}`");
+        }
+    }
+}
+
+/// A HOST OUTSIDE ASCII IS NEVER JUDGED AS WRITTEN. The judge is asked about the punycode name a
+/// fetching client dials (`bücher.example` is `xn--bcher-kva.example` to it), whichever reader
+/// found the host; and a host UTS-46 refuses, or maps onto a forbidden domain code point
+/// (`ｂ＜.example` maps to `b<.example`), is refused with no host and never reaches the judge.
+#[test]
+fn a_host_outside_ascii_is_judged_as_the_name_a_client_dials_never_as_written() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "uri": {"type": "string", "format": "uri"},
+            "host": {"type": "string", "format": "idn-hostname"},
+            "free": {"type": "string"}
+        }
+    });
+    let allow_all = |asked: &mut Vec<String>, dest: &str| {
+        asked.push(dest.to_string());
+        Some(DEST_ALLOWED)
+    };
+    for (field, value, dialled) in [
+        (
+            "uri",
+            "https://b\u{fc}cher.example/x",
+            "xn--bcher-kva.example",
+        ),
+        ("host", "b\u{fc}cher.example", "xn--bcher-kva.example"),
+        (
+            "free",
+            "https:\\\\b\u{fc}cher.example\\",
+            "xn--bcher-kva.example",
+        ),
+        (
+            "free",
+            "http:/\u{ff4c}\u{ff4f}\u{ff43}\u{ff41}\u{ff4c}\u{ff48}\u{ff4f}\u{ff53}\u{ff54}/x",
+            "localhost",
+        ),
+    ] {
+        let mut asked: Vec<String> = Vec::new();
+        let got = guard(&schema, &json!({ field: value }), |dest: &str| {
+            allow_all(&mut asked, dest)
+        });
+        assert!(got.is_ok(), "`{value}` in `{field}`: {got:?}");
+        assert_eq!(
+            asked,
+            [dialled],
+            "`{value}` in `{field}` is judged as it is dialled"
+        );
+    }
+    for (field, value) in [
+        ("uri", "https://\u{ff42}\u{ff1c}.example/x"),
+        ("host", "\u{ff42}\u{ff1c}.example"),
+    ] {
+        let mut asked: Vec<String> = Vec::new();
+        let got = guard(&schema, &json!({ field: value }), |dest: &str| {
+            allow_all(&mut asked, dest)
+        });
+        assert!(
+            matches!(
+                &got,
+                Err(ArgRefusal {
+                    why: ArgWhy::NoHost(_),
+                    ..
+                })
+            ),
+            "`{value}` in `{field}` names no host a client can dial and is refused: {got:?}"
+        );
+        assert!(asked.is_empty(), "`{value}` was judged: {asked:?}");
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════════
+//   THE WHATWG SPECIAL SCHEMES, AND A URL NO READER ACCEPTS
+// ═════════════════════════════════════════════════════════════════════════════════════════════════
+
+/// The field kind a gap input was found allowed in.
+#[derive(Clone, Copy, Debug)]
+enum Field {
+    /// A plain `{"type": "string"}` with no `format`.
+    Undeclared,
+    /// A `{"type": "string", "format": "uri-reference"}`.
+    Reference,
+}
+
+fn field_schema(field: Field) -> Value {
+    match field {
+        Field::Undeclared => json!({
+            "type": "object",
+            "properties": {"target": {"type": "string"}}
+        }),
+        Field::Reference => json!({
+            "type": "object",
+            "properties": {"target": {"type": "string", "format": "uri-reference"}}
+        }),
+    }
+}
+
+/// Whether `value` in a `field` is refused at `/target` by the guard over a deployment with no
+/// private reach, and the verdict it got.
+fn refused_in(field: Field, value: &str) -> (bool, Result<super::ArgScan, ArgRefusal>) {
+    let got = guard(&field_schema(field), &json!({ "target": value }), public());
+    let refused = got.as_ref().is_err_and(|e| e.pointer == "/target");
+    (refused, got)
+}
+
+/// One input a WHATWG reader reads as naming an internal or metadata host, refused in every field
+/// kind it was found allowed in.
+fn assert_refused(value: &str, fields: &[Field]) {
+    for &field in fields {
+        let (refused, got) = refused_in(field, value);
+        assert!(
+            refused,
+            "`{value:?}` in a {field:?} field must be refused, got {got:?}"
+        );
+    }
+}
+
+// The WHATWG special schemes are six: `ftp` and `file` are read as `http` is (a backslash is a
+// slash, the slashes after the scheme are skipped), so each of these names a host to a fetching
+// client and that host is judged.
+
+#[test]
+fn ftp_one_slash_fullwidth_localhost_is_refused() {
+    assert_refused(
+        "ftp:/\u{ff4c}\u{ff4f}\u{ff43}\u{ff41}\u{ff4c}\u{ff48}\u{ff4f}\u{ff53}\u{ff54}",
+        &[Field::Undeclared, Field::Reference],
+    );
+}
+
+#[test]
+fn ftp_one_slash_loopback_is_refused() {
+    assert_refused("ftp:/127.0.0.1", &[Field::Undeclared, Field::Reference]);
+}
+
+#[test]
+fn ftp_backslashes_loopback_is_refused() {
+    assert_refused("ftp:\\\\127.0.0.1", &[Field::Undeclared, Field::Reference]);
+}
+
+#[test]
+fn ftp_no_slash_loopback_is_refused() {
+    assert_refused("ftp:127.0.0.1", &[Field::Undeclared, Field::Reference]);
+}
+
+#[test]
+fn ftp_one_slash_metadata_is_refused() {
+    assert_refused(
+        "ftp:/169.254.169.254/",
+        &[Field::Undeclared, Field::Reference],
+    );
+}
+
+#[test]
+fn ftp_backslashes_localhost_is_refused() {
+    assert_refused("ftp:\\\\localhost", &[Field::Undeclared, Field::Reference]);
+}
+
+/// `file:\\127.0.0.1\x` fails the contract's reader whichever special-scheme set the contract
+/// keeps (it reads `file` opaque), so its refusal rests on the plane's OWN set naming `file`: the
+/// set is pinned here as the six WHATWG names, and the refusal is pinned with the contract's reading
+/// of the value shown to be a refusal, so a contract that changes its set cannot change this one.
+#[test]
+fn the_plane_reads_its_own_six_special_schemes_whatever_the_contract_keeps() {
+    assert_eq!(
+        super::SPECIAL_SCHEMES,
+        ["http", "https", "ws", "wss", "ftp", "file"],
+        "the WHATWG special schemes, all six"
+    );
+    let value = "file:\\\\127.0.0.1\\x";
+    assert!(
+        busbar_contract::net::parse_url(value).is_err(),
+        "the contract's reader does not read `{value}`; the plane's own set must"
+    );
+    assert_refused(value, &[Field::Undeclared, Field::Reference]);
+}
+
+#[test]
+fn file_backslashes_loopback_is_refused() {
+    assert_refused(
+        "file:\\\\127.0.0.1\\x",
+        &[Field::Undeclared, Field::Reference],
+    );
+}
+
+// A non-special scheme with a backslash in its authority: the contract's reader refuses it, and a
+// URL no reader accepts is refused rather than read as naming no host.
+
+#[test]
+fn foo_backslash_userinfo_loopback_is_refused() {
+    assert_refused("foo://a\\@127.0.0.1", &[Field::Undeclared]);
+}
+
+#[test]
+fn foo_backslash_userinfo_metadata_is_refused() {
+    assert_refused("foo://a\\@169.254.169.254/", &[Field::Undeclared]);
+}
+
+#[test]
+fn ldap_backslash_userinfo_loopback_is_refused() {
+    assert_refused("ldap://a\\@127.0.0.1", &[Field::Undeclared]);
+}
+
+#[test]
+fn gopher_backslash_userinfo_loopback_is_refused() {
+    assert_refused("gopher://a\\b@127.0.0.1/", &[Field::Undeclared]);
+}
+
+/// THE TWINS. The same reading leaves an ordinary value alone: a public `ftp`/`ws` URL is judged
+/// and passes, and a value no reader takes for a URL naming a host (an opaque `foo:bar`, prose
+/// holding a backslash or a URL mid-sentence, a bare IDN or hex-looking name, a `file` URL with no
+/// host) is not judged at all.
+#[test]
+fn ordinary_values_beside_the_special_schemes_stay_allowed() {
+    let undeclared = field_schema(Field::Undeclared);
+    for judged in [
+        "ftp://example.com/",
+        "ftp:/example.com/x",
+        "ws://example.com/",
+        "file:\\\\example.com\\x",
+    ] {
+        let scan = guard(&undeclared, &json!({ "target": judged }), public())
+            .unwrap_or_else(|e| panic!("`{judged:?}` names a public host: {e}"));
+        assert_eq!(scan.undeclared_judged, 1, "`{judged:?}` was judged");
+    }
+    for untouched in [
+        "foo:bar",
+        "the path a\\b is relative",
+        "a\\b",
+        "b\u{fc}cher.de",
+        "0x.example",
+        "see https://example.com/ for docs",
+        "file:///etc/passwd",
+        "mailto:someone@example.com",
+    ] {
+        // A `uri-reference` holding `://` is an absolute URL under the scheme allowlist, so prose
+        // carrying one is judged there; every other untouched value is untouched in both kinds.
+        let fields: &[Field] = if untouched.contains("://") {
+            &[Field::Undeclared]
+        } else {
+            &[Field::Undeclared, Field::Reference]
+        };
+        for &field in fields {
+            let scan = guard(
+                &field_schema(field),
+                &json!({ "target": untouched }),
+                public(),
+            )
+            .unwrap_or_else(|e| panic!("`{untouched:?}` in a {field:?} field: {e}"));
+            if matches!(field, Field::Undeclared) {
+                assert_eq!(scan.undeclared_judged, 0, "`{untouched:?}` names no host");
+            }
+        }
+    }
+}
+
+/// EVERY GAP THE DIFFERENTIAL REVIEW FOUND after dev + #1450 + #1461: 48 inputs, each a JSON string
+/// literal decoded exactly, whose WHATWG host is internal or metadata, each in every field kind it
+/// was found allowed in (58 cases). Every one is refused.
+const REVIEW_GAPS: &[(&str, &[Field], &str, &str)] = &[
+    (
+        r#""\\\\ｌｏｃａｌｈｏｓｔ\\x""#,
+        &[Field::Reference],
+        "backslash network path",
+        "#1263 as pinned (mcp 28d655c)",
+    ),
+    (
+        r#""/\\ｌｏｃａｌｈｏｓｔ""#,
+        &[Field::Reference],
+        "backslash network path",
+        "#1263 as pinned (mcp 28d655c)",
+    ),
+    (
+        r#""\\/ｌｏｃａｌｈｏｓｔ""#,
+        &[Field::Reference],
+        "backslash network path",
+        "#1263 as pinned (mcp 28d655c)",
+    ),
+    (
+        r#""\\\\１２７.０.０.１""#,
+        &[Field::Reference],
+        "backslash network path",
+        "#1263 as pinned (mcp 28d655c)",
+    ),
+    (
+        r#""ws:/ｌｏｃａｌｈｏｓｔ""#,
+        &[Field::Undeclared, Field::Reference],
+        "ws/ftp/file scheme",
+        "#1263 as pinned (mcp 28d655c)",
+    ),
+    (
+        r#""ftp:/ｌｏｃａｌｈｏｓｔ""#,
+        &[Field::Undeclared, Field::Reference],
+        "ws/ftp/file scheme",
+        "planned whatwg_host fix",
+    ),
+    (
+        r#""ftp://ｌｏｃａｌｈｏｓｔ/""#,
+        &[Field::Undeclared],
+        "ws/ftp/file scheme",
+        "#1263 as pinned (mcp 28d655c)",
+    ),
+    (
+        r#""\\\\%EF%BD%8C%EF%BD%8F%EF%BD%83%EF%BD%81%EF%BD%8C%EF%BD%88%EF%BD%8F%EF%BD%93%EF%BD%94""#,
+        &[Field::Reference],
+        "backslash network path",
+        "#1263 as pinned (mcp 28d655c)",
+    ),
+    (
+        r#""\\\\%6c%6fcalhost""#,
+        &[Field::Reference],
+        "backslash network path",
+        "#1263 as pinned (mcp 28d655c)",
+    ),
+    (
+        r#""\\\\LocalHost.""#,
+        &[Field::Reference],
+        "backslash network path",
+        "#1263 as pinned (mcp 28d655c)",
+    ),
+    (
+        r#""\\\\0x7f.1""#,
+        &[Field::Reference],
+        "backslash network path",
+        "#1263 as pinned (mcp 28d655c)",
+    ),
+    (
+        r#""/\\127.1""#,
+        &[Field::Reference],
+        "backslash network path",
+        "#1263 as pinned (mcp 28d655c)",
+    ),
+    (
+        r#""\\/2130706433""#,
+        &[Field::Reference],
+        "backslash network path",
+        "#1263 as pinned (mcp 28d655c)",
+    ),
+    (
+        r#""\\\\[::1]\\x""#,
+        &[Field::Reference],
+        "backslash network path",
+        "#1263 as pinned (mcp 28d655c)",
+    ),
+    (
+        r#""\\\\evil@127.0.0.1""#,
+        &[Field::Reference],
+        "backslash network path",
+        "#1263 as pinned (mcp 28d655c)",
+    ),
+    (
+        r#""\\/127.0.0.1""#,
+        &[Field::Reference],
+        "backslash network path",
+        "#1263 as pinned (mcp 28d655c)",
+    ),
+    (
+        r#""/\\127.0.0.1""#,
+        &[Field::Reference],
+        "backslash network path",
+        "#1263 as pinned (mcp 28d655c)",
+    ),
+    (
+        r#""\\\\127.0.0.1""#,
+        &[Field::Reference],
+        "backslash network path",
+        "#1263 as pinned (mcp 28d655c)",
+    ),
+    (
+        r#""\\/localhost""#,
+        &[Field::Reference],
+        "backslash network path",
+        "#1263 as pinned (mcp 28d655c)",
+    ),
+    (
+        r#""/\\localhost""#,
+        &[Field::Reference],
+        "backslash network path",
+        "#1263 as pinned (mcp 28d655c)",
+    ),
+    (
+        r#""\\\\localhost""#,
+        &[Field::Reference],
+        "backslash network path",
+        "#1263 as pinned (mcp 28d655c)",
+    ),
+    (
+        r#""\\\\169.254.169.254""#,
+        &[Field::Reference],
+        "backslash network path",
+        "#1263 as pinned (mcp 28d655c)",
+    ),
+    (
+        r#""/\\/localhost""#,
+        &[Field::Reference],
+        "backslash network path",
+        "#1263 as pinned (mcp 28d655c)",
+    ),
+    (
+        r#""\\\\\\localhost""#,
+        &[Field::Reference],
+        "backslash network path",
+        "#1263 as pinned (mcp 28d655c)",
+    ),
+    (
+        r#""\u0001//localhost""#,
+        &[Field::Reference],
+        "other",
+        "#1263 as pinned (mcp 28d655c)",
+    ),
+    (
+        r#""/\t/localhost""#,
+        &[Field::Reference],
+        "other",
+        "#1263 as pinned (mcp 28d655c)",
+    ),
+    (
+        r#""\\\t\\localhost""#,
+        &[Field::Reference],
+        "backslash network path",
+        "#1263 as pinned (mcp 28d655c)",
+    ),
+    (
+        r#""/\n/127.0.0.1""#,
+        &[Field::Reference],
+        "other",
+        "#1263 as pinned (mcp 28d655c)",
+    ),
+    (
+        r#""ftp://127.0.0.1/""#,
+        &[Field::Undeclared],
+        "ws/ftp/file scheme",
+        "#1263 as pinned (mcp 28d655c)",
+    ),
+    (
+        r#""ftp:/127.0.0.1""#,
+        &[Field::Undeclared, Field::Reference],
+        "ws/ftp/file scheme",
+        "planned whatwg_host fix",
+    ),
+    (
+        r#""ftp:\\\\127.0.0.1""#,
+        &[Field::Undeclared, Field::Reference],
+        "ws/ftp/file scheme",
+        "planned whatwg_host fix",
+    ),
+    (
+        r#""ftp:127.0.0.1""#,
+        &[Field::Undeclared, Field::Reference],
+        "ws/ftp/file scheme",
+        "planned whatwg_host fix",
+    ),
+    (
+        r#""ws://localhost/""#,
+        &[Field::Undeclared],
+        "ws/ftp/file scheme",
+        "#1263 as pinned (mcp 28d655c)",
+    ),
+    (
+        r#""wss:\\\\127.1""#,
+        &[Field::Undeclared, Field::Reference],
+        "ws/ftp/file scheme",
+        "#1263 as pinned (mcp 28d655c)",
+    ),
+    (
+        r#""ws:localhost""#,
+        &[Field::Undeclared, Field::Reference],
+        "ws/ftp/file scheme",
+        "#1263 as pinned (mcp 28d655c)",
+    ),
+    (
+        r#""gopher://127.0.0.1/""#,
+        &[Field::Undeclared],
+        "non-special scheme",
+        "#1263 as pinned (mcp 28d655c)",
+    ),
+    (
+        r#""file:\\\\127.0.0.1\\x""#,
+        &[Field::Undeclared, Field::Reference],
+        "ws/ftp/file scheme",
+        "planned whatwg_host fix",
+    ),
+    (
+        r#""foo://127.0.0.1""#,
+        &[Field::Undeclared],
+        "non-special scheme",
+        "#1263 as pinned (mcp 28d655c)",
+    ),
+    (
+        r#""ldap://127.0.0.1""#,
+        &[Field::Undeclared],
+        "non-special scheme",
+        "#1263 as pinned (mcp 28d655c)",
+    ),
+    (
+        r#""Foo://LocalHost./""#,
+        &[Field::Undeclared],
+        "non-special scheme",
+        "#1263 as pinned (mcp 28d655c)",
+    ),
+    (
+        r#""foo://[::1]/""#,
+        &[Field::Undeclared],
+        "non-special scheme",
+        "#1263 as pinned (mcp 28d655c)",
+    ),
+    (
+        r#""foo://a\\@127.0.0.1""#,
+        &[Field::Undeclared],
+        "non-special scheme",
+        "planned whatwg_host fix",
+    ),
+    (
+        r#""\\\\0x""#,
+        &[Field::Reference],
+        "\\0x",
+        "#1263 as pinned (mcp 28d655c)",
+    ),
+    (
+        r#""ftp:/169.254.169.254/""#,
+        &[Field::Undeclared, Field::Reference],
+        "ws/ftp/file scheme",
+        "planned whatwg_host fix",
+    ),
+    (
+        r#""ftp:\\\\localhost""#,
+        &[Field::Undeclared, Field::Reference],
+        "ws/ftp/file scheme",
+        "planned whatwg_host fix",
+    ),
+    (
+        r#""ldap://a\\@127.0.0.1""#,
+        &[Field::Undeclared],
+        "non-special scheme",
+        "planned whatwg_host fix",
+    ),
+    (
+        r#""foo://a\\@169.254.169.254/""#,
+        &[Field::Undeclared],
+        "non-special scheme",
+        "planned whatwg_host fix",
+    ),
+    (
+        r#""gopher://a\\b@127.0.0.1/""#,
+        &[Field::Undeclared],
+        "non-special scheme",
+        "planned whatwg_host fix",
+    ),
+];
+
+/// THE SPELLINGS WITHOUT `//` the busbar-side door test pinned before #1461 moved it (`http:h`,
+/// `http:/\h` with a literal backslash, and `http:0x`, which a URL client dials as `0.0.0.0`), each
+/// with every plain host that test spelt, in both field kinds. The plane pins them now.
+fn odd_spellings() -> Vec<String> {
+    let hosts = [
+        "localhost",
+        "127.0.0.1",
+        "169.254.169.254",
+        "0x7f.1",
+        "017700000001",
+    ];
+    let mut out: Vec<String> = Vec::new();
+    for h in hosts {
+        out.push(format!("http:{h}/latest/meta-data/"));
+        out.push(format!("http:/\\{h}/latest/meta-data/"));
+    }
+    out.push("http:0x/latest/meta-data/".to_string());
+    out
+}
+
+/// A SPECIAL SCHEME NO READER ACCEPTS is refused only as a raw URL: a value holding whitespace or
+/// a control character is prose to the guard (no raw URL holds one) and goes the ordinary way.
+#[test]
+fn a_special_scheme_no_reader_accepts_is_refused_and_prose_after_it_is_not() {
+    assert_refused("ftp:/127.0.0.1", &[Field::Undeclared, Field::Reference]);
+    for value in ["ws:[", "ftp:%", "file://a%/x"] {
+        let (refused, got) = refused_in(Field::Undeclared, value);
+        assert!(refused, "`{value}` is a raw URL no reader accepts: {got:?}");
+    }
+    for prose in [
+        "ftp: see notes",
+        "file: notes.txt",
+        "http: the protocol, see below",
+        "https:\u{1}x",
+    ] {
+        let scan = guard(
+            &field_schema(Field::Undeclared),
+            &json!({ "target": prose }),
+            public(),
+        )
+        .unwrap_or_else(|e| panic!("`{prose:?}` is prose: {e}"));
+        assert_eq!(scan.undeclared_judged, 0, "`{prose:?}` was not judged");
+    }
+}
+
+#[test]
+fn every_gap_the_differential_review_found_is_refused() {
+    let mut cases = 0usize;
+    let mut allowed: Vec<String> = Vec::new();
+    for &(literal, fields, class, closed_by) in REVIEW_GAPS {
+        let value: String = serde_json::from_str(literal)
+            .unwrap_or_else(|e| panic!("`{literal}` is not a JSON string literal: {e}"));
+        for &field in fields {
+            cases += 1;
+            let (refused, got) = refused_in(field, &value);
+            if !refused {
+                allowed.push(format!(
+                    "{literal} in {field:?} ({class}; {closed_by}): {got:?}"
+                ));
+            }
+        }
+    }
+    assert_eq!(REVIEW_GAPS.len(), 48, "the review's 48 inputs");
+    assert_eq!(cases, 58, "the review's 58 input-and-field cases");
+    for value in odd_spellings() {
+        for field in [Field::Undeclared, Field::Reference] {
+            cases += 1;
+            let (refused, got) = refused_in(field, &value);
+            if !refused {
+                allowed.push(format!("{value:?} in {field:?} (odd spelling): {got:?}"));
+            }
+        }
+    }
+    assert_eq!(cases, 80, "58 review cases and 22 odd-spelling cases");
+    assert!(
+        allowed.is_empty(),
+        "{} of {cases} refused; still allowed:\n{}",
+        cases - allowed.len(),
+        allowed.join("\n")
+    );
 }

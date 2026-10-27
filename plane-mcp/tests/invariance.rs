@@ -4,38 +4,17 @@
 //! registered. The contract crate holds itself to that rule and asserts it; this is the same
 //! assertion, one crate over, for the same reason.
 
-use std::path::{Path, PathBuf};
+#[path = "support/source_scan.rs"]
+mod source_scan;
 
-/// The crate's own source directory.
-fn src_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
-}
+use std::path::Path;
+
+use source_scan::{sibling_plane_crates, src_dir, walk_surface};
 
 /// The crate's own manifest.
 fn manifest() -> String {
     std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
         .expect("the manifest is readable")
-}
-
-/// The dash-spelled directory name of every OTHER `busbar-plane-*` crate in the workspace.
-///
-/// Read from the tree rather than typed out one instance at a time: a purity check that hand-lists
-/// its sibling planes is itself an instance-naming leak (and a stale one, the day a new plane is
-/// added and this list is not). Deriving the set from `crates/`'s own directory listing makes the
-/// check exhaustive over every sibling plane there is, present or future, without this crate's own
-/// source spelling a single one of their names.
-fn sibling_plane_crates() -> Vec<String> {
-    let crates_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("crates/<this crate> has a parent");
-    let mut out: Vec<String> = std::fs::read_dir(crates_dir)
-        .expect("the crates directory is readable")
-        .flatten()
-        .filter_map(|e| e.file_name().into_string().ok())
-        .filter(|name| name.starts_with("busbar-plane-") && name != env!("CARGO_PKG_NAME"))
-        .collect();
-    out.sort();
-    out
 }
 
 /// Walk every source file, handing each to a reader.
@@ -75,7 +54,7 @@ fn the_crate_declares_no_features() {
 #[test]
 fn no_item_is_conditionally_compiled() {
     let mut offenders = Vec::new();
-    walk(&src_dir(), &mut |path, text| {
+    walk_surface(&src_dir(), &mut |path, text| {
         for (n, line) in text.lines().enumerate() {
             let line = line.trim_start();
             if line.starts_with("#[cfg(test)]") {
@@ -100,7 +79,10 @@ fn the_crate_forbids_unsafe_and_undocumented_items() {
     assert!(lib.contains("#![deny(missing_docs)]"));
 }
 
-/// No source file contains the word the lint gate forbids.
+/// No source file contains the word the lint gate forbids: neither the shipped surface nor the
+/// crate's own test modules (`src/tests/`, and each module's `tests/`), which compile under the same
+/// literal `#![forbid(unsafe_code)]`. A test that needs `unsafe` drives the door from an integration
+/// test (`tests/*.rs`) instead.
 #[test]
 fn the_source_contains_no_unsafe_block() {
     let mut offenders = Vec::new();

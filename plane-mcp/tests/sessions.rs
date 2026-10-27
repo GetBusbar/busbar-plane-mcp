@@ -12,8 +12,19 @@
 //! are stand-ins written in this file: a clock, the kernel's entitlement and trust answers (all
 //! yes), a counting `random.fill`, and two upstreams behind the connector, one that requires a
 //! session and one that speaks the stateless revision.
+//!
+//! This suite drives the door over its C ABI with a host it stands up itself, so it needs
+//! `unsafe`, and it reaches the crate through `door` alone (the crate's only public item). The
+//! door facts it needs are `tests/support/door_facts.rs`, pinned to the crate's own items in
+//! `src/tests/door_facts_tests.rs`.
 
 #![allow(unsafe_code)]
+
+// The door's private constants these tests need, restated and held to the crate's own items by the
+// crate's unit test `door_facts_tests`. Each test binary reads only some of them.
+#[path = "support/door_facts.rs"]
+#[allow(dead_code)]
+mod door_facts;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::os::raw::c_void;
@@ -42,7 +53,7 @@ use busbar_contract::abi::plane::{
     PIECE_LAST, RECORD_AUDIT,
 };
 use busbar_contract::abi::transport::FrameSpan;
-use busbar_plane_mcp::{door, tool_door};
+use busbar_plane_mcp::door;
 use serde_json::{json, Value};
 
 // ── the host's services ─────────────────────────────────────────────────────────────────────────
@@ -55,6 +66,9 @@ fn answer(out: *mut ServiceOut, outcome: Outcome, value: u64, len: u64) -> RawOu
             outcome: RawOutcome::of(outcome),
             value,
             len,
+            items: 0,
+            needed_bytes: 0,
+            needed_items: 0,
             ..ServiceOut::ZERO
         });
     }
@@ -490,7 +504,7 @@ fn establish_now(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawO
     // SAFETY: the SDK hands an `EstablishIn`.
     let i = unsafe { input.cast::<EstablishIn>().read() };
     // SAFETY: the SDK's target text, live for the call.
-    let url = unsafe { std::slice::from_raw_parts(i.target.ptr, i.target.len) };
+    let url = unsafe { std::slice::from_raw_parts(i.target.ptr(), i.target.len()) };
     let url = String::from_utf8_lossy(url).into_owned();
     let mut ups = upstreams();
     let ups = ups.get_or_insert_with(Upstreams::default);
@@ -710,19 +724,13 @@ fn z<T>() -> T {
 }
 
 fn str_of(s: &str) -> AbiStr {
-    AbiStr {
-        ptr: s.as_ptr(),
-        len: s.len(),
-    }
+    // SAFETY: the test's own bytes, which outlive the call each `in` is built for.
+    unsafe { AbiStr::from_raw_parts(s.as_ptr(), s.len()) }
 }
 
 fn octets(b: &[u8]) -> Blob {
-    Blob {
-        ptr: b.as_ptr(),
-        len: b.len(),
-        fmt: BLOB_OCTETS,
-        flags: 0,
-    }
+    // SAFETY: the test's own bytes, which outlive the call each `in` is built for.
+    unsafe { Blob::from_raw_parts(b.as_ptr(), b.len(), BLOB_OCTETS, 0) }
 }
 
 fn head<T>(op: u32, ticket: Ticket) -> InHead {
@@ -743,7 +751,7 @@ fn out_head<T>() -> OutHead {
 
 fn ops() -> &'static Ops {
     // SAFETY: the door is a `'static` table whose ops are the plane kind's.
-    unsafe { &*(*tool_door::door()).ops.cast::<Ops>() }
+    unsafe { &*door().ops().cast::<Ops>() }
 }
 
 fn lifecycle() -> &'static OpsHead {
@@ -796,11 +804,15 @@ fn open_with(section: &str) -> Door {
         ..z()
     };
     let f = lifecycle().open.expect("the door opens");
-    let ret = f(
-        std::ptr::null_mut(),
-        std::ptr::from_ref(&i).cast(),
-        std::ptr::from_mut(&mut o).cast(),
-    );
+    // SAFETY: the slot is the door's own, called with an in and an out of the types it declares.
+    #[allow(unused_unsafe)]
+    let ret = unsafe {
+        f(
+            std::ptr::null_mut(),
+            std::ptr::from_ref(&i).cast(),
+            std::ptr::from_mut(&mut o).cast(),
+        )
+    };
     assert_eq!(ret.outcome(), Outcome::Ready, "the door opens");
     Door {
         instance: o.open.instance,
@@ -815,9 +827,9 @@ struct Arrived {
 }
 
 fn claim(verb: &str) -> u32 {
-    let i = door::ROUTES
+    let i = door_facts::ROUTES
         .iter()
-        .position(|r| r.verb == verb && r.target == "/mcp" && r.carrier == "http")
+        .position(|&(v, t, c)| v == verb && t == "/mcp" && c == "http")
         .expect("the door routes it");
     u32::try_from(i).unwrap()
 }
@@ -837,11 +849,15 @@ impl Door {
             next_tick_ns: 0,
         };
         let f = lifecycle().tick.expect("tick");
-        let ret = f(
-            self.instance,
-            std::ptr::from_ref(&i).cast(),
-            std::ptr::from_mut(&mut o).cast(),
-        );
+        // SAFETY: the slot is the door's own, called with an in and an out of the types it declares.
+        #[allow(unused_unsafe)]
+        let ret = unsafe {
+            f(
+                self.instance,
+                std::ptr::from_ref(&i).cast(),
+                std::ptr::from_mut(&mut o).cast(),
+            )
+        };
         assert_eq!(ret.outcome(), Outcome::Ready);
     }
 
@@ -859,11 +875,15 @@ impl Door {
         let mut o: PlaneDriveOut = z();
         o.head = out_head::<PlaneDriveOut>();
         let f = lifecycle().drive.expect("drive");
-        let ret = f(
-            self.instance,
-            std::ptr::from_ref(&i).cast(),
-            std::ptr::from_mut(&mut o).cast(),
-        );
+        // SAFETY: the slot is the door's own, called with an in and an out of the types it declares.
+        #[allow(unused_unsafe)]
+        let ret = unsafe {
+            f(
+                self.instance,
+                std::ptr::from_ref(&i).cast(),
+                std::ptr::from_mut(&mut o).cast(),
+            )
+        };
         assert_eq!(ret.outcome(), Outcome::Ready);
     }
 
@@ -924,11 +944,15 @@ impl Door {
         let mut o: PlaneCancelOut = z();
         o.cancel.head = out_head::<PlaneCancelOut>();
         let f = lifecycle().cancel.expect("cancel");
-        let ret = f(
-            self.instance,
-            std::ptr::from_ref(&i).cast(),
-            std::ptr::from_mut(&mut o).cast(),
-        );
+        // SAFETY: the slot is the door's own, called with an in and an out of the types it declares.
+        #[allow(unused_unsafe)]
+        let ret = unsafe {
+            f(
+                self.instance,
+                std::ptr::from_ref(&i).cast(),
+                std::ptr::from_mut(&mut o).cast(),
+            )
+        };
         assert_eq!(ret.outcome(), Outcome::Ready);
     }
 
@@ -973,11 +997,15 @@ impl Door {
         let mut o: ArriveOut = z();
         o.head = out_head::<ArriveOut>();
         let f = ops().arrive.expect("arrive");
-        let ret = f(
-            self.instance,
-            std::ptr::from_ref(&i).cast(),
-            std::ptr::from_mut(&mut o).cast(),
-        );
+        // SAFETY: the slot is the door's own, called with an in and an out of the types it declares.
+        #[allow(unused_unsafe)]
+        let ret = unsafe {
+            f(
+                self.instance,
+                std::ptr::from_ref(&i).cast(),
+                std::ptr::from_mut(&mut o).cast(),
+            )
+        };
         Arrived {
             outcome: ret.outcome(),
             refusal_status: o.refusal_status,
@@ -1031,11 +1059,15 @@ impl Door {
             let mut o: OnPieceOut = z();
             o.head = out_head::<OnPieceOut>();
             let f = ops().on_piece.expect("on_piece");
-            let ret = f(
-                self.instance,
-                std::ptr::from_ref(&i).cast(),
-                std::ptr::from_mut(&mut o).cast(),
-            );
+            // SAFETY: the slot is the door's own, called with an in and an out of the types it declares.
+            #[allow(unused_unsafe)]
+            let ret = unsafe {
+                f(
+                    self.instance,
+                    std::ptr::from_ref(&i).cast(),
+                    std::ptr::from_mut(&mut o).cast(),
+                )
+            };
             first = false;
             got.outcome = Some(ret.outcome());
             if o.reply_status != 0 {
@@ -1061,6 +1093,7 @@ impl Door {
                     .filter(|r| r.op == RECORD_AUDIT)
                     .map(|r| (at(r.key), at(r.value), r.kind == AUDIT_REJECTED)),
             );
+            got.diags += o.head.envelope.diags_len;
             got.bytes
                 .extend_from_slice(&reply[..usize::try_from(o.emitted).unwrap()]);
             if ret.outcome() != Outcome::Ready || o.more == 0 {
@@ -1153,6 +1186,8 @@ struct Answered {
     request: String,
     /// The audit rows written: action, resource, rejected.
     audits: Vec<(String, String, bool)>,
+    /// The diagnostics the reply's envelope carried.
+    diags: usize,
 }
 
 impl Answered {
@@ -1580,7 +1615,7 @@ fn a_session_subscription_hears_the_upstreams_resource_update() {
         d.arrive(61, "POST", "/mcp", subscribe, &in_session).outcome,
         Outcome::Ready
     );
-    let subscribed = d.piece(61, &Given::caller(ALICE, subscribe));
+    let subscribed = d.settle(61, &Given::caller(ALICE, subscribe));
     assert_eq!(subscribed.status, 200, "{}", subscribed.text());
     assert_eq!(subscribed.json()["result"], json!({}));
 
@@ -1909,6 +1944,45 @@ fn two_callers_of_one_legacy_member_never_share_a_stream() {
     );
 }
 
+/// A NOTIFICATION ON THE HELD LINK FINISHES ON ITS POST: the `2024-11-05` server answers a
+/// notification's POST `202` and never sends anything for it on the stream, so busbar POSTs it with
+/// no id and goes on at once. The handshake's `notifications/initialized` is that notification:
+/// the call after it is POSTed and answered though no event ever came for it.
+#[test]
+fn a_notification_on_the_held_link_finishes_on_its_post() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open_with(LEGACY_SECTION);
+    let (a, fields) = legacy_call(40, "n.txt");
+    relayed(&d, 78, ALICE, &a, &fields);
+    let answered = d.pump(78, &walk_refused(ALICE));
+    assert_eq!(answered.status, 200, "{}", answered.text());
+    assert_eq!(
+        legacy_text(&answered),
+        (json!(40), "legacy n.txt".to_string())
+    );
+    let posted: Vec<Value> = seen()
+        .into_iter()
+        .filter(|s| s.url.contains(LEGACY_MESSAGES))
+        .map(|s| s.body)
+        .collect();
+    let at = |method: &str| {
+        posted
+            .iter()
+            .position(|b| b["method"] == json!(method))
+            .unwrap_or_else(|| panic!("`{method}` was POSTed: {posted:?}"))
+    };
+    let note = &posted[at("notifications/initialized")];
+    assert!(
+        note.get("id").is_none(),
+        "a notification is POSTed with no id: {note}"
+    );
+    assert!(
+        at("notifications/initialized") < at("tools/call"),
+        "the call went on after the notification's POST, with no answer for it: {posted:?}"
+    );
+}
+
 // ── row 159 legacy-rung, ladder, session and subscription findings (lane q128) ──────────────────
 
 /// The largest integer a JavaScript peer reads back exactly (`Number.MAX_SAFE_INTEGER`).
@@ -2190,18 +2264,22 @@ fn one_owner_holds_a_bounded_number_of_session_streams() {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
     *upstreams() = Some(Upstreams::default());
     let d = open();
-    let init = initialize(&d, 200, ALICE);
-    let session = init
-        .field("mcp-session-id")
-        .expect("the answer names its session")
-        .to_string();
-    let stream = [
-        ("accept", "text/event-stream"),
-        ("mcp-session-id", session.as_str()),
-        ("mcp-protocol-version", "2025-06-18"),
-    ];
+    // Five sessions (a session keeps sixteen streams), thirteen streams on each.
+    let sessions: Vec<String> = (0..5)
+        .map(|n| {
+            initialize(&d, 190 + n, ALICE)
+                .field("mcp-session-id")
+                .expect("the answer names its session")
+                .to_string()
+        })
+        .collect();
     let mut statuses = Vec::new();
-    for unit in 201..=265 {
+    for (n, unit) in (201..=265).enumerate() {
+        let stream = [
+            ("accept", "text/event-stream"),
+            ("mcp-session-id", sessions[n / 13].as_str()),
+            ("mcp-protocol-version", "2025-06-18"),
+        ];
         assert_eq!(
             d.arrive(unit, "GET", "/mcp", b"", &stream).outcome,
             Outcome::Ready
@@ -2319,6 +2397,547 @@ fn the_legacy_get_carries_no_stateless_mirror_headers() {
             field_of(&get.fields, name).is_none(),
             "the GET carries `{name}`: {:?}",
             get.fields
+        );
+    }
+}
+
+/// RED: A SESSION REVISION'S ANSWER IS THE UPSTREAM'S OWN BYTES: a `tools/call` in a `2025-06-18`
+/// session reaches its caller with the upstream's result members in the upstream's order and its
+/// numbers as the upstream spelt them (`1.0`, `1e3`), only the stateless-only members cut out.
+/// RED: the answer was parsed and printed again, its members sorted and `1e3` re-spelt `1000.0`.
+#[test]
+fn a_session_answer_is_relayed_byte_for_byte() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open();
+    let init = initialize(&d, 120, ALICE);
+    let session = init
+        .field("mcp-session-id")
+        .expect("the answer names its session")
+        .to_string();
+    let call = br#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"st_read_file","arguments":{}}}"#;
+    let fields = [
+        ACCEPT_BOTH,
+        ("mcp-session-id", session.as_str()),
+        ("mcp-protocol-version", "2025-06-18"),
+    ];
+    let arrived = d.arrive(121, "POST", "/mcp", call, &fields);
+    assert_eq!(arrived.outcome, Outcome::Ready, "{arrived:?}");
+    d.piece(121, &Given::attempt(ALICE, "st"));
+    let send = d.pump(121, &Given::caller(ALICE, call));
+    assert!(
+        send.far,
+        "the call is relayed: {} {}",
+        send.status,
+        send.text()
+    );
+    let far = br#"{"jsonrpc":"2.0","id":0,"result":{"zeta":1.0,"content":[{"type":"text","text":"x"}],"resultType":"complete","alpha":1e3,"ttlMs":5}}"#;
+    let answered = d.settle(121, &Given::far(ALICE, 200, vec![JSON_TYPE], far));
+    assert_eq!(answered.status, 200, "{}", answered.text());
+    assert_eq!(
+        answered.text(),
+        r#"{"id":5,"jsonrpc":"2.0","result":{"zeta":1.0,"content":[{"type":"text","text":"x"}],"alpha":1e3}}"#,
+        "the upstream's own bytes, only the stateless-only members cut"
+    );
+}
+
+/// RED: A `2024-11-05` UPSTREAM'S ANSWER IS ITS OWN BYTES even when its log records ride ahead of
+/// it: the caller reads the result's members in the upstream's order and its numbers as spelt.
+/// RED: with a frame riding, the answer was parsed and printed again.
+#[test]
+fn a_legacy_answer_with_frames_is_relayed_byte_for_byte() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open_with(LEGACY_SECTION);
+    let (a, fields) = legacy_call(30, "a.txt");
+    relayed(&d, 122, ALICE, &a, &fields);
+    upstreams().as_mut().unwrap().hold_calls = true;
+    assert_eq!(
+        d.piece(122, &walk_refused(ALICE)).outcome,
+        Some(Outcome::Pending)
+    );
+    let session = legacy_sessions()[0].clone();
+    on_stream(&session, |s| {
+        let held = std::mem::take(&mut s.held);
+        let text = String::from_utf8(held[0].clone()).unwrap();
+        let data = text
+            .lines()
+            .find_map(|l| l.strip_prefix("data: "))
+            .expect("the held answer");
+        let id = serde_json::from_str::<Value>(data).unwrap()["id"].clone();
+        s.events.push_back(sse_event(
+            "message",
+            r#"{"jsonrpc":"2.0","method":"notifications/message","params":{"level":"info","data":"working"}}"#,
+        ));
+        s.events.push_back(sse_event(
+            "message",
+            &format!(
+                r#"{{"jsonrpc":"2.0","id":{id},"result":{{"zeta":1.0,"content":[{{"type":"text","text":"legacy a.txt"}}],"alpha":1e3}}}}"#
+            ),
+        ));
+    });
+    d.turn();
+    let answered = d.pump(122, &walk_refused(ALICE));
+    assert_eq!(answered.status, 200, "{}", answered.text());
+    assert!(
+        answered.text().contains(
+            r#""zeta":1.0,"content":[{"type":"text","text":"legacy a.txt"}],"alpha":1e3}"#
+        ),
+        "the upstream's own bytes: {}",
+        answered.text()
+    );
+}
+
+/// A `tools/call` of `name` asking for progress under the caller's token `p`.
+fn progress_call(name: &str) -> Vec<u8> {
+    serde_json::to_vec(&json!({
+        "jsonrpc": "2.0",
+        "id": 31,
+        "method": "tools/call",
+        "params": {
+            "name": name,
+            "arguments": {},
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": {},
+                "progressToken": "p",
+            },
+        },
+    }))
+    .unwrap()
+}
+
+/// RED: TWO CALLS IN FLIGHT NEVER SHARE A PROGRESS TOKEN: two first-round calls to a stateless
+/// upstream carry two tokens, and a call lowered into a session carries the token of the id it is
+/// sent under. RED: every first round carried `busbar-0`, the round's id.
+#[test]
+fn calls_in_flight_never_share_a_progress_token() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open();
+    let call = progress_call("st_read_file");
+    let mut tokens = Vec::new();
+    for unit in [130, 131] {
+        assert_eq!(
+            d.arrive(unit, "POST", "/mcp", &call, ST_FIELDS).outcome,
+            Outcome::Ready
+        );
+        d.piece(unit, &Given::attempt(ALICE, "st"));
+        let send = d.pump(unit, &Given::caller(ALICE, &call));
+        assert!(send.far, "{} {}", send.status, send.text());
+        let sent: Value = serde_json::from_slice(&send.bytes).expect("a JSON-RPC request");
+        assert_eq!(sent["id"], json!(0), "the stateless round's id: {sent}");
+        tokens.push(sent["params"]["_meta"]["progressToken"].clone());
+    }
+    assert!(
+        tokens
+            .iter()
+            .all(|t| t.as_str().is_some_and(|t| t.starts_with("busbar-"))),
+        "busbar's own tokens: {tokens:?}"
+    );
+    assert_ne!(tokens[0], tokens[1], "two calls in flight shared a token");
+
+    let call = progress_call("fs_read_file");
+    assert_eq!(
+        d.arrive(132, "POST", "/mcp", &call, CALL_FIELDS).outcome,
+        Outcome::Ready
+    );
+    d.piece(132, &Given::attempt(ALICE, "fs"));
+    let send = d.pump(132, &Given::caller(ALICE, &call));
+    assert!(send.far, "{} {}", send.status, send.text());
+    let sent: Value = serde_json::from_slice(&send.bytes).expect("a JSON-RPC request");
+    assert_eq!(
+        send.field("mcp-session-id"),
+        Some(UPSTREAM_SESSION),
+        "lowered into the session"
+    );
+    assert_eq!(
+        sent["params"]["_meta"]["progressToken"],
+        json!(format!("busbar-{}", sent["id"])),
+        "the token of the id the call is sent under: {sent}"
+    );
+    assert!(!tokens.contains(&sent["params"]["_meta"]["progressToken"]));
+}
+
+/// RED: A HELD STREAM IS NEVER ENDED TO MAKE ROOM: past the streams one session keeps, the next GET
+/// is refused `429`, and the first stream still collects what its session buffers. RED: the next
+/// GET dropped the first stream's cursor, and that stream ended at its next collection.
+#[test]
+fn a_held_stream_is_never_ended_for_another() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open();
+    let session = initialize(&d, 140, ALICE)
+        .field("mcp-session-id")
+        .expect("the answer names its session")
+        .to_string();
+    let stream = [
+        ("accept", "text/event-stream"),
+        ("mcp-session-id", session.as_str()),
+        ("mcp-protocol-version", "2025-06-18"),
+    ];
+    let mut statuses = Vec::new();
+    for unit in 141..=157 {
+        assert_eq!(
+            d.arrive(unit, "GET", "/mcp", b"", &stream).outcome,
+            Outcome::Ready
+        );
+        statuses.push(d.piece(unit, &Given::stream_open(ALICE, unit)).status);
+    }
+    assert!(
+        statuses[..16].iter().all(|s| *s == 200),
+        "a session keeps sixteen streams: {statuses:?}"
+    );
+    assert_eq!(
+        statuses[16], 429,
+        "the seventeenth is refused: {statuses:?}"
+    );
+    // The first stream is still live: a collection writes no end of stream.
+    d.turn();
+    let collected = d.piece(141, &Given::collect(ALICE, 141));
+    assert!(
+        !collected.done,
+        "the first stream was ended for the seventeenth: {}",
+        collected.text()
+    );
+}
+
+/// Opens a `2024-11-05` stream on `unit` as `caller`: the message address its endpoint event names.
+fn legacy_stream(d: &Door, unit: u64, caller: &str) -> String {
+    let opened = d.arrive(unit, "GET", "/mcp", b"", &[("accept", "text/event-stream")]);
+    assert_eq!(opened.outcome, Outcome::Ready, "{opened:?}");
+    let text = d.piece(unit, &Given::stream_open(caller, unit)).text();
+    text.strip_prefix("event: endpoint\ndata: ")
+        .and_then(|rest| rest.split('\n').next())
+        .unwrap_or_else(|| panic!("the stream opens with the endpoint event: {text:?}"))
+        .to_string()
+}
+
+/// RED: A `2024-11-05` SESSION ENDS WITH ITS STREAM: once the caller's stream ended (or its op was
+/// cancelled), a message POSTed to its address is told the session is unknown (`404`) and is not
+/// run. RED: the session outlived its stream, the message ran, and it was answered `202` with its
+/// answer dropped.
+#[test]
+fn a_legacy_session_ends_with_its_stream() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open();
+    let list = br#"{"jsonrpc":"2.0","id":9,"method":"tools/list"}"#;
+    let json_type = [("content-type", "application/json")];
+
+    // The caller's side of the stream ends.
+    let address = legacy_stream(&d, 150, ALICE);
+    let ended = d.piece(
+        150,
+        &Given {
+            stream: 150,
+            ..Given::caller(ALICE, b"")
+        },
+    );
+    assert!(ended.done, "the stream ends: {}", ended.text());
+    assert_eq!(
+        d.arrive(151, "POST", &address, list, &json_type).outcome,
+        Outcome::Ready
+    );
+    let posted = d.piece(151, &Given::caller(ALICE, list));
+    assert_eq!(posted.status, 404, "{}", posted.text());
+
+    // The stream's op is cancelled.
+    let address = legacy_stream(&d, 152, ALICE);
+    d.cancel(152);
+    assert_eq!(
+        d.arrive(153, "POST", &address, list, &json_type).outcome,
+        Outcome::Ready
+    );
+    let posted = d.piece(153, &Given::caller(ALICE, list));
+    assert_eq!(posted.status, 404, "{}", posted.text());
+}
+
+/// THE UNGOVERNED CHAIN'S DIAGNOSTIC IS REPORTED ONCE PER INSTANCE, on its first `2024-11-05`
+/// stream: that stream's reply carries it, and the latch is set only by a carried report, so the
+/// next ungoverned stream carries none. A governed caller's stream never carries it.
+#[test]
+fn the_ungoverned_legacy_diagnostic_is_reported_once_when_carried() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open();
+    let opened = |unit: u64, caller: &str| {
+        let arrived = d.arrive(unit, "GET", "/mcp", b"", &[("accept", "text/event-stream")]);
+        assert_eq!(arrived.outcome, Outcome::Ready, "{arrived:?}");
+        d.piece(unit, &Given::stream_open(caller, unit))
+    };
+    assert_eq!(
+        opened(170, ALICE).diags,
+        0,
+        "a governed caller's stream says nothing"
+    );
+    let first = opened(171, "");
+    assert_eq!(first.status, 200, "{}", first.text());
+    assert_eq!(
+        first.diags, 1,
+        "the first ungoverned stream carries the diagnostic"
+    );
+    assert_eq!(opened(172, "").diags, 0, "latched: said once per instance");
+}
+
+// ── a subscription is recorded, never sent upstream (predev's model) ───────────────────────────
+
+/// `initialize` as `caller` on `unit`: the session it opened.
+fn open_session(d: &Door, unit: u64, caller: &str) -> String {
+    initialize(d, unit, caller)
+        .field("mcp-session-id")
+        .expect("the answer names its session")
+        .to_string()
+}
+
+/// `body` POSTed in `session` as `caller` on `unit`: its answer, on one piece (nothing pends).
+fn session_post(d: &Door, unit: u64, session: &str, caller: &str, body: &[u8]) -> Answered {
+    let fields = [
+        ACCEPT_BOTH,
+        ("mcp-session-id", session),
+        ("mcp-protocol-version", "2025-06-18"),
+    ];
+    assert_eq!(
+        d.arrive(unit, "POST", "/mcp", body, &fields).outcome,
+        Outcome::Ready
+    );
+    d.piece(unit, &Given::caller(caller, body))
+}
+
+/// predev's acknowledgement of a session's `resources/subscribe` or `resources/unsubscribe` with
+/// JSON-RPC id `id`: `ok(json!({}))` (gh/predev crates/busbar-plane-mcp/src/door_sessions.rs
+/// l.664-665, l.712 and l.729), whose envelope is `line::result` (line.rs l.50-51).
+fn predev_session_ack(id: u64) -> Vec<u8> {
+    serde_json::to_vec(&json!({ "jsonrpc": "2.0", "id": id, "result": {} })).unwrap()
+}
+
+/// The resource subscription frames busbar sent any member over the connector.
+fn subscription_frames() -> Vec<(String, String)> {
+    seen()
+        .into_iter()
+        .filter_map(|s| {
+            let method = s.body["method"].as_str()?.to_string();
+            matches!(
+                method.as_str(),
+                "resources/subscribe" | "resources/unsubscribe"
+            )
+            .then(|| (s.url, method))
+        })
+        .collect()
+}
+
+/// RED: A SESSION'S SUBSCRIPTION IS RECORDED, NEVER SENT UPSTREAM, as predev held it
+/// (gh/predev crates/busbar-plane-mcp/src/door_sessions.rs l.687-731: the uri resolved under the
+/// caller's grants and recorded under the owner's quota, `{}` answered, the member sent nothing;
+/// what the member announces reaches the session, `announce` l.800). Subscribe and unsubscribe are each
+/// acknowledged with predev's bytes exactly, and no `resources/subscribe` or
+/// `resources/unsubscribe` reaches a member. RED: busbar sent the declaring member both.
+#[test]
+fn a_session_subscription_sends_its_member_nothing() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open();
+    let session = open_session(&d, 240, ALICE);
+    let subscribe =
+        br#"{"jsonrpc":"2.0","id":3,"method":"resources/subscribe","params":{"uri":"file:///readme"}}"#;
+    let unsubscribe =
+        br#"{"jsonrpc":"2.0","id":4,"method":"resources/unsubscribe","params":{"uri":"file:///readme"}}"#;
+    let subscribed = session_post(&d, 241, &session, ALICE, subscribe);
+    assert_eq!(subscribed.outcome, Some(Outcome::Ready));
+    assert_eq!(subscribed.status, 200, "{}", subscribed.text());
+    assert_eq!(
+        subscribed.bytes,
+        predev_session_ack(3),
+        "predev's acknowledgement: {}",
+        subscribed.text()
+    );
+    let dropped = session_post(&d, 242, &session, ALICE, unsubscribe);
+    assert_eq!(dropped.status, 200, "{}", dropped.text());
+    assert_eq!(
+        dropped.bytes,
+        predev_session_ack(4),
+        "predev's acknowledgement: {}",
+        dropped.text()
+    );
+    assert!(
+        subscription_frames().is_empty(),
+        "no subscription frame reached a member: {:?}",
+        subscription_frames()
+    );
+}
+
+/// RED: A `subscriptions/listen` OF A RESOURCE IS ACKNOWLEDGED AT ONCE AND SENDS NOTHING UPSTREAM,
+/// as predev held it (gh/predev crates/busbar-plane-mcp/src/door_listen.rs l.182-253 opened it and
+/// stepped it once, l.256-290; the acknowledgement is subscribe.rs l.231 and l.249-256 tagged
+/// notification `notifications/subscriptions/acknowledged` carrying the accepted filter, l.300-307,
+/// framed as one `message` event, framing.rs l.197-212; the member's announcements are relayed,
+/// subscribe.rs l.328-347). The first piece answers predev's bytes exactly and no
+/// `resources/subscribe` reaches a member. RED: the open pended on busbar's own
+/// `resources/subscribe` to the declaring member.
+#[test]
+fn a_listen_subscription_sends_its_member_nothing() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open();
+    let listen = br#"{"jsonrpc":"2.0","id":81,"method":"subscriptions/listen","params":{"notifications":{"resourceSubscriptions":["file:///readme"]},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#;
+    let fields = [
+        ACCEPT_BOTH,
+        ("mcp-protocol-version", "2026-07-28"),
+        ("mcp-method", "subscriptions/listen"),
+    ];
+    let arrived = d.arrive(250, "POST", "/mcp", listen, &fields);
+    assert_eq!(arrived.outcome, Outcome::Ready, "{arrived:?}");
+    let opened = d.piece(250, &Given::stream_open(ALICE, 250));
+    assert_eq!(opened.outcome, Some(Outcome::Ready), "{}", opened.text());
+    assert_eq!(opened.status, 200, "{}", opened.text());
+    let ack = json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/subscriptions/acknowledged",
+        "params": {
+            "notifications": { "resourceSubscriptions": ["file:///readme"] },
+            "_meta": { "io.modelcontextprotocol/subscriptionId": 81 },
+        },
+    });
+    let predev = format!(
+        "event: message\ndata: {}\n\n",
+        serde_json::to_string(&ack).unwrap()
+    );
+    assert_eq!(
+        opened.text(),
+        predev,
+        "predev's acknowledgement, on the first piece"
+    );
+    assert!(
+        subscription_frames().is_empty(),
+        "no subscription frame reached a member: {:?}",
+        subscription_frames()
+    );
+}
+
+/// The section with one `transport: stdio` member declaring a resource.
+const STDIO_SECTION: &str = r#"{
+    "io": {"transport": "stdio", "command": "/usr/bin/true", "pin": {"mechanism": "unpinned"}, "tools_allow": {"read_file": {}}, "resources_allow": {"file:///notes": {"name": "notes", "text": "hi"}}}
+}"#;
+
+/// A STDIO MEMBER'S RESOURCE SUBSCRIPTION IS ACKNOWLEDGED AND SENDS THE CHILD NOTHING, as predev
+/// held it (gh/predev crates/busbar-plane-mcp/src/door_sessions.rs l.687-731, the same for every
+/// transport; the child's own `notifications/resources/updated`, heard beside a relayed exchange,
+/// reaches the watchers, door_program.rs l.308-310 and tool_program.rs l.378-381). Subscribe and
+/// unsubscribe are acknowledged with predev's bytes exactly, and nothing is sent for them.
+#[test]
+fn a_stdio_members_resource_subscription_is_acknowledged() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open_with(STDIO_SECTION);
+    let session = open_session(&d, 230, ALICE);
+    let subscribe =
+        br#"{"jsonrpc":"2.0","id":3,"method":"resources/subscribe","params":{"uri":"file:///notes"}}"#;
+    let unsubscribe =
+        br#"{"jsonrpc":"2.0","id":4,"method":"resources/unsubscribe","params":{"uri":"file:///notes"}}"#;
+    let subscribed = session_post(&d, 231, &session, ALICE, subscribe);
+    assert_eq!(subscribed.status, 200, "{}", subscribed.text());
+    assert_eq!(
+        subscribed.bytes,
+        predev_session_ack(3),
+        "predev's acknowledgement: {}",
+        subscribed.text()
+    );
+    let dropped = session_post(&d, 232, &session, ALICE, unsubscribe);
+    assert_eq!(
+        dropped.bytes,
+        predev_session_ack(4),
+        "predev's acknowledgement: {}",
+        dropped.text()
+    );
+    assert!(
+        seen().is_empty(),
+        "nothing was sent for it: {:?}",
+        subscription_frames()
+    );
+}
+
+// ── a member's resource update reaches a listen subscriber once ────────────────────────────────
+
+/// The stateless member's `notifications/resources/updated` for the readme, as the member spells
+/// it: members out of the usual order and a number in an unusual spelling, so bytes handed on
+/// unread could be told from bytes re-encoded.
+const MEMBER_UPDATE: &str = r#"{"params":{"uri":"file:///readme","revision":1.50E+1},"method":"notifications/resources/updated","jsonrpc":"2.0"}"#;
+
+/// The relayed call's far answer: the member's update, then the call's own answer.
+fn far_with_update() -> Vec<u8> {
+    format!(
+        "event: message\ndata: {MEMBER_UPDATE}\n\nevent: message\ndata: {{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{{\"content\":[],\"resultType\":\"complete\"}}}}\n\n"
+    )
+    .into_bytes()
+}
+
+/// predev's relay of a member's update of `uri` to the subscription opened under id `id`: a
+/// notification of the subscription's own, `{"uri"}` tagged with its subscription id
+/// (gh/predev crates/busbar-plane-mcp/src/subscribe.rs l.328-345 and `notification` l.249-256),
+/// never the member's bytes: the member's other params and its spelling are not handed on.
+fn predev_relayed_update(uri: &str, id: u64) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/resources/updated",
+        "params": {
+            "uri": uri,
+            "_meta": { "io.modelcontextprotocol/subscriptionId": id },
+        },
+    })
+}
+
+/// A MEMBER'S RESOURCE UPDATE REACHES AN HTTP LISTEN SUBSCRIBER EXACTLY ONCE, as predev relayed it
+/// (gh/predev crates/busbar-plane-mcp/src/subscribe.rs l.328-345; door_listen.rs l.256-290 frames
+/// it as one `message` event, framing.rs l.197-212): the collection after the member announced it
+/// carries predev's frame byte for byte (re-encoded under the subscription's id, not the member's
+/// bytes), and no further tick or collection delivers it again.
+#[test]
+fn a_members_update_reaches_a_listen_subscriber_exactly_once() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open();
+    let listen = br#"{"jsonrpc":"2.0","id":82,"method":"subscriptions/listen","params":{"notifications":{"resourceSubscriptions":["file:///readme"]},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#;
+    let fields = [
+        ACCEPT_BOTH,
+        ("mcp-protocol-version", "2026-07-28"),
+        ("mcp-method", "subscriptions/listen"),
+    ];
+    assert_eq!(
+        d.arrive(260, "POST", "/mcp", listen, &fields).outcome,
+        Outcome::Ready
+    );
+    let opened = d.piece(260, &Given::stream_open(ALICE, 260));
+    assert!(opened.text().contains("acknowledged"), "{}", opened.text());
+
+    assert_eq!(
+        d.arrive(261, "POST", "/mcp", ST_CALL, ST_FIELDS).outcome,
+        Outcome::Ready
+    );
+    d.piece(261, &Given::attempt(BOB, "st"));
+    assert!(d.piece(261, &Given::caller(BOB, ST_CALL)).far);
+    let far = far_with_update();
+    let answered = d.piece(
+        261,
+        &Given::far(BOB, 200, vec![("content-type", "text/event-stream")], &far),
+    );
+    assert_eq!(answered.status, 200, "{}", answered.text());
+
+    let delivered = d.piece(260, &Given::collect(ALICE, 260)).text();
+    let predev = format!(
+        "event: message\ndata: {}\n\n",
+        serde_json::to_string(&predev_relayed_update("file:///readme", 82)).unwrap()
+    );
+    assert_eq!(delivered, predev, "predev's relay of the member's update");
+    assert!(
+        !delivered.contains(MEMBER_UPDATE),
+        "the member's own bytes are not handed on: {delivered:?}"
+    );
+    for _ in 0..4 {
+        d.turn();
+        let again = d.piece(260, &Given::collect(ALICE, 260)).text();
+        assert!(
+            !again.contains("notifications/resources/updated"),
+            "the update was delivered a second time: {again:?}"
         );
     }
 }

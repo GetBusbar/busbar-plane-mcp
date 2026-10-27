@@ -1,11 +1,30 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! A stdio child's messages, read whole and correlated by id (ARCHITECT round 5
-//! Q-L3B-STDIO-UPSTREAM (A)).
+//! A stdio child's messages, read whole and correlated by id.
 
 use super::*;
 use serde_json::json;
+
+/// A stdio child's asks judged against `def.sampling_bounds`, as the door judges them.
+fn judge_child_asks(
+    server: &str,
+    def: &crate::tools_config::McpServerDefCfg,
+    asks: &[ChildAsk],
+) -> Result<(), crate::call::AskRefusal> {
+    let requests = asks.iter().map(|a| &a.request);
+    crate::call::judge_sampling_bounds(server, &def.sampling_bounds, requests)
+}
+
+/// The caller's replies to a stdio child judged by their written bytes, as the door judges them.
+fn judge_child_replies(
+    server: &str,
+    def: &crate::tools_config::McpServerDefCfg,
+    replies: &[Vec<u8>],
+) -> Result<(), crate::call::AskRefusal> {
+    let written = replies.iter().map(Vec::len).sum();
+    crate::call::judge_input_response(server, &def.sampling_bounds, written)
+}
 
 /// The door, as these tests stand in for it: what it answered, what it was told, and the child's
 /// line of relayed calls (each by the id it waits on, in arrival order).
@@ -175,7 +194,7 @@ fn every_id_on_a_child_is_its_own() {
     assert_eq!(generation_of(b"other: 1\r\n"), 0);
 }
 
-/// LAW 11 (ARCHITECT Q6), RED against the deleted "no satisfier" reply: a GRANTED authority ask the
+/// LAW 11: a GRANTED authority ask the
 /// child sends while busbar relays a call is TAKEN for the caller, verbatim, and busbar writes the
 /// child nothing in its place; an UNGRANTED one is still refused on the child's input
 /// (`ask_ungranted`); `ping` is still answered by busbar (keepalive, not an ask).
@@ -398,7 +417,7 @@ fn the_call_an_ask_belongs_to() {
 }
 
 /// A STDIO CHILD'S granted `sampling/createMessage` ask is judged against the same
-/// `tools.<server>.sampling_bounds` as the http path (owner ruling Q22c): over the cap is a named
+/// `tools.<server>.sampling_bounds` as the http path: over the cap is a named
 /// refusal (`sampling_bound_exceeded`) the door writes back on the child's input as `-32001`;
 /// exactly at the cap it goes to the caller.
 #[test]
@@ -433,7 +452,7 @@ fn a_stdio_childs_sampling_ask_over_the_cap_is_refused_by_name() {
 }
 
 /// THE CALLER'S ANSWER TO A STDIO CHILD'S ASK is bounded by `sampling_bounds.max_input_response_bytes`
-/// (ARCHITECT 2026-10-14): the bytes that would be written to the child are measured, over the cap
+/// the bytes that would be written to the child are measured, over the cap
 /// is the named refusal (nothing is written), exactly at the cap it is written.
 #[test]
 fn a_callers_answer_to_a_stdio_childs_ask_over_the_cap_is_refused() {

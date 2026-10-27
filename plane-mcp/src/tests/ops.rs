@@ -2,7 +2,7 @@
 //! measures implementation and nothing else; still a direct child module, so `use
 //! super::*` reaches the private items it always did.
 
-use super::{is_known_notification, method_row_for, Sender, METHODS, NOTIFICATIONS, OP_CLASSES};
+use super::{method_row_for, Sender, METHODS, OP_CLASSES};
 
 /// Every method maps to a class the plane declares.
 #[test]
@@ -54,23 +54,6 @@ fn the_lookup_answers_the_table_and_nothing_else() {
     assert_eq!(method_row_for(""), None);
 }
 
-/// A notification is not a method, and a method is not a notification.
-///
-/// The two lists must not overlap: a name in both would be answered and not answered at once.
-#[test]
-fn the_two_lists_do_not_overlap() {
-    for name in NOTIFICATIONS {
-        assert!(method_row_for(name).is_none(), "{name} is in both lists");
-    }
-    for row in METHODS {
-        assert!(
-            !is_known_notification(row.method),
-            "{} is in both lists",
-            row.method
-        );
-    }
-}
-
 /// Every method the codec's own dispatch table names is one this plane carries.
 ///
 /// The table itself, iterated. This SCRAPED it out of the server half's source once — an
@@ -95,32 +78,6 @@ fn every_dispatched_method_is_carried() {
         seen >= 12,
         "only {seen} methods were read out of the codec's table"
     );
-}
-
-/// The name pointer is the codec's own reading of where a request's subject is.
-///
-/// The codec answers the same question in a small function; this CALLS it and asserts the two
-/// agree, member for member, in BOTH directions. It read that function's source once — an
-/// `include_str!` over `../../busbar-mcp/src/…`, then a substring search for the arm — which
-/// coupled this crate to a sibling its manifest does not name, and which could only ever check
-/// one direction: a method the codec addressed and this plane gave no pointer for read as a
-/// pass, because the loop never visited it.
-#[test]
-fn the_name_pointers_are_the_codecs_own() {
-    for row in METHODS {
-        let member = row.name_pointer.map(|pointer| {
-            pointer
-                .rsplit('/')
-                .next()
-                .expect("a pointer has a last segment")
-        });
-        assert_eq!(
-            crate::codec::name_source_of(row.method),
-            member,
-            "the codec and this plane disagree about where {}'s subject is",
-            row.method
-        );
-    }
 }
 
 /// The three an upstream sends back are the three the plane calls provider-initiated.
