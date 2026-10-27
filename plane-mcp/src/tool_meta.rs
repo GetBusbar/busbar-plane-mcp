@@ -1,55 +1,6 @@
-//! What this plane declares about itself.
-//!
-//! Everything here is a constant, because everything here is read once at registration and sealed
-//! into policy. A plane that could vary its own declarations at run time would make the claims a
-//! boot proved non-overlapping stop being the claims in force.
+//! The meter classes and `--help` lines this plane declares.
 
-use busbar_contract::ids::{
-    AdminVerbId, ClassDirection, MeterClassDecl, MeterClassId, OpClassId, RecordSchemaId,
-};
-use busbar_contract::plane::PlaneMeta;
-
-use crate::{
-    tool_claims as claims, tool_facts as facts, tool_ops as ops, tool_records as records, McpPlane,
-};
-
-/// The two classes this plane meters.
-///
-/// A tool call is FLAT-metered: the call class divides by one and counts calls, and a rate card that
-/// wants to charge per call has a key to hang a price on. The byte class is the second axis the
-/// design's plane table names, and it is what makes a very large answer cost more than a small one
-/// on a deployment that wants it to.
-///
-/// WHAT THE DOOR REPORTS (#71; the design's money section, "The plane reports; the kernel
-/// writes"): once a server has answered a relayed `tools/call`, one `tool_calls` and the byte length
-/// of the document it answered with (`tool_door.rs` `Pending::counted`), beside the fee unit a
-/// success earns. A call whose upstream never answered reports neither class, because nothing was
-/// measured (#62: what is billed is what was delivered); it went out, so it keeps the fee unit its
-/// caller's answer earns (Q35). A call that never left reports no fee unit either: one whose
-/// deadline passed in its queue (`call::never_sent`), or one whose server the live tool-list check
-/// could not reach.
-const METER_CLASSES: &[MeterClassDecl] = &[
-    MeterClassDecl {
-        key: CLASS_TOOL_CALLS,
-        family: "count",
-        // Sized from the answer: a call has been made once it has been answered, and a call that
-        // never reached a server is not a call this node made.
-        direction: ClassDirection::Response,
-        default_divisor: 1,
-    },
-    MeterClassDecl {
-        key: CLASS_BYTES,
-        family: "byte",
-        // Sized from the ANSWER, because the answer is what the metering step measures: the one
-        // quantity this plane reports under this class is the length of the document it just read
-        // back. The class used to declare itself sized from the request instead, which is a hold
-        // taken over one side of the exchange and settled from the other — and a rate card reading
-        // the declaration would have been pricing a caller's request at the size of a server's
-        // answer to it.
-        direction: ClassDirection::Response,
-        default_divisor: 1,
-    },
-];
+use busbar_contract::ids::MeterClassId;
 
 /// The class key a completed call is counted under.
 pub const CLASS_TOOL_CALLS: MeterClassId = MeterClassId::new("tool_calls");
@@ -57,66 +8,8 @@ pub const CLASS_TOOL_CALLS: MeterClassId = MeterClassId::new("tool_calls");
 /// The class key the bytes an exchange moved are counted under.
 pub const CLASS_BYTES: MeterClassId = MeterClassId::new("bytes");
 
-/// The verbs this plane answers.
-///
-/// Two, and which two is the point. The codec answers a projection over every registration and a
-/// projection over the ONE registration a request names; the introspection verb now carries a
-/// subject, so both are expressible and both are declared. The per-name one used to be declared
-/// nowhere, because a verb identifier and a context said WHICH plane but never WHICH server, and a
-/// key per registration is not available to a plane whose verb key set is closed at registration.
-///
-/// What is still NOT a verb of this plane is anything that changes something: the codec's operation
-/// that re-contacts a server and re-pins it is the kernel's own record-write verb, reached with this
-/// plane's record schemas, and the plane contributes the shape rather than the action. Liveness is
-/// not here either, for a different reason — a plane holds a registration table and no runtime
-/// state, so a health answer would be a guess wearing a fact's clothes.
-const INTROSPECTION_VERBS: &[AdminVerbId] =
-    &[AdminVerbId::new("tools"), AdminVerbId::new("server")];
-
-/// The schema of this plane's own configuration block.
-///
-/// Two blocks, in fact, and that is the codec's shape rather than this crate's: an address block
-/// naming what this deployment IS, and a registry block naming the servers it fronts. Nothing here
-/// is a credential — the credential members name a REFERENCE that the secret plugin resolves, and
-/// this plane never sees what is behind one — and nothing here is a price.
-const CONFIG_SCHEMA: &str = r#"{
-  "type": "object",
-  "additionalProperties": false,
-  "properties": {
-    "canonical_uri": { "type": "string" },
-    "authorization_servers": { "type": "array", "items": { "type": "string" } },
-    "scopes_supported": { "type": "array", "items": { "type": "string" } },
-    "allowed_origins": { "type": "array", "items": { "type": "string" } },
-    "servers": {
-      "type": "object",
-      "additionalProperties": {
-        "type": "object",
-        "properties": {
-          "url": { "type": "string" },
-          "command": { "type": "string" },
-          "args": { "type": "array", "items": { "type": "string" } },
-          "pin": { "type": "object" },
-          "verify_ttl": { "type": "string" },
-          "timeout": { "type": "string" },
-          "tools_allow": { "type": "object" },
-          "prompts_allow": { "type": "object" },
-          "resources_allow": { "type": "object" },
-          "transport": { "type": "string" },
-          "grants": { "type": "object" },
-          "allow_private": { "type": "boolean" },
-          "upstream_credentials": { "type": "object" },
-          "hooks": { "type": "array", "items": { "type": "string" } }
-        },
-        "required": ["pin"]
-      }
-    }
-  },
-  "required": ["canonical_uri"]
-}"#;
-
 /// This plane's lines in the `Flags:` block of `busbar --help`, byte for byte as the binary has
-/// always printed them (shadow-oracle cells `cli__--help` / `cli__-h`). It opens with
-/// [`STDIO_SERVE_FLAG`] and carries no trailing newline; the root splices it in place.
+/// always printed them (shadow-oracle cells `cli__--help` / `cli__-h`), with no trailing newline.
 pub const HELP_FLAGS: &str =
     "    --mcp-stdio         serve the MCP plane on THIS PROCESS's stdin/stdout (newline-delimited
                         JSON-RPC) instead of binding any listener — for an MCP host that runs
@@ -124,27 +17,6 @@ pub const HELP_FLAGS: &str =
                         a configured `auth.chain`, BUSBAR_MCP_STDIO_CREDENTIAL must carry a
                         credential the chain admits (audience-bound to mcp.canonical_uri), and the
                         whole session runs as that key — budgets, audit and hooks apply";
-
-impl PlaneMeta for McpPlane {
-    const KEY: &'static str = "mcp";
-    const CLAIMS: &'static [busbar_contract::grammar::Claim] = claims::CLAIMS;
-    const OP_CLASSES: &'static [OpClassId] = ops::OP_CLASSES;
-    const METER_CLASSES: &'static [MeterClassDecl] = METER_CLASSES;
-    const SESSION_FACTS: &'static [&'static str] = facts::SESSION_FACTS;
-    const CONTENT_FACTS: &'static [&'static str] = facts::CONTENT_FACTS;
-    const RECORD_SCHEMAS: &'static [RecordSchemaId] = records::RECORD_SCHEMAS;
-    const INTROSPECTION_VERBS: &'static [AdminVerbId] = INTROSPECTION_VERBS;
-    // The specification names a cancellation notice, and this protocol's own dispatch does NOT act
-    // on one today: it is not in the codec's method table, and a notice obliges no answer. So no
-    // interrupt fact is declared, because declaring one would make the kernel supersede open units
-    // on a frame the codec has never superseded anything on — a behaviour change, which is exactly
-    // what this crate is not allowed to make.
-    const INTERRUPT_FACT: Option<&'static str> = None;
-    // Nothing paces this plane's write path. Events are written as fast as they are produced, which
-    // is what the codec does and what this crate must not change.
-    const EGRESS_PACING_FACT: Option<&'static str> = None;
-    const CONFIG_SCHEMA: &'static str = CONFIG_SCHEMA;
-}
 
 #[cfg(test)]
 #[path = "tests/meta.rs"]
