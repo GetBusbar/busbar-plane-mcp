@@ -255,7 +255,13 @@ fn a_relayed_state_is_refused_when_the_clock_fails() {
             now: 1000,
             roots_epoch: 0,
         };
-        ask::relay_state(bind, &ask::digest_arguments(&json!({})), leg, seal)
+        ask::relay_state_for(
+            bind,
+            &ask::digest_arguments(&json!({})),
+            leg,
+            ask::DEFAULT_TTL_SECS,
+            seal,
+        )
     })
     .expect("a relayed state is sealed");
     let mut retry = caps();

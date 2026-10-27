@@ -29,7 +29,22 @@ fn catalogue() -> Catalogue {
 fn opened(owner: &str, now_ns: u64) -> LineListen {
     let params = json!({ "notifications": { "toolsListChanged": true } });
     let listen = Listen::open(Some(&params), json!("sub"), now_ns, |_| false).expect("opened");
-    LineListen::opened(listen, BTreeMap::new(), owner, now_ns)
+    LineListen {
+        listen: Box::new(listen),
+        entitled: BTreeMap::new(),
+        owner: owner.to_string(),
+        standing: Standing::Live,
+        confirmed_ns: now_ns,
+        pinged_ns: now_ns,
+        updates: Vec::new(),
+    }
+}
+
+/// A unit of its caller re-asked at `now_ns`, its standing `standing` (as [`reconfirm`] moves it).
+fn reconfirmed(kept: &mut LineListen, standing: Standing, now_ns: u64) {
+    kept.entitled = BTreeMap::new();
+    kept.standing = standing;
+    kept.confirmed_ns = now_ns;
 }
 
 /// A LINE SUBSCRIPTION NO UNIT OF ITS CALLER RE-CONFIRMED ENDS. The kernel answers a caller's
@@ -66,11 +81,11 @@ fn one_caller_holds_at_most_the_http_carriers_count_of_line_subscriptions() {
         held.insert((1, n.to_string()), opened("k", 1));
     }
     assert!(
-        line_quota_full(&held, "k"),
+        door_listen::quota_full(held.values().map(|l: &LineListen| &l.owner), "k"),
         "a caller at {per_owner} line subscriptions is refused its next"
     );
     assert!(
-        !line_quota_full(&held, "j"),
+        !door_listen::quota_full(held.values().map(|l: &LineListen| &l.owner), "j"),
         "another caller is not at its bound"
     );
 }
@@ -84,9 +99,9 @@ fn a_unit_of_its_caller_reasks_the_standing_its_frames_are_stepped_under() {
     let mut kept = opened("k", 1);
     assert!(matches!(kept.step_at(&cat, 1), ListenStep::Frames(_)));
     assert!(!kept.wants_ping(2), "nothing is due yet");
-    assert!(kept.wants_ping(1 + RECONFIRM_NS), "a quiet caller is asked");
-    assert!(!kept.wants_ping(2 + RECONFIRM_NS), "once");
-    kept.reconfirm(BTreeMap::new(), Standing::Live, UNCONFIRMED_NS);
+    assert!(kept.wants_ping(1 + KEEPALIVE_NS), "a quiet caller is asked");
+    assert!(!kept.wants_ping(2 + KEEPALIVE_NS), "once");
+    reconfirmed(&mut kept, Standing::Live, UNCONFIRMED_NS);
     let step = kept.step_at(&cat, UNCONFIRMED_NS + 2);
     assert!(
         !matches!(step, ListenStep::End(_)),
@@ -96,7 +111,7 @@ fn a_unit_of_its_caller_reasks_the_standing_its_frames_are_stepped_under() {
         message: "`k` is no longer live".to_string(),
         reason: busbar_contract::vocab::REASON_IDENTITY_NOT_LIVE.to_string(),
     };
-    kept.reconfirm(BTreeMap::new(), lapsed, UNCONFIRMED_NS + 3);
+    reconfirmed(&mut kept, lapsed, UNCONFIRMED_NS + 3);
     let step = kept.step_at(&cat, UNCONFIRMED_NS + 4);
     assert!(
         matches!(&step, ListenStep::End(frames)

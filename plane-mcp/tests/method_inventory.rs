@@ -15,6 +15,8 @@
 use busbar_plane_mcp::client::peer::{classify, ServerMessage};
 use busbar_plane_mcp::client::verb::UpstreamVerb;
 
+include!("support/all_verbs.rs");
+
 /// busbar's `qa/method-inventory.json` at the pin. An unset variable is a failure, never a skip.
 fn inventory() -> String {
     let busbar = std::env::var_os("BUSBAR_CHECKOUT").expect(
@@ -67,10 +69,8 @@ fn the_issued_set_is_exactly_the_inventory_column() {
          filter that matched nothing would report a complete column of nothing.",
         owed.len()
     );
-    let built: std::collections::BTreeSet<String> = UpstreamVerb::all()
-        .iter()
-        .map(|v| v.method().to_string())
-        .collect();
+    let built: std::collections::BTreeSet<String> =
+        all_verbs().iter().map(|v| v.method().to_string()).collect();
     let missing: Vec<&String> = owed.difference(&built).collect();
     let invented: Vec<&String> = built.difference(&owed).collect();
     assert!(
