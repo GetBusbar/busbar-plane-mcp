@@ -51,17 +51,21 @@ pub fn probe_outcome(status: u16, body: &[u8]) -> StepOutcome {
 }
 
 /// Reads what the answer to busbar's STATELESS request says about the upstream's revision: the
-/// ladder moves only on a refusal that names the revision or a session, and any other answer, an
-/// upstream's own JSON-RPC error included, is the stateless path's answer, handed on as it came (THE
+/// ladder moves on any refusal of the request, and any other answer, an upstream's own JSON-RPC
+/// error at a success status included, is the stateless path's answer, handed on as it came (THE
 /// DESIGN section 2, the mcp bullet: the stateless path of the `2026-07-28` revision stays
 /// byte-identical).
 ///
 /// A refusal of the revision is what a server of an earlier revision answers a request that opens
 /// no session:
 ///
-/// - a `4xx` whose body is no JSON-RPC error: a `2024-11-05` server's `404`/`405` at its event
-///   stream's endpoint, a session server's bare `400` or `404` for the session it was not named;
-/// - a `405`, whatever its body: the endpoint takes no POST;
+/// - ANY `4xx`, whatever its body: the MCP specification (2025-06-18 and 2025-11-25, Streamable
+///   HTTP) has a server that does not support the `MCP-Protocol-Version` it was sent answer
+///   `400 Bad Request` and fixes no JSON-RPC code or wording for it, so no body can tell that
+///   refusal from another; a `2024-11-05` server's `404`/`405` at its event stream's endpoint and a
+///   session server's `400`/`404` for the session it was not named are the same answer. The
+///   earlier revisions are tried before the upstream is taken for a stateless one, and the `4xx`
+///   never reaches the caller as the call's answer;
 /// - a JSON-RPC error `-32022` (the revision is unsupported), at any status;
 /// - a JSON-RPC error whose message names the session or the initialization the request skipped
 ///   (`Bad Request: No valid session ID provided`, `Server not initialized`), at any status.
@@ -72,15 +76,14 @@ pub fn stateless_outcome(status: u16, body: &[u8]) -> StepOutcome {
     if (500..600).contains(&status) {
         return StepOutcome::Unreachable;
     }
+    if (400..500).contains(&status) {
+        return StepOutcome::Refused4xx;
+    }
     let error = serde_json::from_slice::<Value>(body)
         .ok()
         .and_then(|v| v.get("error").filter(|e| e.is_object()).cloned());
     let Some(error) = error else {
-        return if (400..500).contains(&status) {
-            StepOutcome::Refused4xx
-        } else {
-            StepOutcome::Answered
-        };
+        return StepOutcome::Answered;
     };
     let code = error.get("code").and_then(Value::as_i64);
     let message = error
@@ -89,7 +92,7 @@ pub fn stateless_outcome(status: u16, body: &[u8]) -> StepOutcome {
         .unwrap_or("")
         .to_ascii_lowercase();
     let names_session = message.contains("session") || message.contains("initializ");
-    if status == 405 || code == Some(CODE_UNSUPPORTED_PROTOCOL_VERSION) || names_session {
+    if code == Some(CODE_UNSUPPORTED_PROTOCOL_VERSION) || names_session {
         StepOutcome::Refused4xx
     } else {
         StepOutcome::Answered
@@ -158,6 +161,16 @@ pub fn lower_request(
     let mut body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
     if let (Some(id), Some(obj)) = (id, body.as_object_mut()) {
         obj.insert("id".to_string(), Value::from(id));
+        // A progress token the request carries is derived from the id it is sent under, so two
+        // requests in flight never share one.
+        if let Some(token) = obj
+            .get_mut("params")
+            .and_then(|p| p.get_mut("_meta"))
+            .and_then(|m| m.get_mut("progressToken"))
+            .filter(|t| !t.is_null())
+        {
+            *token = Value::from(format!("busbar-{id}"));
+        }
     }
     if let Some(params) = body.get_mut("params").and_then(Value::as_object_mut) {
         let empty = params
@@ -334,4 +347,4 @@ impl EventReader {
 
 #[cfg(test)]
 #[path = "tests/compat_tests.rs"]
-mod tests;
+pub(super) mod tests;

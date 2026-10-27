@@ -31,7 +31,7 @@ const PLANE_KINDS: [&str; 4] = [
 /// A tail string read back through the `&'static str` it was built from: the tail's strings are
 /// constants of this crate, so a string this test knows is found by address and length.
 fn text(a: AbiStr) -> String {
-    if a.ptr.is_null() {
+    if a.is_absent() {
         return String::new();
     }
     [
@@ -54,7 +54,7 @@ fn text(a: AbiStr) -> String {
         FEE_PER_REQUEST,
     ]
     .into_iter()
-    .find(|c| c.as_ptr() == a.ptr && c.len() == a.len)
+    .find(|c| c.as_ptr() == a.ptr() && c.len() == a.len())
     .expect("a tail string this test knows")
     .to_string()
 }
@@ -93,7 +93,7 @@ fn the_tails_trust_keys_are_the_grammars() {
             ),
         ]
     );
-    assert_eq!(TRUST_KEYS[0].mechanisms_len, PIN_MECHANISMS.len());
+    assert_eq!(TRUST_KEYS[0].mechanisms_len(), PIN_MECHANISMS.len());
     assert_eq!(PIN_MECHANISMS.len(), 4, "every mechanism the grammar has");
     for abi in PIN_MECHANISMS {
         let token = text(abi.token);
@@ -106,7 +106,16 @@ fn the_tails_trust_keys_are_the_grammars() {
             parsed.mechanism != crate::tools_config::McpPinMechanism::Unpinned,
             "{token}"
         );
-        assert_eq!(abi.flags & MECHANISM_PEER_KEY, 0, "{token}");
+        // `cert_spki` and `mtls` pin the far end's key, which the host seals into the member route.
+        assert_eq!(
+            abi.flags & MECHANISM_PEER_KEY != 0,
+            matches!(
+                parsed.mechanism,
+                crate::tools_config::McpPinMechanism::CertSpki
+                    | crate::tools_config::McpPinMechanism::ClientCertBinding
+            ),
+            "{token}"
+        );
     }
 }
 
@@ -246,11 +255,11 @@ fn the_tail_states_every_operation_class() {
         assert_eq!(op_class_index(*op), Some(i as u32));
         let abi = OP_CLASS_TABLE[i].op;
         assert_eq!(
-            (abi.ptr, abi.len),
+            (abi.ptr(), abi.len()),
             (op.as_str().as_ptr(), op.as_str().len())
         );
     }
-    assert_eq!(TAIL.op_classes_len, OP_CLASS_TABLE.len());
+    assert_eq!(TAIL.op_classes_len(), OP_CLASS_TABLE.len());
 }
 
 /// THE DNS-REBINDING ALLOWLIST is the `mcp:` block's `allowed_origins` (none without a block), and
@@ -350,4 +359,19 @@ fn the_task_run_route_is_closed_and_exact() {
     assert_eq!(route.carrier, crate::tool_claims::CARRIER_HTTP);
     assert!(!route.open);
     assert_eq!(route.claim_flags() & CLAIM_EXACT, CLAIM_EXACT);
+}
+
+/// THE CALL LOG CANNOT BE REWRITTEN: the call kind is the one record chain the door declares, so
+/// the host hash-chains every call record (its prelude length-prefixed, the scope in the digest)
+/// and a record whose middle is replaced breaks the chain. This is what production declares; no
+/// operation table of the plane's own stands in for it.
+#[test]
+fn the_call_log_is_the_one_chain_the_host_keeps() {
+    assert_eq!(RECORD_CHAINS.len(), 1);
+    let chain = RECORD_CHAINS[0];
+    assert_eq!(chain.kind, RECORD_CALL);
+    assert_eq!(chain.framing, CHAIN_LENGTH_PREFIXED);
+    assert_eq!(chain.flags, CHAIN_DIGESTS_SCOPE);
+    let kind = RECORD_KINDS[RECORD_CALL as usize];
+    assert_eq!(text(kind), crate::tool_records::KIND_CALL);
 }

@@ -1,256 +1,62 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! The plane's vocabulary against the conformance battery, and the plane's door driven both ways.
+//! The plane's door driven both ways: linked and dropped in, one script through every plane op.
 //!
-//! This is the door witness that moved here with the crate from busbar's
-//! `crates/busbar-plane-mcp/tests/conformance.rs` (`tests/conformance.rs` is now busbar's published
-//! `conformance_suite!`). The dropped-in door is this crate's own cdylib, and the battery is busbar's
-//! at the pin this repo names (`BUSBAR_CHECKOUT`, a checkout of GetBusbar/busbar at `.busbar-ref`,
-//! which plugin-ci exports).
-//!
-//! The judge of this work is the battery: the official suite and the in-house adversarial battery,
-//! both of which speak to a booted node over a socket. The vocabulary tests here read the
-//! battery's own sources (its method names, error code table, metadata keys and revision) and
-//! assert this crate's tables carry them, so a battery that starts sending something new fails HERE
-//! rather than in a run someone has to interpret. The `both_ways` module drives the served door
-//! through the loader, linked and dropped-in, and compares the transcripts.
-//!
-//! The tests that drove the unserved `Plane` trait impl (decode, encode, verify, route, meter) were
-//! retired with that impl (finding 12; the coordinator's order "delete the dead Plane impl with
-//! its struck route"); the served door's own tests carry what the door does.
+//! The dropped-in door is this crate's own cdylib. This file reaches the logic crate through
+//! `door` alone (its only public item, BUSBAR-1.6.0.md l.3567): the door's private constants it
+//! needs are `plane-mcp/tests/support/door_facts.rs`, held to the crate's own items by the logic
+//! crate's unit test `door_facts_tests`. The checks that read the plane's own functions (the
+//! vocabulary against the battery, and the transcript against what the plane's pure functions say)
+//! live in the logic crate (`plane-mcp/src/tests/`).
 
-use busbar_plane_mcp::{codec, tool_ops as ops};
-use std::path::PathBuf;
-
-/// The battery's own source tree: busbar's `testing/mcp-conformance` at the pin (`BUSBAR_CHECKOUT`).
-/// An unset variable is a failure, never a skip: these tests read the battery or prove nothing.
-fn battery() -> PathBuf {
-    let busbar = std::env::var_os("BUSBAR_CHECKOUT").expect(
-        "BUSBAR_CHECKOUT is unset: the battery is busbar's testing/mcp-conformance at .busbar-ref \
-         (plugin-ci exports it)",
-    );
-    PathBuf::from(busbar).join("testing/mcp-conformance")
-}
-
-/// Every method name the battery's suites and fake peers name.
-///
-/// Read out of the battery rather than restated, which is the whole point: a battery that starts
-/// sending a method this plane does not carry must fail at build time, not in a run.
-fn battery_methods() -> Vec<String> {
-    let mut found = Vec::new();
-    let mut walk = |dir: PathBuf| {
-        // A directory that is not there is NOT "no methods here". The three below are the three
-        // places the battery keeps the names this plane is checked against, and a missing one used
-        // to return quietly: the surviving two still filled `found`, the non-empty floor below
-        // still held, and the coverage this test claims silently shrank to whatever was left. If
-        // the battery moves a directory, that must be a red here rather than a smaller test.
-        let entries = std::fs::read_dir(&dir)
-            .unwrap_or_else(|e| panic!("the battery's {} is readable ({e})", dir.display()));
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().is_some_and(|e| e == "mjs") {
-                let text = std::fs::read_to_string(&path).expect("a battery source is readable");
-                for piece in text.split('\'').skip(1).step_by(2) {
-                    if looks_like_a_method(piece) && !found.contains(&piece.to_string()) {
-                        found.push(piece.to_string());
-                    }
-                }
-            }
-        }
-    };
-    walk(battery().join("src/suites"));
-    walk(battery().join("src/core"));
-    walk(battery().join("fakepeer"));
-    assert!(
-        !found.is_empty(),
-        "no method names were read out of the battery"
-    );
-    found
-}
-
-/// Whether a quoted piece of the battery's source is a method name of this protocol.
-fn looks_like_a_method(piece: &str) -> bool {
-    let heads = [
-        "server/",
-        "tools/",
-        "prompts/",
-        "resources/",
-        "completion/",
-        "tasks/",
-        "subscriptions/",
-        "notifications/",
-        "sampling/",
-        "roots/",
-        "elicitation/",
-    ];
-    heads.iter().any(|h| piece.starts_with(h)) && !piece.contains(' ')
-}
-
-/// Every method the battery sends is one this plane carries, in one of its three roles.
-#[test]
-fn every_method_the_battery_sends_is_carried() {
-    for method in battery_methods() {
-        let carried = ops::method_row_for(&method).is_some() || NOTICES.contains(&method.as_str());
-        // The battery names three notices this node emits rather than receives, and one deliberate
-        // nonsense name. Everything else it names, it sends.
-        let emitted_only = matches!(
-            method.as_str(),
-            "notifications/message"
-                | "notifications/progress"
-                | "notifications/cancelled"
-                | "notifications/subscriptions/acknowledged"
-        );
-        assert!(
-            carried || emitted_only,
-            "the battery names {method} and this plane neither carries nor emits it"
-        );
-    }
-}
-
-/// How many rows of each role the method table declares, and how many notices this plane knows.
-///
-/// Every loop below is a FILTER over a declared table, so a table that lost the rows a loop selects
-/// would leave that loop iterating zero times — and a conformance test that drove nothing reports
-/// `ok`. These three numbers are what turns "the loop found nothing" into a failure. Raise one
-/// deliberately, in the commit that adds the row.
-const CLIENT_ROWS: usize = 13;
-/// The rows only a paired server may send. See [`CLIENT_ROWS`].
-const PROVIDER_ROWS: usize = 3;
-/// The notices the battery sends that this plane takes (a notification obliges no answer).
-const NOTICES: &[&str] = &[
-    "notifications/roots/list_changed",
-    "notifications/tools/list_changed",
-    "notifications/resources/updated",
-];
-
-/// The declared method rows of one role.
-fn rows_of(sender: ops::Sender) -> Vec<&'static ops::RpcMethodRow> {
-    ops::METHODS.iter().filter(|r| r.sender == sender).collect()
-}
-
-/// The method table keeps the roles the door serves: how many rows each role has, and every row's
-/// class is one the plane declares.
-///
-/// The surviving, plane-free half of what the decode-driven tests asserted (finding 12): the door
-/// reads this same table (`ops::method_row_for`), so the table is what is pinned here.
-#[test]
-fn the_method_table_keeps_its_roles_and_its_declared_classes() {
-    assert_eq!(rows_of(ops::Sender::Client).len(), CLIENT_ROWS);
-    assert_eq!(rows_of(ops::Sender::Provider).len(), PROVIDER_ROWS);
-    for row in ops::METHODS {
-        assert!(
-            ops::OP_CLASSES.contains(&row.op),
-            "{} names the undeclared class {}",
-            row.method,
-            row.op
-        );
-    }
-}
-
-/// The revision the battery declares is the revision the codec declares.
-#[test]
-fn the_revision_is_the_codecs_own() {
-    let spec = std::fs::read_to_string(battery().join("src/core/spec.mjs"))
-        .expect("the battery's own revision is readable");
-    assert!(
-        spec.contains(busbar_plane_mcp::codec::PROTOCOL_VERSION),
-        "the battery and the codec no longer agree on the revision"
-    );
-}
-
-/// The battery's own error code table is the one this plane writes from.
-#[test]
-fn the_error_codes_are_the_batterys_own() {
-    let source = std::fs::read_to_string(battery().join("src/core/jsonrpc.mjs"))
-        .expect("the battery's own code table is readable");
-    for code in [
-        busbar_contract::jsonrpc::PARSE_ERROR,
-        codec::CODE_INVALID_REQUEST,
-        codec::CODE_METHOD_NOT_FOUND,
-        codec::CODE_INVALID_PARAMS,
-        codec::CODE_INTERNAL,
-        codec::CODE_HEADER_MISMATCH,
-        codec::CODE_MISSING_CLIENT_CAPABILITY,
-        codec::CODE_UNSUPPORTED_PROTOCOL_VERSION,
-    ] {
-        assert!(
-            names_the_number(&source, code),
-            "the battery no longer names the code {code}"
-        );
-    }
-    // And the two the battery calls RETIRED are two this plane cannot write.
-    let written = [
-        busbar_contract::jsonrpc::PARSE_ERROR,
-        codec::CODE_INVALID_REQUEST,
-        codec::CODE_METHOD_NOT_FOUND,
-        codec::CODE_INVALID_PARAMS,
-        codec::CODE_INTERNAL,
-        codec::CODE_HEADER_MISMATCH,
-        codec::CODE_MISSING_CLIENT_CAPABILITY,
-        codec::CODE_UNSUPPORTED_PROTOCOL_VERSION,
-        codec::CODE_REFUSED,
-        codec::CODE_UPSTREAM_UNAVAILABLE,
-    ];
-    for retired in &[-32002_i64, -32042] {
-        assert!(
-            names_the_number(&source, *retired),
-            "the battery no longer names the retired code {retired}"
-        );
-        assert!(!written.contains(retired));
-    }
-}
-
-/// Whether a source file names EXACTLY this number, rather than merely containing its digits.
-///
-/// A bare substring search answers yes for a code that is a prefix of a longer one — `-32700` is
-/// inside `-327001` — and yes for the digits of a code that appears in a version string, a byte
-/// count or a comment. Either way the check would report the battery still names a code it had
-/// dropped. Requiring a non-digit on each side is what makes the match the number itself.
-fn names_the_number(source: &str, code: i64) -> bool {
-    let needle = code.to_string();
-    let bytes = source.as_bytes();
-    source.match_indices(&needle).any(|(at, _)| {
-        let before_ok = at == 0 || !bytes[at - 1].is_ascii_digit();
-        let after = at + needle.len();
-        let after_ok = after == bytes.len() || !bytes[after].is_ascii_digit();
-        before_ok && after_ok
-    })
-}
-
-/// The metadata keys are the ones the battery actually sends.
-#[test]
-fn the_metadata_keys_are_the_batterys_own() {
-    let source = std::fs::read_to_string(battery().join("src/core/jsonrpc.mjs"))
-        .expect("the battery's own key table is readable");
-    for key in [
-        codec::META_PROTOCOL_VERSION,
-        codec::META_CLIENT_CAPABILITIES,
-        "progressToken",
-    ] {
-        assert!(source.contains(key), "the battery no longer sends {key}");
-    }
-}
+// The door's private constants this file needs, restated and held to the crate's own items by
+// the logic crate's unit test `door_facts_tests`.
+#[path = "../../plane-mcp/tests/support/door_facts.rs"]
+#[allow(dead_code)]
+mod door_facts;
 
 /// THE MCP PLANE'S CONFORMANCE RIG, BOTH WAYS (BUSBAR-1.6.0.md, the plane driver's "Proven by":
 /// the plane conformance suite, compiled-in and dropped-in through one table).
 ///
-/// The linked door (`plane_door::door`) and this crate's dropped-in image (its built cdylib, the
-/// same door behind `export_door!`) are each admitted through the one loader on one
-/// dispatcher and run ONE script through every plane op, each answer read back. The two
-/// transcripts must be identical, step for step, and the linked one must say what the plane's
-/// own pure functions say the door answers: the snapshot is `door::endpoint_snapshot_spec`'s, a refused
-/// arrival renders the plane's own words at its own status, and a request the plane answers from
-/// what it holds is the catalogue's answer.
+/// The linked door and this crate's dropped-in image (its built cdylib, the same door behind
+/// `export_door!`) are each admitted through the one loader on one dispatcher and run ONE script
+/// through every plane op, each answer read back. The two transcripts must be identical, step for
+/// step. The door's answers are also held to what the plane states on the wire: its sections, its
+/// refusal family, its fee unit, its entitlement binding.
 ///
 /// RED ARM, kept: the same door with `on_piece` swapped for one that relays the caller's bytes
 /// back instead of answering from the catalogue. Its transcript differs at the answer, so a door
 /// that stopped answering from what the plane holds cannot pass for this one.
+/// This plugin's own door, named for the loader.
+fn loaded_door() -> busbar_plugin_loader::dispatch::LoadedDoor {
+    // This crate's sealed door function (`&'static Door`), taken by the loader's safe conversion.
+    let door: busbar_contract::abi::mechanism::door::DoorFn = busbar_plane_mcp::door;
+    busbar_plugin_loader::dispatch::LoadedDoor::from(door)
+}
+
+/// An all-zero `in`/`out` frame.
+fn z<T>() -> T {
+    // SAFETY: every `in`/`out` here is plain C data; all-zero is a valid value of each.
+    unsafe { std::mem::zeroed() }
+}
+
+/// `b` as opaque octets.
+fn octets(b: &'static [u8]) -> busbar_contract::abi::mechanism::call::Blob {
+    busbar_contract::abi::mechanism::call::Blob::of(b)
+        .with_fmt(busbar_contract::abi::mechanism::call::BLOB_OCTETS)
+}
+
+/// `b` as an ABI string.
+fn text(b: &'static [u8]) -> busbar_contract::abi::mechanism::call::AbiStr {
+    busbar_contract::abi::mechanism::call::AbiStr::of_bytes(b)
+}
+
 mod both_ways {
-    use std::mem::zeroed;
     use std::sync::Arc;
 
-    use busbar_contract::abi::mechanism::call::{AbiStr, Blob, Field, Outcome, Span, BLOB_OCTETS};
+    use super::{octets, text, z};
+    use busbar_contract::abi::mechanism::call::{AbiStr, Field, Outcome, Span};
     use busbar_contract::abi::mechanism::door::Door;
     use busbar_contract::abi::mechanism::lifecycle::{
         slot as life, CancelIn, CancelOut, GenIn, RefreshIn, TickIn, TickOut, ValidateIn,
@@ -264,20 +70,23 @@ mod both_ways {
     };
     use busbar_contract::abi::sdk::capture::{CaptureHome, CaptureSlot};
     use busbar_contract::abi::sdk::door::{abi_str, kind_op};
+    use busbar_contract::abi::sdk::publish::ServedRoute;
     use busbar_contract::abi::sdk::{Instance, Lent, Out, Safe, SafeSlot};
-    use busbar_plane_mcp::codec::{H_MCP_METHOD, H_MCP_NAME, H_PROTOCOL_VERSION, PROTOCOL_VERSION};
-    use busbar_plane_mcp::{door, tool_door as plane_door, tool_ops as ops};
     use busbar_plugin_loader::dispatch::kinds::plane::{OwnedSnapshot, Plane};
     use busbar_plugin_loader::dispatch::{
-        in_head, load_dropped, load_linked, out_head, rendering_of, Bind, DispatchConfig,
-        Dispatcher, Frame, LinkedRow, NoSink, Plugin,
+        in_head, load_dropped, load_linked, out_head, Bind, DispatchConfig, Dispatcher, Frame,
+        LinkedRow, LoadedDoor, NoSink, Plugin,
     };
     use serde_json::{json, Value};
 
-    fn z<T>() -> T {
-        // SAFETY: every `in`/`out` here is plain C data; all-zero is a valid value of each.
-        unsafe { zeroed() }
-    }
+    // The door: this plugin's one public item.
+    use busbar_plane_mcp::door;
+
+    use crate::door_facts::{
+        self, claim as route_of, CLASS_FEE_INDEX, CODE_HEADER_MISMATCH, CODE_INTERNAL,
+        CODE_REFUSED, DEFAULT_METADATA, ENDPOINT_SECTION, H_MCP_METHOD, H_MCP_NAME,
+        H_PROTOCOL_VERSION, PROTOCOL_VERSION, TOOLS_SECTION,
+    };
 
     fn bind(d: &Dispatcher) -> Bind {
         Bind {
@@ -290,22 +99,6 @@ mod both_ways {
         }
     }
 
-    fn octets(b: &'static [u8]) -> Blob {
-        Blob {
-            ptr: b.as_ptr(),
-            len: b.len(),
-            fmt: BLOB_OCTETS,
-            flags: 0,
-        }
-    }
-
-    fn text(b: &'static [u8]) -> AbiStr {
-        AbiStr {
-            ptr: b.as_ptr(),
-            len: b.len(),
-        }
-    }
-
     fn at(buf: &[u8], s: Span) -> String {
         String::from_utf8_lossy(&buf[s.offset as usize..(s.offset + s.len) as usize]).into_owned()
     }
@@ -313,8 +106,7 @@ mod both_ways {
     // ── the fixtures ─────────────────────────────────────────────────────────────────────────────────
 
     /// One fronted server, the section the door's own tests read.
-    const SECTION: &[u8] =
-        br#"{"fs": {"url": "https://mcp.example/fs", "pin": {"mechanism": "unpinned"}}}"#;
+    const SECTION: &[u8] = door_facts::WITNESS_SECTION;
     /// [`SECTION`] as stage 3g deals it to `validate` (`{tools: <section>}`), and a dealt section
     /// the grammar refuses: a server id holding the routing-key separator.
     const DEALT: &[u8] =
@@ -353,11 +145,7 @@ mod both_ways {
     /// The route index of `(verb, target)` in the door's route table (its first such row), the claim
     /// an arrival carries.
     fn claim(verb: &str, target: &str) -> u32 {
-        let i = door::ROUTES
-            .iter()
-            .position(|r| r.verb == verb && r.target == target)
-            .expect("the door routes it");
-        u32::try_from(i).expect("a small table")
+        route_of(verb, target, "http")
     }
 
     // ── one step of the transcript ───────────────────────────────────────────────────────────────────
@@ -608,10 +396,8 @@ mod both_ways {
         let mut r: Frame<RefusalIn, RefusalOut> = Frame::new(z(), z());
         (r.input.head, r.out.head) = (in_head(), out_head());
         (r.input.cause, r.input.status) = (cause, status);
-        r.input.text = AbiStr {
-            ptr: words.as_ptr(),
-            len: words.len(),
-        };
+        // SAFETY: `words` outlives the call this `in` is built for.
+        r.input.text = unsafe { AbiStr::from_raw_parts(words.as_ptr(), words.len()) };
         (r.input.reply_buf, r.input.reply_cap) = (reply.as_mut_ptr(), reply.len());
         (r.input.fields_buf, r.input.fields_cap) = (fields.as_mut_ptr(), fields.len());
         (r.input.arena_buf, r.input.arena_cap) = (arena.as_mut_ptr(), arena.len());
@@ -708,7 +494,7 @@ mod both_ways {
         t.push(s);
         let words = words.unwrap_or_default();
         t.push(refusal(p, "refusal GET /mcp", REFUSAL_ARRIVE, 0, &words));
-        let metadata = ("GET", busbar_plane_mcp::tool_claims::DEFAULT_METADATA);
+        let metadata = ("GET", DEFAULT_METADATA);
         t.push(arrive(p, "arrive metadata", 13, metadata, b"", &[]).0);
         // A refusal the kernel decided (a gate), in the one error envelope.
         t.push(refusal(p, "refusal gate", REFUSAL_GATE, 403, b"denied"));
@@ -728,10 +514,7 @@ mod both_ways {
             vec![0u8; 256],
         );
         let target = b"/tools/nope/health";
-        s.input.target = AbiStr {
-            ptr: target.as_ptr(),
-            len: target.len(),
-        };
+        s.input.target = AbiStr::of_bytes(target);
         s.input.route = 2;
         (s.input.reply_buf, s.input.reply_cap) = (reply.as_mut_ptr(), reply.len());
         (s.input.fields_buf, s.input.fields_cap) = (fields.as_mut_ptr(), fields.len());
@@ -803,15 +586,11 @@ mod both_ways {
         serde_json::from_slice(bytes).expect("a JSON document")
     }
 
-    /// The op class index the door's tail holds for `op`.
-    fn class(op: busbar_contract::ids::OpClassId) -> u32 {
-        door::op_class_index(op).expect("the tail holds it")
-    }
-
     // ── the doors ────────────────────────────────────────────────────────────────────────────────────
 
     fn linked(d: &Dispatcher) -> Plugin<Plane> {
-        let row = LinkedRow::of(plane_door::door).expect("the linked door states its Statement");
+        let row = LinkedRow::of_loaded(crate::loaded_door())
+            .expect("the linked door states its Statement");
         load_linked(&row, bind(d)).expect("the linked door loads")
     }
 
@@ -820,7 +599,9 @@ mod both_ways {
     /// dropped-in door's proof.
     fn dropped(d: &Dispatcher) -> Plugin<Plane> {
         let path = busbar_plugin_loader::conformance::cdylib_of("busbar_plane_mcp_plugin");
-        let stated = rendering_of(plane_door::door).expect("the door renders its Statement");
+        let stated = LinkedRow::of_loaded(crate::loaded_door())
+            .expect("the door renders its Statement")
+            .statement;
         load_dropped(&path, &stated, bind(d)).expect("the dropped door loads")
     }
 
@@ -831,18 +612,12 @@ mod both_ways {
     fn the_statements_sections_are_the_grammars() {
         let d = Dispatcher::new(DispatchConfig::default());
         let served = linked(&d).served();
-        assert_eq!(served.section, busbar_plane_mcp::tools_config::SECTION);
-        assert_eq!(served.owns, vec![door::ENDPOINT_SECTION]);
+        assert_eq!(served.section, TOOLS_SECTION);
+        assert_eq!(served.owns, vec![ENDPOINT_SECTION]);
     }
 
-    #[test]
-    fn the_linked_and_the_dropped_in_door_answer_every_op_the_same() {
-        let d = Dispatcher::new(DispatchConfig::default());
-        let linked = script(&linked(&d));
-        assert_eq!(script(&dropped(&d)), linked, "the dropped-in door");
-    }
-
-    /// The linked transcript is the one the plane's own pure functions say the door answers.
+    /// The linked transcript is the one the plane's own pure functions say the door answers: each
+    /// expectation those functions build is restated in `door_facts` and held to them in the crate.
     #[test]
     fn the_door_answers_what_the_plane_says() {
         let d = Dispatcher::new(DispatchConfig::default());
@@ -854,7 +629,6 @@ mod both_ways {
         let open = step(&t, "open");
         assert_eq!(open.outcome, Outcome::Ready);
         let snapshot = open.snapshot.as_ref().expect("open publishes a snapshot");
-        let spec = door::snapshot_spec_with(Some(door::under_public_url(PUBLIC_URL)), None);
         assert_eq!(snapshot.generation, 1);
         let claims: Vec<_> = snapshot
             .claims
@@ -868,8 +642,21 @@ mod both_ways {
                 )
             })
             .collect();
-        let want: Vec<_> = spec
-            .claims
+        // The door's routes as the contract states a route's claim (`ServedRoute::claim_spec`).
+        let specs: Vec<_> = door_facts::ROUTES
+            .iter()
+            .zip(door_facts::ROUTES_OPEN)
+            .map(|(&(verb, target, carrier), &open)| {
+                ServedRoute {
+                    verb,
+                    target,
+                    carrier,
+                    open,
+                }
+                .claim_spec()
+            })
+            .collect();
+        let want: Vec<_> = specs
             .iter()
             .map(|c| {
                 (
@@ -881,20 +668,24 @@ mod both_ways {
             })
             .collect();
         assert_eq!(claims, want, "the claims are the door's routes");
-        assert_eq!(claims.len(), door::ROUTES.len());
+        assert_eq!(claims.len(), door_facts::ROUTES.len());
         let admin: Vec<_> = snapshot
             .admin_routes
             .iter()
             .map(|r| (r.verb.as_str(), r.target.as_str(), r.flags))
             .collect();
-        let want: Vec<_> = spec
-            .admin_routes
+        let want: Vec<_> = door_facts::ADMIN_VERBS
             .iter()
-            .map(|r| (r.verb.as_str(), r.target.as_str(), r.flags))
+            .map(|&(verb, target)| (verb, target, 0))
             .collect();
         assert_eq!(admin, want, "the admin routes are the door's");
-        assert_eq!(snapshot.audience, spec.audience);
-        assert_eq!(snapshot.resource_metadata, spec.resource_metadata);
+        // The endpoint mounted under the public base URL `open` was lent (`door::under_public_url`).
+        let audience = Some(format!("{PUBLIC_URL}/mcp"));
+        assert_eq!(snapshot.audience, audience);
+        assert_eq!(
+            snapshot.resource_metadata,
+            Some(format!("{PUBLIC_URL}{DEFAULT_METADATA}"))
+        );
         assert_eq!(
             snapshot.audience.as_deref(),
             Some("https://busbar.example/mcp")
@@ -907,7 +698,7 @@ mod both_ways {
             a.detail,
             format!(
                 "op_class={} principal_required=true dialect=0 refusal=0",
-                class(ops::OP_TOOLS_LIST)
+                door_facts::OP_CLASS_TOOLS_LIST
             )
         );
         let answer = step(&t, "answer tools/list");
@@ -929,12 +720,11 @@ mod both_ways {
             calls > 1,
             "a 32-byte buffer takes the answer over several calls"
         );
-        let catalogue = busbar_plane_mcp::catalogue::Catalogue::build(
-            1,
-            &door::read_tools_section(SECTION).expect("the section reads"),
+        assert_eq!(
+            answer.reply,
+            door_facts::WITNESS_TOOLS_LIST_ANSWER,
+            "the catalogue's own bytes"
         );
-        let want = catalogue.tools_list(&json!(9), &|_: &str, _: &str| false, |_| false);
-        assert_eq!(answer.reply, want, "the catalogue's own bytes");
         assert_eq!(document(&answer.reply)["id"], json!(9));
         assert_eq!(
             answer.fields,
@@ -947,7 +737,7 @@ mod both_ways {
         assert_eq!(a.outcome, Outcome::Ready);
         assert!(a
             .detail
-            .starts_with(&format!("op_class={} ", class(ops::OP_NOTIFICATION))));
+            .starts_with(&format!("op_class={} ", door_facts::OP_CLASS_NOTIFICATION)));
         let n = step(&t, "answer notice");
         assert_eq!(
             (n.outcome, n.status, n.reply.as_slice()),
@@ -972,17 +762,19 @@ mod both_ways {
         assert_eq!((r.outcome, r.status), (Outcome::Ready, 400));
         let body = document(&r.reply);
         assert_eq!(body["error"]["code"], json!(-32700));
-        assert_eq!(
-            body["error"]["message"],
-            json!(busbar_plane_mcp::tool_arrival::NOT_JSON)
-        );
+        assert_eq!(body["error"]["message"], json!(door_facts::NOT_JSON));
         assert_eq!(body["id"], Value::Null);
 
         let a = step(&t, "arrive GET /mcp");
         assert_eq!((a.outcome, a.status), (Outcome::Refused, 405));
         let r = step(&t, "refusal GET /mcp");
         assert_eq!((r.outcome, r.status), (Outcome::Ready, 405));
-        assert_eq!(r.reply, door::method_not_allowed_body());
+        let (error, description) = door_facts::METHOD_NOT_ALLOWED;
+        assert_eq!(
+            r.reply,
+            serde_json::to_vec(&json!({ "error": error, "error_description": description }))
+                .expect("a JSON document")
+        );
         assert_eq!(
             r.fields,
             vec![("allow".to_string(), "POST".to_string()), json_type()]
@@ -992,15 +784,12 @@ mod both_ways {
         assert_eq!((a.outcome, a.status), (Outcome::Refused, 404));
         assert!(a
             .detail
-            .ends_with(&format!("refusal={}", plane_door::UNSERVED)));
+            .ends_with(&format!("refusal={}", door_facts::UNSERVED)));
 
         let r = step(&t, "refusal gate");
         assert_eq!((r.outcome, r.status), (Outcome::Ready, 0));
         let body = document(&r.reply);
-        assert_eq!(
-            body["error"]["code"],
-            json!(busbar_plane_mcp::codec::CODE_REFUSED)
-        );
+        assert_eq!(body["error"]["code"], json!(CODE_REFUSED));
         assert_eq!(body["error"]["message"], json!("denied"));
 
         // The ops the driver does not call on this door yet, and the rest of the lifecycle.
@@ -1026,13 +815,17 @@ mod both_ways {
         assert_eq!(refresh.outcome, Outcome::Ready);
         let snapshot = refresh.snapshot.as_ref().expect("refresh publishes");
         assert_eq!(snapshot.generation, 2);
-        assert_eq!(
-            snapshot.audience, spec.audience,
-            "the base URL `open` was lent"
-        );
+        assert_eq!(snapshot.audience, audience, "the base URL `open` was lent");
         for what in ["retire", "close"] {
             assert_eq!(step(&t, what).outcome, Outcome::Ready, "{what}");
         }
+    }
+
+    #[test]
+    fn the_linked_and_the_dropped_in_door_answer_every_op_the_same() {
+        let d = Dispatcher::new(DispatchConfig::default());
+        let linked = script(&linked(&d));
+        assert_eq!(script(&dropped(&d)), linked, "the dropped-in door");
     }
 
     /// The kernel refuses with `reason` at its own `status` (no unit had arrived), and the door
@@ -1102,7 +895,7 @@ mod both_ways {
             ) {
                 json!(-32600)
             } else {
-                json!(busbar_plane_mcp::codec::CODE_REFUSED)
+                json!(CODE_REFUSED)
             };
             assert_eq!(
                 body["error"]["code"], want,
@@ -1110,7 +903,7 @@ mod both_ways {
             );
             assert_ne!(
                 body["error"]["code"],
-                json!(busbar_plane_mcp::codec::CODE_INTERNAL),
+                json!(CODE_INTERNAL),
                 "{code:?} (class {class:?}) is never the internal error"
             );
             rendered += 1;
@@ -1326,7 +1119,7 @@ mod both_ways {
     const RELAY_SECTION: &[u8] = br#"{"fs": {"url": "https://mcp.example/fs/rpc?v=1", "pin": {"mechanism": "pinned_pubkey", "key": "sha256/K="}, "grants": {"roots": true}, "tools_allow": {"read_file": {"schema_hash": "sha256:aa", "input_schema": {"type": "object", "properties": {"path": {"type": "string", "x-mcp-header": "Path"}}}}, "draft": {}}}}"#;
 
     /// A relayed call, its path argument mirrored.
-    const RELAY_CALL: &[u8] = br#"{"jsonrpc":"2.0","id":30,"method":"tools/call","params":{"name":"fs_read_file","arguments":{"path":"/a"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#;
+    const RELAY_CALL: &[u8] = door_facts::RELAY_CALL;
     const RELAY_FIELDS: &[Field] = &[
         field(H_PROTOCOL_VERSION, PROTOCOL_VERSION),
         field(H_MCP_METHOD, "tools/call"),
@@ -1465,14 +1258,8 @@ mod both_ways {
         let mut arena = vec![0_u8; 4096];
         let mut turns = vec![
             busbar_contract::abi::hook::MessageView {
-                role: AbiStr {
-                    ptr: std::ptr::null(),
-                    len: 0,
-                },
-                text: AbiStr {
-                    ptr: std::ptr::null(),
-                    len: 0,
-                },
+                role: AbiStr::ABSENT,
+                text: AbiStr::ABSENT,
             };
             4
         ];
@@ -1491,12 +1278,12 @@ mod both_ways {
             let view = j.out.view;
             // A string the view leaves unset (NULL) reads as empty, as a span absent from the arena.
             let span_of = |a: AbiStr| {
-                if a.ptr.is_null() {
+                if a.is_absent() {
                     return Span { offset: 0, len: 0 };
                 }
                 Span {
-                    offset: u32::try_from(a.ptr as usize - base).expect("in the arena"),
-                    len: u32::try_from(a.len).expect("small"),
+                    offset: u32::try_from(a.ptr() as usize - base).expect("in the arena"),
+                    len: u32::try_from(a.len()).expect("small"),
                 }
             };
             s.detail = format!(
@@ -1533,14 +1320,11 @@ mod both_ways {
         let t = relay_script(&linked(&served(ALL)));
         let call = step(&t, "project call");
         assert_eq!(call.outcome, Outcome::Ready);
-        let invocation =
-            busbar_plane_mcp::call::invocation(RELAY_CALL).expect("a call is an invocation");
-        let shape = busbar_contract::ir::facts::IrFacts::shape(&invocation);
         assert_eq!(
             call.detail,
             format!(
                 "messages=1 chars={} flags={} pool=\"fs\" dialect=mcp",
-                shape.text_chars,
+                door_facts::RELAY_CALL_TEXT_CHARS,
                 busbar_contract::abi::hook::REQUEST_HAS_TOOLS
             )
         );
@@ -1618,51 +1402,12 @@ mod both_ways {
         );
     }
 
-    /// What the plane's own pure functions say one relayed call answers.
-    fn admitted() -> busbar_plane_mcp::call::AdmittedCall {
-        let section = door::read_tools_section(RELAY_SECTION).expect("the section reads");
-        let catalogue = busbar_plane_mcp::catalogue::Catalogue::build(1, &section);
-        let params = document(RELAY_CALL)["params"].clone();
-        let header = |name: &str| (name == "mcp-param-path").then(|| "/a".to_string());
-        match busbar_plane_mcp::call::admit_trusted(
-            &catalogue,
-            &json!(30),
-            Some(&params),
-            &header,
-            &|_, _| true,
-            &mut |_| {
-                busbar_plane_mcp::call::Trust::Verdict(
-                    busbar_contract::abi::host::service::DISTRUST_NONE,
-                )
-            },
-            &mut |_, _| busbar_plane_mcp::ask::AskDecision::Proceed,
-        ) {
-            busbar_plane_mcp::call::Admission::Go(a) => a,
-            other => panic!("the call is admitted: {other:?}"),
-        }
-    }
-
-    fn settled(far: &[u8], sse: bool) -> (u32, Vec<u8>) {
-        let section = door::read_tools_section(RELAY_SECTION).expect("the section reads");
-        match busbar_plane_mcp::call::settle_call_as(
-            &admitted(),
-            section.servers.get("fs"),
-            200,
-            far,
-            sse,
-            0,
-            busbar_plane_mcp::client::jsonrpc::dispatch_request_id(0),
-        ) {
-            busbar_plane_mcp::call::Settled::Answer { status, body, .. } => (status, body),
-            other => panic!("an answer: {other:?}"),
-        }
-    }
-
-    /// The relayed call: the ATTEMPT is taken, the caller's body becomes the request bound for the
-    /// member (the dialect's own builder, at the path of the member's URL), and the far end's
-    /// answer is settled as the plane's pure settle says, in JSON.
+    /// The relayed call, as the door states it on the wire: the ATTEMPT is taken, the caller's body
+    /// becomes a request bound for the member at the path of the member's URL, and the far end's
+    /// answer is settled in JSON, metered, logged and audited. (That the request and the settled
+    /// answers are byte for byte what the plane's own builders say is checked in the logic crate.)
     #[test]
-    fn a_relayed_call_is_the_request_and_the_answer_the_plane_says() {
+    fn a_relayed_call_is_sent_on_settled_metered_logged_and_audited() {
         let t = relay_script(&linked(&served(ALL)));
         let attempt = step(&t, "attempt");
         assert_eq!((attempt.outcome, attempt.reply.len()), (Outcome::Ready, 0));
@@ -1674,20 +1419,10 @@ mod both_ways {
             "{}",
             send.detail
         );
-        let section = door::read_tools_section(RELAY_SECTION).expect("the section reads");
-        let def = section.servers.get("fs").expect("registered");
-        let want = busbar_plane_mcp::call::outbound(&admitted(), "fs", def, 0, None)
-            .expect("the member is reachable");
-        assert_eq!(send.reply, want.body, "the dialect builder's body");
-        assert_eq!(send.fields, want.fields, "the dialect builder's head");
         assert_eq!(document(&send.reply)["params"]["name"], json!("read_file"));
 
         let ok = step(&t, "answer ok");
-        assert_eq!(
-            (ok.outcome, ok.status),
-            (Outcome::Ready, settled(FAR_OK, false).0)
-        );
-        assert_eq!(ok.reply, settled(FAR_OK, false).1);
+        assert_eq!((ok.outcome, ok.status), (Outcome::Ready, 200));
         assert_eq!(document(&ok.reply)["id"], json!(30));
         assert_eq!(
             document(&ok.reply)["result"]["resultType"],
@@ -1702,7 +1437,7 @@ mod both_ways {
         assert_eq!(
             ok.units,
             vec![
-                (door::CLASS_FEE_INDEX, 1),
+                (CLASS_FEE_INDEX, 1),
                 (0, 1),
                 (1, u64::try_from(FAR_OK.len()).expect("a small answer"))
             ],
@@ -1714,17 +1449,9 @@ mod both_ways {
         assert_eq!(
             ok.records,
             vec![(
-                door::RECORD_CALL,
-                busbar_plane_mcp::ask::UNGOVERNED.as_bytes().to_vec(),
-                busbar_plane_mcp::record::call_suffix(
-                    0,
-                    "fs",
-                    "fs_read_file",
-                    "dispatched",
-                    "",
-                    "sha256:aa",
-                    1
-                ),
+                door_facts::RECORD_CALL,
+                door_facts::UNGOVERNED.as_bytes().to_vec(),
+                door_facts::call_suffix(0, "fs", "fs_read_file", "dispatched", "", "sha256:aa", 1),
             )],
             "one call record"
         );
@@ -1754,15 +1481,7 @@ mod both_ways {
         );
 
         let error = step(&t, "answer error");
-        assert_eq!(error.reply, settled(FAR_ERROR, false).1);
         assert_eq!(document(&error.reply)["result"]["isError"], json!(true));
-
-        let stream = step(&t, "answer stream");
-        assert_eq!(
-            stream.reply,
-            settled(FAR_SSE, true).1,
-            "the stream's last event"
-        );
 
         // A GRANTED ASK IS RELAYED under busbar's sealed state (Law 11); a host that signs nothing
         // cannot seal it, so the ask is refused, never answered by busbar.
@@ -1806,7 +1525,7 @@ mod both_ways {
         );
         assert_eq!(
             none.units,
-            vec![(door::CLASS_FEE_INDEX, 1)],
+            vec![(CLASS_FEE_INDEX, 1)],
             "the fee unit alone: no tool call and no byte was measured"
         );
     }
@@ -1830,7 +1549,7 @@ mod both_ways {
         assert_eq!(
             answered.units,
             vec![
-                (door::CLASS_FEE_INDEX, 1),
+                (CLASS_FEE_INDEX, 1),
                 (0, 1),
                 (
                     1,
@@ -1861,7 +1580,7 @@ mod both_ways {
         assert_eq!(mismatch.status, 400);
         assert_eq!(
             document(&mismatch.reply)["error"]["code"],
-            json!(busbar_plane_mcp::codec::CODE_HEADER_MISMATCH)
+            json!(CODE_HEADER_MISMATCH)
         );
     }
 
@@ -1940,7 +1659,7 @@ mod both_ways {
             input: Lent<'_, OnPieceIn>,
             mut out: Out<'_, OnPieceOut>,
         ) -> Outcome {
-            let bytes = input.field(|i| &i.bytes).bytes();
+            let bytes = input.bytes().bytes();
             let n = input.reply_buf().stream(bytes);
             out.set(|o| &o.emitted, n as u64);
             out.set(|o| &o.reply_status, 200);
@@ -1951,7 +1670,7 @@ mod both_ways {
 
     /// The mcp door with `on_piece` swapped for [`Echo`].
     extern "C" fn echo_door() -> *const Door {
-        let d = plane_door::door();
+        let d = door();
         // SAFETY: the macro's `'static` door states a plane table.
         let mut ops = unsafe { *d.ops().cast::<plane::Ops>() };
         ops.on_piece = kind_op::<plane::Ops, Safe<Echo>, TestCapture, { slot::ON_PIECE }>();
@@ -1967,9 +1686,10 @@ mod both_ways {
     fn red_a_door_that_stops_answering_from_the_catalogue_answers_differently() {
         let d = Dispatcher::new(DispatchConfig::default());
         let honest = script(&linked(&d));
-        // SAFETY: `echo_door` answers the `'static` door it laid out (leaked) over the mcp door's.
-        let door = unsafe { busbar_plugin_loader::dispatch::LoadedDoor::from_raw(echo_door) };
-        let row = LinkedRow::of_loaded(door).expect("the door states its Statement");
+        // SAFETY: `echo_door` answers a leaked `'static`, fully initialised door whose Statement is
+        // the macro door's own.
+        let row = LinkedRow::of_loaded(unsafe { LoadedDoor::from_raw(echo_door) })
+            .expect("the door states its Statement");
         let red = script(&load_linked::<Plane>(&row, bind(&d)).expect("the door loads"));
         let (h, r) = (
             step(&honest, "answer tools/list"),
@@ -1986,11 +1706,11 @@ mod bounds {
     //!
     //! The units are driven through the linked door op by op, as [`super::both_ways`] drives it.
 
-    use std::mem::zeroed;
     use std::path::Path;
     use std::sync::Arc;
 
-    use busbar_contract::abi::mechanism::call::{AbiStr, Blob, Field, Outcome, BLOB_OCTETS};
+    use super::{octets, text, z};
+    use busbar_contract::abi::mechanism::call::{Field, Outcome};
     use busbar_contract::abi::mechanism::lifecycle::GenIn;
     use busbar_contract::abi::plane::{
         slot, ArriveIn, ArriveOut, OnPieceIn, OnPieceOut, OutField, PlaneOpenIn, PlaneOpenOut,
@@ -1998,34 +1718,13 @@ mod bounds {
         REFUSAL_GATE,
     };
     use busbar_contract::abi::sdk::door::abi_str;
-    use busbar_plane_mcp::codec::{H_MCP_METHOD, H_PROTOCOL_VERSION, PROTOCOL_VERSION};
-    use busbar_plane_mcp::{door, tool_door as plane_door};
+
+    use crate::door_facts::{claim, H_MCP_METHOD, H_PROTOCOL_VERSION, PROTOCOL_VERSION};
     use busbar_plugin_loader::dispatch::kinds::plane::Plane;
     use busbar_plugin_loader::dispatch::{
         in_head, load_linked, out_head, Bind, DispatchConfig, Dispatcher, Frame, LinkedRow, NoSink,
         Plugin,
     };
-
-    fn z<T>() -> T {
-        // SAFETY: every `in`/`out` here is plain C data; all-zero is a valid value of each.
-        unsafe { zeroed() }
-    }
-
-    fn octets(b: &'static [u8]) -> Blob {
-        Blob {
-            ptr: b.as_ptr(),
-            len: b.len(),
-            fmt: BLOB_OCTETS,
-            flags: 0,
-        }
-    }
-
-    fn text(b: &'static [u8]) -> AbiStr {
-        AbiStr {
-            ptr: b.as_ptr(),
-            len: b.len(),
-        }
-    }
 
     const SECTION: &[u8] =
         br#"{"fs": {"url": "https://mcp.example/fs", "pin": {"mechanism": "unpinned"}}}"#;
@@ -2044,7 +1743,8 @@ mod bounds {
 
     /// The linked door, opened over [`SECTION`] and started.
     fn started(d: &Dispatcher) -> Plugin<Plane> {
-        let row = LinkedRow::of(plane_door::door).expect("the linked door states its Statement");
+        let row = LinkedRow::of_loaded(crate::loaded_door())
+            .expect("the linked door states its Statement");
         let bind = Bind {
             instance: Arc::from("the-instance"),
             max_inflight_cap: 64,
@@ -2074,24 +1774,24 @@ mod bounds {
         p
     }
 
-    /// A `tools/list` of `unit` arrives (the plane answers it from what it holds).
-    fn arrive_list(p: &Plugin<Plane>, unit: u64) {
-        let route = door::ROUTES
-            .iter()
-            .position(|r| r.verb == "POST" && r.target == "/mcp")
-            .expect("the door routes it");
+    /// `body` with `fields` arrives as `unit`, POSTed on the mount: its outcome and the status the
+    /// plane refused it with.
+    fn arrive(
+        p: &Plugin<Plane>,
+        unit: u64,
+        body: &'static [u8],
+        fields: &'static [Field],
+    ) -> (Outcome, u32) {
+        let route = claim("POST", "/mcp", "http");
         let mut a: Frame<ArriveIn, ArriveOut> = Frame::new(z(), z());
         (a.input.head, a.out.head) = (in_head(), out_head());
         a.input.unit = unit;
-        a.input.claim = u32::try_from(route).expect("a small table");
+        a.input.claim = route;
         (a.input.method, a.input.target) = (text(b"POST"), text(b"/mcp"));
-        a.input.body = octets(TOOLS_LIST);
-        (a.input.fields, a.input.fields_len) = (LIST_FIELDS.as_ptr(), LIST_FIELDS.len());
-        assert_eq!(
-            p.call(slot::ARRIVE, &mut a).outcome,
-            Outcome::Ready,
-            "arrive"
-        );
+        a.input.body = octets(body);
+        (a.input.fields, a.input.fields_len) = (fields.as_ptr(), fields.len());
+        let outcome = p.call(slot::ARRIVE, &mut a).outcome;
+        (outcome, a.out.refusal_status)
     }
 
     /// What one `on_piece` answered: its outcome, the status it stated and the bytes it emitted.
@@ -2167,7 +1867,11 @@ mod bounds {
     fn a_unit_the_kernel_refuses_is_dropped() {
         let d = Dispatcher::new(DispatchConfig::default());
         let p = started(&d);
-        arrive_list(&p, 7);
+        assert_eq!(
+            arrive(&p, 7, TOOLS_LIST, LIST_FIELDS).0,
+            Outcome::Ready,
+            "arrive"
+        );
         refuse(&p, 7);
         assert_eq!(
             piece(&p, 7, FROM_CALLER),
@@ -2181,7 +1885,11 @@ mod bounds {
     fn a_unit_whose_piece_the_plane_refuses_is_dropped() {
         let d = Dispatcher::new(DispatchConfig::default());
         let p = started(&d);
-        arrive_list(&p, 8);
+        assert_eq!(
+            arrive(&p, 8, TOOLS_LIST, LIST_FIELDS).0,
+            Outcome::Ready,
+            "arrive"
+        );
         // A far end's piece for a unit that sent nothing on.
         assert_eq!(piece(&p, 8, FROM_FAR_END), Outcome::Refused);
         assert_eq!(
@@ -2211,36 +1919,18 @@ mod bounds {
         );
     }
 
-    /// A `subscriptions/listen` of `unit` arrives, opting in to a list category.
-    fn arrive_listen(p: &Plugin<Plane>, unit: u64) {
-        const LISTEN: &[u8] = br#"{"jsonrpc":"2.0","id":3,"method":"subscriptions/listen","params":{"notifications":{"toolsListChanged":true},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#;
-        const FIELDS: &[Field] = &[
-            Field {
-                name: abi_str(H_PROTOCOL_VERSION),
-                value: abi_str(PROTOCOL_VERSION),
-            },
-            Field {
-                name: abi_str(H_MCP_METHOD),
-                value: abi_str("subscriptions/listen"),
-            },
-        ];
-        let route = door::ROUTES
-            .iter()
-            .position(|r| r.verb == "POST" && r.target == "/mcp")
-            .expect("the door routes it");
-        let mut a: Frame<ArriveIn, ArriveOut> = Frame::new(z(), z());
-        (a.input.head, a.out.head) = (in_head(), out_head());
-        a.input.unit = unit;
-        a.input.claim = u32::try_from(route).expect("a small table");
-        (a.input.method, a.input.target) = (text(b"POST"), text(b"/mcp"));
-        a.input.body = octets(LISTEN);
-        (a.input.fields, a.input.fields_len) = (FIELDS.as_ptr(), FIELDS.len());
-        assert_eq!(
-            p.call(slot::ARRIVE, &mut a).outcome,
-            Outcome::Ready,
-            "arrive listen"
-        );
-    }
+    /// A `subscriptions/listen`, opting in to a list category.
+    const LISTEN: &[u8] = br#"{"jsonrpc":"2.0","id":3,"method":"subscriptions/listen","params":{"notifications":{"toolsListChanged":true},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#;
+    const LISTEN_FIELDS: &[Field] = &[
+        Field {
+            name: abi_str(H_PROTOCOL_VERSION),
+            value: abi_str(PROTOCOL_VERSION),
+        },
+        Field {
+            name: abi_str(H_MCP_METHOD),
+            value: abi_str("subscriptions/listen"),
+        },
+    ];
 
     /// A HOST WITH A CLOCK: the shared services double, serving `clock.now` (a subscription is
     /// timed on it) and nothing else.
@@ -2270,7 +1960,11 @@ mod bounds {
         // Streams are opened through a one-byte reply buffer, so each stays held, its head part
         // written.
         let open = |unit: u64, caller: &'static str, cap: usize| {
-            arrive_listen(&p, unit);
+            assert_eq!(
+                arrive(&p, unit, LISTEN, LISTEN_FIELDS).0,
+                Outcome::Ready,
+                "arrive listen"
+            );
             push(&p, (unit, FROM_CALLER, 0), (unit, caller), cap)
         };
         open(1, "caller-b", 1);
@@ -2304,7 +1998,11 @@ mod bounds {
     fn a_subscription_on_a_host_whose_clock_is_unbound_is_refused() {
         let d = Dispatcher::new(DispatchConfig::default());
         let p = started(&d);
-        arrive_listen(&p, 1);
+        assert_eq!(
+            arrive(&p, 1, LISTEN, LISTEN_FIELDS).0,
+            Outcome::Ready,
+            "arrive listen"
+        );
         let refused = push(&p, (1, FROM_CALLER, 0), (1, "caller-a"), 1 << 16);
         assert_eq!(
             refused.status,
@@ -2312,23 +2010,6 @@ mod bounds {
             "a subscription the clock cannot time is refused: {}",
             String::from_utf8_lossy(&refused.reply)
         );
-    }
-
-    /// A `tools/list` of `unit` arrives: its outcome and the status the plane refused it with.
-    fn arrival(p: &Plugin<Plane>, unit: u64) -> (Outcome, u32) {
-        let route = door::ROUTES
-            .iter()
-            .position(|r| r.verb == "POST" && r.target == "/mcp")
-            .expect("the door routes it");
-        let mut a: Frame<ArriveIn, ArriveOut> = Frame::new(z(), z());
-        (a.input.head, a.out.head) = (in_head(), out_head());
-        a.input.unit = unit;
-        a.input.claim = u32::try_from(route).expect("a small table");
-        (a.input.method, a.input.target) = (text(b"POST"), text(b"/mcp"));
-        a.input.body = octets(TOOLS_LIST);
-        (a.input.fields, a.input.fields_len) = (LIST_FIELDS.as_ptr(), LIST_FIELDS.len());
-        let outcome = p.call(slot::ARRIVE, &mut a).outcome;
-        (outcome, a.out.refusal_status)
     }
 
     /// A full unit table refuses the next arrival (429) and never evicts: the first unit is still
@@ -2339,8 +2020,10 @@ mod bounds {
         let p = started(&d);
         let mut first_refused = None;
         for unit in 1..=5000 {
-            if arrival(&p, unit) != (Outcome::Ready, 0) && first_refused.is_none() {
-                first_refused = Some((unit, arrival(&p, unit)));
+            if arrive(&p, unit, TOOLS_LIST, LIST_FIELDS) != (Outcome::Ready, 0)
+                && first_refused.is_none()
+            {
+                first_refused = Some((unit, arrive(&p, unit, TOOLS_LIST, LIST_FIELDS)));
             }
         }
         assert_eq!(

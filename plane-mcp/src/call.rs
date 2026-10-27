@@ -714,11 +714,15 @@ pub fn judge_arguments(
         return admission;
     };
     let entry = &admitted.entry;
-    let schema = entry
-        .input_schema
-        .clone()
-        .unwrap_or_else(|| json!({ "type": "object" }));
-    match crate::argguard::guard(&schema, &admitted.arguments, |dest| judge(entry, dest)) {
+    let undeclared;
+    let schema = match &entry.input_schema {
+        Some(schema) => schema,
+        None => {
+            undeclared = json!({ "type": "object" });
+            &undeclared
+        }
+    };
+    match crate::argguard::guard(schema, &admitted.arguments, |dest| judge(entry, dest)) {
         Ok(_) => Admission::Go(admitted),
         Err(refused) => Admission::Refused(
             catalogue_refusal(
