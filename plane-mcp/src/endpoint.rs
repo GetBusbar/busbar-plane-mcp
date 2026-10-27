@@ -2,11 +2,7 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE `mcp:` ENDPOINT BLOCK: its grammar ([`McpCfg`]), its boot refusals ([`McpCfgError`]) and the
-//! validated resource ([`McpResource`]) derived from it. Pure data and string rules, MOVED here from
-//! the retired host crate with the `tools:` grammar beside it ([`crate::config`]), so the endpoint's
-//! judging survives that crate's deletion unchanged: the same fields, the same refusals, the same
-//! words. The composition root registers the block on the plane axis and lowers it through
-//! [`McpResource::from_cfg`] at boot.
+//! validated resource ([`McpResource`]) the composition root lowers it to at boot.
 
 use serde::{Deserialize, Serialize};
 

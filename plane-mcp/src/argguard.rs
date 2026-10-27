@@ -1,81 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE ARGUMENT HALF OF THE DISPATCH SSRF GUARD: a schema-aware walk of the nested per-request
-//! `tools/call` arguments, finding every URL and every host they carry and asking the host's ONE
-//! destination judge (`dest.judge`, BUSBAR-1.6.0.md Appendix C B.3 item 11) about each. The plane
-//! reads the value; the deployment's egress rules decide it.
-//!
-//! ## The gap this closes, stated as the live consequence
-//!
-//! The transport guard closes the URL/host/address/redirect half: busbar resolves the UPSTREAM's own URL
-//! once, judges every address the resolver returned, and connects to the address that was judged.
-//! Routing is likewise immune to attacker text, because a route is decided on the bound identity
-//! and `super::dispatch` provably reads no free text at all.
-//!
-//! Neither of those makes the PAYLOAD safe. A model that has just read a hostile tool description
-//! can still put `http://169.254.169.254/latest/meta-data/…` into a tool ARGUMENT, and without this
-//! module busbar hands that argument to the upstream untouched. An argument is attacker-influenced
-//! DATA travelling to an operator-chosen destination, which is the classic SSRF shape and a
-//! different shape from the one the routing rule answers.
-//!
-//! ## Why the PINNED schema is what makes this a check rather than a guess
-//!
-//! `super::catalogue` already fetches, canonicalises and hash-pins each tool's input schema, and a
-//! schema that changed to hide or reveal a URL field is DRIFT, which quarantines the server before
-//! any call goes out. So the schema this walk reads is not "whatever the upstream said this
-//! morning" — it is the exact document whose digest an operator approved. [`super::dispatch`]
-//! re-compares that digest immediately before handing the schema here, so the walk cannot be
-//! steered by a schema swapped underneath it.
-//!
-//! ## Two detectors, and why there are two
-//!
-//! 1. **DECLARED.** A string whose schema declares a URL-ish `format` — `uri`, `uri-reference`,
-//!    `iri`, `url`, `hostname`, `idn-hostname`, `ipv4`, `ipv6` — is judged in full: scheme
-//!    allowlist for the URL kinds, host judgement for all of them. Nested objects, arrays, tuple
-//!    positions, `additionalProperties` and `allOf`/`anyOf`/`oneOf` branches are all followed, so
-//!    "several levels deep" is not a special case.
-//!
-//! 2. **UNDECLARED.** Most real MCP tools take a URL in a plain `{"type": "string"}` with no
-//!    `format` at all. A walk that judged only declared fields would therefore refuse almost
-//!    nothing while reporting green, so every string in the arguments is ALSO judged when the whole
-//!    value (after trimming) begins `http://` or `https://`, and when a WHATWG URL reader (the
-//!    `fetch` most MCP servers use) reads the whole value as a URL naming a host, however it is
-//!    spelled: `http:/h`, `https:\\h`, `ftp:h`, `file:\\h\x`, a scheme split by a tab or led by a
-//!    control character all name `h` to the upstream, so `h` is judged; all six WHATWG special
-//!    schemes (`http`, `https`, `ws`, `wss`, `ftp`, `file`) are read so. A value that opens with any
-//!    `scheme://`, or with a special scheme and `:` and holds no whitespace or control character,
-//!    but names no host a reader accepts is refused rather than passed. Nothing narrower is
-//!    sniffed — a bare `localhost` in an untyped `query` field stays untouched, because refusing a
-//!    hostname-shaped word in free text breaks real tools and buys nothing an attacker cannot
-//!    restate.
-//!
-//! The counts of both are RETURNED ([`ArgScan`]) rather than kept internal, because a walker that
-//! visits nothing refuses nothing and passes every test it is given. A caller — and the tests —
-//! can assert the walk actually reached fields.
-//!
-//! ## What this module deliberately does NOT do
-//!
-//! - **No host rules of its own.** The scheme allowlist and the host reader are the walk's; every
-//!   verdict on a host is `dest.judge`'s, under the deployment's egress rules (its allow-list, the
-//!   metadata hosts, the private-address setting), so an argument and the connector's dial are
-//!   judged by the same guard.
-//! - **No DNS.** The transport guard resolves and PINS because busbar is the party that connects.
-//!   For an argument busbar is NOT the connecting party: the upstream resolves the name itself,
-//!   later, from its own resolver. A lookup here would therefore be advisory at best — trivially
-//!   defeated by rebinding, since nothing binds our answer to the upstream's connect — while
-//!   costing a per-argument lookup on the dispatch path and turning busbar into a name-resolution
-//!   oracle for whatever a model types. So the judgement is decided from the string alone, and the
-//!   honest consequence is stated rather than softened: a hostname whose A record points at
-//!   loopback is NOT caught here.
-//! - **No `$ref` resolution.** A `$ref` is followed nowhere; a URL field reachable only through one
-//!   is not visited.
-//! - **No mid-string URLs.** A URL embedded inside a longer free-text value in an UNDECLARED field
-//!   is not detected. Substring matching over prose is how a guard acquires false positives, and a
-//!   false positive here refuses a legitimate call.
-//! - **No plaintext-to-public rule.** `super::ssrf` refuses `http` to a public host because
-//!   busbar's own upstream credential rides that request. No busbar credential rides a tool
-//!   argument, so the rule does not transfer and is not applied.
+//! THE ARGUMENT HALF OF THE DISPATCH SSRF GUARD: a value-driven walk of `tools/call` arguments
+//! against the pinned input schema, asking the host's one destination judge (`dest.judge`,
+//! BUSBAR-1.6.0.md Appendix C B.3 item 11) about every host they carry. Declared URL-ish formats
+//! are judged in full; an undeclared string is judged when the whole value is a URL a WHATWG reader
+//! reads as naming a host. No DNS, no `$ref`, no mid-string URLs: the verdict is `dest.judge`'s.
 
 use busbar_contract::abi::host::service::{
     DEST_ALLOWED, DEST_INTERNAL, DEST_METADATA, DEST_NO_HOST, DEST_OBFUSCATED,

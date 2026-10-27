@@ -157,24 +157,23 @@ pub fn prompts_get(prompt: &PromptEntry, id: &Value, params: Option<&Value>) -> 
     )
 }
 
-fn concrete_content(res: &ResourceEntry) -> Value {
+/// One `contents` entry: the uri, its media type, and the blob or else the text (normalised).
+fn content(uri: &str, mime_type: Option<&String>, blob: Option<&String>, text: &str) -> Value {
     let mut content = Map::new();
-    content.insert("uri".into(), res.uri.clone().into());
-    if let Some(m) = &res.mime_type {
+    content.insert("uri".into(), uri.into());
+    if let Some(m) = mime_type {
         content.insert("mimeType".into(), m.clone().into());
     }
-    match &res.blob {
-        Some(blob) => {
-            content.insert("blob".into(), blob.clone().into());
-        }
-        None => {
-            content.insert(
-                "text".into(),
-                normalise(res.text.as_deref().unwrap_or("")).into(),
-            );
-        }
-    }
+    match blob {
+        Some(blob) => content.insert("blob".into(), blob.clone().into()),
+        None => content.insert("text".into(), normalise(text).into()),
+    };
     Value::Object(content)
+}
+
+fn concrete_content(res: &ResourceEntry) -> Value {
+    let text = res.text.as_deref().unwrap_or("");
+    content(&res.uri, res.mime_type.as_ref(), res.blob.as_ref(), text)
 }
 
 fn templated_content(
@@ -186,13 +185,7 @@ fn templated_content(
     for (name, value) in bindings {
         text = text.replace(&format!("{{{name}}}"), value);
     }
-    let mut content = Map::new();
-    content.insert("uri".into(), requested.into());
-    if let Some(m) = &template.mime_type {
-        content.insert("mimeType".into(), m.clone().into());
-    }
-    content.insert("text".into(), normalise(&text).into());
-    Value::Object(content)
+    content(requested, template.mime_type.as_ref(), None, &text)
 }
 
 fn ambiguous(id: &Value, uri: &str, candidates: &[String]) -> Refusal {
