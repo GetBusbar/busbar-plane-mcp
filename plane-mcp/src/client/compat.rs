@@ -1,18 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE CLIENT HALF OF THE SESSION REVISIONS: how busbar, calling an upstream, speaks
-//! `2025-11-25`, `2025-06-18` or `2024-11-05` when the upstream does not speak the stateless
-//! `2026-07-28` revision busbar sends by default (OWNER 2026-09-29 compat scope; MCP-COMPAT C5).
-//!
-//! Every request busbar issues is built once, in the stateless shape, by [`super::jsonrpc`] and
-//! [`super::verb`]. This module does not build a second set: it LOWERS a built request into a
-//! session revision ([`lower_request`]) and reads the upstream's answers back. The ladder itself
-//! (stateless, then `initialize`, then the event stream, moving only on a refusal) is
-//! [`crate::revision::next_step`]; [`probe_outcome`] is what feeds it.
-//!
-//! Pure: no I/O, no clock, no randomness. The caller owns the connection and the memory of what
-//! each upstream negotiated ([`crate::tool_sessions::UpstreamTable`]).
+//! THE CLIENT HALF OF THE SESSION REVISIONS: how busbar, calling an upstream that does not speak
+//! the stateless `2026-07-28` revision, speaks `2025-11-25`, `2025-06-18` or `2024-11-05`. A request
+//! is built once, stateless, and LOWERED here ([`lower_request`]); the answers are read back for
+//! the ladder ([`super::negotiate`]). Pure: no I/O, no clock, no randomness.
 
 use serde_json::Value;
 
