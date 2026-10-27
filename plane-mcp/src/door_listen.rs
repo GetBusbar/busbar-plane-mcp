@@ -26,13 +26,13 @@ use crate::framing::{events, CACHE_CONTROL, CONTENT_TYPE, EVENT_STREAM, NO_STORE
 use crate::subscribe::{Listen, Standing, Step as ListenStep, KEEPALIVE_NS, MAX_LIFETIME_NS};
 use crate::tool_arrival::Disposition;
 use busbar_contract::abi::mechanism::call::Outcome;
-use busbar_contract::abi::mechanism::ticket::{CompletionHandle, Ticket};
+use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::plane::{
-    OnPieceIn, OnPieceOut, PlaneDriveIn, PlaneDriveOut, UnitCount, FROM_CALLER, FROM_KERNEL,
-    PIECE_LAST, UNITS_REPORTED,
+    OnPieceIn, OnPieceOut, PlaneDriveIn, PlaneDriveOut, FROM_CALLER, FROM_KERNEL, PIECE_LAST,
 };
 use busbar_contract::abi::sdk::{Lent, Out, Services};
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 /// How often the instance's tick steps its held subscriptions (predev re-read the generation and
 /// re-asked the permission every 250 ms of a stream's life).
@@ -42,19 +42,6 @@ pub(super) const POLL_NS: u64 = 250_000_000;
 /// a quota is a refusal its caller can act on (close one, then open), where an eviction of another
 /// caller's stream is not.
 pub(super) const MAX_LISTENS_PER_OWNER: usize = 64;
-
-/// What an idle stream writes to say it is alive: an event-stream comment, which every reader
-/// drops, so an intermediary does not reclaim a working connection.
-const KEEPALIVE: &[u8] = b": keepalive\n\n";
-
-/// The status an invalid `subscriptions/listen` is refused with.
-const STATUS_INVALID: u32 = 400;
-
-/// The status a `subscriptions/listen` is refused with when its caller is at its quota.
-const STATUS_QUOTA: u32 = 429;
-
-/// The status a `subscriptions/listen` is refused with when the host's clock cannot be read.
-const STATUS_CLOCK: u32 = 503;
 
 /// One held subscription, by its session's stream.
 #[derive(Debug, Clone)]
@@ -110,34 +97,17 @@ pub(super) fn announced(plane: &McpDoor, server: &str, uri: &str) {
 
 /// A frame of the stream: its head (status, fields and the request's fee unit) with the first.
 pub(super) fn frame(bytes: Vec<u8>, done: bool, headed: bool) -> Pending {
-    let (fields, units) = if headed {
-        (Vec::new(), Vec::new())
-    } else {
-        (
-            vec![
-                (CONTENT_TYPE.to_string(), EVENT_STREAM.to_string()),
-                (CACHE_CONTROL.to_string(), NO_STORE.to_string()),
-            ],
-            vec![UnitCount {
-                class: crate::door::CLASS_FEE_INDEX,
-                source: UNITS_REPORTED,
-                amount: 1,
-            }],
-        )
-    };
-    Pending {
-        status: 200,
-        fields,
-        request: None,
-        bytes,
-        sent: 0,
-        headed,
-        done,
-        records: Vec::new(),
-        audits: Vec::new(),
-        lane: None,
-        units,
+    let mut frame = Pending::answer(200, bytes, None, &[]);
+    frame.fields = vec![
+        (CONTENT_TYPE.to_string(), EVENT_STREAM.to_string()),
+        (CACHE_CONTROL.to_string(), NO_STORE.to_string()),
+    ];
+    if headed {
+        frame.fields.clear();
+        frame.units.clear();
     }
+    (frame.headed, frame.done) = (headed, done);
+    frame
 }
 
 /// ONE PIECE OF A LISTEN SESSION (`stream != 0`): the caller's piece opens it, a collection steps
@@ -212,89 +182,112 @@ pub(super) fn piece(
     }
 }
 
-/// OPEN the subscription the unit's request asks for: refused `400` in its own words, or held and
+/// OPEN the subscription the unit's request asks for: refused in its own words, or held and
 /// stepped once (the acknowledgement). `None` for a unit that is not a `subscriptions/listen`.
 fn open(plane: &McpDoor, ticket: Ticket, principal: &str, unit: &mut CallUnit) -> Option<bool> {
-    let Disposition::Request { row, id } = &unit.disposition else {
-        return None;
-    };
-    if row.op != crate::tool_ops::OP_SUBSCRIPTIONS_LISTEN {
-        return None;
-    }
+    let id = listen_id(unit)?;
     if plane.listens.with(&unit.key, |l| l.is_some()) {
         return Some(false);
     }
-    let id = id.clone();
     let held = plane.current().or_else(|| unit.held.clone())?;
-    entitled_afresh(plane, ticket, unit, &held);
-    // A subscription opened at a clock read that failed is refused, never opened at the epoch
-    // (row 159 finding P-M4): its lifetime and keepalive are judged against this reading.
-    let Some(now) = mono_ns(plane.services, ticket, unit) else {
-        let refusal = crate::tool_arrival::Refusal {
-            status: STATUS_CLOCK,
-            id: Some(id),
-            code: crate::codec::CODE_REFUSED,
-            message: super::CLOCK_UNREAD.to_string(),
-            data: None,
-        };
+    let listen = match open_listen(plane, ticket, unit, &held, id.clone()) {
+        Ok((listen, _)) => listen,
+        Err(refused) => {
+            unit.pending = Some(*refused);
+            return Some(true);
+        }
+    };
+    let listening = Listening {
+        owner: principal.to_string(),
+        listen: Box::new(listen),
+        ticket,
+        first_tick: 0,
+        due: false,
+        headed: false,
+        updates: Vec::new(),
+    };
+    // THE QUOTA REFUSES THE NEW STREAM, never evicts a held one.
+    let admitted = plane.listens.with_all(|held| {
+        let full = quota_full(held.values().map(|l| &l.owner), principal);
+        if !full {
+            held.insert(unit.key, listening);
+        }
+        !full
+    });
+    if !admitted {
+        let refusal = quota_refusal(id);
         unit.pending = Some(Pending::answer(refusal.status, refusal.body(), None, &[]));
         return Some(true);
-    };
-    let opened = {
-        let entitled = &unit.entitled;
-        let admit = |kind: &str, name: &str| {
-            entitled
-                .get(&format!("{kind}:{name}"))
-                .copied()
-                .unwrap_or(false)
-        };
-        Listen::open(unit.params.as_ref(), id, now, |uri| {
-            matches!(held.catalogue.resource_by_uri(&admit, uri), Lookup::One(_))
-        })
-    };
-    match opened {
-        Err(refusal) => {
-            let body = serde_json::to_vec(&refusal).unwrap_or_default();
-            unit.pending = Some(Pending::answer(STATUS_INVALID, body, None, &[]));
-            Some(true)
-        }
-        Ok(listen) => {
-            let id = listen.id.clone();
-            let listening = Listening {
-                owner: principal.to_string(),
-                listen: Box::new(listen),
-                ticket,
-                first_tick: 0,
-                due: false,
-                headed: false,
-                updates: Vec::new(),
-            };
-            // THE QUOTA REFUSES THE NEW STREAM, never evicts a held one: this caller at its own
-            // bound, or the instance at its total, is told so.
-            let admitted = plane.listens.with_all(|held| {
-                let full = held.len() >= MAX_UNITS
-                    || held.values().filter(|l| l.owner == principal).count()
-                        >= MAX_LISTENS_PER_OWNER;
-                if !full {
-                    held.insert(unit.key, listening);
-                }
-                !full
-            });
-            if !admitted {
-                let refusal = quota_refusal(id);
-                unit.pending = Some(Pending::answer(refusal.status, refusal.body(), None, &[]));
-                return Some(true);
-            }
-            step(plane, ticket, principal, unit)
-        }
     }
+    step(plane, ticket, principal, unit)
+}
+
+/// The id of `unit`'s request when it is a `subscriptions/listen`.
+pub(super) fn listen_id(unit: &CallUnit) -> Option<Value> {
+    match &unit.disposition {
+        Disposition::Request { row, id } if row.op == crate::tool_ops::OP_SUBSCRIPTIONS_LISTEN => {
+            Some(id.clone())
+        }
+        _ => None,
+    }
+}
+
+/// OPENS the subscription `id` over `held`, on either carrier: the unit's grants entitled afresh and
+/// the clock read. `Err` the answer refusing it: `503` for a clock read that failed (never opened
+/// at the epoch, row 159 finding P-M4), `400` in the request's own words.
+pub(super) fn open_listen(
+    plane: &McpDoor,
+    ticket: Ticket,
+    unit: &mut CallUnit,
+    held: &Held,
+    id: Value,
+) -> Result<(Listen, u64), Box<Pending>> {
+    entitled_afresh(plane, ticket, unit, held);
+    let Some(now) = mono_ns(plane.services, ticket, unit) else {
+        let body = busbar_contract::jsonrpc::error_body(
+            id,
+            crate::codec::CODE_REFUSED,
+            super::CLOCK_UNREAD,
+            None,
+        );
+        let body = serde_json::to_vec(&body).unwrap_or_default();
+        return Err(Box::new(Pending::answer(503, body, None, &[])));
+    };
+    let admit = admit(&unit.entitled);
+    Listen::open(unit.params.as_ref(), id, now, |uri| {
+        matches!(held.catalogue.resource_by_uri(&admit, uri), Lookup::One(_))
+    })
+    .map(|listen| (listen, now))
+    .map_err(|refusal| {
+        let body = serde_json::to_vec(&refusal).unwrap_or_default();
+        Box::new(Pending::answer(400, body, None, &[]))
+    })
+}
+
+/// Whether the grants `entitled` admit `kind`'s `name`.
+pub(super) fn admit(entitled: &BTreeMap<String, bool>) -> impl Fn(&str, &str) -> bool + '_ {
+    |kind, name| {
+        entitled
+            .get(&format!("{kind}:{name}"))
+            .copied()
+            .unwrap_or(false)
+    }
+}
+
+/// Whether `owner` holds as many subscriptions among the held ones' `owners` as one caller may
+/// ([`MAX_LISTENS_PER_OWNER`]), or the instance its total ([`MAX_UNITS`]), on either carrier.
+pub(super) fn quota_full<'a>(
+    owners: impl ExactSizeIterator<Item = &'a String>,
+    owner: &str,
+) -> bool {
+    owners.len() >= MAX_UNITS || owners.filter(|o| *o == owner).count() >= MAX_LISTENS_PER_OWNER
 }
 
 /// THE QUOTA'S REFUSAL of subscription `id`, on either carrier: its caller holds the most open
 /// subscriptions one caller may, or the instance its total.
 pub(super) fn quota_refusal(id: Value) -> crate::tool_arrival::Refusal {
     crate::tool_arrival::Refusal {
-        status: STATUS_QUOTA,
+        status: 429,
         id: Some(id),
         code: crate::codec::CODE_REFUSED,
         message: format!(
@@ -315,13 +308,7 @@ fn step(plane: &McpDoor, ticket: Ticket, principal: &str, unit: &mut CallUnit) -
         return Some(false);
     };
     let standing = standing(plane, ticket, principal, unit);
-    let entitled = &unit.entitled;
-    let admit = |kind: &str, name: &str| {
-        entitled
-            .get(&format!("{kind}:{name}"))
-            .copied()
-            .unwrap_or(false)
-    };
+    let admit = admit(&unit.entitled);
     let (stepped, headed) = plane.listens.with(&unit.key, |l| {
         let l = l?;
         l.due = false;
@@ -329,22 +316,21 @@ fn step(plane: &McpDoor, ticket: Ticket, principal: &str, unit: &mut CallUnit) -
         let stepped = l
             .listen
             .step(&held.catalogue, &admit, &standing, &updates, now);
-        Some((stepped, l.headed))
+        // The head goes with the stream's first frame (its acknowledgement, or the last frame of a
+        // stream whose permission lapsed before it).
+        let headed = l.headed;
+        l.headed |= stepped != ListenStep::Quiet;
+        Some((stepped, headed))
     })?;
     let (bytes, done) = match stepped {
         ListenStep::Frames(frames) => (events(&frames), false),
-        ListenStep::Keepalive => (KEEPALIVE.to_vec(), false),
+        // An event-stream comment, which every reader drops, so an intermediary does not reclaim a
+        // working connection.
+        ListenStep::Keepalive => (b": keepalive\n\n".to_vec(), false),
         ListenStep::Quiet => return Some(false),
         ListenStep::End(frames) => (events(&frames), true),
         ListenStep::Closed => (Vec::new(), true),
     };
-    // The head goes with the stream's first frame (its acknowledgement, or the last frame of a
-    // stream whose permission lapsed before it).
-    plane.listens.with(&unit.key, |l| {
-        if let Some(l) = l {
-            l.headed = true;
-        }
-    });
     unit.pending = Some(frame(bytes, done, headed));
     Some(true)
 }
@@ -479,13 +465,8 @@ pub(super) fn mono_ns(
     unit: &mut CallUnit,
 ) -> Option<u64> {
     let services = services?;
-    let handle = CompletionHandle {
-        ticket,
-        seq: unit.issued,
-        _reserved: 0,
-    };
-    unit.issued += 1;
-    services.clock_now(handle).ok().map(|r| r.mono_ns)
+    let h = super::door_tasks::handle(ticket, &mut unit.issued, &mut None);
+    services.clock_now(h).ok().map(|r| r.mono_ns)
 }
 
 /// The catalogue's every grant, entitled afresh for this frame: a held unit re-asks what its caller
@@ -495,29 +476,8 @@ pub(super) fn entitled_afresh(plane: &McpDoor, ticket: Ticket, unit: &mut CallUn
     ask_entitlements(plane.services, ticket, unit, &held.catalogue.grants());
 }
 
-/// Whether the unit's principal still stands: the kernel's live re-resolution
-/// (`entitlement.check` of [`busbar_contract::abi::host::service::ENTITLEMENT_STANDING`]). A host
-/// that serves no entitlement stands nothing.
-fn stands(plane: &McpDoor, ticket: Ticket, unit: &mut CallUnit) -> bool {
-    let Some(services) = plane.services else {
-        return false;
-    };
-    let handle = CompletionHandle {
-        ticket,
-        seq: unit.issued,
-        _reserved: 0,
-    };
-    unit.issued += 1;
-    services
-        .entitled(
-            handle,
-            busbar_contract::abi::host::service::ENTITLEMENT_STANDING,
-        )
-        .unwrap_or(false)
-}
-
-/// THE PERMISSION, RE-ASKED THIS FRAME: the kernel re-resolves the unit's principal live
-/// ([`stands`]); one that no longer stands is lapsed, in predev's words, and ends the subscription on
+/// THE PERMISSION, RE-ASKED THIS FRAME: the kernel re-resolves the unit's principal live; one
+/// that no longer stands is lapsed, in predev's words, and ends the subscription on
 /// this frame (on either carrier).
 pub(super) fn standing(
     plane: &McpDoor,
@@ -525,7 +485,15 @@ pub(super) fn standing(
     principal: &str,
     unit: &mut CallUnit,
 ) -> Standing {
-    if stands(plane, ticket, unit) {
+    // The kernel's live re-resolution (`entitlement.check` of `ENTITLEMENT_STANDING`): a host that
+    // serves no entitlement stands nothing.
+    let stands = plane.services.is_some_and(|services| {
+        let h = super::door_tasks::handle(ticket, &mut unit.issued, &mut None);
+        services
+            .entitled(h, busbar_contract::abi::host::service::ENTITLEMENT_STANDING)
+            .unwrap_or(false)
+    });
+    if stands {
         Standing::Live
     } else {
         Standing::Lapsed {

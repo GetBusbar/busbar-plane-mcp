@@ -8,7 +8,6 @@
 /// field `len:u64-be ⧺ bytes`, a numeric field its eight big-endian bytes as one such field — in the
 /// call digest's order: `ts, server, tool, outcome, reason, tool_digest, pin_generation`. The
 /// `request_id` is not in it: a join key is never in the digest.
-
 #[must_use]
 pub fn call_suffix(
     ts: u64,

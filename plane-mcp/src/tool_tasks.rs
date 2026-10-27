@@ -2,56 +2,22 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! SEP-2663 — THE TASKS EXTENSION on the MCP door, pure: the task's state, its two wire shapes, its
-//! lifecycle transitions, the retention sweep and the durable rows a task is kept in. The served
-//! engine's task registry (`busbar-mcp` `tasks.rs`), ported; the door half that runs a task is
-//! `tool_door`'s `door_tasks`.
+//! lifecycle transitions, the retention sweep and the durable rows a task is kept in (the served
+//! engine's `tasks.rs`, ported; the door half that runs a task is `door_tasks`).
 //!
-//! A `tools/call` on a tool whose operator wrote `tools_allow.<tool>.task_support: optional` or
-//! `required`, from a caller that declared the extension in
-//! `params._meta['io.modelcontextprotocol/clientCapabilities'].extensions`, is answered with a
-//! `CreateTaskResult` instead of a result: the caller is handed a `taskId` and polls `tasks/get`
-//! until the task reaches a terminal state, at which point the tool result is INLINED on the poll
-//! response. `tasks/update` delivers input the task asked for; `tasks/cancel` stops it. There is no
-//! `tasks/result` and no `tasks/list` (the v2 wire removed both; `-32601` to them is deliberate).
+//! A `tools/call` on a tool whose operator declared `task_support`, from a caller that declared the
+//! extension, is answered with a `CreateTaskResult`; the caller polls `tasks/get` until the task is
+//! terminal, the result INLINED. `tasks/update` delivers input; `tasks/cancel` stops it. There is no
+//! `tasks/result` and no `tasks/list` (the v2 wire removed both).
 //!
-//! ## WHO RUNS A TASK (ARCHITECT round 5 Q-L3B-TASKS (b) → (A))
+//! A tool that RAN and reported a failure is `completed` with `result.isError: true`; `failed` is a
+//! PROTOCOL-level error, inlining `error` and never `result`.
 //!
-//! THE DESIGN: "a work continuation is a NEW unit with its own arrival, admission and window; its
-//! principal is the one its work handle recorded", and "a continuation runs as a child unit whose
-//! parent has exited, so it files under the late-arm rules". The creating unit opens a durable work
-//! handle (`work.open`: the handle's REFERENCE is the `taskId`), nests the continuation on the
-//! plane's own task-run claim (`unit.nest`) carrying the reference, and answers. The continuation
-//! binds the handle (`work.resume`, principal-checked), takes the run once (`records.claim`), runs
-//! the call to its end under its own admission and window, and settles the handle (`work.settle`).
-//! `tasks/get` is `work.find` plus what the task holds; `tasks/cancel` is a settle the running
-//! continuation observes on its next step.
-//!
-//! ## WHAT THE STATUSES MEAN, and the one distinction that is easy to get backwards
-//!
-//! A tool that RAN and reported a failure is `completed` with `result.isError: true`. It is NOT
-//! `failed`. `failed` is reserved for a PROTOCOL-level error — the upstream answered a JSON-RPC
-//! error, the transport broke, busbar refused to carry the dispatch — and inlines an `error`
-//! object with a numeric `code` and a `message`, carrying no `result` at all.
-//!
-//! ## DURABILITY
-//!
-//! The served engine's registry was in-process: a restart lost every task. Here THE TASK STORE IS
-//! HOST RECORDS (THE DESIGN, the mcp bullet): the handle is the kernel's (durable, scoped to the
-//! instance and the principal); a live task's state — its status, its `inputRequests`, the answers
-//! it holds, the upstream ask it is parked on — is written to the plane's own records in chunks
-//! ([`live_parts`]) by every unit that moves it; and a terminal task's result likewise
-//! ([`result_chunks`]). So `tasks/get`, `tasks/update` and `tasks/cancel` answer a task from any
-//! node and across a restart; what an instance holds of a task is a cache of those rows, plus the
-//! halves only its own process has (the run it took, the unit running it).
-//!
-//! Every live task is indexed under its caller in the plane's records with its run's LEASE
-//! ([`TaskLease`]). A task-creating call settles, `cancelled`, every live task of its caller no process
-//! holds whose lease lapsed or that nothing moved past the abandonment ceiling: the handles a
-//! process that is gone left behind never exhaust the bound of live work (THE DESIGN, "Admission bounds
-//! live work; nothing evicts it").
-//!
-//! What IS honoured unconditionally is STRONG CONSISTENCY: the creating unit holds the task before
-//! the caller is handed its id, so a `tasks/get` issued with no delay between the two resolves.
+//! THE TASK STORE IS HOST RECORDS: the handle is the kernel's; a live task's state and a terminal
+//! task's result are written to the plane's records in chunks, so the verbs answer from any node and
+//! across a restart. Every live task is indexed under its caller with its run's LEASE
+//! ([`TaskLease`]), so the handles a gone process left behind are settled, never exhausting the bound
+//! of live work.
 
 use std::collections::BTreeMap;
 
@@ -446,13 +412,7 @@ impl Task {
     /// the v2 wire.
     #[must_use]
     pub fn detailed(&self) -> Value {
-        let mut obj = Map::new();
-        obj.insert("taskId".into(), self.id.clone().into());
-        obj.insert("status".into(), self.status.token().into());
-        obj.insert("createdAt".into(), iso8601_ms(self.created_ms).into());
-        obj.insert("lastUpdatedAt".into(), iso8601_ms(self.updated_ms).into());
-        obj.insert("ttlMs".into(), TASK_TTL_MS.into());
-        obj.insert("pollIntervalMs".into(), TASK_POLL_INTERVAL_MS.into());
+        let mut obj = self.shape();
         if let Some(result) = &self.result {
             obj.insert("result".into(), result.clone());
         }
@@ -471,15 +431,24 @@ impl Task {
     /// EMPTY `content`: the base revision's `CallToolResult` makes `content` required.
     #[must_use]
     pub fn created(&self) -> Value {
-        json!({
-            "taskId": self.id,
-            "status": self.status.token(),
-            "createdAt": iso8601_ms(self.created_ms),
-            "lastUpdatedAt": iso8601_ms(self.updated_ms),
-            "ttlMs": TASK_TTL_MS,
-            "pollIntervalMs": TASK_POLL_INTERVAL_MS,
-            "content": [],
-        })
+        let mut obj = self.shape();
+        obj.insert("content".into(), json!([]));
+        Value::Object(obj)
+    }
+
+    /// The fields both task shapes carry.
+    fn shape(&self) -> Map<String, Value> {
+        [
+            ("taskId", json!(self.id)),
+            ("status", json!(self.status.token())),
+            ("createdAt", json!(iso8601_ms(self.created_ms))),
+            ("lastUpdatedAt", json!(iso8601_ms(self.updated_ms))),
+            ("ttlMs", json!(TASK_TTL_MS)),
+            ("pollIntervalMs", json!(TASK_POLL_INTERVAL_MS)),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect()
     }
 
     /// PARK on a round of asks. Any ask already answered by an earlier `tasks/update` is not
@@ -562,27 +531,21 @@ impl Task {
                     park.responses.insert(key.clone(), value.clone());
                 }
             }
-            self.input_requests
-                .retain(|(k, _)| !responses.contains_key(k));
-            self.updated_ms = now_ms;
-            if self.input_requests.is_empty() && self.status == Status::InputRequired {
-                self.status = Status::Working;
+        } else {
+            let asked: Vec<(&String, &Value)> = responses
+                .iter()
+                .filter(|(k, _)| self.input_requests.iter().any(|(r, _)| r == *k))
+                .collect();
+            let new_keys = asked
+                .iter()
+                .filter(|(k, _)| !self.answers.contains_key(k.as_str()))
+                .count();
+            if self.answers.len() + new_keys > MAX_TASK_ANSWERS {
+                return false;
             }
-            return true;
-        }
-        let asked: Vec<(&String, &Value)> = responses
-            .iter()
-            .filter(|(k, _)| self.input_requests.iter().any(|(r, _)| r == *k))
-            .collect();
-        let new_keys = asked
-            .iter()
-            .filter(|(k, _)| !self.answers.contains_key(k.as_str()))
-            .count();
-        if self.answers.len() + new_keys > MAX_TASK_ANSWERS {
-            return false;
-        }
-        for (key, value) in asked {
-            self.answers.insert(key.clone(), value.clone());
+            for (key, value) in asked {
+                self.answers.insert(key.clone(), value.clone());
+            }
         }
         self.input_requests
             .retain(|(k, _)| !responses.contains_key(k));
@@ -617,39 +580,36 @@ impl Task {
     /// The tool RAN. `result` is its own answer, `isError` and all. Whether this call made the
     /// transition.
     pub fn complete(&mut self, result: Value, now_ms: u64) -> bool {
-        if self.status.is_terminal() {
-            return false;
+        let moved = self.end(Status::Completed, now_ms);
+        if moved {
+            self.result = Some(result);
         }
-        self.status = Status::Completed;
-        self.result = Some(result);
-        self.input_requests.clear();
-        self.relay = None;
-        self.updated_ms = now_ms;
-        true
+        moved
     }
 
     /// A PROTOCOL-level failure: `error` only, never a `result` beside it. Whether this call made
     /// the transition.
     pub fn fail(&mut self, code: i64, message: String, now_ms: u64) -> bool {
-        if self.status.is_terminal() {
-            return false;
+        let moved = self.end(Status::Failed, now_ms);
+        if moved {
+            self.error = Some(json!({ "code": code, "message": message }));
+            self.result = None;
         }
-        self.status = Status::Failed;
-        self.error = Some(json!({ "code": code, "message": message }));
-        self.result = None;
-        self.input_requests.clear();
-        self.relay = None;
-        self.updated_ms = now_ms;
-        true
+        moved
     }
 
     /// CANCEL. Idempotent on a terminal task, which is the whole of the `tasks/cancel` contract.
     /// Whether THIS call performed the terminal transition.
     pub fn cancel(&mut self, now_ms: u64) -> bool {
+        self.end(Status::Cancelled, now_ms)
+    }
+
+    /// The move to the terminal `status` at `now_ms`, its asks dropped; whether it made it.
+    fn end(&mut self, status: Status, now_ms: u64) -> bool {
         if self.status.is_terminal() {
             return false;
         }
-        self.status = Status::Cancelled;
+        self.status = status;
         self.input_requests.clear();
         self.relay = None;
         self.updated_ms = now_ms;
@@ -788,23 +748,12 @@ impl WorkRow {
     /// A row read back; `None` for bytes that are not one.
     #[must_use]
     pub fn read(bytes: &[u8]) -> Option<Self> {
-        let text = std::str::from_utf8(bytes).ok()?;
-        let mut parts = text.split('|');
-        if parts.next()? != ROW_V1 {
-            return None;
-        }
-        let status = Status::of_token(parts.next()?)?;
-        let created_ms = parts.next()?.parse().ok()?;
-        let updated_ms = parts.next()?.parse().ok()?;
-        let digest = parts.next()?.to_string();
-        if parts.next().is_some() {
-            return None;
-        }
+        let [status, created, updated, digest] = fields(bytes, ROW_V1)?;
         Some(WorkRow {
-            status,
-            created_ms,
-            updated_ms,
-            digest,
+            status: Status::of_token(status)?,
+            created_ms: created.parse().ok()?,
+            updated_ms: updated.parse().ok()?,
+            digest: digest.to_string(),
         })
     }
 }
@@ -924,19 +873,10 @@ impl TaskLease {
     /// A row read back; `None` for bytes that are not one.
     #[must_use]
     pub fn read(bytes: &[u8]) -> Option<Self> {
-        let text = std::str::from_utf8(bytes).ok()?;
-        let mut parts = text.split('|');
-        if parts.next()? != LEASE_V1 {
-            return None;
-        }
-        let until_ms = parts.next()?.parse().ok()?;
-        let updated_ms = parts.next()?.parse().ok()?;
-        if parts.next().is_some() {
-            return None;
-        }
+        let [until, updated] = fields(bytes, LEASE_V1)?;
         Some(TaskLease {
-            until_ms,
-            updated_ms,
+            until_ms: until.parse().ok()?,
+            updated_ms: updated.parse().ok()?,
         })
     }
 
@@ -947,6 +887,16 @@ impl TaskLease {
         (self.until_ms != 0 && now_ms > self.until_ms)
             || now_ms.saturating_sub(self.updated_ms) > ACTIVE_TASK_ABANDON_MS
     }
+}
+
+/// The `N` `|`-separated fields of a row whose version word is `version`; `None` for bytes that are
+/// not one.
+fn fields<'a, const N: usize>(bytes: &'a [u8], version: &str) -> Option<[&'a str; N]> {
+    let mut parts = std::str::from_utf8(bytes).ok()?.split('|');
+    if parts.next()? != version {
+        return None;
+    }
+    parts.collect::<Vec<_>>().try_into().ok()
 }
 
 /// The terminal value read back from its chunks (in key order); `None` when they do not make one.
@@ -994,20 +944,14 @@ pub fn task_ask_rounds(
 /// The `CreateTaskResult` envelope: the flat task shape with `resultType: task`, under the caller's
 /// id.
 #[must_use]
-pub fn task_result(id: &Value, created: Value) -> Vec<u8> {
-    let mut value = created;
-    if let Some(obj) = value.as_object_mut() {
-        obj.insert("resultType".into(), RESULT_TYPE_TASK.into());
+pub fn task_result(id: &Value, mut created: Value) -> Vec<u8> {
+    // SEP-2663's discriminator, returned ONLY on a task busbar itself just created.
+    if let Some(obj) = created.as_object_mut() {
+        obj.insert("resultType".into(), "task".into());
     }
-    let mut envelope = Map::new();
-    envelope.insert("jsonrpc".into(), "2.0".into());
-    envelope.insert("id".into(), id.clone());
-    envelope.insert("result".into(), value);
-    serde_json::to_vec(&Value::Object(envelope)).unwrap_or_default()
+    serde_json::to_vec(&json!({ "jsonrpc": "2.0", "id": id, "result": created }))
+        .unwrap_or_default()
 }
-
-/// SEP-2663's discriminator, returned ONLY on a task busbar itself just created.
-pub const RESULT_TYPE_TASK: &str = "task";
 
 /// Unix milliseconds as an ISO-8601 UTC instant, `YYYY-MM-DDTHH:MM:SS.mmmZ`.
 #[must_use]
