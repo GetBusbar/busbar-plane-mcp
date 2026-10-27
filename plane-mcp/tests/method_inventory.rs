@@ -1,11 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE STDIO CLIENT LEG AGAINST THE GENERATED METHOD INVENTORY: busbar's `qa/method-inventory.json`
-//! (generated from rmcp's own model) at the pin this repo names, read from `BUSBAR_CHECKOUT` (a
-//! checkout of GetBusbar/busbar at `.busbar-ref`, which plugin-ci exports). Both tests moved here
-//! from `src/client/tests/{verb,peer}_tests.rs`, where they compiled the inventory in from busbar's
-//! tree; the plane's source performs no input or output (tests/purity.rs), so the read is here.
+//! THE STDIO CLIENT LEG AGAINST THE METHOD INVENTORY: `tests/data/method-inventory.json` (generated
+//! from rmcp's own model; it moved here from busbar's `qa/`).
 //!
 //! * `the_issued_set_is_exactly_the_inventory_column`: `UpstreamVerb::all` is the inventory's
 //!   `mcp|stdio|client|client` column, in BOTH directions.
@@ -17,15 +14,9 @@ use busbar_plane_mcp::client::verb::UpstreamVerb;
 
 include!("support/all_verbs.rs");
 
-/// busbar's `qa/method-inventory.json` at the pin. An unset variable is a failure, never a skip.
+/// The MCP method inventory.
 fn inventory() -> String {
-    let busbar = std::env::var_os("BUSBAR_CHECKOUT").expect(
-        "BUSBAR_CHECKOUT is unset: the inventory is busbar's qa/method-inventory.json at .busbar-ref \
-         (plugin-ci exports it)",
-    );
-    let path = std::path::PathBuf::from(busbar).join("qa/method-inventory.json");
-    std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("the inventory {} reads: {e}", path.display()))
+    include_str!("data/method-inventory.json").to_string()
 }
 
 fn line(raw: &str) -> serde_json::Value {
@@ -81,7 +72,7 @@ fn the_issued_set_is_exactly_the_inventory_column() {
     assert!(
         invented.is_empty(),
         "`UpstreamVerb` sends methods the generated matrix does not define: {invented:#?}\n\
-         Do not edit qa/method-inventory.json — it is generated from the SDKs and will come back."
+         The inventory is the specification's method set; a method it lacks is not owed."
     );
 }
 
