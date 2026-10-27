@@ -155,12 +155,9 @@ impl Negotiator {
     /// The first action.
     pub fn start(&mut self) -> Action {
         match self.remembered.clone() {
-            None => self.send(Phase::Probe, self.original.clone()),
-            Some(r) if r.revision == Revision::R2026_07_28 => {
-                self.send(Phase::Probe, self.original.clone())
-            }
             Some(r) if r.revision.is_event_stream_revision() => self.open_stream(),
-            Some(r) => self.in_session(r.revision, r.session),
+            Some(r) if r.revision.has_sessions() => self.in_session(r.revision, r.session),
+            _ => self.send(Phase::Probe, self.original.clone()),
         }
     }
 
@@ -170,11 +167,11 @@ impl Negotiator {
     }
 
     fn in_session(&mut self, revision: Revision, session: Option<String>) -> Action {
-        let url = self.original.url.clone();
         // A REQUEST IN A SESSION CARRIES THAT SESSION'S OWN NEXT ID, never the stateless round's
         // that every concurrent call carries.
         let id = self.session_id.filter(|_| self.original_id.is_some());
-        let request = lower_request(&self.original, &url, revision, session.as_deref(), id);
+        let (original, url) = (&self.original, &self.original.url);
+        let request = lower_request(original, url, revision, session.as_deref(), id);
         self.sent_id = id;
         self.send(Phase::InSession { revision, session }, request)
     }
@@ -232,9 +229,9 @@ impl Negotiator {
                             return self.fail(Refusal::OfferedUnsupported);
                         }
                         let session = answer.field(crate::adapt::H_SESSION_ID).map(str::to_string);
-                        let url = self.original.url.clone();
+                        let (original, url) = (&self.original, &self.original.url);
                         let request =
-                            initialized_notification(&self.original, &url, r, session.as_deref());
+                            initialized_notification(original, url, r, session.as_deref());
                         return self.send(
                             Phase::Initialized {
                                 revision: r,

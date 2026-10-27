@@ -257,6 +257,16 @@ impl Link {
             && self.replying.is_none()
     }
 
+    /// Registers the call on `ticket` as waiting for `id`: `false` when the link already waits on
+    /// [`MAX_WAITING`] calls.
+    fn wait(&mut self, id: u64, ticket: Ticket) -> bool {
+        if self.waiters.len() >= MAX_WAITING {
+            return false;
+        }
+        self.waiters.insert(Value::from(id).to_string(), ticket);
+        true
+    }
+
     /// The stream is gone: every waiting call is woken to read why.
     fn die(&mut self, why: &str, woken: &mut Vec<Ticket>) {
         if self.dead.is_none() {
@@ -956,13 +966,12 @@ pub(super) fn call(
                         None => {
                             let id = l.next_id;
                             l.next_id = l.next_id.saturating_add(1);
-                            if l.waiters.len() >= MAX_WAITING {
+                            if !l.wait(id, ticket) {
                                 return Next::Fail(format!(
                                     "MCP server `{member}`: its 2024-11-05 event stream already \
                                      waits on {MAX_WAITING} calls"
                                 ));
                             }
-                            l.waiters.insert(Value::from(id).to_string(), ticket);
                             st.id = Some(id);
                             id
                         }
@@ -1117,3 +1126,7 @@ fn post(
         Poll::Ready(Err(e)) => Poll::Ready(Err(e.to_string())),
     }
 }
+
+#[cfg(test)]
+#[path = "tests/legacy_link_tests.rs"]
+mod tests;
