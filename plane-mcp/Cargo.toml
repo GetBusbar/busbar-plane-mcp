@@ -73,4 +73,5 @@ busbar-contract = { workspace = true, features = ["test-seal", "alloc-counter"] 
 # THE LOADER, TEST-ONLY: `src/tests/relayed_call_tests.rs` admits the linked door through the one
 # loader, as busbar does, and drives it with the loader's own frames (`conformance::{input,
 # output}`), so the door's transcript is held to the crate's builders with no raw ABI call.
-busbar-plugin-loader = { workspace = true, features = ["conformance"] }
+busbar-plugin-loader = { workspace = true }
+busbar-test-kit = { workspace = true }
