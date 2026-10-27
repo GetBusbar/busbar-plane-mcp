@@ -7,28 +7,24 @@
 //! the engine's `mcp::envelope` reader, and must be accepted. busbar refusing a request busbar sent
 //! would be a silent, mutual misunderstanding that no single-direction test can see.
 
-use crate::client::jsonrpc::{
-    parse_response, tools_call, tools_list, RpcOutcome, META_CLIENT_CAPABILITIES,
-    META_PROTOCOL_VERSION,
-};
+use crate::client::jsonrpc::{parse_response, tools_call, tools_list, RpcOutcome};
+use crate::codec::{META_CLIENT_CAPABILITIES, META_PROTOCOL_VERSION};
 
-/// A routing key for a valid test server and tool.
-fn tkey(server: &str, tool: &str) -> crate::identity::ToolKey {
-    let server = crate::identity::ServerId::new(server).expect("test server id must be valid");
-    crate::identity::ToolKey::new(server, tool).expect("test tool key must be valid")
-}
-
-/// EVERY byte `req` will put on the wire, concatenated: URL, then each header name and value, then
-/// the body, read from the same fields the transport writes.
+/// EVERY byte a request puts on the wire, concatenated: URL, each header name and value, the body.
 fn wire_bytes(req: &crate::client::jsonrpc::OutboundRequest) -> Vec<u8> {
-    let mut out = Vec::new();
-    out.extend_from_slice(req.url.as_bytes());
+    let mut out = req.url.as_bytes().to_vec();
     for (name, value) in &req.headers {
         out.extend_from_slice(name.as_bytes());
         out.extend_from_slice(value.as_bytes());
     }
     out.extend_from_slice(&req.body);
     out
+}
+
+/// A routing key for a valid test server and tool.
+fn tkey(server: &str, tool: &str) -> crate::identity::ToolKey {
+    let server = crate::identity::ServerId::new(server).expect("test server id must be valid");
+    crate::identity::ToolKey::new(server, tool).expect("test tool key must be valid")
 }
 
 fn body_of(req: &crate::client::jsonrpc::OutboundRequest) -> serde_json::Value {

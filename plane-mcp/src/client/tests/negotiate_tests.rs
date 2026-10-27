@@ -5,7 +5,6 @@
 //! contract describes, answering as each revision's server would.
 
 use super::*;
-use crate::client::compat::tests::ev;
 use crate::client::jsonrpc::envelope;
 use crate::codec::{H_PROTOCOL_VERSION, META_CLIENT_CAPABILITIES, META_PROTOCOL_VERSION};
 use serde_json::json;
@@ -126,7 +125,6 @@ fn a_lost_session_is_reinitialized_once_and_never_looped() {
     let memo = Remembered {
         revision: Revision::R2025_11_25,
         session: Some("old".into()),
-        message_address: None,
     };
     let mut n = Negotiator::new(call(), Some(memo), "1.6.0");
     let first = n.start();
@@ -174,66 +172,21 @@ fn an_offer_this_plane_cannot_carry_is_a_disconnect() {
     assert_eq!(fin, Action::Fail(Refusal::OfferedUnsupported));
 }
 
+/// An upstream refusing the stateless request and `initialize` is handed to the `2024-11-05`
+/// event stream, which the driver carries (`door_legacy`); one remembered as `2024-11-05` goes
+/// there straight away.
 #[test]
-fn an_event_stream_upstream_is_reached_through_the_address_its_stream_names() {
+fn an_event_stream_upstream_is_handed_to_the_stream() {
     let mut n = Negotiator::new(call(), None, "1.6.0");
     n.start();
     n.on_answer(answer(404, json!({})));
-    let open = n.on_answer(answer(404, json!({})));
-    let Action::OpenStream { request } = open else {
-        panic!("expected the stream, got {open:?}")
-    };
-    assert!(request.body.is_empty());
-    assert_eq!(header(&request, "accept"), Some("text/event-stream"));
-    assert_eq!(header(&request, "authorization"), Some("Bearer tok"));
-    assert_eq!(n.on_answer(answer(200, json!(null))), Action::AwaitEvent);
-    let init = n.on_event(&ev(Some("endpoint"), "/messages?sessionId=s1"));
-    let (req, body) = sent(&init);
-    assert_eq!(req.url, "https://up.example/messages?sessionId=s1");
-    assert_eq!(body["params"]["protocolVersion"], "2024-11-05");
-    assert_eq!(header(req, H_PROTOCOL_VERSION), None);
-    let id = body["id"].clone();
-    assert_eq!(n.on_answer(accepted()), Action::AwaitEvent);
-    let initialized = n.on_event(&ev(
-        Some("message"),
-        &result(id, json!({"protocolVersion":"2024-11-05"})).to_string(),
-    ));
-    assert_eq!(sent(&initialized).1["method"], "notifications/initialized");
-    let the_call = n.on_answer(accepted());
-    let (req, body) = sent(&the_call);
-    assert_eq!(req.url, "https://up.example/messages?sessionId=s1");
-    assert_eq!(body["id"], 5);
-    assert_eq!(n.on_answer(accepted()), Action::AwaitEvent);
-    let unrelated = result(json!(77), json!({})).to_string();
-    assert_eq!(
-        n.on_event(&ev(Some("message"), &unrelated)),
-        Action::AwaitEvent
-    );
-    let fin = n.on_event(&ev(
-        Some("message"),
-        &result(json!(5), json!({"content":[]})).to_string(),
-    ));
-    let Action::Finish(a) = fin else {
-        panic!("expected the answer, got {fin:?}")
-    };
-    assert_eq!(serde_json::from_slice::<Value>(&a.body).unwrap()["id"], 5);
-    assert_eq!(n.remembered().unwrap().revision, Revision::R2024_11_05);
-}
-
-/// RED: a stream naming a message address on another origin gets nothing POSTed to it, so the
-/// credential never leaves for a host the operator did not register.
-#[test]
-fn red_a_cross_origin_message_address_gets_no_request() {
+    assert_eq!(n.on_answer(answer(404, json!({}))), Action::OpenStream);
     let memo = Remembered {
         revision: Revision::R2024_11_05,
         session: None,
-        message_address: None,
     };
     let mut n = Negotiator::new(call(), Some(memo), "1.6.0");
-    assert!(matches!(n.start(), Action::OpenStream { .. }));
-    n.on_answer(answer(200, json!(null)));
-    let a = n.on_event(&ev(Some("endpoint"), "https://evil.example/steal"));
-    assert_eq!(a, Action::Fail(Refusal::AddressRefused));
+    assert_eq!(n.start(), Action::OpenStream);
 }
 
 /// A REQUEST LOWERED INTO A REMEMBERED SESSION CARRIES THAT SESSION'S OWN ID (row 159 finding 3):
@@ -245,7 +198,6 @@ fn red_calls_in_one_session_never_share_an_id() {
     let memo = Remembered {
         revision: Revision::R2025_06_18,
         session: Some("sess-1".to_string()),
-        message_address: None,
     };
     let lowered = |id: Option<u64>| {
         let mut n = Negotiator::new(call(), Some(memo.clone()), "1.6.0").with_session_id(id);
@@ -311,39 +263,4 @@ fn red_a_stateless_400_moves_the_ladder_and_is_never_remembered() {
     let fin = n.on_answer(answer(200, result(json!(5), json!({"content":[]}))));
     assert!(matches!(fin, Action::Finish(ref a) if a.status == 200));
     assert_eq!(n.remembered().unwrap().revision, Revision::R2025_06_18);
-}
-
-/// RED: a NOTIFICATION posted on the held `2024-11-05` link is finished by its POST's status: no
-/// answer comes for it on the stream, so the negotiation does not wait for one.
-#[test]
-fn red_a_notification_on_the_held_link_finishes_on_its_post() {
-    let note = envelope(
-        URL,
-        "notifications/cancelled",
-        None,
-        json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":5}}),
-        Some("tok"),
-    );
-    let mut n = Negotiator::new(note, None, "1.6.0");
-    n.start();
-    n.on_answer(answer(404, json!({})));
-    let open = n.on_answer(answer(404, json!({})));
-    assert!(matches!(open, Action::OpenStream { .. }), "{open:?}");
-    assert_eq!(n.on_answer(answer(200, json!(null))), Action::AwaitEvent);
-    let init = n.on_event(&ev(Some("endpoint"), "/messages?sessionId=s1"));
-    let id = sent(&init).1["id"].clone();
-    assert_eq!(n.on_answer(accepted()), Action::AwaitEvent);
-    let initialized = n.on_event(&ev(
-        Some("message"),
-        &result(id, json!({"protocolVersion":"2024-11-05"})).to_string(),
-    ));
-    assert_eq!(sent(&initialized).1["method"], "notifications/initialized");
-    let posted = n.on_answer(accepted());
-    let (_, body) = sent(&posted);
-    assert_eq!(body["method"], "notifications/cancelled");
-    let fin = n.on_answer(accepted());
-    assert!(
-        matches!(fin, Action::Finish(ref a) if a.status == 202),
-        "a notification waited for an answer the stream never sends: {fin:?}"
-    );
 }

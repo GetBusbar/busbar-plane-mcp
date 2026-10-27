@@ -60,31 +60,6 @@ pub(crate) fn severity_of(name: &str) -> Option<usize> {
     SEVERITIES.iter().position(|s| *s == name)
 }
 
-/// One `notifications/message` record busbar writes about its own handling of a request.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LogRecord {
-    /// Its severity.
-    pub level: &'static str,
-    /// Its logger, always under `busbar.`.
-    pub logger: &'static str,
-    /// What it says.
-    pub data: Value,
-}
-
-impl LogRecord {
-    fn envelope(&self) -> Value {
-        json!({
-            "jsonrpc": "2.0",
-            "method": "notifications/message",
-            "params": {
-                "level": self.level,
-                "logger": self.logger,
-                "data": self.data,
-            },
-        })
-    }
-}
-
 /// The least severe level the caller asked for in `_meta`, or [`DEFAULT_LEVEL`]. A level the
 /// protocol does not name is the default, never a refusal: the caller asked for a stream, and an
 /// unknown filter is not a reason to deny it one.
@@ -149,57 +124,6 @@ pub fn prefers_event_stream(accept: Option<&str>) -> bool {
     }
 }
 
-/// The two records busbar writes about one request: what was dispatched (`debug`) and how it ended
-/// (`info` on a `200`, else `warning`). `target` is the request's `Mcp-Name` member, where its
-/// method has one.
-#[must_use]
-pub fn request_log(method: &str, target: Option<Value>, status: u32) -> Vec<LogRecord> {
-    let ok = status == 200;
-    vec![
-        LogRecord {
-            level: "debug",
-            logger: "busbar.mcp.dispatch",
-            data: json!({
-                "message": "dispatching MCP method",
-                "method": method,
-                "target": target,
-            }),
-        },
-        LogRecord {
-            level: if ok { "info" } else { "warning" },
-            logger: "busbar.mcp.dispatch",
-            data: json!({
-                "message": if ok { "MCP method completed" } else { "MCP method refused" },
-                "method": method,
-                "httpStatus": status,
-            }),
-        },
-    ]
-}
-
-/// One answer as an event stream: each progress frame, then each log record, then the answer, one
-/// `message` event each. `None` when `body` is not one JSON document (it goes out as it was).
-///
-/// THE ANSWER IS ITS OWN BYTES (Law 11): the body is never parsed into a value
-/// and printed again, which would re-order its members and re-spell its numbers. Each of its lines
-/// is one `data:` line, and a client joins them back with `\n`: a JSON document carries a line
-/// break only between its tokens, so the one change the event-stream framing can make is a `\r`
-/// there read back as `\n`.
-#[must_use]
-pub fn event_stream(body: &[u8], logs: &[LogRecord], progress: &[Value]) -> Option<Vec<u8>> {
-    let text = std::str::from_utf8(body).ok()?;
-    serde_json::from_str::<serde::de::IgnoredAny>(text).ok()?;
-    let mut out = String::new();
-    for frame in progress {
-        push_event(&mut out, frame);
-    }
-    for log in logs {
-        push_event(&mut out, &log.envelope());
-    }
-    push_raw_event(&mut out, text);
-    Some(out.into_bytes())
-}
-
 /// One `message` event carrying `data` as it is: one `data:` line per line of it.
 fn push_raw_event(out: &mut String, data: &str) {
     out.push_str("event: message\n");
@@ -221,6 +145,24 @@ fn push_raw_event(out: &mut String, data: &str) {
         }
     }
     out.push('\n');
+}
+
+/// One answer as an event stream: each of `frames`, then the answer, one `message` event each.
+/// `None` when `body` is not one JSON document (it goes out as it was).
+///
+/// THE ANSWER IS ITS OWN BYTES (Law 11): never parsed and printed again, which would re-order its
+/// members and re-spell its numbers. Each of its lines is one `data:` line, and a client joins them
+/// back with `\n`: a JSON document carries a line break only between its tokens.
+#[must_use]
+pub fn event_stream(body: &[u8], frames: &[Value]) -> Option<Vec<u8>> {
+    let text = std::str::from_utf8(body).ok()?;
+    serde_json::from_str::<serde::de::IgnoredAny>(text).ok()?;
+    let mut out = String::new();
+    for frame in frames {
+        push_event(&mut out, frame);
+    }
+    push_raw_event(&mut out, text);
+    Some(out.into_bytes())
 }
 
 /// Messages as an event stream: one `message` event each, in order.
@@ -251,8 +193,6 @@ pub struct Framing {
     pub target: Option<Value>,
     /// The least severe level the caller asked for.
     pub level: &'static str,
-    /// Whether the caller asked for the frames only a stream carries (its log records and progress).
-    pub stream: bool,
 }
 
 impl Framing {
@@ -272,22 +212,42 @@ impl Framing {
             method: method.to_string(),
             target,
             level: requested_level(meta),
-            stream: true,
         })
     }
 
-    /// The answer `(status, body)` framed: a `200` with a JSON body as an event stream with its log
-    /// records and `progress`, and `true`; anything else as it was, and `false`.
+    /// The answer `(status, body)` framed: a `200` with a JSON body as an event stream, and
+    /// `true`; anything else as it was, and `false`. The stream is each progress frame, then the
+    /// two `notifications/message` records busbar writes about its own handling (what was
+    /// dispatched, `debug`, and how it ended, `info`) at the caller's level, then the answer.
+    ///
+    /// THE ANSWER IS ITS OWN BYTES (Law 11): never parsed and printed again, which would re-order
+    /// its members and re-spell its numbers. Each of its lines is one `data:` line, and a client
+    /// joins them back with `\n`: a JSON document carries a line break only between its tokens.
     #[must_use]
     pub fn frame(&self, status: u32, body: Vec<u8>, progress: &[Value]) -> (Vec<u8>, bool) {
         if status != 200 {
             return (body, false);
         }
-        let logs: Vec<LogRecord> = request_log(&self.method, self.target.clone(), status)
-            .into_iter()
-            .filter(|r| level_allows(self.level, r.level))
-            .collect();
-        match event_stream(&body, &logs, progress) {
+        let logs = [
+            (
+                "debug",
+                json!({ "message": "dispatching MCP method", "target": self.target }),
+            ),
+            (
+                "info",
+                json!({ "message": "MCP method completed", "httpStatus": status }),
+            ),
+        ];
+        let mut frames = progress.to_vec();
+        for (level, mut data) in logs {
+            if level_allows(self.level, level) {
+                data["method"] = json!(self.method);
+                let params =
+                    json!({ "level": level, "logger": "busbar.mcp.dispatch", "data": data });
+                frames.push(json!({ "jsonrpc": "2.0", "method": "notifications/message", "params": params }));
+            }
+        }
+        match event_stream(&body, &frames) {
             Some(stream) => (stream, true),
             None => (body, false),
         }

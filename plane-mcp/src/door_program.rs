@@ -54,7 +54,7 @@ pub(super) struct InLine {
 /// Whether member `def`'s calls wait their turn on its child: its grants let a child's ask be
 /// relayed to a caller (a call whose asks are all refused may share the child freely).
 pub(super) fn serialised(def: &crate::tools_config::McpServerDefCfg) -> bool {
-    let g = def.grants.as_ask_grants();
+    let g = def.grants;
     g.sampling || g.elicitation || g.roots
 }
 
@@ -96,7 +96,7 @@ pub(super) struct ProgramRelay {
     pub(super) wait: u64,
     /// The generation of the child the walk's lease reached.
     pub(super) generation: u64,
-    corr: Correlator,
+    pub(super) corr: Correlator,
     /// The exchange writing the replies the child is owed, while it pends.
     replying: Option<ProgramExchange>,
     /// How many reply exchanges this call made.
@@ -375,7 +375,7 @@ fn exchange_child(
     let mut peer = DoorPeer {
         plane,
         member,
-        grants: def.grants.as_ask_grants(),
+        grants: def.grants,
     };
     let answer = exchange.drive(host, ticket, base, &greeted, &mut peer);
     if let std::task::Poll::Ready(Ok(done)) = &answer {
@@ -444,13 +444,7 @@ pub(super) fn tools_listed(
     let id = list_id(unit.key, unit.attempt);
     let mut exchange = match unit.program.take() {
         Some((Purpose::Verify, parked)) => parked,
-        _ => ProgramExchange::new(
-            server,
-            door::NEED_PROGRAM,
-            vec![(list_request(id), Some(id))],
-            true,
-        )
-        .timed(def.timeout_ms()),
+        _ => list_exchange(server, def, id),
     };
     match exchange_child(plane, host, ticket, base, server, def, &mut exchange) {
         std::task::Poll::Pending => {
@@ -492,13 +486,7 @@ pub(super) fn connect_child(
     };
     let mut exchange = match instance.resume::<ProgramExchange>() {
         Some(parked) => *parked,
-        None => ProgramExchange::new(
-            server,
-            door::NEED_PROGRAM,
-            vec![(list_request(id), Some(id))],
-            true,
-        )
-        .timed(def.timeout_ms()),
+        None => list_exchange(server, def, id),
     };
     match exchange_child(plane, host, ticket, 0, server, def, &mut exchange) {
         std::task::Poll::Pending => {
@@ -511,9 +499,15 @@ pub(super) fn connect_child(
     }
 }
 
-/// The `tools/list` a stdio member is sent, under `id`.
-fn list_request(id: u64) -> Vec<u8> {
-    crate::client::jsonrpc::tools_list("", id, None).body
+/// The `tools/list` exchange with stdio member `server`, under `id`, held to its `timeout:`.
+fn list_exchange(
+    server: &str,
+    def: &crate::tools_config::McpServerDefCfg,
+    id: u64,
+) -> ProgramExchange {
+    let request = crate::client::jsonrpc::tools_list("", id, None).body;
+    ProgramExchange::new(server, door::NEED_PROGRAM, vec![(request, Some(id))], true)
+        .timed(def.timeout_ms())
 }
 
 /// What a far piece of a stdio member's answer came to.
@@ -562,7 +556,7 @@ pub(super) fn far(
         let mut peer = DoorPeer {
             plane,
             member,
-            grants: def.grants.as_ask_grants(),
+            grants: def.grants,
         };
         relay.hold = 0;
         match relay
@@ -642,11 +636,6 @@ pub(super) fn refuse_asks(
     } else {
         Far::Taken
     }
-}
-
-/// The progress frames the relay's reading kept, taken.
-pub(super) fn progress(relay: &mut ProgramRelay) -> Vec<Value> {
-    std::mem::take(&mut relay.corr.progress)
 }
 
 #[cfg(test)]

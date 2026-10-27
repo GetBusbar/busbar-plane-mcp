@@ -71,7 +71,6 @@ dependencies = [
  "base64",
  "busbar-contract",
  "busbar-plugin-loader",
- "bytes",
  "indexmap",
  "serde",
  "serde_json",

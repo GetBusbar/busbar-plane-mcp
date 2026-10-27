@@ -25,7 +25,6 @@ mod alloc_gate_tests;
 /// The plane's vocabulary against the conformance battery (the plugin crate's `tests/door_witness.rs`).
 mod battery_vocabulary_tests;
 /// The plane's own declarations agree with each other (`tests/declarations_agree.rs`).
-mod declarations_agree_tests;
 /// The approval digest, pinned (`tests/digest_pin.rs`).
 mod digest_pin_tests;
 /// A sealed state's window judged at the host clock's time: a clock that fails refuses

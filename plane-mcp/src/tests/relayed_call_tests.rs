@@ -581,12 +581,13 @@ fn admitted() -> crate::call::AdmittedCall {
     let catalogue = crate::catalogue::Catalogue::build(1, &section);
     let params = document(RELAY_CALL)["params"].clone();
     let header = |name: &str| (name == "mcp-param-path").then(|| "/a".to_string());
-    match crate::call::admit_call(
+    match crate::call::admit_trusted(
         &catalogue,
         &json!(30),
         Some(&params),
         &header,
         &|_, _| true,
+        &mut |_| crate::call::Trust::Verdict(busbar_contract::abi::host::service::DISTRUST_NONE),
         &mut |_, _| crate::ask::AskDecision::Proceed,
     ) {
         crate::call::Admission::Go(a) => a,
@@ -596,7 +597,15 @@ fn admitted() -> crate::call::AdmittedCall {
 
 fn settled(far: &[u8], sse: bool) -> (u32, Vec<u8>) {
     let section = crate::door::read_tools_section(RELAY_SECTION).expect("the section reads");
-    match crate::call::settle_call(&admitted(), section.servers.get("fs"), 200, far, sse, 0) {
+    match crate::call::settle_call_as(
+        &admitted(),
+        section.servers.get("fs"),
+        200,
+        far,
+        sse,
+        0,
+        crate::client::jsonrpc::dispatch_request_id(0),
+    ) {
         crate::call::Settled::Answer { status, body, .. } => (status, body),
         other => panic!("an answer: {other:?}"),
     }
