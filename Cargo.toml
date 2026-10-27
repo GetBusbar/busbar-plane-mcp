@@ -10,8 +10,8 @@
 # `.busbar-ref`; no sibling-checkout path dependency ships in any manifest.
 #
 # THIRD-PARTY VERSIONS ARE THE FLEET'S, NOT THIS REPO'S. The table below is busbar's own root
-# `[workspace.dependencies]` (third-party rows) at busbar 93d8a0f6887a65d9e69cc62982b54dcbf4a00bae, followed by the plugin-only rows
-# of busbar's `.github/fleet/deps.toml` at 93d8a0f6887a65d9e69cc62982b54dcbf4a00bae. A member takes a crate with
+# `[workspace.dependencies]` (third-party rows) at busbar c0989f28494479c966fefda2f90a83ecbc6c9a1a, followed by the plugin-only rows
+# of busbar's `.github/fleet/deps.toml` at c0989f28494479c966fefda2f90a83ecbc6c9a1a. A member takes a crate with
 # `{ workspace = true }` (adding features if it needs them); a crate in neither table is a new
 # `deps.toml` row in busbar first. CI holds this repo's Cargo.lock to busbar's lock at the pin.
 [workspace]
@@ -43,7 +43,7 @@ busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "28f
 busbar-core-connector = { git = "https://github.com/GetBusbar/busbar", rev = "28f2455e7000d5fc1fd1ce186502ffe6d06cbd08", features = ["test-support"] }
 busbar-transport-http = { git = "https://github.com/GetBusbar/busbar-transport-http", rev = "12b078389496d4c1fd81b730f5d9d0887537c3b0" }
 busbar-transport-tcp = { git = "https://github.com/GetBusbar/busbar-transport-tcp", rev = "223ec3f02000de94089a1752635b9e206f7492e5" }
-# busbar's root [workspace.dependencies], third-party rows, at 93d8a0f6887a65d9e69cc62982b54dcbf4a00bae
+# busbar's root [workspace.dependencies], third-party rows, at c0989f28494479c966fefda2f90a83ecbc6c9a1a
 arc-swap = "1"
 async-trait = "0.1"
 axum = "0.8"
@@ -66,6 +66,7 @@ http-body-util = "0.1"
 httpdate = "1.0"
 hyper = { version = "1", default-features = false, features = ["server", "client", "http1", "http2"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "http1", "http2", "server-auto", "server-graceful", "service", "tokio"] }
+idna = { version = "1.1.0", default-features = false, features = ["alloc", "compiled_data"] }
 idna_adapter = "=1.1.0"
 indexmap = { version = "2", features = ["serde"] }
 jsonschema = { version = "0.49", default-features = false }
@@ -82,6 +83,7 @@ opentelemetry-proto = { version = "0.32", default-features = false, features = [
 proc-macro2 = { version = "1", features = ["span-locations"] }
 prost = { version = "0.14", default-features = false, features = ["std"] }
 psl = "2.1"
+quote = "1"
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 ring = "0.17"
@@ -114,7 +116,7 @@ url = "2"
 webpki = { package = "rustls-webpki", version = "0.103", default-features = false, features = ["std", "ring"] }
 webpki-roots = "1"
 zeroize = "1"
-# busbar .github/fleet/deps.toml [plugin-deps], at 93d8a0f6887a65d9e69cc62982b54dcbf4a00bae
+# busbar .github/fleet/deps.toml [plugin-deps], at c0989f28494479c966fefda2f90a83ecbc6c9a1a
 fallible-iterator = "0.2"
 httparse = { version = "1", default-features = false }
 ldap3 = { version = "0.12", default-features = false, features = ["sync"] }

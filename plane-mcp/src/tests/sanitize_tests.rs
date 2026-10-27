@@ -14,7 +14,7 @@
 //! of the feature, and a module whose tests only ever demonstrate its strengths lets a caveat rot
 //! into a claim.
 
-use super::{normalise, normalise_opt};
+use super::normalise;
 
 /// The exact markup CVE-2025-54136-class tool poisoning uses. Every one of these must leave, and the
 /// INNER TEXT must stay: the text is what a human reviewer reads at approval time, and deleting it
@@ -94,18 +94,6 @@ fn an_unterminated_tag_keeps_the_tail_verbatim() {
         normalise("<b caf\u{e9} \u{4E2D}\u{6587}"),
         "<b caf\u{e9} \u{4E2D}\u{6587}"
     );
-}
-
-/// Every catalogue field reaches the strip through [`normalise_opt`], so the optional wrapper must
-/// behave exactly as the scalar one: a wrapper that forgot to call through would leave every
-/// catalogue site unstripped while the scalar tests passed.
-#[test]
-fn the_optional_wrapper_normalises_through_the_same_function() {
-    assert_eq!(
-        normalise_opt(Some("<system>x</system>")),
-        Some("x".to_string())
-    );
-    assert_eq!(normalise_opt(None), None);
 }
 
 /// THE HONEST SCOPE, asserted rather than written down: markup-stripping does not stop

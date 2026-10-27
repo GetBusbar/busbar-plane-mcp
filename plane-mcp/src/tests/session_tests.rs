@@ -18,16 +18,8 @@ fn entropy(n: u64) -> [u8; 16] {
 }
 
 fn open(t: &mut SessionTable, n: u64, who: &str, now: u64) -> String {
-    t.open(
-        entropy(n),
-        owner(who),
-        Revision::R2025_11_25,
-        Carriage::Endpoint,
-        now,
-    )
-    .unwrap()
-    .as_str()
-    .to_string()
+    t.open(entropy(n), owner(who), Revision::R2025_11_25, now)
+        .unwrap()
 }
 
 fn small(max_sessions: usize, per: usize, total: usize) -> SessionTable {
@@ -56,22 +48,10 @@ fn an_id_is_128_bits_of_the_callers_entropy_in_hex() {
 #[test]
 fn zero_entropy_is_refused_and_a_live_id_is_not_minted_twice() {
     let mut t = SessionTable::new(Bounds::default());
-    let r = t.open(
-        [0; 16],
-        owner("a"),
-        Revision::R2025_06_18,
-        Carriage::Endpoint,
-        0,
-    );
+    let r = t.open([0; 16], owner("a"), Revision::R2025_06_18, 0);
     assert_eq!(r, Err(OpenRefused::NoEntropy));
     open(&mut t, 1, "a", 0);
-    let again = t.open(
-        entropy(1),
-        owner("b"),
-        Revision::R2025_06_18,
-        Carriage::Endpoint,
-        0,
-    );
+    let again = t.open(entropy(1), owner("b"), Revision::R2025_06_18, 0);
     assert_eq!(again, Err(OpenRefused::Collision));
 }
 
@@ -93,7 +73,6 @@ fn red_a_session_is_unknown_to_every_other_principal_and_credential() {
         !t.close(&id, &owner("mallory"), 1),
         "a foreign DELETE ends nothing"
     );
-    assert!(!t.mark_initialized(&id, &owner("mallory"), 1));
     assert_eq!(t.open_stream(&id, &owner("mallory"), 1), None);
     let stream = t.open_stream(&id, &owner("alice"), 1).unwrap();
     assert_eq!(t.push(&id, &owner("mallory"), stream, "x", 1), None);
@@ -103,7 +82,6 @@ fn red_a_session_is_unknown_to_every_other_principal_and_credential() {
         None,
         "a foreign resume reads nothing"
     );
-    assert!(!t.is_initialized(&id, &owner("mallory"), 1));
     // ...and the owner's session survived every one of those.
     assert!(t.close(&id, &owner("alice"), 2));
     assert_eq!(t.revision(&id, &owner("alice"), 3), None);
@@ -118,7 +96,7 @@ fn red_the_session_count_is_bounded_and_evicts_least_recently_used() {
     // Touch `a`, so `b` is now the least recently used.
     assert!(t.revision(&a, &owner("p"), 3).is_some());
     let d = open(&mut t, 4, "p", 4);
-    assert_eq!(t.len(), 3);
+    assert_eq!(t.sessions.len(), 3);
     assert!(
         t.revision(&b, &owner("p"), 5).is_none(),
         "b was LRU and is gone"
@@ -128,7 +106,7 @@ fn red_the_session_count_is_bounded_and_evicts_least_recently_used() {
     }
     for n in 10..100 {
         open(&mut t, n, "p", 6);
-        assert!(t.len() <= 3);
+        assert!(t.sessions.len() <= 3);
     }
 }
 
@@ -137,17 +115,14 @@ fn red_a_sessions_buffer_is_bounded_in_bytes_oldest_first() {
     let mut t = small(10, 400, 1 << 30);
     let id = open(&mut t, 1, "p", 0);
     let s = t.open_stream(&id, &owner("p"), 0).unwrap();
-    let base = t.total_bytes();
+    let base = t.total_bytes;
     let mut ids = Vec::new();
     for i in 0..50 {
         ids.push(
             t.push(&id, &owner("p"), s, &format!("{i:0>60}"), 0)
                 .unwrap(),
         );
-        assert!(
-            t.total_bytes() - base <= 400,
-            "session buffer over its bound"
-        );
+        assert!(t.total_bytes - base <= 400, "session buffer over its bound");
     }
     // The newest events survive; the oldest were trimmed and the replay says it is not whole.
     let r = t.replay(&id, &owner("p"), &ids[0], 0).unwrap();
@@ -166,16 +141,16 @@ fn red_the_whole_table_is_bounded_in_bytes() {
         let id = open(&mut t, n, "p", n);
         let s = t.open_stream(&id, &owner("p"), n).unwrap();
         t.push(&id, &owner("p"), s, &"x".repeat(300), n).unwrap();
-        assert!(t.total_bytes() <= total, "table over its bound at {n}");
+        assert!(t.total_bytes <= total, "table over its bound at {n}");
     }
-    assert!(t.len() < 200, "sessions were evicted to fit");
+    assert!(t.sessions.len() < 200, "sessions were evicted to fit");
     // Even one session writing more than the whole table holds stays under it.
     let mut t = small(10, 1 << 20, total);
     let id = open(&mut t, 1, "p", 0);
     let s = t.open_stream(&id, &owner("p"), 0).unwrap();
     for _ in 0..100 {
         t.push(&id, &owner("p"), s, &"y".repeat(500), 0).unwrap();
-        assert!(t.total_bytes() <= total);
+        assert!(t.total_bytes <= total);
     }
 }
 
@@ -191,8 +166,8 @@ fn red_the_byte_account_returns_to_zero() {
         }
     }
     t.sweep(u64::MAX);
-    assert!(t.is_empty());
-    assert_eq!(t.total_bytes(), 0, "every byte charged was given back");
+    assert!(t.sessions.is_empty());
+    assert_eq!(t.total_bytes, 0, "every byte charged was given back");
 }
 
 #[test]
@@ -205,7 +180,7 @@ fn an_idle_session_expires() {
         "the lookup refreshed it"
     );
     assert!(t.revision(&id, &owner("p"), 2_998).is_none());
-    assert_eq!(t.total_bytes(), 0);
+    assert_eq!(t.total_bytes, 0);
 }
 
 #[test]
@@ -228,30 +203,22 @@ fn the_stream_count_is_bounded_and_a_cursor_never_crosses_to_another_stream() {
 }
 
 #[test]
-fn only_a_well_formed_id_prefix_is_ever_logged() {
-    assert_eq!(log_prefix("0123456789abcdef0123456789abcdef"), "01234567");
-    assert_eq!(log_prefix("short"), "");
-    assert_eq!(log_prefix("zz23456789abcdef0123456789abcdef"), "");
-}
-
-#[test]
 fn red_the_upstream_memory_is_bounded() {
     let mut u = UpstreamTable::new(3, 2_000);
     let r = |s: &str| Remembered {
         revision: Revision::R2025_06_18,
         session: Some(s.to_string()),
-        message_address: None,
     };
     u.put("a", r("1"));
     u.put("b", r("2"));
     u.put("c", r("3"));
     assert!(u.get("a").is_some());
     u.put("d", r("4"));
-    assert_eq!(u.len(), 3);
+    assert_eq!(u.entries.len(), 3);
     assert!(u.get("b").is_none(), "b was least recently used");
     for n in 0..100 {
         u.put(&format!("k{n}"), r(&"s".repeat(300)));
-        assert!(u.len() <= 3 && u.bytes() <= 2_000);
+        assert!(u.entries.len() <= 3 && u.bytes <= 2_000);
     }
     u.put("huge", r(&"s".repeat(5_000)));
     assert!(
@@ -261,7 +228,7 @@ fn red_the_upstream_memory_is_bounded() {
     for k in ["k97", "k98", "k99"] {
         u.forget(k);
     }
-    assert_eq!(u.bytes(), 0);
+    assert_eq!(u.bytes, 0);
 }
 
 fn quotas(
@@ -307,14 +274,8 @@ fn red_an_owner_filling_its_cap_never_evicts_another_owners_session() {
     );
     // Fill the table with other owners; a newcomer with nothing of its own is refused.
     open(&mut t, 200, "carol", 61);
-    assert_eq!(t.len(), 4);
-    let refused = t.open(
-        entropy(300),
-        owner("dave"),
-        Revision::R2025_11_25,
-        Carriage::Endpoint,
-        62,
-    );
+    assert_eq!(t.sessions.len(), 4);
+    let refused = t.open(entropy(300), owner("dave"), Revision::R2025_11_25, 62);
     assert_eq!(refused, Err(OpenRefused::Full));
     assert!(
         t.revision(&b, &owner("bob"), 63).is_some(),
@@ -338,7 +299,7 @@ fn red_an_owners_byte_pressure_never_costs_another_owner_a_stream() {
             t.owner_bytes(&owner("alice")) <= 3_000,
             "alice over her share at {n}"
         );
-        assert!(t.total_bytes() <= 6_000);
+        assert!(t.total_bytes <= 6_000);
     }
     let r = t
         .replay(&b, &owner("bob"), "0-0", 50)
@@ -363,14 +324,13 @@ fn red_a_trim_that_frees_more_than_the_push_cost_gives_the_difference_back() {
         base + 10 + EVENT_OVERHEAD,
         "the large event was trimmed and only the small one is charged"
     );
-    assert_eq!(t.total_bytes(), t.owner_bytes(&owner("p")));
+    assert_eq!(t.total_bytes, t.owner_bytes(&owner("p")));
 }
 
 fn in_session(s: &str) -> Remembered {
     Remembered {
         revision: Revision::R2025_06_18,
         session: Some(s.to_string()),
-        message_address: None,
     }
 }
 
@@ -404,9 +364,9 @@ fn red_two_callers_of_one_member_never_share_a_session() {
     assert_ne!(upstream_key("f", "s\u{1f}x"), upstream_key("fs", "x"));
 }
 
-/// EVERY REQUEST IN A SESSION TAKES ITS OWN ID (row 159 finding 3): the session's numbering never
-/// repeats while the session is remembered, survives the session being remembered again, and
-/// starts over for a new session; a stateless memory numbers nothing. RED: a shared round id.
+/// EVERY REQUEST IN A SESSION TAKES ITS OWN ID: the numbering never repeats
+/// while the session is remembered and survives the session being remembered again; a stateless
+/// memory numbers nothing. RED: a shared round id.
 #[test]
 fn red_every_request_in_a_session_takes_its_own_id() {
     let mut u = UpstreamTable::new(16, 1 << 16);
@@ -423,9 +383,9 @@ fn red_every_request_in_a_session_takes_its_own_id() {
         !distinct.contains(&next),
         "the same session reissued id {next}"
     );
-    // A new session starts its own numbering.
+    // A new session numbers on from the instance's counter.
     u.put(&k, in_session("s2"));
-    assert_eq!(u.next_id(&k), Some(SESSION_FIRST_ID));
+    assert!(u.next_id(&k).is_some_and(|id| id > next));
     // A stateless upstream has no session to number.
     let s = upstream_key("st", "alice");
     u.put(
@@ -433,10 +393,107 @@ fn red_every_request_in_a_session_takes_its_own_id() {
         Remembered {
             revision: Revision::R2026_07_28,
             session: None,
-            message_address: None,
         },
     );
     assert_eq!(u.next_id(&s), None);
     u.forget(&k);
     assert_eq!(u.next_id(&k), None);
+}
+
+/// NO ID IS ISSUED TWICE BY AN INSTANCE, whatever becomes of its memory: a remembered session
+/// evicted and remembered again, one forgotten and opened anew, and the id a call carried into a
+/// session the upstream then forgot (a `404` re-initialize keeps it for the new session) are all
+/// numbered from one counter that only goes up. RED: each session counted from the first id
+/// again, so the re-put session and the re-initialized one reissued ids already in flight.
+#[test]
+fn red_no_id_is_issued_twice_whatever_becomes_of_the_memory() {
+    let mut u = UpstreamTable::new(1, 1 << 16);
+    let k = upstream_key("fs", "alice");
+    let mut issued = std::collections::BTreeSet::new();
+    let take = |u: &mut UpstreamTable, issued: &mut std::collections::BTreeSet<u64>, n: usize| {
+        for _ in 0..n {
+            let id = u.next_id(&k).expect("a session is remembered");
+            assert!(issued.insert(id), "id {id} was issued twice");
+        }
+    };
+    u.put(&k, in_session("s1"));
+    take(&mut u, &mut issued, 3);
+    // Another upstream evicts it (the table holds one), and a finishing call remembers it again.
+    u.put(&upstream_key("other", "bob"), in_session("o1"));
+    assert_eq!(u.next_id(&k), None, "evicted");
+    u.put(&k, in_session("s1"));
+    take(&mut u, &mut issued, 3);
+    // The upstream forgot it (`404`): the call keeps the id it took, and the new session numbers on.
+    let carried = u.next_id(&k).expect("an id");
+    assert!(issued.insert(carried));
+    u.forget(&k);
+    u.put(&k, in_session("s2"));
+    take(&mut u, &mut issued, 3);
+    // The stateless counter draws from the same numbering.
+    let drawn = u.take_id();
+    assert!(issued.insert(drawn), "id {drawn} was issued twice");
+}
+
+/// RED: LIVE WORK IS NEVER EVICTED. An owner at its session cap whose every session holds a live
+/// stream is refused its next open ([`OpenRefused::OwnerFull`]) rather than losing one; with one of
+/// them idle, that one gives way. A session at its cursor cap whose every cursor a live stream
+/// reads refuses the next stream rather than dropping the oldest; a cursor no stream reads any
+/// more gives way. RED: the open evicted the least recently used session, live stream and all, and
+/// the seventeenth stream dropped the first one's cursor.
+#[test]
+fn red_a_session_or_cursor_a_live_stream_reads_is_never_evicted() {
+    let mut t = quotas(100, 2, usize::MAX, usize::MAX);
+    let a = open(&mut t, 1, "alice", 0);
+    let b = open(&mut t, 2, "alice", 1);
+    let sa = t.open_stream(&a, &owner("alice"), 2).unwrap();
+    let sb = t.open_stream(&b, &owner("alice"), 3).unwrap();
+    assert!(t.hold_stream(&a, sa) && t.hold_stream(&b, sb));
+    let refused = t.open(entropy(3), owner("alice"), Revision::R2025_11_25, 4);
+    assert_eq!(refused, Err(OpenRefused::OwnerFull));
+    assert!(
+        t.revision(&a, &owner("alice"), 5).is_some(),
+        "a's live stream survives"
+    );
+    assert!(
+        t.revision(&b, &owner("alice"), 5).is_some(),
+        "b's live stream survives"
+    );
+    // b's stream ends: b is idle, and gives way.
+    t.release_stream(&b, sb);
+    open(&mut t, 4, "alice", 6);
+    assert!(
+        t.revision(&a, &owner("alice"), 7).is_some(),
+        "the live session stays"
+    );
+    assert!(
+        t.revision(&b, &owner("alice"), 7).is_none(),
+        "the idle one gave way"
+    );
+
+    // The cursor cap (4 here): every cursor live refuses the fifth.
+    let s = open(&mut t, 5, "bob", 8);
+    let cursors: Vec<u32> = (0..4)
+        .map(|_| t.open_stream(&s, &owner("bob"), 9).unwrap())
+        .collect();
+    for c in &cursors {
+        assert!(t.hold_stream(&s, *c));
+    }
+    let first = t.push(&s, &owner("bob"), cursors[0], "kept", 10).unwrap();
+    assert_eq!(
+        t.open_stream(&s, &owner("bob"), 11),
+        None,
+        "refused at the cap"
+    );
+    let r = t.replay(&s, &owner("bob"), &format!("{}-0", cursors[0]), 12);
+    assert_eq!(
+        r.map(|r| r.events),
+        Some(vec![(first, "kept".to_string())]),
+        "the first stream's cursor survives"
+    );
+    // The first stream ends: its cursor gives way to the next.
+    t.release_stream(&s, cursors[0]);
+    assert!(t.open_stream(&s, &owner("bob"), 13).is_some());
+    assert!(t
+        .replay(&s, &owner("bob"), &format!("{}-0", cursors[0]), 14)
+        .is_none());
 }

@@ -79,7 +79,7 @@ version = "1.6.0"
 dependencies = [
  "base64",
  "busbar-contract",
- "bytes",
+ "busbar-plugin-loader",
  "indexmap",
  "serde",
  "serde_json",

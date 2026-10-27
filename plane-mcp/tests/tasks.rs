@@ -18,12 +18,25 @@
 //! is kept in the host's records whole or refused in words (P-M6); a caller cannot drive its own
 //! task's continuation on the task-run claim (P-M9); and a create settles every page of its
 //! caller's left-behind tasks (C-L10).
+//!
+//! This suite drives the door over its C ABI with a host it stands up itself, so it needs
+//! `unsafe`, and it reaches the crate through `door` alone (the crate's only public item). The
+//! door facts it needs are `tests/support/door_facts.rs`, pinned to the crate's own items in
+//! `src/tests/door_facts_tests.rs`.
+//! Its two pure checks of a task's own answers (C-H1) read crate functions and moved to
+//! `src/tests/door_facts_tests.rs`.
 
 #![allow(unsafe_code)]
 
+// The door's private constants these tests need, restated and held to the crate's own items by the
+// crate's unit test `door_facts_tests`. Each test binary reads only some of them.
+#[path = "support/door_facts.rs"]
+#[allow(dead_code)]
+mod door_facts;
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::os::raw::c_void;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use busbar_contract::abi::host::conn::connector::{
@@ -31,9 +44,10 @@ use busbar_contract::abi::host::conn::connector::{
     REPLY_BODY, REPLY_END, REPLY_HEAD, REQUEST_BODY, REQUEST_HEAD, SERVICES as CONN_SERVICES,
 };
 use busbar_contract::abi::host::service::{
-    ClockNowIn, HostSlots, ItemSpan, RandomFillIn, RecordsClaimIn, RecordsListIn, ServiceOut,
-    SignIn, UnitNestIn, WorkFindIn, WorkOpenIn, WorkResumeIn, WorkSettleIn, CLAIM_TAKEN, CLAIM_WON,
-    DISTRUST_NONE, ENTITLED, SERVICES as HOST_SERVICES, TRUST_NEW, WORK_LIVE, WORK_SETTLED,
+    ClockNowIn, EntitlementCheckIn, HostSlots, ItemSpan, RandomFillIn, RecordsClaimIn,
+    RecordsListIn, ServiceOut, SignIn, UnitNestIn, WorkFindIn, WorkOpenIn, WorkResumeIn,
+    WorkSettleIn, CLAIM_TAKEN, CLAIM_WON, DISTRUST_NONE, ENTITLED, NOT_ENTITLED,
+    SERVICES as HOST_SERVICES, TRUST_NEW, WORK_LIVE, WORK_SETTLED,
 };
 use busbar_contract::abi::mechanism::call::{
     AbiStr, Blob, Field, InHead, OutHead, Outcome, RawOutcome, Span, BLOB_OCTETS,
@@ -47,8 +61,7 @@ use busbar_contract::abi::plane::{
     PIECE_HAS_STATUS, PIECE_LAST, RECORD_PUT,
 };
 use busbar_contract::abi::transport::FrameSpan;
-use busbar_plane_mcp::tool_tasks::{index_key, TaskLease, WorkRow};
-use busbar_plane_mcp::{codec, door, tool_claims, tool_door, tool_tasks};
+use busbar_plane_mcp::door;
 use serde_json::{json, Value};
 
 // ── the host's services ─────────────────────────────────────────────────────────────────────────
@@ -62,6 +75,8 @@ fn answer(out: *mut ServiceOut, outcome: Outcome, value: u64, len: u64, items: u
             value,
             len,
             items,
+            needed_bytes: 0,
+            needed_items: 0,
             ..ServiceOut::ZERO
         });
     }
@@ -78,20 +93,20 @@ fn refused(out: *mut ServiceOut) -> RawOutcome {
 
 /// The bytes an `AbiStr` names (none for an absent one).
 fn str_bytes(s: AbiStr) -> Vec<u8> {
-    if s.ptr.is_null() || s.len == 0 {
+    if s.is_absent() || s.is_empty() {
         return Vec::new();
     }
     // SAFETY: the SDK's text, live for the call.
-    unsafe { std::slice::from_raw_parts(s.ptr, s.len) }.to_vec()
+    unsafe { std::slice::from_raw_parts(s.ptr(), s.len()) }.to_vec()
 }
 
 /// The bytes a `Blob` names.
 fn blob_bytes(b: Blob) -> Vec<u8> {
-    if b.ptr.is_null() || b.len == 0 {
+    if b.ptr().is_null() || b.is_empty() {
         return Vec::new();
     }
     // SAFETY: the SDK's bytes, live for the call.
-    unsafe { std::slice::from_raw_parts(b.ptr, b.len) }.to_vec()
+    unsafe { std::slice::from_raw_parts(b.ptr(), b.len()) }.to_vec()
 }
 
 fn span(offset: usize, len: usize) -> Span {
@@ -121,7 +136,21 @@ extern "C" fn clock_now(_: HostCtx, input: *const c_void, out: *mut ServiceOut) 
     ready(out, 0, 0, 0)
 }
 
-extern "C" fn entitled(_: HostCtx, _: *const c_void, out: *mut ServiceOut) -> RawOutcome {
+/// THE CALLER'S GRANT IS NARROW: while set, the kernel's entitlement answers say the caller holds
+/// no wildcard tool grant (`mcp_tool:`, the door's `SCOPE_TOOL` kind with no name) and is not
+/// granted `tx_write_file`; every other target is entitled.
+static NARROW: AtomicBool = AtomicBool::new(false);
+
+/// The targets a narrow grant does not hold.
+const NOT_GRANTED: [&str; 2] = ["mcp_tool:", "mcp_tool:tx_write_file"];
+
+extern "C" fn entitled(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
+    // SAFETY: the SDK hands an `EntitlementCheckIn` naming its live target.
+    let i = unsafe { input.cast::<EntitlementCheckIn>().read() };
+    let target = String::from_utf8_lossy(&str_bytes(i.target)).into_owned();
+    if NARROW.load(Ordering::SeqCst) && NOT_GRANTED.contains(&target.as_str()) {
+        return ready(out, NOT_ENTITLED, 0, 0);
+    }
     ready(out, ENTITLED, 0, 0)
 }
 
@@ -186,6 +215,8 @@ struct Book {
     claims: HashSet<(Vec<u8>, Vec<u8>)>,
     /// The plane's records of the task kind, by key.
     records: BTreeMap<Vec<u8>, Vec<u8>>,
+    /// How many of the next settles fail (the host could not take them at once).
+    fail_settles: u32,
 }
 
 static BOOK: Mutex<Option<Book>> = Mutex::new(None);
@@ -289,6 +320,14 @@ extern "C" fn work_settle(_: HostCtx, input: *const c_void, out: *mut ServiceOut
     // SAFETY: the SDK hands a `WorkSettleIn`.
     let i = unsafe { input.cast::<WorkSettleIn>().read() };
     let record = blob_bytes(i.record);
+    let failed = with_book(|b| {
+        let fail = b.fail_settles > 0;
+        b.fail_settles = b.fail_settles.saturating_sub(1);
+        fail
+    });
+    if failed {
+        return answer(out, Outcome::Failed, 0, 0, 0);
+    }
     let landed = with_book(|b| match b.works.get_mut(&i.handle) {
         Some(w) if w.live => {
             w.live = false;
@@ -356,6 +395,9 @@ extern "C" fn records_list(_: HostCtx, input: *const c_void, out: *mut ServiceOu
                 outcome: RawOutcome::of(Outcome::Failed),
                 needed_bytes: bytes as u64,
                 needed_items: rows.len() as u64,
+                value: 0,
+                len: 0,
+                items: 0,
                 ..ServiceOut::ZERO
             });
         }
@@ -468,7 +510,10 @@ fn json_head() -> Vec<(String, String)> {
 fn upstream_answer(url: &str, fields: &[(String, String)], body: &Value) -> Reply {
     let id = body.get("id").cloned().unwrap_or(Value::Null);
     let method = body.get("method").and_then(Value::as_str).unwrap_or("");
-    let tools = json!({"tools": [{"name": "read_file", "inputSchema": {"type": "object"}}]});
+    let tools = json!({"tools": [
+        {"name": "read_file", "inputSchema": {"type": "object"}},
+        {"name": "write_file", "inputSchema": {"type": "object"}},
+    ]});
     if !url.starts_with(SESSION_URL) {
         return match method {
             "tools/list" => (200, json_head(), rpc_result(&id, tools)),
@@ -513,7 +558,7 @@ extern "C" fn establish(_: HostCtx, input: *const c_void, out: *mut ServiceOut) 
     // SAFETY: the SDK hands an `EstablishIn`.
     let i = unsafe { input.cast::<EstablishIn>().read() };
     // SAFETY: the SDK's target text, live for the call.
-    let url = unsafe { std::slice::from_raw_parts(i.target.ptr, i.target.len) };
+    let url = unsafe { std::slice::from_raw_parts(i.target.ptr(), i.target.len()) };
     let url = String::from_utf8_lossy(url).into_owned();
     let mut ups = upstreams();
     let ups = ups.get_or_insert_with(Upstreams::default);
@@ -683,6 +728,7 @@ fn fresh() -> MutexGuard<'static, ()> {
     let serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
     *book() = Some(Book::default());
     *upstreams() = Some(Upstreams::default());
+    NARROW.store(false, Ordering::SeqCst);
     serial
 }
 
@@ -694,19 +740,13 @@ fn z<T>() -> T {
 }
 
 fn str_of(s: &str) -> AbiStr {
-    AbiStr {
-        ptr: s.as_ptr(),
-        len: s.len(),
-    }
+    // SAFETY: the test's own bytes, which outlive the call each `in` is built for.
+    unsafe { AbiStr::from_raw_parts(s.as_ptr(), s.len()) }
 }
 
 fn octets(b: &[u8]) -> Blob {
-    Blob {
-        ptr: b.as_ptr(),
-        len: b.len(),
-        fmt: BLOB_OCTETS,
-        flags: 0,
-    }
+    // SAFETY: the test's own bytes, which outlive the call each `in` is built for.
+    unsafe { Blob::from_raw_parts(b.as_ptr(), b.len(), BLOB_OCTETS, 0) }
 }
 
 fn head<T>(op: u32, ticket: Ticket) -> InHead {
@@ -727,7 +767,7 @@ fn out_head<T>() -> OutHead {
 
 fn ops() -> &'static Ops {
     // SAFETY: the door is a `'static` table whose ops are the plane kind's.
-    unsafe { &*(*tool_door::door()).ops().cast::<Ops>() }
+    unsafe { &*door().ops().cast::<Ops>() }
 }
 
 fn lifecycle() -> &'static OpsHead {
@@ -756,11 +796,15 @@ fn open_on(tables: &'static Tables, section: &Value) -> Door {
         ..z()
     };
     let f = lifecycle().open.expect("the door opens");
-    let ret = f(
-        std::ptr::null_mut(),
-        std::ptr::from_ref(&i).cast(),
-        std::ptr::from_mut(&mut o).cast(),
-    );
+    // SAFETY: the slot is the door's own, called with an in and an out of the types it declares.
+    #[allow(unused_unsafe)]
+    let ret = unsafe {
+        f(
+            std::ptr::null_mut(),
+            std::ptr::from_ref(&i).cast(),
+            std::ptr::from_mut(&mut o).cast(),
+        )
+    };
     assert_eq!(ret.outcome(), Outcome::Ready, "the door opens");
     Door {
         instance: o.open.instance,
@@ -777,11 +821,73 @@ struct Arrived {
     outcome: Outcome,
 }
 
+/// The header fields a client mirrors from a JSON-RPC body (the plane's `codec::mirrored`, pinned to
+/// it in `src/tests/door_facts_tests.rs`): `accept`, the method, the name it names, the revision.
+fn mirrored(value: &Value) -> Vec<(String, String)> {
+    fn sentinel(name: &str) -> String {
+        use base64::Engine as _;
+        if name
+            .bytes()
+            .all(|b| b.is_ascii_graphic() && b != b'=' && b != b'?')
+        {
+            return name.to_string();
+        }
+        format!(
+            "=?base64?{}?=",
+            base64::engine::general_purpose::STANDARD.encode(name)
+        )
+    }
+    let mut out = Vec::new();
+    let meta = value.get("params").and_then(|p| p.get("_meta"));
+    let wants_stream = meta.is_some_and(|m| {
+        m.get("io.busbar/loggingLevel").is_some()
+            || m.get("progressToken").is_some_and(|t| !t.is_null())
+    });
+    out.push((
+        "accept".to_string(),
+        if wants_stream {
+            "text/event-stream, application/json"
+        } else {
+            "application/json, text/event-stream"
+        }
+        .to_string(),
+    ));
+    if let Some(method) = value.get("method").and_then(Value::as_str) {
+        out.push(("mcp-method".to_string(), sentinel(method)));
+        let source = match method {
+            "tools/call" | "prompts/get" => Some("name"),
+            "resources/read" => Some("uri"),
+            "tasks/get" | "tasks/update" | "tasks/cancel" => Some("taskId"),
+            _ => None,
+        };
+        if let Some(name) = source
+            .and_then(|s| value.get("params").and_then(|p| p.get(s)))
+            .and_then(Value::as_str)
+        {
+            out.push(("mcp-name".to_string(), sentinel(name)));
+        }
+    }
+    if let Some(version) = meta
+        .and_then(|m| m.get("io.modelcontextprotocol/protocolVersion"))
+        .and_then(Value::as_str)
+        .filter(|v| !v.is_empty())
+    {
+        out.push(("mcp-protocol-version".to_string(), version.to_string()));
+    }
+    out
+}
+
+/// The key of task `id`'s index row under `principal` (the plane's `tool_tasks::index_key`).
+fn index_key(principal: &str, id: &str) -> Vec<u8> {
+    let owner = busbar_contract::redacted::sha256_hex(principal.as_bytes());
+    format!("o/{}/{id}", &owner[..32]).into_bytes()
+}
+
 /// The index of the claim `verb` `target` on the HTTP carrier.
 fn claim(verb: &str, target: &str) -> u32 {
-    let i = door::ROUTES
+    let i = door_facts::ROUTES
         .iter()
-        .position(|r| r.verb == verb && r.target == target && r.carrier == "http")
+        .position(|&(v, t, c)| v == verb && t == target && c == "http")
         .expect("the door routes it");
     u32::try_from(i).unwrap()
 }
@@ -866,7 +972,7 @@ impl Answered {
 impl Door {
     fn arrive_on(&self, unit: u64, claim: u32, target: &str, body: &[u8]) -> Arrived {
         let value: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
-        let mirrored = codec::mirrored(&value);
+        let mirrored = mirrored(&value);
         let fields: Vec<Field> = mirrored
             .iter()
             .map(|(n, v)| Field {
@@ -887,11 +993,15 @@ impl Door {
         let mut o: ArriveOut = z();
         o.head = out_head::<ArriveOut>();
         let f = ops().arrive.expect("arrive");
-        let ret = f(
-            self.instance,
-            std::ptr::from_ref(&i).cast(),
-            std::ptr::from_mut(&mut o).cast(),
-        );
+        // SAFETY: the slot is the door's own, called with an in and an out of the types it declares.
+        #[allow(unused_unsafe)]
+        let ret = unsafe {
+            f(
+                self.instance,
+                std::ptr::from_ref(&i).cast(),
+                std::ptr::from_mut(&mut o).cast(),
+            )
+        };
         Arrived {
             outcome: ret.outcome(),
         }
@@ -907,8 +1017,8 @@ impl Door {
     fn arrive_run(&self, unit: u64, body: &[u8]) -> Arrived {
         self.arrive_on(
             unit,
-            u32::try_from(door::TASK_RUN_ROUTE).unwrap(),
-            tool_claims::TASK_RUN_MOUNT,
+            u32::try_from(door_facts::TASK_RUN_ROUTE).unwrap(),
+            door_facts::TASK_RUN_MOUNT,
             body,
         )
     }
@@ -959,11 +1069,15 @@ impl Door {
             let mut o: OnPieceOut = z();
             o.head = out_head::<OnPieceOut>();
             let f = ops().on_piece.expect("on_piece");
-            let ret = f(
-                self.instance,
-                std::ptr::from_ref(&i).cast(),
-                std::ptr::from_mut(&mut o).cast(),
-            );
+            // SAFETY: the slot is the door's own, called with an in and an out of the types it declares.
+            #[allow(unused_unsafe)]
+            let ret = unsafe {
+                f(
+                    self.instance,
+                    std::ptr::from_ref(&i).cast(),
+                    std::ptr::from_mut(&mut o).cast(),
+                )
+            };
             first = false;
             if o.reply_status != 0 {
                 got.status = o.reply_status;
@@ -980,7 +1094,7 @@ impl Door {
             );
             let writes: Vec<(Vec<u8>, Vec<u8>)> = records[..o.records_written as usize]
                 .iter()
-                .filter(|r| r.op == RECORD_PUT && r.kind == door::RECORD_TASK)
+                .filter(|r| r.op == RECORD_PUT && r.kind == door_facts::RECORD_TASK)
                 .map(|r| (bytes_at(r.key), bytes_at(r.value)))
                 .collect();
             with_book(|b| {
@@ -1000,6 +1114,60 @@ impl Door {
             }
         }
         got
+    }
+
+    /// The kernel REFUSES unit `unit` (its walk reached no member) in `text`, as it ends a unit it
+    /// cannot carry: the door's `refusal`. Every record write of the task kind it carries is applied
+    /// to the host's records.
+    fn refuse(&self, unit: u64, text: &str) -> Outcome {
+        use busbar_contract::abi::plane::{RefusalCode, RefusalIn, RefusalOut, REFUSAL_KERNEL};
+        let ticket = Ticket {
+            slot: u32::try_from(unit).unwrap(),
+            generation: 1,
+        };
+        let mut reply = vec![0_u8; 1 << 12];
+        let mut fields = [z::<OutField>(); 8];
+        let mut arena = vec![0_u8; 1 << 20];
+        let mut records = vec![z::<RecordWrite>(); 2048];
+        let mut i: RefusalIn = z();
+        i.head = head::<RefusalIn>(slot::REFUSAL, ticket);
+        i.cause = REFUSAL_KERNEL;
+        i.status = 502;
+        i.reason = RefusalCode::NoDestination.code();
+        i.unit = unit;
+        i.text = str_of(text);
+        i.target = str_of(door_facts::TASK_RUN_MOUNT);
+        (i.reply_buf, i.reply_cap) = (reply.as_mut_ptr(), reply.len());
+        (i.fields_buf, i.fields_cap) = (fields.as_mut_ptr(), fields.len());
+        (i.arena_buf, i.arena_cap) = (arena.as_mut_ptr(), arena.len());
+        (i.records_buf, i.records_cap) = (records.as_mut_ptr(), records.len());
+        let mut o: RefusalOut = z();
+        o.head = out_head::<RefusalOut>();
+        let f = ops().refusal.expect("refusal");
+        let ret = f(
+            self.instance,
+            std::ptr::from_ref(&i).cast(),
+            std::ptr::from_mut(&mut o).cast(),
+        );
+        let bytes_at = |s: Span| {
+            let from = s.offset as usize;
+            arena[from..from + s.len as usize].to_vec()
+        };
+        let writes: Vec<(Vec<u8>, Vec<u8>)> = records[..o.records_written as usize]
+            .iter()
+            .filter(|r| r.op == RECORD_PUT && r.kind == door_facts::RECORD_TASK)
+            .map(|r| (bytes_at(r.key), bytes_at(r.value)))
+            .collect();
+        with_book(|b| {
+            for (k, v) in writes {
+                if v.is_empty() {
+                    b.records.remove(&k);
+                } else {
+                    b.records.insert(k, v);
+                }
+            }
+        });
+        ret.outcome()
     }
 }
 
@@ -1112,18 +1280,23 @@ fn get(d: &Door, unit: u64, task: &str) -> Answered {
 /// C-H2 [HIGH]: a task's call to a `token_exchange:` member states the CALLER's down-scope, as the
 /// synchronous call does (ARCHITECT round 5 Q-L3B-EXCHANGE (B), tools_config.rs `TokenExchangeCfg`:
 /// the scope is derived from the inbound caller's grant, never left for the member's whole set —
-/// the transitive confused deputy).
+/// the transitive confused deputy). The member serves two tools and the caller is granted one of
+/// them (no wildcard), so the caller's scope and the member's whole set differ.
 #[test]
 fn a_tasks_call_to_an_exchanging_member_carries_the_callers_down_scope() {
     let _serial = fresh();
-    let d = open(&section());
+    let mut s = section();
+    s["tx"]["tools_allow"]["write_file"] = json!({"task_support": "required"});
+    let d = open(&s);
     create(&d, 1, "tx", "tx_read_file");
+    NARROW.store(true, Ordering::SeqCst);
     let sent = run(&d, 2, "tx", &last_nested());
     assert!(sent.far, "the call goes to the member: {}", sent.text());
     assert_eq!(
         sent.field(busbar_contract::abi::auth::SCOPE_REQUEST_FIELD),
         Some("tx_read_file"),
-        "the task's call states the caller's down-scope: {:?}",
+        "the task's call states the caller's down-scope, never the member's whole set \
+         (`tx_read_file tx_write_file`): {:?}",
         sent.fields
     );
 }
@@ -1283,6 +1456,143 @@ fn a_tasks_result_is_answered_from_the_host_records_on_another_node() {
     }
 }
 
+// ── a task's terminal state always reaches the host's records ───────────────────────────────────
+
+/// The record the host's settle of task `task` landed with, if one did.
+fn settle_of(task: &str) -> Option<Vec<u8>> {
+    with_book(|b| {
+        let handle = b
+            .works
+            .iter()
+            .find(|(_, w)| w.reference == task)
+            .map(|(h, _)| *h)?;
+        b.settles
+            .iter()
+            .find(|(h, _)| *h == handle)
+            .map(|(_, r)| r.clone())
+    })
+}
+
+/// `read` is `tasks/get`'s answer of a task completed with the tool's `text`.
+fn assert_completed(read: &Answered, text: &str) {
+    assert_eq!(read.status, 200, "{}", read.text());
+    let v = read.json();
+    assert_eq!(v["result"]["status"], json!("completed"), "{v}");
+    assert_eq!(
+        v["result"]["result"]["content"][0]["text"],
+        json!(text),
+        "{v}"
+    );
+}
+
+/// `read` is `tasks/get`'s answer of a task failed in words holding `words`.
+fn assert_failed(read: &Answered, words: &str) {
+    assert_eq!(read.status, 200, "{}", read.text());
+    let v = read.json();
+    assert_eq!(v["result"]["status"], json!("failed"), "{v}");
+    assert!(
+        v["result"]["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains(words)),
+        "failed in words holding {words:?}: {v}"
+    );
+}
+
+/// THE TASK STORE IS HOST RECORDS (BUSBAR-1.6.0.md, the mcp bullet), a settle that does not land at
+/// once: the host fails the continuation's settle, which is owed to the next create's sweep. The
+/// tool's result is in the host's records all the while: answered on this node, on another node
+/// and before the sweep, and after the sweep on a node that started after it all (a restart).
+#[test]
+fn a_tasks_result_reaches_the_host_records_when_its_settle_does_not_land_at_once() {
+    let _serial = fresh();
+    let d = open(&section());
+    let task = create(&d, 1, "st", "st_read_file");
+    let sent = run(&d, 2, "st", &last_nested());
+    assert!(sent.far, "{}", sent.text());
+    with_book(|b| b.fail_settles = 1);
+    d.piece(2, &Given::far(ALICE, 200, &result_of(&sent, "kept")));
+    assert_eq!(settle_of(&task), None, "the host did not take the settle");
+    let other = open(&section());
+    assert_completed(&get(&d, 3, &task), "kept");
+    assert_completed(&get(&other, 4, &task), "kept");
+    create(&d, 5, "st", "st_read_file");
+    let row = settle_of(&task).expect("the owed settle landed at the next create's sweep");
+    assert!(
+        row.starts_with(b"t1|completed|"),
+        "{}",
+        String::from_utf8_lossy(&row)
+    );
+    let restarted = open(&section());
+    assert_completed(&get(&restarted, 7, &task), "kept");
+}
+
+/// An owed settle whose process is gone (a restart before its sweep): the next create of its caller
+/// on another process finds the task left behind and settles it with the result its run reached,
+/// never `cancelled` over it, and the result answers from the host's records.
+#[test]
+fn a_task_whose_owed_settle_outlives_its_process_is_settled_with_its_result() {
+    let _serial = fresh();
+    let d = open(&section());
+    let task = create(&d, 1, "st", "st_read_file");
+    let sent = run(&d, 2, "st", &last_nested());
+    assert!(sent.far, "{}", sent.text());
+    with_book(|b| b.fail_settles = 1);
+    d.piece(2, &Given::far(ALICE, 200, &result_of(&sent, "survives")));
+    assert_eq!(settle_of(&task), None, "the host did not take the settle");
+    let restarted = open(&section());
+    create(&restarted, 3, "st", "st_read_file");
+    let row = settle_of(&task).expect("a create of its caller on another process settles it");
+    assert!(
+        row.starts_with(b"t1|completed|"),
+        "settled with its result, not cancelled: {}",
+        String::from_utf8_lossy(&row)
+    );
+    assert_completed(&get(&restarted, 5, &task), "survives");
+}
+
+/// A continuation the KERNEL REFUSED (its walk reached no member) fails its task, the settle owed
+/// to the next create's sweep: the failure's words are written to the host's records at the
+/// refusal, so another node answers them before the sweep, and a node that started after the sweep
+/// answers them from the settled row, never as a task that does not exist.
+#[test]
+fn a_task_whose_continuation_the_kernel_refused_keeps_its_failure_in_the_host_records() {
+    const WHY: &str = "no member of the pool could be reached";
+    let _serial = fresh();
+    let d = open(&section());
+    let task = create(&d, 1, "st", "st_read_file");
+    let sent = run(&d, 2, "st", &last_nested());
+    assert!(sent.far, "{}", sent.text());
+    assert_eq!(d.refuse(2, WHY), Outcome::Ready);
+    let other = open(&section());
+    assert_failed(&get(&d, 3, &task), WHY);
+    assert_failed(&get(&other, 4, &task), WHY);
+    create(&d, 5, "st", "st_read_file");
+    let row = settle_of(&task).expect("the owed settle landed at the next create's sweep");
+    assert!(
+        row.starts_with(b"t1|failed|"),
+        "{}",
+        String::from_utf8_lossy(&row)
+    );
+    let restarted = open(&section());
+    assert_failed(&get(&restarted, 7, &task), WHY);
+}
+
+/// A SETTLED ROW WHOSE RESULT THE RECORDS DO NOT HOLD is answered `failed` in words, never as
+/// "No task with that `taskId` exists".
+#[test]
+fn a_settled_task_whose_result_is_not_in_the_records_is_failed_in_words() {
+    let _serial = fresh();
+    let reference = format!("{:032x}", 0x5e77_1ed0_u64);
+    with_book(|b| {
+        let handle = open_work(b, reference.clone(), b"t1|completed|1|2|d".to_vec());
+        if let Some(w) = b.works.get_mut(&handle) {
+            w.live = false;
+        }
+    });
+    let d = open(&section());
+    assert_failed(&get(&d, 1, &reference), "not in the host's records");
+}
+
 // ── P-M9: the task-run claim is the kernel's ────────────────────────────────────────────────────
 
 /// P-M9 [MEDIUM]: a caller posting a `resume` to its own task on the task-run claim while the task
@@ -1298,16 +1608,111 @@ fn a_caller_cannot_drive_its_own_tasks_continuation() {
     assert!(sent.far, "the task's one run: {}", sent.text());
     let mut forged: Value = serde_json::from_slice(&nested).unwrap();
     forged["resume"] = json!(7);
+    forged["seal"] = json!(mint_seal(b"not a resume the plane sealed"));
     assert_eq!(forged["taskId"], json!(task));
     let forged = serde_json::to_vec(&forged).unwrap();
-    let arrived = d.arrive_run(3, &forged);
-    let again = arrived.outcome == Outcome::Ready && {
-        d.piece(3, &Given::attempt(ALICE, "st"));
-        d.piece(3, &Given::caller(ALICE, &forged)).far
-    };
+    assert_eq!(
+        d.arrive_run(3, &forged).outcome,
+        Outcome::Ready,
+        "the forged resume is a well-formed arrival: it reaches the seal check"
+    );
+    d.piece(3, &Given::attempt(ALICE, "st"));
+    let served = d.piece(3, &Given::caller(ALICE, &forged));
     assert!(
-        !again,
+        !served.far,
         "a resume the caller posted itself sent the task's call a second time"
+    );
+    assert_eq!(served.status, 400, "{}", served.text());
+}
+
+/// The seal the stand-in signer makes over `data` (key `k`, the signature the data's SHA-256 in
+/// hex), as the plane spells a seal: unpadded base64url of the signature.
+fn mint_seal(data: &[u8]) -> String {
+    use base64::Engine as _;
+    let signature = busbar_contract::redacted::sha256_hex(data);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature.as_bytes())
+}
+
+/// What a resume's seal is made over (the plane's `door_tasks::resume_data`): the principal, the
+/// task, the round and the digest of the call it runs (`tool_tasks::run_digest`).
+fn resume_data(principal: &str, task: &str, round: u64, params: &Value) -> Vec<u8> {
+    let digest = busbar_contract::redacted::sha256_hex(&serde_json::to_vec(params).unwrap());
+    format!("busbar-mcp task resume v1\0{principal}\0{task}\0{round}\0{digest}").into_bytes()
+}
+
+/// A section whose one tool asks its caller one round (`confirm`) inside the task.
+fn confirm_section() -> Value {
+    json!({"st": {
+        "url": "https://up.example/st",
+        "pin": pin(),
+        "verify_ttl": "1h",
+        "tools_allow": {"read_file": {
+            "task_support": "required",
+            "task_ask_caller": [{"confirm": {
+                "method": "elicitation/create",
+                "params": {"message": "go?", "requestedSchema": {"type": "object", "properties": {}}},
+            }}],
+        }},
+    }})
+}
+
+/// THE SEAL AND THE ROUND: the resume a `tasks/update` nests runs the task's call;
+/// the same resume under a forged seal, for the very round that update answered, is served as a
+/// task that does not exist with no call sent (the seal check alone refuses it: the round would
+/// be taken); and a seal the plane's own signer made for a round no update answered runs nothing.
+#[test]
+fn a_resume_runs_only_under_the_planes_seal_for_the_round_an_update_answered() {
+    let _serial = fresh();
+    let d = open(&confirm_section());
+    let task = create(&d, 1, "st", "st_read_file");
+    let parked = run(&d, 2, "st", &last_nested());
+    assert!(
+        !parked.far,
+        "the run asks its caller first: {}",
+        parked.text()
+    );
+    let update = verb(
+        "tasks/update",
+        &task,
+        &json!({"inputResponses": {"confirm": {"action": "accept", "content": {}}}}),
+    );
+    assert_eq!(d.arrive(3, &update).outcome, Outcome::Ready);
+    let acked = d.piece(3, &Given::caller(ALICE, &update));
+    assert_eq!(acked.status, 200, "{}", acked.text());
+    let genuine: Value = serde_json::from_slice(&last_nested()).unwrap();
+    assert_eq!(genuine["resume"], json!(0), "{genuine}");
+    assert_eq!(
+        genuine["seal"],
+        json!(mint_seal(&resume_data(ALICE, &task, 0, &genuine["params"]))),
+        "the test mints the seal as the plane's signer makes it"
+    );
+
+    let mut forged = genuine.clone();
+    forged["seal"] = json!(mint_seal(b"not a resume the plane sealed"));
+    let forged = serde_json::to_vec(&forged).unwrap();
+    assert_eq!(d.arrive_run(4, &forged).outcome, Outcome::Ready);
+    d.piece(4, &Given::attempt(ALICE, "st"));
+    let served = d.piece(4, &Given::caller(ALICE, &forged));
+    assert!(!served.far, "a forged seal sent the task's call");
+    assert_eq!(served.status, 400, "{}", served.text());
+
+    let resumed = run(&d, 5, "st", &serde_json::to_vec(&genuine).unwrap());
+    assert!(
+        resumed.far,
+        "the resume the update nested runs: {}",
+        resumed.text()
+    );
+
+    let mut replayed = genuine.clone();
+    replayed["resume"] = json!(7);
+    replayed["seal"] = json!(mint_seal(&resume_data(ALICE, &task, 7, &genuine["params"])));
+    let replayed = serde_json::to_vec(&replayed).unwrap();
+    assert_eq!(d.arrive_run(6, &replayed).outcome, Outcome::Ready);
+    d.piece(6, &Given::attempt(ALICE, "st"));
+    let again = d.piece(6, &Given::caller(ALICE, &replayed));
+    assert!(
+        !again.far,
+        "a sealed resume for a round no update answered sent the task's call again"
     );
 }
 
@@ -1323,19 +1728,13 @@ fn a_create_settles_every_page_of_its_callers_left_behind_tasks() {
         (0..70u64)
             .map(|n| {
                 let reference = format!("{:032x}", 0x1eff_0000_u64 + n);
-                let row = WorkRow {
-                    status: tool_tasks::Status::Working,
-                    created_ms: 1,
-                    updated_ms: 1,
-                    digest: "d".to_string(),
-                };
-                let lease = TaskLease {
-                    until_ms: 1,
-                    updated_ms: 1,
-                };
-                b.records
-                    .insert(index_key(ALICE, &reference), lease.bytes());
-                open_work(b, reference, row.bytes())
+                // A working task's row (`t1|<status>|<created>|<updated>|<digest>`) and its index
+                // row (`l1|<until>|<updated>`), as the plane writes them (pinned in
+                // `src/tests/door_facts_tests.rs`).
+                let row = b"t1|working|1|1|d".to_vec();
+                let lease = b"l1|1|1".to_vec();
+                b.records.insert(index_key(ALICE, &reference), lease);
+                open_work(b, reference, row)
             })
             .collect()
     });
@@ -1350,56 +1749,72 @@ fn a_create_settles_every_page_of_its_callers_left_behind_tasks() {
     );
 }
 
-// ── C-H1: the answers to a task's own rounds ────────────────────────────────────────────────────
+// ── the kernel's cancel of a running continuation ────────────────────────────────────────────────
 
-/// An ask, built the one way a `CallerAsk` can be built: from an operator-written config entry.
-fn elicitation(key: &str) -> busbar_plane_mcp::ask::CallerAsk {
-    busbar_plane_mcp::ask::CallerAsk::from_config(
-        key,
-        &busbar_plane_mcp::tools_config::AskEntryCfg {
-            method: "elicitation/create".into(),
-            params: Some(json!({})),
-        },
-    )
+impl Door {
+    /// The kernel cancels the continuation running on `unit`'s ticket, lending `records_cap` record
+    /// slots: the outcome, and the audit rows written (action, resource).
+    fn cancel_with(&self, unit: u64, records_cap: usize) -> (Outcome, Vec<(String, String)>) {
+        use busbar_contract::abi::mechanism::lifecycle::CancelIn;
+        use busbar_contract::abi::plane::{PlaneCancelIn, PlaneCancelOut, RECORD_AUDIT};
+        let ticket = Ticket {
+            slot: u32::try_from(unit).unwrap(),
+            generation: 1,
+        };
+        let mut records = vec![z::<RecordWrite>(); records_cap];
+        let mut arena = vec![0_u8; 1 << 12];
+        let i = PlaneCancelIn {
+            cancel: CancelIn {
+                head: head::<PlaneCancelIn>(life::CANCEL, ticket),
+                ticket,
+            },
+            records_buf: records.as_mut_ptr(),
+            records_cap: records.len(),
+            arena_buf: arena.as_mut_ptr(),
+            arena_cap: arena.len(),
+            unit,
+        };
+        let mut o: PlaneCancelOut = z();
+        o.cancel.head = out_head::<PlaneCancelOut>();
+        let f = lifecycle().cancel.expect("cancel");
+        let ret = f(
+            self.instance,
+            std::ptr::from_ref(&i).cast(),
+            std::ptr::from_mut(&mut o).cast(),
+        );
+        let at = |s: Span| {
+            let from = s.offset as usize;
+            String::from_utf8_lossy(&arena[from..from + s.len as usize]).into_owned()
+        };
+        let rows = records[..o.records_written as usize]
+            .iter()
+            .filter(|r| r.op == RECORD_AUDIT)
+            .map(|r| (at(r.key), at(r.value)))
+            .collect();
+        (ret.outcome(), rows)
+    }
 }
 
-/// C-H1 [HIGH]: `tasks/update` keeps only the answers the task's current round asked for. A key
-/// the round did not ask is ignored (SEP-2663: keys the task is not waiting on are not refused), so
-/// an update cannot smuggle a tool argument into the call the task runs (call.rs, the synchronous
-/// rule: "an answer may only supply what was asked for").
+/// RED: THE KERNEL'S CANCEL OF A RUNNING CONTINUATION writes its task's `mcp_task.cancel` audit
+/// row, and rows the host's buffers cannot hold are a FAULT: `cancel` may not pend and is never
+/// re-called, so a short buffer is never answered READY with the row silently lost.
 #[test]
-fn an_update_keeps_only_the_keys_the_round_asked() {
-    let mut t = tool_tasks::Task::new("0123456789abcdef0123456789abcdef", "k", 7, "d1", 1);
-    t.park(vec![elicitation("confirm")], 1);
-    assert!(t.deliver(
-        &serde_json::from_value(json!({"confirm": {"action": "accept"}, "path": "/etc/shadow"}))
-            .unwrap(),
-        2,
-    ));
+fn a_cancel_whose_audit_row_does_not_fit_is_a_fault() {
+    let _serial = fresh();
+    let d = open(&section());
+    create(&d, 1, "st", "st_read_file");
+    let sent = run(&d, 2, "st", &last_nested());
+    assert!(sent.far, "{}", sent.text());
     assert_eq!(
-        t.answers().get("confirm"),
-        Some(&json!({"action": "accept"}))
+        d.cancel_with(2, 0).0,
+        Outcome::Fault,
+        "a cancel row the buffer cannot hold was answered READY and lost"
     );
-    assert!(
-        t.answers().get("path").is_none(),
-        "an answer the round never asked is kept: {:?}",
-        t.answers()
-    );
-    let mut idle = tool_tasks::Task::new("0123456789abcdef0123456789abcdef", "k", 7, "d1", 1);
-    assert!(idle.deliver(&serde_json::from_value(json!({"path": "/x"})).unwrap(), 2));
-    assert!(idle.answers().is_empty(), "{:?}", idle.answers());
-}
 
-/// C-H1 [HIGH]: the answers never rewrite an argument the call was admitted with: the hooks and the
-/// argument guard judged the admitted arguments, and those are the arguments that go out.
-#[test]
-fn an_answer_never_rewrites_an_admitted_argument() {
-    let answers: serde_json::Map<String, Value> =
-        serde_json::from_value(json!({"path": "/etc/shadow", "confirm": {"action": "accept"}}))
-            .unwrap();
-    assert_eq!(
-        tool_tasks::merge_answers(&json!({ "path": "/a" }), &answers),
-        json!({ "path": "/a", "confirm": {"action": "accept"} }),
-        "an answer rewrote an admitted argument"
-    );
+    create(&d, 3, "st", "st_read_file");
+    let sent = run(&d, 4, "st", &last_nested());
+    assert!(sent.far, "{}", sent.text());
+    let (outcome, rows) = d.cancel_with(4, 8);
+    assert_eq!(outcome, Outcome::Ready);
+    assert_eq!(rows.len(), 1, "the task's cancel is audited once: {rows:?}");
 }

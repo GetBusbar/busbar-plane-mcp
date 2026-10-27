@@ -26,6 +26,9 @@
 //! - A SUBSCRIPTION is answered with its acknowledgement and kept on the session: what changes, a
 //!   keepalive and its end are emitted on the session, until the carrier ends.
 
+// The crate's only public item is `door`: the accessors and variants below were this module's public API; the tests hold them, the door does not reach them (BUSBAR-1.6.0.md l.3560).
+#![cfg_attr(not(test), allow(dead_code))]
+
 use serde_json::{json, Map, Value};
 
 use crate::codec::PROTOCOL_VERSION;
@@ -42,9 +45,6 @@ pub const ASK_TIMEOUT_NS: u64 = 30 * 1_000_000_000;
 /// composition that never converges (the per-capability `max_caller_ask_rounds` still applies).
 pub const MAX_LIVE_ASK_ROUNDS: u32 = 8;
 
-/// The JSON-RPC code for a method this carrier does not carry.
-const METHOD_NOT_FOUND: i64 = -32601;
-
 /// One success envelope.
 #[must_use]
 pub fn result(id: &Value, result: Value) -> Value {
@@ -53,11 +53,12 @@ pub fn result(id: &Value, result: Value) -> Value {
 
 /// One method-not-found envelope.
 fn unsupported(id: &Value, message: &str) -> Value {
-    json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "error": { "code": METHOD_NOT_FOUND, "message": message },
-    })
+    busbar_contract::jsonrpc::error_body(
+        id.clone(),
+        crate::codec::CODE_METHOD_NOT_FOUND,
+        message,
+        None,
+    )
 }
 
 /// The `initialize` answer to a client that names no session revision: the stateless revision,
@@ -114,14 +115,6 @@ fn server_info() -> Value {
     })
 }
 
-/// The session revision an `initialize` asks for, when this plane carries it.
-fn requested_revision(value: &Value) -> Option<Revision> {
-    value
-        .pointer("/params/protocolVersion")
-        .and_then(Value::as_str)
-        .and_then(crate::revision::accept_offered)
-}
-
 /// What a stdio-era verb came to.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Era {
@@ -145,7 +138,11 @@ pub fn era(value: &Value) -> Era {
         return Era::Dispatch;
     };
     match method {
-        crate::adapt::METHOD_INITIALIZE => match requested_revision(value) {
+        crate::adapt::METHOD_INITIALIZE => match value
+            .pointer("/params/protocolVersion")
+            .and_then(Value::as_str)
+            .and_then(crate::revision::accept_offered)
+        {
             Some(revision) => Era::Opened(revision, session_initialize_result(id, revision)),
             None => Era::Answer(initialize_result(id)),
         },
@@ -227,31 +224,10 @@ pub fn id_key(id: &Value) -> String {
     }
 }
 
-/// Whether a request already livened `round` times may be livened again.
-#[must_use]
-pub fn may_liven(round: u32) -> bool {
-    round < MAX_LIVE_ASK_ROUNDS
-}
-
-/// Where a live ask stands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AskStand {
-    /// Waiting on the caller's answer to the ask in flight.
-    Waiting,
-    /// Every ask of the round was answered: the retry went on as its own unit.
-    Answered,
-    /// The caller cancelled the request.
-    Cancelled,
-    /// The caller answered an ask with an error (or not at all): it is handed the result itself.
-    Unanswered,
-}
-
 /// ONE LIVE ASK ROUND for one request: the request it continues, the round's asks in order, the
 /// answers so far, the sealed state the retry echoes, and the unit holding the caller's answer.
 #[derive(Debug, Clone)]
 pub struct LiveAsk {
-    /// The principal it was asked under.
-    pub principal: String,
     /// The request as the caller sent it (its id is the caller's).
     pub original: Value,
     /// The `input_required` result itself: what the caller is handed when it does not answer.
@@ -260,33 +236,21 @@ pub struct LiveAsk {
     pub queued: Vec<(String, String, Value)>,
     /// The key of the ask in flight.
     pub current: String,
-    /// The number the ask in flight was issued under (its request id is `busbar:<n>`).
-    pub current_n: u64,
     /// The answers so far, by key.
     pub responses: Map<String, Value>,
     /// The sealed state the retry echoes.
     pub state: String,
     /// The live round this is (`0` = the request's first).
     pub round: u32,
-    /// The carrier session it was asked on.
-    pub session: u64,
     /// When the ask in flight lapses, on the host's monotonic clock.
     pub deadline_ns: u64,
-    /// Where it stands.
-    pub stand: AskStand,
 }
 
 impl LiveAsk {
     /// The round an `input_required` `result` asks of `original`; `None` when the result names no
     /// asks or no state (it is then handed to the caller as it is).
     #[must_use]
-    pub fn of(
-        principal: &str,
-        original: Value,
-        fallback: Vec<u8>,
-        result: &Value,
-        round: u32,
-    ) -> Option<Self> {
+    pub fn of(original: Value, fallback: Vec<u8>, result: &Value, round: u32) -> Option<Self> {
         let requests = result.get("inputRequests")?.as_object()?;
         let state = result.get("requestState")?.as_str()?.to_string();
         let mut queued: Vec<(String, String, Value)> = requests
@@ -304,18 +268,14 @@ impl LiveAsk {
         }
         queued.reverse();
         Some(LiveAsk {
-            principal: principal.to_string(),
             original,
             fallback,
             queued,
             current: String::new(),
-            current_n: 0,
             responses: Map::new(),
             state,
             round,
-            session: 0,
             deadline_ns: 0,
-            stand: AskStand::Waiting,
         })
     }
 
@@ -335,7 +295,6 @@ impl LiveAsk {
     pub fn issue(&mut self, n: u64) -> Option<Vec<u8>> {
         let (key, method, params) = self.queued.pop()?;
         self.current = key;
-        self.current_n = n;
         let mut line = serde_json::to_vec(&json!({
             "jsonrpc": "2.0",
             "id": format!("{ASK_ID_PREFIX}{n}"),

@@ -5,50 +5,10 @@
 //! scan is worth something. (The repeat-the-call determinism tests drove the unserved `Plane` impl
 //! and were retired with it, finding 12.)
 
-use std::path::{Path, PathBuf};
+#[path = "support/source_scan.rs"]
+mod source_scan;
 
-/// The crate's own source directory.
-fn src_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
-}
-
-/// The underscore-spelled module path of every OTHER `busbar-plane-*` crate in the workspace.
-///
-/// Read from the tree rather than typed out one instance at a time: a purity check that hand-lists
-/// its sibling planes is itself an instance-naming leak (and a stale one, the day a new plane is
-/// added and this list is not). Deriving the set from `crates/`'s own directory listing makes the
-/// check exhaustive over every sibling plane there is, present or future, without this crate's own
-/// source spelling a single one of their names.
-fn sibling_plane_crate_paths() -> Vec<String> {
-    let crates_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("crates/<this crate> has a parent");
-    let mut out: Vec<String> = std::fs::read_dir(crates_dir)
-        .expect("the crates directory is readable")
-        .flatten()
-        .filter_map(|e| e.file_name().into_string().ok())
-        .filter(|name| name.starts_with("busbar-plane-") && name != env!("CARGO_PKG_NAME"))
-        .map(|name| name.replace('-', "_"))
-        .collect();
-    out.sort();
-    out
-}
-
-/// Walk every source file, handing each to a reader.
-fn walk(dir: &Path, f: &mut impl FnMut(&Path, &str)) {
-    for entry in std::fs::read_dir(dir)
-        .expect("the source directory is readable")
-        .flatten()
-    {
-        let path = entry.path();
-        if path.is_dir() {
-            walk(&path, f);
-        } else if path.extension().is_some_and(|e| e == "rs") {
-            let text = std::fs::read_to_string(&path).expect("a source file is readable");
-            f(&path, &text);
-        }
-    }
-}
+use source_scan::{sibling_plane_crates, src_dir, walk_surface};
 
 /// A line that is only a comment says nothing about what the code does.
 fn is_comment(line: &str) -> bool {
@@ -81,7 +41,7 @@ fn the_plane_holds_no_interior_state() {
         "static mut",
     ];
     let mut offenders = Vec::new();
-    walk(&src_dir(), &mut |path, text| {
+    walk_surface(&src_dir(), &mut |path, text| {
         for (n, line) in text.lines().enumerate() {
             if is_comment(line) {
                 continue;
@@ -123,7 +83,7 @@ fn the_plane_performs_no_input_or_output() {
         "eprintln!",
     ];
     let mut offenders = Vec::new();
-    walk(&src_dir(), &mut |path, text| {
+    walk_surface(&src_dir(), &mut |path, text| {
         for (n, line) in text.lines().enumerate() {
             if is_comment(line) {
                 continue;
@@ -154,9 +114,13 @@ fn the_plane_names_no_kernel_side_crate() {
         "busbar_substrate",
         "busbar_kernel",
     ];
-    let siblings = sibling_plane_crate_paths();
+    // Each sibling's module path: its directory name, underscore-spelled.
+    let siblings: Vec<String> = sibling_plane_crates()
+        .into_iter()
+        .map(|name| name.replace('-', "_"))
+        .collect();
     let mut offenders = Vec::new();
-    walk(&src_dir(), &mut |path, text| {
+    walk_surface(&src_dir(), &mut |path, text| {
         for (n, line) in text.lines().enumerate() {
             if is_comment(line) {
                 continue;
@@ -199,7 +163,7 @@ fn the_plane_names_no_money_and_no_decision() {
         "bearer_token",
     ];
     let mut offenders = Vec::new();
-    walk(&src_dir(), &mut |path, text| {
+    walk_surface(&src_dir(), &mut |path, text| {
         for (n, line) in text.lines().enumerate() {
             if is_comment(line) {
                 continue;
@@ -235,7 +199,7 @@ fn the_plane_names_no_money_and_no_decision() {
 fn the_plane_satisfies_no_upstream_ask() {
     let forbidden = ["may_satisfy", "InputRequiredLoop"];
     let mut offenders = Vec::new();
-    walk(&src_dir(), &mut |path, text| {
+    walk_surface(&src_dir(), &mut |path, text| {
         for (n, line) in text.lines().enumerate() {
             if is_comment(line) {
                 continue;
@@ -270,7 +234,7 @@ fn no_code_routes_a_call_to_another_plane_or_implements_the_unserved_plane_trait
         "impl SessionPlane for",
     ];
     let mut offenders = Vec::new();
-    walk(&src_dir(), &mut |path, text| {
+    walk_surface(&src_dir(), &mut |path, text| {
         for (n, line) in text.lines().enumerate() {
             if is_comment(line) {
                 continue;

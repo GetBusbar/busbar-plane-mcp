@@ -11,6 +11,9 @@
 //! otherwise well formed, because its `data.supported` is an invitation to retry (`-32022`). Every
 //! refusal here is `400`.
 
+// The crate's only public item is `door`: the accessors and variants below were this module's public API; the tests hold them, the door does not reach them (BUSBAR-1.6.0.md l.3560).
+#![cfg_attr(not(test), allow(dead_code))]
+
 use serde_json::Value;
 
 use crate::codec::{
@@ -54,18 +57,6 @@ impl Refused {
             message,
             data: None,
         }
-    }
-
-    /// The refusal as the wire carries it: the one JSON-RPC error envelope, `id` or `null`.
-    #[must_use]
-    pub fn body(&self, id: Option<&Value>) -> Vec<u8> {
-        let envelope = busbar_contract::jsonrpc::error_body(
-            id.cloned().unwrap_or(Value::Null),
-            self.code,
-            self.message,
-            self.data.clone(),
-        );
-        serde_json::to_vec(&envelope).unwrap_or_default()
     }
 }
 
