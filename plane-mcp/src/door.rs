@@ -43,31 +43,11 @@ use crate::tools_config::{ToolsCfg, DEFAULT_MCP_VERIFY_TTL, SUBJECT_NOUN};
 
 /// The grant kind that admits traffic on this plane: one registered server.
 pub const SCOPE: &str = "mcp_server";
-/// The signing domain busbar's own ask state is sealed under ([`crate::seal`]): the host's `sign`
-/// derives this domain's subkey from the deployment's fleet-shared key.
-pub const ASK_SIGNING_DOMAIN: &str = "mcp/ask-state/v1";
-/// The key-id prefix of those seals.
-pub const ASK_KID_PREFIX: &str = "busbar-mcp-ask-";
 /// The second grant kind: one tool of a registered server, keyed on its published name.
 pub const SCOPE_TOOL: &str = "mcp_tool";
-/// The plane's human label.
-pub const LABEL: &str = "MCP";
-/// The singular noun for one registration, in admin responses.
-pub const ADMIN_NOUN: &str = "mcp-server";
-/// The record resource kind a registration is audited under.
-pub const AUDIT_KIND: &str = "mcp_server";
 /// The section this plane owns beside `tools:`: its endpoint block.
 pub const ENDPOINT_SECTION: &str = "mcp";
 
-/// WHERE EACH REGISTERED SERVER IS REACHED: its registration's `url`, as a member-target path
-/// (`busbar_contract::section::MEMBER_TARGET_PREFIX`): one member route per server, at its own URL.
-pub const MEMBER_TARGET: &str = "settings.*.url";
-/// The one wire dialect: JSON-RPC 2.0, carried over each of the plane's transports.
-pub const DIALECT: &str = "jsonrpc";
-/// The billable class a call is counted in, and its family.
-pub const CALLS_FAMILY: &str = "count";
-/// The billable class a hop's moved bytes are counted in, and its family.
-pub const BYTES_FAMILY: &str = "byte";
 /// The fee unit this plane declares: one per request.
 pub const FEE_PER_REQUEST: &str = busbar_contract::plane::PER_REQUEST;
 
@@ -116,10 +96,6 @@ pub const NEED_UPSTREAM: u32 = 0;
 /// host keeps running (ARCHITECT round 5 Q-L3B-STDIO-UPSTREAM (A)).
 pub const NEED_PROGRAM: u32 = 1;
 
-/// WHERE EACH STDIO SERVER IS REACHED: its registration's own program, as the member-program path
-/// (`busbar_contract::section::MEMBER_PROGRAM`): its `command`, `args` and `env`.
-pub const MEMBER_PROGRAM: &str = busbar_contract::section::MEMBER_PROGRAM;
-
 /// The program need's response field the plane reads: the generation of the child a lease reached.
 pub const KEEP_PROGRAM_HEADERS: &[AbiStr] =
     &[abi_str(busbar_contract::conn::PROGRAM_GENERATION_FIELD)];
@@ -140,8 +116,9 @@ pub const NEEDS: &[Need] = &[
         egress_class: EGRESS_PROVIDER,
         transport: abi_str(CARRIER_HTTP),
         auth: NONE,
-        // Each registered server is reached at its own `url` (ARCHITECT Q-L3B-ROUTES).
-        target_from: abi_str(MEMBER_TARGET),
+        // Each registered server is reached at its own `url` (ARCHITECT Q-L3B-ROUTES), as a
+        // member-target path: one member route per server.
+        target_from: abi_str("settings.*.url"),
         trust_from: NONE,
         details: NO_DETAILS,
         keep_response_headers: KEEP_RESPONSE_HEADERS.as_ptr(),
@@ -154,7 +131,8 @@ pub const NEEDS: &[Need] = &[
         egress_class: EGRESS_OPERATOR_INFRASTRUCTURE,
         transport: abi_str(CARRIER_STDIO),
         auth: NONE,
-        target_from: abi_str(MEMBER_PROGRAM),
+        // Each stdio server is its registration's own program: `command`, `args` and `env`.
+        target_from: abi_str(busbar_contract::section::MEMBER_PROGRAM),
         trust_from: NONE,
         details: NO_DETAILS,
         keep_response_headers: KEEP_PROGRAM_HEADERS.as_ptr(),
@@ -164,30 +142,29 @@ pub const NEEDS: &[Need] = &[
     },
 ];
 
-const DIALECTS: &[AbiStr] = &[abi_str(DIALECT)];
+/// The one wire dialect: JSON-RPC 2.0, carried over each of the plane's transports.
+const DIALECTS: &[AbiStr] = &[abi_str("jsonrpc")];
 
 const SCOPE_KINDS: &[AbiStr] = &[abi_str(SCOPE), abi_str(SCOPE_TOOL)];
 
 const BILLABLE_CLASSES: &[BillableClass] = &[
     BillableClass {
         class: abi_str(crate::tool_meta::CLASS_TOOL_CALLS.as_str()),
-        family: abi_str(CALLS_FAMILY),
+        family: abi_str("count"),
     },
     BillableClass {
         class: abi_str(crate::tool_meta::CLASS_BYTES.as_str()),
-        family: abi_str(BYTES_FAMILY),
+        family: abi_str("byte"),
     },
     // THE FEE UNIT is also a class (the tail check holds `fee_units ⊆ billable_classes`, ARCHITECT
     // Q-L5-FEE (C)): reported `1` on an answer the caller is served with a success, so a unit whose
     // caller is answered otherwise has its `per_request` refunded, as 1.5.5 refunded it.
     BillableClass {
         class: abi_str(FEE_PER_REQUEST),
-        family: abi_str(FEE_FAMILY),
+        // A count of 0 or 1.
+        family: abi_str("count"),
     },
 ];
-
-/// The family of the fee unit's class: a count of 0 or 1.
-pub const FEE_FAMILY: &str = "count";
 
 /// The tail index of the fee unit's class in [`BILLABLE_CLASSES`].
 pub const CLASS_FEE_INDEX: u32 = 2;
@@ -285,33 +262,21 @@ const TRUST_KEYS: &[TrustKey] = &[
     },
 ];
 
-const fn op_class(i: usize) -> OpClass {
-    OpClass {
-        op: abi_str(crate::tool_ops::OP_CLASSES[i].as_str()),
-        name: abi_str(crate::tool_ops::OP_CLASSES[i].as_str()),
+/// The operation classes, in [`crate::tool_ops::OP_CLASSES`] order, each named by its own key.
+const OP_CLASS_TABLE: &[OpClass] = &{
+    const N: usize = crate::tool_ops::OP_CLASSES.len();
+    let mut table = [OpClass {
+        op: NONE,
+        name: NONE,
+    }; N];
+    let mut i = 0;
+    while i < N {
+        let key = abi_str(crate::tool_ops::OP_CLASSES[i].as_str());
+        table[i] = OpClass { op: key, name: key };
+        i += 1;
     }
-}
-
-/// The operation classes, in [`crate::tool_ops::OP_CLASSES`] order.
-const OP_CLASS_TABLE: &[OpClass] = &[
-    op_class(0),
-    op_class(1),
-    op_class(2),
-    op_class(3),
-    op_class(4),
-    op_class(5),
-    op_class(6),
-    op_class(7),
-    op_class(8),
-    op_class(9),
-    op_class(10),
-    op_class(11),
-    op_class(12),
-    op_class(13),
-    op_class(14),
-    op_class(15),
-    op_class(16),
-];
+    table
+};
 
 /// The tail index of an operation class, where the table holds it (the SDK's one index rule,
 /// [`class_index`]).
@@ -361,18 +326,21 @@ pub fn forbidden_origin_body() -> Vec<u8> {
 ///
 /// The block, written and malformed, in its grammar's words.
 pub fn allowed_origins(owned: &[u8]) -> Result<Vec<String>, String> {
+    Ok(mcp_block(owned)?
+        .map(|cfg| cfg.allowed_origins)
+        .unwrap_or_default())
+}
+
+/// The `mcp:` block among the sections `owned` keys by name; `None` when it writes none.
+fn mcp_block(owned: &[u8]) -> Result<Option<crate::endpoint::McpCfg>, String> {
     if owned.is_empty() {
-        return Ok(Vec::new());
+        return Ok(None);
     }
-    let Some(block) = serde_json::from_slice::<serde_json::Value>(owned)
-        .map_err(|e| e.to_string())?
+    let value: serde_json::Value = serde_json::from_slice(owned).map_err(|e| e.to_string())?;
+    value
         .get(ENDPOINT_SECTION)
-        .cloned()
-    else {
-        return Ok(Vec::new());
-    };
-    let cfg: crate::endpoint::McpCfg = serde_json::from_value(block).map_err(|e| e.to_string())?;
-    Ok(cfg.allowed_origins)
+        .map(|block| serde_json::from_value(block.clone()).map_err(|e| e.to_string()))
+        .transpose()
 }
 
 /// THE STATEMENT TAIL: the plane's static facts.
@@ -389,12 +357,15 @@ pub const TAIL: &PlaneTail = &PlaneTail {
     dispatch_shape: SHAPE_PIECEWISE,
     answer_layout: ANSWER_LAYOUT,
     scope: abi_str(SCOPE),
-    label: abi_str(LABEL),
+    label: abi_str("MCP"),
     subject_noun: abi_str(SUBJECT_NOUN),
-    admin_noun: abi_str(ADMIN_NOUN),
-    audit_kind: abi_str(AUDIT_KIND),
-    signing_domain: abi_str(ASK_SIGNING_DOMAIN),
-    signing_kid_prefix: abi_str(ASK_KID_PREFIX),
+    // A registration, in admin responses, and the record resource kind it is audited under.
+    admin_noun: abi_str("mcp-server"),
+    audit_kind: abi_str("mcp_server"),
+    // The signing domain busbar's own ask state is sealed under ([`crate::seal`]): the host's
+    // `sign` derives its subkey from the deployment's fleet-shared key.
+    signing_domain: abi_str("mcp/ask-state/v1"),
+    signing_kid_prefix: abi_str("busbar-mcp-ask-"),
     cli_help: abi_str(crate::tool_meta::HELP_FLAGS),
     dialects: DIALECTS.as_ptr(),
     dialects_len: DIALECTS.len(),
@@ -432,53 +403,33 @@ pub const TAIL: &PlaneTail = &PlaneTail {
 /// EVERY ROUTE THE PLANE SERVES, in the order the engine mounts them: the discovery document, the
 /// endpoint's three verbs, and the event-framed answer on the same path.
 pub const ROUTES: &[ServedRoute] = &[
-    ServedRoute {
-        verb: "GET",
-        target: DEFAULT_METADATA,
-        carrier: CARRIER_HTTP,
-        open: true,
-    },
-    ServedRoute {
-        verb: "POST",
-        target: DEFAULT_MOUNT,
-        carrier: CARRIER_HTTP,
-        open: false,
-    },
-    ServedRoute {
-        verb: "GET",
-        target: DEFAULT_MOUNT,
-        carrier: CARRIER_HTTP,
-        open: false,
-    },
-    ServedRoute {
-        verb: "DELETE",
-        target: DEFAULT_MOUNT,
-        carrier: CARRIER_HTTP,
-        open: false,
-    },
-    ServedRoute {
-        verb: "POST",
-        target: DEFAULT_MOUNT,
-        carrier: CARRIER_SSE,
-        open: false,
-    },
+    route("GET", DEFAULT_METADATA, CARRIER_HTTP, true),
+    route("POST", DEFAULT_MOUNT, CARRIER_HTTP, false),
+    route("GET", DEFAULT_MOUNT, CARRIER_HTTP, false),
+    route("DELETE", DEFAULT_MOUNT, CARRIER_HTTP, false),
+    route("POST", DEFAULT_MOUNT, CARRIER_SSE, false),
     // THE TASK-RUN CLAIM (ARCHITECT round 5 Q-L3B-TASKS (b) → (A)): a task's continuation, nested
     // by the unit that created the task.
-    ServedRoute {
-        verb: "POST",
-        target: TASK_RUN_MOUNT,
-        carrier: CARRIER_HTTP,
-        open: false,
-    },
+    route("POST", TASK_RUN_MOUNT, CARRIER_HTTP, false),
     // THE LINE CARRIER (ARCHITECT Q1a, round 4 Q-L3B-STDIO-SHAPE (B)): the host holds the process's
     // own stdin/stdout open as one carrier session and opens a unit per line.
-    ServedRoute {
-        verb: "POST",
-        target: DEFAULT_MOUNT,
-        carrier: CARRIER_STDIO,
-        open: false,
-    },
+    route("POST", DEFAULT_MOUNT, CARRIER_STDIO, false),
 ];
+
+/// One [`ROUTES`] row.
+const fn route(
+    verb: &'static str,
+    target: &'static str,
+    carrier: &'static str,
+    open: bool,
+) -> ServedRoute {
+    ServedRoute {
+        verb,
+        target,
+        carrier,
+        open,
+    }
+}
 
 /// The index of the task-run claim in [`ROUTES`].
 pub const TASK_RUN_ROUTE: usize = 5;
@@ -630,18 +581,8 @@ pub fn admitted_endpoint(
     public_url: Option<&str>,
     owned: &[u8],
 ) -> Result<Option<(String, String)>, String> {
-    let block = if owned.is_empty() {
-        None
-    } else {
-        serde_json::from_slice::<serde_json::Value>(owned)
-            .map_err(|e| e.to_string())?
-            .get(ENDPOINT_SECTION)
-            .cloned()
-    };
-    match block {
-        Some(block) => {
-            let cfg: crate::endpoint::McpCfg =
-                serde_json::from_value(block).map_err(|e| e.to_string())?;
+    match mcp_block(owned)? {
+        Some(cfg) => {
             let resource =
                 crate::endpoint::McpResource::from_cfg(&cfg).map_err(|e| e.to_string())?;
             Ok(Some((
@@ -661,17 +602,9 @@ pub fn admitted_endpoint(
 ///
 /// The block, written and malformed, in its grammar's words.
 pub fn resource_facts(owned: &[u8]) -> Result<Option<Vec<u8>>, String> {
-    if owned.is_empty() {
-        return Ok(None);
-    }
-    let Some(block) = serde_json::from_slice::<serde_json::Value>(owned)
-        .map_err(|e| e.to_string())?
-        .get(ENDPOINT_SECTION)
-        .cloned()
-    else {
+    let Some(cfg) = mcp_block(owned)? else {
         return Ok(None);
     };
-    let cfg: crate::endpoint::McpCfg = serde_json::from_value(block).map_err(|e| e.to_string())?;
     let resource = crate::endpoint::McpResource::from_cfg(&cfg).map_err(|e| e.to_string())?;
     Ok(Some(
         serde_json::json!({

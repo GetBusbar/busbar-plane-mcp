@@ -69,33 +69,15 @@ pub const DEFAULT_METADATA: &str = "/.well-known/oauth-protected-resource/mcp";
 /// a continuation runs under the principal its work handle recorded, and only once.
 pub const TASK_RUN_MOUNT: &str = "/mcp/tasks/run";
 
-/// The named stream a locally launched server's frames arrive on.
-pub const STDIO_STREAM: &str = "mcp";
-
-/// Build one claim over a selector on a named transport.
-const fn claim(transport: &'static str, selector: Selector) -> Claim {
+/// One claim over a selector on a named transport, under [`SCHEME`]; or, `open`, one whose units
+/// carry no credential at all (no scheme, not "a scheme called anonymous"). No idempotency location
+/// is declared: the codec reads no client-supplied idempotency key.
+const fn claim(transport: &'static str, selector: Selector, open: bool) -> Claim {
     Claim {
         transport,
         selector,
-        scheme: Some(SCHEME),
-        scheme_alternatives: SCHEME_ALTS,
-        // No idempotency location is declared. The codec reads no client-supplied idempotency key
-        // today, and declaring one here would change the shape of every request that reaches a
-        // server, which is precisely the behaviour this crate is not allowed to change.
-        idempotency: None,
-    }
-}
-
-/// Build one claim whose units carry no credential at all.
-///
-/// Not "a scheme called anonymous": no scheme. The claim admits the anonymous principal without
-/// consulting one, which is what a deliberately open surface actually is.
-const fn open(transport: &'static str, selector: Selector) -> Claim {
-    Claim {
-        transport,
-        selector,
-        scheme: None,
-        scheme_alternatives: &[],
+        scheme: if open { None } else { Some(SCHEME) },
+        scheme_alternatives: if open { &[] } else { SCHEME_ALTS },
         idempotency: None,
     }
 }
@@ -108,16 +90,16 @@ const fn open(transport: &'static str, selector: Selector) -> Claim {
 pub const CLAIMS: &[Claim] = &[
     // The discovery document is deliberately open: it is what a caller reads to find out how to
     // authenticate, so requiring a credential for it would be a closed loop.
-    open(CARRIER_HTTP, Selector::ExactPath(DEFAULT_METADATA)),
-    claim(CARRIER_HTTP, Selector::ExactPath(DEFAULT_MOUNT)),
+    claim(CARRIER_HTTP, Selector::ExactPath(DEFAULT_METADATA), true),
+    claim(CARRIER_HTTP, Selector::ExactPath(DEFAULT_MOUNT), false),
     // The streamed answer arrives on the same path, framed as events.
-    claim(CARRIER_SSE, Selector::ExactPath(DEFAULT_MOUNT)),
+    claim(CARRIER_SSE, Selector::ExactPath(DEFAULT_MOUNT), false),
     // A task's continuation, nested by the unit that created the task: it takes a credential like
     // the endpoint. Claimed here as well as in the snapshot (`door::ROUTES`), so a second plane's
     // claim on this path is a tie refused at the boot seal, not later at registration.
-    claim(CARRIER_HTTP, Selector::ExactPath(TASK_RUN_MOUNT)),
+    claim(CARRIER_HTTP, Selector::ExactPath(TASK_RUN_MOUNT), false),
     // A locally launched server has no path at all: its frames arrive on a named stream.
-    claim(CARRIER_STDIO, Selector::StreamName(STDIO_STREAM)),
+    claim(CARRIER_STDIO, Selector::StreamName("mcp"), false),
 ];
 
 #[cfg(test)]

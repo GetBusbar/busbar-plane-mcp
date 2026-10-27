@@ -115,13 +115,6 @@ pub struct RpcMethodRow {
     pub op: OpClassId,
     /// Who sends it.
     pub sender: Sender,
-    /// Whether its answer arrives as a run of events rather than as one document.
-    pub event_framed: bool,
-    /// Where in the parameters the thing being named is, where the method names one.
-    ///
-    /// The codec keeps the same table under its own name, and it is used for the same purpose: to
-    /// say what the request is ABOUT without reading the request's content.
-    pub name_pointer: Option<&'static str>,
 }
 
 /// Every method name this plane reads.
@@ -133,114 +126,82 @@ pub const METHODS: &[RpcMethodRow] = &[
         method: "server/discover",
         op: OP_DISCOVER,
         sender: Sender::Client,
-        event_framed: false,
-        name_pointer: None,
     },
     RpcMethodRow {
         method: "tools/list",
         op: OP_TOOLS_LIST,
         sender: Sender::Client,
-        event_framed: false,
-        name_pointer: None,
     },
     RpcMethodRow {
         method: "tools/call",
         op: OP_TOOL_CALL,
         sender: Sender::Client,
-        event_framed: false,
-        name_pointer: Some("/params/name"),
     },
     RpcMethodRow {
         method: "prompts/list",
         op: OP_PROMPTS_LIST,
         sender: Sender::Client,
-        event_framed: false,
-        name_pointer: None,
     },
     RpcMethodRow {
         method: "prompts/get",
         op: OP_PROMPT_GET,
         sender: Sender::Client,
-        event_framed: false,
-        name_pointer: Some("/params/name"),
     },
     RpcMethodRow {
         method: "resources/list",
         op: OP_RESOURCES_LIST,
         sender: Sender::Client,
-        event_framed: false,
-        name_pointer: None,
     },
     RpcMethodRow {
         method: "resources/templates/list",
         op: OP_RESOURCE_TEMPLATES_LIST,
         sender: Sender::Client,
-        event_framed: false,
-        name_pointer: None,
     },
     RpcMethodRow {
         method: "resources/read",
         op: OP_RESOURCE_READ,
         sender: Sender::Client,
-        event_framed: false,
-        name_pointer: Some("/params/uri"),
     },
     RpcMethodRow {
         method: "completion/complete",
         op: OP_COMPLETION,
         sender: Sender::Client,
-        event_framed: false,
-        name_pointer: None,
     },
     RpcMethodRow {
         method: "tasks/get",
         op: OP_TASK_GET,
         sender: Sender::Client,
-        event_framed: false,
-        name_pointer: Some("/params/taskId"),
     },
     RpcMethodRow {
         method: "tasks/update",
         op: OP_TASK_UPDATE,
         sender: Sender::Client,
-        event_framed: false,
-        name_pointer: Some("/params/taskId"),
     },
     RpcMethodRow {
         method: "tasks/cancel",
         op: OP_TASK_CANCEL,
         sender: Sender::Client,
-        event_framed: false,
-        name_pointer: Some("/params/taskId"),
     },
     RpcMethodRow {
         method: "subscriptions/listen",
         op: OP_SUBSCRIPTIONS_LISTEN,
         sender: Sender::Client,
-        event_framed: true,
-        name_pointer: None,
     },
     // The three an upstream sends BACK, mid-call.
     RpcMethodRow {
         method: "sampling/createMessage",
         op: OP_SAMPLING,
         sender: Sender::Provider,
-        event_framed: false,
-        name_pointer: None,
     },
     RpcMethodRow {
         method: "roots/list",
         op: OP_ROOTS_LIST,
         sender: Sender::Provider,
-        event_framed: false,
-        name_pointer: None,
     },
     RpcMethodRow {
         method: "elicitation/create",
         op: OP_ELICITATION,
         sender: Sender::Provider,
-        event_framed: false,
-        name_pointer: None,
     },
 ];
 
