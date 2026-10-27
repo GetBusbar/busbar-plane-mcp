@@ -139,7 +139,6 @@ fn the_exchange_asks_then_proceeds_once() {
     let AskDecision::Ask {
         asks,
         request_state,
-        round,
     } = decide(
         &confirm(),
         3,
@@ -152,7 +151,8 @@ fn the_exchange_asks_then_proceeds_once() {
     else {
         panic!("asks");
     };
-    assert_eq!((asks.len(), round), (1, 0));
+    let sealed = seal.open(&request_state).expect("the minted state opens");
+    assert_eq!((asks.len(), sealed.round), (1, 0));
     let body: Value =
         serde_json::from_slice(&input_required_result(&json!(4), &asks, &request_state))
             .expect("json");

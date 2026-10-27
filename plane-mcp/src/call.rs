@@ -608,7 +608,6 @@ pub fn admit_trusted(
         crate::ask::AskDecision::Ask {
             asks,
             request_state,
-            ..
         } => {
             return Admission::Asked(
                 crate::ask::input_required_result(id, &asks, &request_state),
