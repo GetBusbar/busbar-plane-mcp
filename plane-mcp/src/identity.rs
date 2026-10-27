@@ -112,11 +112,6 @@ impl ServerId {
         }
         Ok(Self(id.to_string()))
     }
-
-    /// The id, as registered.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
 }
 
 impl fmt::Display for ServerId {
@@ -154,33 +149,9 @@ impl ToolKey {
         })
     }
 
-    /// The server half of the key.
-    pub fn server(&self) -> &ServerId {
-        &self.server
-    }
-
     /// The tool half of the key, as the upstream names it.
     pub fn tool(&self) -> &str {
         &self.tool
-    }
-
-    /// The namespaced name: `{server}_{tool}`. THE value of an `mcp_tool` scope grant, and the name
-    /// an upstream tool is exposed under.
-    pub fn namespaced(&self) -> String {
-        format!("{}{SEP}{}", self.server.0, self.tool)
-    }
-
-    /// Recover the pair from a rendering. EXACT, not best-effort: the split is at the FIRST `_`, and
-    /// that is total because a server id may not contain one.
-    ///
-    /// A rendering that does not round-trip is refused rather than guessed at. This function is what
-    /// a scope-grant value is read back through, so "guess" here means "admit a tool the operator
-    /// did not name".
-    pub fn parse(namespaced: &str) -> Result<Self, NameError> {
-        let (server, tool) = namespaced
-            .split_once(SEP)
-            .ok_or(NameError::Empty { what: "tool name" })?;
-        ToolKey::new(ServerId::new(server)?, tool)
     }
 }
 
@@ -188,22 +159,6 @@ impl fmt::Display for ToolKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}{SEP}{}", self.server.0, self.tool)
     }
-}
-
-/// THE BOUND IDENTITY, all three components of it: the registered server, the namespaced tool, and
-/// the schema/description digest the operator approved.
-///
-/// Every one of the three is authenticated state — an id the operator registered, a name derived
-/// from it, and a digest the operator approved. None of them is free text an upstream chose the
-/// content of at refresh time. That is the whole property, and it is why this struct has no
-/// `description` field: a routing decision made over this value cannot read one.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BoundIdentity {
-    /// The routing key: the registered server and its tool.
-    pub key: ToolKey,
-    /// The approved `sha256:…` digest over the tool's name, description and input schema. Computed by the
-    /// engine's client catalogue (`tool_digest`).
-    pub digest: String,
 }
 
 #[cfg(test)]

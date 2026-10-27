@@ -319,9 +319,10 @@ pub fn relayed_asks(asks: &[ChildAsk]) -> (Value, Vec<(String, Value)>) {
         keys.push((key, ask.id.clone()));
     }
     let result = serde_json::json!({
-        "resultType": crate::jsonrpc::RESULT_TYPE_INPUT_REQUIRED,
-        "inputRequests": Value::Object(requests),
-    });
+            "resultType": crate::codec::RESULT_TYPE_INPUT_REQUIRED
+    ,
+            "inputRequests": Value::Object(requests),
+        });
     (result, keys)
 }
 
@@ -572,12 +573,6 @@ impl ProgramExchange {
     pub fn only_on(mut self, generation: u64) -> Self {
         self.only = Some(generation);
         self
-    }
-
-    /// The progress frames the exchange relayed.
-    #[must_use]
-    pub fn progress(&self) -> &[Value] {
-        &self.corr.progress
     }
 
     /// Drive the exchange on `ticket`, its services numbered from `base`: READY with what it came

@@ -19,10 +19,7 @@ use busbar_contract::abi::mechanism::call::AbiStr;
 use busbar_contract::abi::mechanism::door::SECTION_DECLARING;
 use serde_json::{json, Value};
 
-use super::{
-    namespaced, validate_published_names, McpPinMechanism, ServerPinCfg, ToolsCfg, SECTION,
-    SUBJECT_NOUN, TRUST_KEYS,
-};
+use super::{namespaced, validate_published_names, ToolsCfg, SECTION, SUBJECT_NOUN};
 
 /// The section read by the grammar alone, as the door reads its settings (no rule spanning
 /// registrations): what one server's well-formedness is judged by.
@@ -59,52 +56,6 @@ fn locked_example() -> Value {
             "hooks": ["tool-sanitizer", "dispatch-order"]
         }
     })
-}
-
-/// The mechanisms declared to the kernel are exactly the grammar's own, each with the root-ness
-/// its grammar gives it.
-#[test]
-fn the_declared_trust_keys_match_the_grammar() {
-    let pin = &TRUST_KEYS[0];
-    assert_eq!(pin.mechanisms.len(), 4, "every mechanism the grammar has");
-    for declared in pin.mechanisms {
-        let parsed: ServerPinCfg = serde_json::from_value(json!({ "mechanism": declared.token }))
-            .unwrap_or_else(|e| panic!("`{}` is a grammar token: {e}", declared.token));
-        assert_eq!(
-            parsed.mechanism.is_a_root(),
-            declared.root,
-            "{}",
-            declared.token
-        );
-    }
-}
-
-/// Each mechanism's SERIALIZED token is the token the declared `TRUST_KEYS` spells: the write path
-/// judges the serialized definition against the declaration, so a drift between the two would read
-/// a keyless root pin as no pin. (The kernel's reading of each declared token — a root takes its
-/// material, the no-root spelling refuses it — is the root battery's half.)
-#[test]
-fn every_serialized_pin_token_is_the_declared_trust_key_token() {
-    use McpPinMechanism as M;
-    let declared: Vec<&str> = TRUST_KEYS[0].mechanisms.iter().map(|m| m.token).collect();
-    let all = [
-        M::PinnedPubkey,
-        M::CertSpki,
-        M::ClientCertBinding,
-        M::Unpinned,
-    ];
-    assert_eq!(declared.len(), all.len());
-    for m in all {
-        let serialized = serde_json::to_value(m).expect("a mechanism serialises");
-        let token = serialized.as_str().expect("a mechanism is a string");
-        assert!(declared.contains(&token), "`{token}` is not declared");
-        let root = TRUST_KEYS[0]
-            .mechanisms
-            .iter()
-            .find(|d| d.token == token)
-            .map(|d| d.root);
-        assert_eq!(root, Some(m.is_a_root()), "{token}");
-    }
 }
 
 #[test]

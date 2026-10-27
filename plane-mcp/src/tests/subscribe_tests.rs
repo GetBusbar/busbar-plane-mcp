@@ -46,7 +46,7 @@ fn the_acknowledgement_is_first_and_carries_the_accepted_subset() {
     let mut l =
         Listen::open(Some(&params), json!("sub"), 0, |u| u == "file:///readme").expect("opened");
     assert_eq!(
-        l.accepted().resources,
+        l.accepted.resources,
         Some(vec!["file:///readme".to_string()])
     );
     let Step::Frames(frames) = l.step(&catalogue(1, SECTION), &everything, &Standing::Live, &[], 1)
@@ -237,5 +237,5 @@ fn the_distinct_uris_are_counted_through_a_set_and_the_ceiling_refuses_at_once()
         .collect();
     let params = json!({ "notifications": { "resourceSubscriptions": copies } });
     let l = Listen::open(Some(&params), json!("sub"), 0, |_| true).expect("duplicates fold");
-    assert_eq!(l.accepted().resources.as_ref().map(Vec::len), Some(3));
+    assert_eq!(l.accepted.resources.as_ref().map(Vec::len), Some(3));
 }

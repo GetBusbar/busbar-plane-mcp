@@ -123,9 +123,6 @@ fn the_help_flags_open_with_the_declared_flag() {
         .lines()
         .next()
         .expect("the help lines are not empty");
-    assert!(
-        first.starts_with(&format!("    {} ", super::STDIO_SERVE_FLAG)),
-        "{first}"
-    );
+    assert!(first.starts_with("    --mcp-stdio "), "{first}");
     assert!(!super::HELP_FLAGS.ends_with('\n'));
 }

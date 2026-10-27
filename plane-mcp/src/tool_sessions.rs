@@ -139,17 +139,6 @@ impl SessionId {
     }
 }
 
-/// The part of a session id that may be logged: its first eight characters, or nothing when the
-/// value is not a well-formed id at all (so a hostile header is never echoed into a log).
-#[must_use]
-pub fn log_prefix(id: &str) -> &str {
-    if id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()) {
-        &id[..8]
-    } else {
-        ""
-    }
-}
-
 /// Why a session could not be opened.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OpenRefused {
@@ -294,35 +283,11 @@ impl SessionTable {
         }
     }
 
-    /// The ceilings this table enforces.
-    #[must_use]
-    pub const fn bounds(&self) -> Bounds {
-        self.bounds
-    }
-
     /// Whether `id` names a session the table still holds, whoever owns it (state kept beside a
     /// session is dropped once this is false).
     #[must_use]
     pub fn holds(&self, id: &str) -> bool {
         self.sessions.contains_key(id)
-    }
-
-    /// Live sessions (expired ones not yet swept included).
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.sessions.len()
-    }
-
-    /// Whether the table holds no session.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.sessions.is_empty()
-    }
-
-    /// Bytes charged to the table.
-    #[must_use]
-    pub const fn total_bytes(&self) -> usize {
-        self.total_bytes
     }
 
     /// Opens a session for `owner`. `entropy` is 16 bytes from the caller's CSPRNG.
@@ -417,11 +382,6 @@ impl SessionTable {
         self.find(id, owner, now_ms)
             .map(|s| s.initialized = true)
             .is_some()
-    }
-
-    /// Whether `id` has seen `notifications/initialized`.
-    pub fn is_initialized(&mut self, id: &str, owner: &Owner, now_ms: u64) -> bool {
-        self.find(id, owner, now_ms).is_some_and(|s| s.initialized)
     }
 
     /// Ends `id` (DELETE). `false` when `owner` does not hold it.
@@ -660,24 +620,6 @@ impl UpstreamTable {
             bytes: 0,
             tick: 0,
         }
-    }
-
-    /// Upstreams remembered.
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    /// Whether nothing is remembered.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
-    /// Bytes charged.
-    #[must_use]
-    pub const fn bytes(&self) -> usize {
-        self.bytes
     }
 
     /// What is remembered about `upstream`, refreshing its recency.

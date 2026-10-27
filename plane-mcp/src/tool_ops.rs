@@ -104,8 +104,6 @@ pub enum Sender {
     Client,
     /// An upstream sends it back mid-call, opening a unit of its own.
     Provider,
-    /// Either side sends it and nobody answers it.
-    Notice,
 }
 
 /// One row of the vocabulary.
@@ -246,27 +244,10 @@ pub const METHODS: &[RpcMethodRow] = &[
     },
 ];
 
-/// The notification names this plane recognises.
-///
-/// A notification obliges no answer, so recognising one is only about knowing whether to act on it.
-/// One this plane does not recognise is DROPPED rather than refused, which is what the specification
-/// requires and what the codec already does.
-pub const NOTIFICATIONS: &[&str] = &[
-    "notifications/roots/list_changed",
-    "notifications/tools/list_changed",
-    "notifications/resources/updated",
-];
-
 /// The row for one method name, if this plane carries that method at all.
 #[must_use]
 pub fn method_row_for(method: &str) -> Option<&'static RpcMethodRow> {
     METHODS.iter().find(|r| r.method == method)
-}
-
-/// Whether a name is a notification this plane recognises.
-#[must_use]
-pub fn is_known_notification(method: &str) -> bool {
-    NOTIFICATIONS.contains(&method)
 }
 
 #[cfg(test)]

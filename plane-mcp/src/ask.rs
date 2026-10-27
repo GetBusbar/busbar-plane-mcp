@@ -707,7 +707,7 @@ pub fn input_required_result(id: &Value, asks: &[CallerAsk], request_state: &str
     let mut value = Map::new();
     value.insert(
         "resultType".into(),
-        crate::jsonrpc::RESULT_TYPE_INPUT_REQUIRED.into(),
+        crate::codec::RESULT_TYPE_INPUT_REQUIRED.into(),
     );
     value.insert("inputRequests".into(), Value::Object(requests));
     value.insert("requestState".into(), request_state.into());
@@ -728,19 +728,6 @@ fn unanswered(child: &ChildLeg, retry: Retry<'_>) -> Option<String> {
         .filter(|key| !answered.is_some_and(|m| m.contains_key(*key)))
         .collect();
     (!missing.is_empty()).then(|| missing.join(", "))
-}
-
-/// THE STATE A RELAYED UPSTREAM ASK IS ANSWERED UNDER: busbar's one sealed `requestState`, bound to
-/// the principal, the call (method, tool, arguments as the caller sent them) and the catalogue
-/// generation, nesting the member that asked and its own state. `None` when it cannot be sealed.
-#[must_use]
-pub fn relay_state(
-    bind: Bind<'_>,
-    args_digest: &str,
-    leg: UpstreamLeg,
-    seal: &mut dyn Seal,
-) -> Option<String> {
-    relay_state_for(bind, args_digest, leg, DEFAULT_TTL_SECS, seal)
 }
 
 /// [`relay_state`], standing `ttl_secs`: a task parked on its caller's answer waits as long as the

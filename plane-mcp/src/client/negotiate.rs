@@ -8,44 +8,22 @@
 //! request to an upstream whose revision busbar may not know, and says, one [`Action`] at a time,
 //! what the driver must put on the wire: the stateless request itself; on a refusal an `initialize`
 //! and `notifications/initialized` and then the request lowered into the session revision the
-//! upstream chose; and on a refusal of `initialize`, the `2024-11-05` event stream, with the
-//! request POSTed to the address the stream names and its answer read off the stream.
+//! upstream chose; and on a refusal of `initialize`, [`Action::OpenStream`]: the driver carries the
+//! call over the `2024-11-05` event stream itself (`door_legacy`).
 //!
-//! THE ADAPTER CONTRACT, which is all a driver implements (the engine's legacy client leg today,
-//! the plane driver's far end at the flip):
-//!
-//! - [`Action::Send`]: send the request with its verb; feed the answer to [`Negotiator::on_answer`]
-//!   as a [`HopAnswer`] (status, the response head's kept fields, body), or `None` when there was no
-//!   answer at all. The only head field read is [`super::compat::H_SESSION`], which the plane
-//!   declares in `keep_response_headers`.
-//! - [`Action::OpenStream`]: open a GET stream; feed its head to [`Negotiator::on_answer`] (body
-//!   empty), then every event read off it to [`Negotiator::on_event`] until the machine finishes.
-//!   Close the stream when it does.
-//! - [`Action::AwaitEvent`]: read the next event off the open stream.
-//! - [`Action::Finish`]: the answer to hand back, in the shape the stateless request would have
-//!   had it; [`Negotiator::remembered`] is what to keep for the next call to this upstream.
-//! - [`Action::Fail`]: stop; nothing more is sent.
-//!
-//! Nothing here opens a connection, reads a clock or holds anything across calls but the value.
+//! [`Action::Send`]: POST the request; feed the answer to [`Negotiator::on_answer`] as a
+//! [`HopAnswer`], or `None` when there was no answer at all. [`Action::Finish`] is the answer to hand
+//! back; [`Negotiator::remembered`] is what to keep for the next call to this upstream.
 
 use serde_json::Value;
 
 use super::compat::{
     initialize_request, initialized_notification, lower_request, offered_revision, probe_outcome,
-    stateless_outcome, EventStreamLink, LinkEffect, StreamEvent, H_SESSION,
+    stateless_outcome, H_SESSION,
 };
 use super::jsonrpc::OutboundRequest;
 use crate::revision::{self, Revision, StepOutcome};
 use crate::tool_sessions::Remembered;
-
-/// The verb a hop is sent with.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Verb {
-    /// A JSON-RPC message.
-    Post,
-    /// The end of a session.
-    Delete,
-}
 
 /// What came back from one hop.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -77,34 +55,22 @@ pub enum Refusal {
     /// The upstream could not be reached, or answered 5xx, on a step whose failure says nothing
     /// about its revision. The last answer, if any, is carried.
     Unreachable(Option<HopAnswer>),
-    /// Every rung of the ladder was refused: the upstream speaks no revision this plane carries.
-    NoCommonRevision,
     /// The upstream's `initialize` answer named a revision this plane cannot carry; the spec's rule
     /// is to disconnect.
     OfferedUnsupported,
-    /// The `2024-11-05` stream named a message address on another origin, or none busbar can read.
-    AddressRefused,
-    /// The stream ended, or refused a POST, before the answer arrived.
-    StreamLost,
 }
 
 /// The next thing the driver does.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
-    /// Send `request` with `verb`, then call [`Negotiator::on_answer`].
+    /// POST `request`, then call [`Negotiator::on_answer`].
     Send {
-        /// The verb.
-        verb: Verb,
         /// The request.
         request: OutboundRequest,
     },
-    /// Open a GET event stream with `request`'s address and credential, then call
-    /// [`Negotiator::on_answer`] with its head.
-    OpenStream {
-        /// The stream request (its body is empty).
-        request: OutboundRequest,
-    },
-    /// Read the next event off the open stream and call [`Negotiator::on_event`].
+    /// Carry the call over the `2024-11-05` event stream.
+    OpenStream,
+    /// Read the next event off the open stream.
     AwaitEvent,
     /// The answer to hand back.
     Finish(HopAnswer),
@@ -124,16 +90,9 @@ enum Phase {
         revision: Revision,
         session: Option<String>,
     },
-    StreamOpening,
-    StreamWaitAddress,
-    StreamInitPosted,
-    StreamInitialized,
-    StreamCallPosted,
     Done,
 }
 
-/// How many requests one `2024-11-05` link waits on at once: `initialize` and the call itself.
-const LINK_WAITING: usize = 2;
 /// The id busbar's own `initialize` carries, on a session upstream and on a `2024-11-05` stream:
 /// `2^53 - 1`, the largest integer a JavaScript peer reads back exactly (an id past it comes back
 /// rounded and correlates with nothing). Busbar's other request ids stay below it: a stateless
@@ -150,7 +109,6 @@ pub struct Negotiator {
     phase: Phase,
     remembered: Option<Remembered>,
     reinitialized: bool,
-    link: Option<EventStreamLink>,
     /// The id a request lowered into the REMEMBERED session carries ([`Self::with_session_id`]):
     /// the session's own next id, so no id repeats within one session.
     session_id: Option<u64>,
@@ -178,7 +136,6 @@ impl Negotiator {
             phase: Phase::Probe,
             remembered,
             reinitialized: false,
-            link: None,
             session_id: None,
             sent_id: None,
         }
@@ -227,10 +184,7 @@ impl Negotiator {
 
     fn send(&mut self, phase: Phase, request: OutboundRequest) -> Action {
         self.phase = phase;
-        Action::Send {
-            verb: Verb::Post,
-            request,
-        }
+        Action::Send { request }
     }
 
     fn in_session(&mut self, revision: Revision, session: Option<String>) -> Action {
@@ -265,22 +219,8 @@ impl Negotiator {
     }
 
     fn open_stream(&mut self) -> Action {
-        self.phase = Phase::StreamOpening;
-        let mut request = lower_request(
-            &self.original,
-            &self.original.url,
-            Revision::R2024_11_05,
-            None,
-        );
-        request.body = Vec::new();
-        request
-            .headers
-            .retain(|(k, _)| k != "content-type" && k != "accept");
-        request
-            .headers
-            .push(("accept".to_string(), "text/event-stream".to_string()));
-        self.link = Some(EventStreamLink::new(&self.original.url, LINK_WAITING));
-        Action::OpenStream { request }
+        self.phase = Phase::Done;
+        Action::OpenStream
     }
 
     fn finish(&mut self, answer: HopAnswer) -> Action {
@@ -293,8 +233,7 @@ impl Negotiator {
         Action::Fail(refusal)
     }
 
-    /// Feeds the answer to the last [`Action::Send`] or [`Action::OpenStream`]; `None` when there
-    /// was no answer at all.
+    /// Feeds the answer to the last [`Action::Send`]; `None` when there was no answer at all.
     pub fn on_answer(&mut self, answer: Option<HopAnswer>) -> Action {
         let Some(answer) = answer else {
             return self.fail(Refusal::Unreachable(None));
@@ -362,102 +301,8 @@ impl Negotiator {
                 }
                 self.finish(answer)
             }
-            Phase::StreamOpening => {
-                if answer.ok() {
-                    self.phase = Phase::StreamWaitAddress;
-                    Action::AwaitEvent
-                } else if (400..500).contains(&answer.status) {
-                    self.remembered = None;
-                    self.fail(Refusal::NoCommonRevision)
-                } else {
-                    self.fail(Refusal::Unreachable(Some(answer)))
-                }
-            }
-            Phase::StreamInitPosted | Phase::StreamCallPosted => {
-                if answer.ok() {
-                    Action::AwaitEvent
-                } else {
-                    self.fail(Refusal::StreamLost)
-                }
-            }
-            Phase::StreamInitialized => {
-                if !answer.ok() {
-                    return self.fail(Refusal::StreamLost);
-                }
-                self.post_call_on_stream()
-            }
-            Phase::StreamWaitAddress | Phase::Done => Action::AwaitEvent,
+            Phase::Done => Action::AwaitEvent,
         }
-    }
-
-    fn post_call_on_stream(&mut self) -> Action {
-        let Some(address) = self
-            .link
-            .as_ref()
-            .and_then(|l| l.address().map(str::to_string))
-        else {
-            return self.fail(Refusal::StreamLost);
-        };
-        let request = lower_request(&self.original, &address, Revision::R2024_11_05, None);
-        match self.original_id.clone() {
-            Some(id) => {
-                if let Some(link) = self.link.as_mut() {
-                    link.expect(&id);
-                }
-                self.send(Phase::StreamCallPosted, request)
-            }
-            // A notification has no answer on the stream: its POST's status is the whole of it.
-            None => self.send(Phase::StreamCallPosted, request),
-        }
-    }
-
-    /// Feeds one event read off the open stream.
-    pub fn on_event(&mut self, event: &StreamEvent) -> Action {
-        let Some(link) = self.link.as_mut() else {
-            return self.fail(Refusal::StreamLost);
-        };
-        match (self.phase.clone(), link.on_event(event)) {
-            (Phase::StreamWaitAddress, LinkEffect::Ready(address)) => {
-                link.expect(&Value::from(INITIALIZE_ID));
-                let request = initialize_request(
-                    &self.original,
-                    &address,
-                    Revision::R2024_11_05,
-                    INITIALIZE_ID,
-                    &self.client_version,
-                );
-                self.send(Phase::StreamInitPosted, request)
-            }
-            (_, LinkEffect::Refused(_)) => self.fail(Refusal::AddressRefused),
-            (Phase::StreamInitPosted, LinkEffect::Answer { body, .. }) => {
-                if offered_revision(&body) != Some(Revision::R2024_11_05) {
-                    return self.fail(Refusal::OfferedUnsupported);
-                }
-                let address = link.address().unwrap_or_default().to_string();
-                self.remembered = Some(Remembered {
-                    revision: Revision::R2024_11_05,
-                    session: None,
-                    message_address: None,
-                });
-                let request =
-                    initialized_notification(&self.original, &address, Revision::R2024_11_05, None);
-                self.send(Phase::StreamInitialized, request)
-            }
-            (Phase::StreamCallPosted, LinkEffect::Answer { body, .. }) => self.finish(HopAnswer {
-                status: 200,
-                fields: Vec::new(),
-                body,
-            }),
-            _ => Action::AwaitEvent,
-        }
-    }
-
-    /// Whether a notification's call is complete: a notification POSTed on the stream is finished
-    /// by its POST's status, which [`Self::on_answer`] reports as [`Action::AwaitEvent`]; the driver
-    /// asks this instead of waiting for an answer that never comes.
-    #[must_use]
-    pub fn expects_no_answer(&self) -> bool {
-        self.phase == Phase::StreamCallPosted && self.original_id.is_none()
     }
 }
 

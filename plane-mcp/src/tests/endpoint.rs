@@ -28,11 +28,8 @@ fn cfg(uri: &str) -> McpCfg {
 fn the_mount_and_the_metadata_path_are_derived_from_the_one_canonical_uri() {
     let r = McpResource::from_cfg(&cfg("https://gateway.example.com/mcp")).unwrap();
     assert_eq!(r.canonical_uri(), "https://gateway.example.com/mcp");
-    assert_eq!(r.mount_path(), "/mcp");
-    assert_eq!(
-        r.metadata_path(),
-        "/.well-known/oauth-protected-resource/mcp"
-    );
+    assert_eq!(r.mount_path, "/mcp");
+    assert_eq!(r.metadata_path, "/.well-known/oauth-protected-resource/mcp");
     assert_eq!(
         r.metadata_url(),
         "https://gateway.example.com/.well-known/oauth-protected-resource/mcp"
@@ -47,9 +44,9 @@ fn a_trailing_slash_derives_the_same_mount() {
     let slashed = format!("{bare}/");
     let r = McpResource::from_cfg(&cfg(&bare)).unwrap();
     let s = McpResource::from_cfg(&cfg(&slashed)).unwrap();
-    assert_eq!(s.mount_path(), DEFAULT_MOUNT);
-    assert_eq!(s.mount_path(), r.mount_path());
-    assert_eq!(s.metadata_path(), r.metadata_path());
+    assert_eq!(s.mount_path, DEFAULT_MOUNT);
+    assert_eq!(s.mount_path, r.mount_path);
+    assert_eq!(s.metadata_path, r.metadata_path);
     assert_eq!(s.canonical_uri(), slashed);
 }
 
@@ -101,7 +98,7 @@ fn the_canonical_uri_is_preserved_verbatim_rather_than_normalised() {
     let uri = format!("https://Gateway.Example.COM:443{DEFAULT_MOUNT}");
     let r = McpResource::from_cfg(&cfg(&uri)).unwrap();
     assert_eq!(r.canonical_uri(), uri);
-    assert_eq!(r.mount_path(), DEFAULT_MOUNT);
+    assert_eq!(r.mount_path, DEFAULT_MOUNT);
 }
 
 /// Every refusal arm, with the exact error, because a boot refusal that names the wrong field sends
@@ -190,12 +187,12 @@ fn the_origin_allowlist_is_carried_as_written_and_empty_by_default() {
     let mut c = cfg("https://gateway.example.com/mcp");
     let empty = McpResource::from_cfg(&c).unwrap();
     assert!(
-        empty.allowed_origins().is_empty(),
+        empty.allowed_origins.is_empty(),
         "the default allowlist is empty"
     );
     c.allowed_origins = vec!["https://app.example.com".to_string()];
     let r = McpResource::from_cfg(&c).unwrap();
-    assert_eq!(r.allowed_origins(), ["https://app.example.com".to_string()]);
+    assert_eq!(r.allowed_origins, ["https://app.example.com".to_string()]);
 }
 
 /// The `mcp:` block parses with the field names an operator actually writes, and an unknown key is

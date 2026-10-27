@@ -9,6 +9,26 @@ use serde_json::{json, Value};
 use super::*;
 use crate::catalogue::{Catalogue, ToolEntry};
 
+/// Admits one call with no trust verdict against it (every tool serves).
+fn admit_call(
+    catalogue: &Catalogue,
+    id: &Value,
+    params: Option<&Value>,
+    header: &impl Fn(&str) -> Option<String>,
+    admit: &impl Fn(&str, &str) -> bool,
+    ask: &mut dyn FnMut(&ToolEntry, &Value) -> crate::ask::AskDecision,
+) -> Admission {
+    admit_trusted(
+        catalogue,
+        id,
+        params,
+        header,
+        admit,
+        &mut |_| Trust::Verdict(DISTRUST_NONE),
+        ask,
+    )
+}
+
 /// One server: an approved tool whose `path` argument is mirrored in `Mcp-Param-Path`, a tool
 /// awaiting approval, a tool that must be answered as a task, and a tool that asks its caller.
 const SECTION: &str = r#"{"fs": {"url": "https://mcp.example/fs", "pin": {"mechanism": "unpinned"},

@@ -55,7 +55,7 @@ use crate::client::compat::{
     EventStreamLink, LinkEffect,
 };
 use crate::client::jsonrpc::{OutboundRequest, ServerRequestGrants};
-use crate::client::negotiate::{Verb, INITIALIZE_ID};
+use crate::client::negotiate::INITIALIZE_ID;
 use crate::client::peer::{NotificationEffect, ServerMessage, ServerNotification};
 use crate::revision::Revision;
 
@@ -1132,7 +1132,7 @@ fn post(
         base,
         &request.url,
         member,
-        || super::door_sessions::exchange_request(Verb::Post, request, timeout_ms),
+        || super::door_sessions::exchange_request(request, timeout_ms),
     );
     match polled {
         Poll::Pending => Poll::Pending,
