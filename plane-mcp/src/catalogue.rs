@@ -183,6 +183,25 @@ pub(crate) fn granted(admit: &impl Fn(&str, &str) -> bool, server: &str, namespa
     admit(SCOPE, server) && admit(SCOPE_TOOL, namespaced)
 }
 
+/// The entries the caller may see: both grants of each (`names`: its server and published name).
+fn visible<'a, T>(
+    entries: &'a BTreeMap<String, T>,
+    admit: &impl Fn(&str, &str) -> bool,
+    names: impl Fn(&T) -> (&String, &String),
+) -> Vec<&'a T> {
+    let seen = |e: &&T| {
+        let (server, published) = names(e);
+        granted(admit, server, published)
+    };
+    entries.values().filter(seen).collect()
+}
+
+/// A cacheable `*/list` answer: `{key: entries}` with its hints.
+fn listing(id: &Value, key: &str, entries: impl Iterator<Item = Value>) -> Vec<u8> {
+    let entries: Vec<Value> = entries.collect();
+    complete(id, cache_hints(json!({ key: entries })))
+}
+
 /// A cacheable result with its two hints.
 pub(crate) fn cache_hints(mut value: Value) -> Value {
     if let Some(obj) = value.as_object_mut() {
@@ -341,26 +360,17 @@ impl Catalogue {
 
     /// The tools this caller may see, in published-name order.
     pub fn tools_for(&self, admit: &impl Fn(&str, &str) -> bool) -> Vec<&ToolEntry> {
-        self.tools
-            .values()
-            .filter(|t| granted(admit, &t.server, &t.namespaced))
-            .collect()
+        visible(&self.tools, admit, |t| (&t.server, &t.namespaced))
     }
 
     /// The prompts this caller may see.
     pub fn prompts_for(&self, admit: &impl Fn(&str, &str) -> bool) -> Vec<&PromptEntry> {
-        self.prompts
-            .values()
-            .filter(|p| granted(admit, &p.server, &p.namespaced))
-            .collect()
+        visible(&self.prompts, admit, |p| (&p.server, &p.namespaced))
     }
 
     /// The resources this caller may see.
     pub fn resources_for(&self, admit: &impl Fn(&str, &str) -> bool) -> Vec<&ResourceEntry> {
-        self.resources
-            .values()
-            .filter(|r| granted(admit, &r.server, &r.namespaced))
-            .collect()
+        visible(&self.resources, admit, |r| (&r.server, &r.namespaced))
     }
 
     /// The resource templates this caller may see.
@@ -368,10 +378,9 @@ impl Catalogue {
         &self,
         admit: &impl Fn(&str, &str) -> bool,
     ) -> Vec<&ResourceTemplateEntry> {
-        self.resource_templates
-            .values()
-            .filter(|t| granted(admit, &t.server, &t.namespaced))
-            .collect()
+        visible(&self.resource_templates, admit, |t| {
+            (&t.server, &t.namespaced)
+        })
     }
 
     /// The prompt a published name names, under the caller's grants. `None` covers no such prompt
@@ -421,33 +430,20 @@ impl Catalogue {
         admit: &impl Fn(&str, &str) -> bool,
         hidden: impl Fn(&ToolEntry) -> bool,
     ) -> Vec<u8> {
-        let tools: Vec<Value> = self
-            .tools_for(admit)
-            .into_iter()
-            .filter(|t| !hidden(t))
-            .map(ToolEntry::render)
-            .collect();
-        complete(id, cache_hints(json!({ "tools": tools })))
+        let tools = self.tools_for(admit).into_iter().filter(|t| !hidden(t));
+        listing(id, "tools", tools.map(ToolEntry::render))
     }
 
     /// `prompts/list`.
     pub fn prompts_list(&self, id: &Value, admit: &impl Fn(&str, &str) -> bool) -> Vec<u8> {
-        let prompts: Vec<Value> = self
-            .prompts_for(admit)
-            .into_iter()
-            .map(PromptEntry::render)
-            .collect();
-        complete(id, cache_hints(json!({ "prompts": prompts })))
+        let prompts = self.prompts_for(admit).into_iter();
+        listing(id, "prompts", prompts.map(PromptEntry::render))
     }
 
     /// `resources/list`.
     pub fn resources_list(&self, id: &Value, admit: &impl Fn(&str, &str) -> bool) -> Vec<u8> {
-        let resources: Vec<Value> = self
-            .resources_for(admit)
-            .into_iter()
-            .map(ResourceEntry::render)
-            .collect();
-        complete(id, cache_hints(json!({ "resources": resources })))
+        let resources = self.resources_for(admit).into_iter();
+        listing(id, "resources", resources.map(ResourceEntry::render))
     }
 
     /// `resources/templates/list`: the empty list for a caller who reaches none.
@@ -456,12 +452,12 @@ impl Catalogue {
         id: &Value,
         admit: &impl Fn(&str, &str) -> bool,
     ) -> Vec<u8> {
-        let templates: Vec<Value> = self
-            .resource_templates_for(admit)
-            .into_iter()
-            .map(ResourceTemplateEntry::render)
-            .collect();
-        complete(id, cache_hints(json!({ "resourceTemplates": templates })))
+        let templates = self.resource_templates_for(admit).into_iter();
+        listing(
+            id,
+            "resourceTemplates",
+            templates.map(ResourceTemplateEntry::render),
+        )
     }
 }
 

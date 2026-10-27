@@ -185,12 +185,6 @@ pub struct Drift {
     pub removed: Vec<String>,
 }
 
-impl Drift {
-    fn is_empty(&self) -> bool {
-        self.added.is_empty() && self.changed.is_empty() && self.removed.is_empty()
-    }
-}
-
 /// The changes queue of `sighting` against the kernel's `items`. The verdict on a tool offered at
 /// another digest is the kernel's word, never a comparison here, so a tool the kernel holds demoted
 /// is `changed` with or without a successful sighting (after a restart the plane has sighted
@@ -238,7 +232,8 @@ pub fn state(items: &[KernelItem], sighting: &Sighting) -> State {
     if !items.iter().any(KernelItem::serves) {
         return State::Pending;
     }
-    if drift(items, sighting).is_empty() {
+    let d = drift(items, sighting);
+    if d.added.is_empty() && d.changed.is_empty() && d.removed.is_empty() {
         State::Approved
     } else {
         State::Quarantined

@@ -66,9 +66,6 @@ pub const REASON_CUSTOM_PARAM_MISMATCH: &str = "custom_param_mismatch";
 pub const REASON_TASKS_UNDECLARED: &str = "tasks_capability_undeclared";
 /// The call-log reason of an answer naming an input busbar did not ask for.
 pub const REASON_ANSWER_UNDECLARED: &str = "caller_ask_answer_undeclared";
-/// The call-log reason of a complete result still carrying an ask's field, refused at the terminal
-/// check (an ask is relayed only as an input-required result).
-pub const REASON_ASK_NOT_PROXIED: &str = "ask_not_proxied";
 /// The call-log reason of a call that NEVER LEFT ITS QUEUE: it waited its turn on a stdio member's
 /// child (another call held it) and its deadline passed first. It rides `refused`, because the call
 /// did not go out ([`never_sent`]).
@@ -1518,10 +1515,14 @@ pub fn retry_refused_line(entry: &ToolEntry, reason: &str) -> CallLine {
 /// An upstream ask busbar declined: `403`, `-32000`, the refusal's words and reason.
 #[must_use]
 pub fn ask_refused(admitted: &AdmittedCall, refusal: &AskRefusal) -> Settled {
-    let reason = refusal.audit_reason();
+    forbidden(admitted, refusal.to_string(), refusal.audit_reason())
+}
+
+/// `admitted`'s call refused after it went out: `403`, `-32000`, `message` and `reason`.
+fn forbidden(admitted: &AdmittedCall, message: String, reason: &str) -> Settled {
     Settled::Answer {
         status: STATUS_FORBIDDEN,
-        body: catalogue_refusal(STATUS_FORBIDDEN, &admitted.id, refusal.to_string(), reason).body(),
+        body: catalogue_refusal(STATUS_FORBIDDEN, &admitted.id, message, reason).body(),
         line: CallLine::resolved(&admitted.entry, vocab::OUTCOME_REFUSED, reason),
     }
 }
@@ -1529,31 +1530,21 @@ pub fn ask_refused(admitted: &AdmittedCall, refusal: &AskRefusal) -> Settled {
 /// A finished result: the terminal ask check, then the upstream's result relayed as it came
 /// (Law 11). `value` is the result parsed, `body` the answer it was parsed from.
 fn completed(admitted: &AdmittedCall, value: &Value, body: &[u8]) -> Settled {
-    let entry = &admitted.entry;
-    let id = &admitted.id;
     if let Some(field) = upstream_ask_field(value) {
-        return Settled::Answer {
-            status: STATUS_FORBIDDEN,
-            body: catalogue_refusal(
-                STATUS_FORBIDDEN,
-                id,
-                format!(
-                    "MCP server `{}` answered with a complete result that still carries an ask's \
-                     `{field}`. An upstream's ask is relayed to you only as an input-required \
-                     result, under the operator's grant; this answer is neither a complete result \
-                     nor such an ask, so it is not served.",
-                    entry.server
-                ),
-                REASON_ASK_NOT_PROXIED,
-            )
-            .body(),
-            line: CallLine::resolved(entry, vocab::OUTCOME_REFUSED, REASON_ASK_NOT_PROXIED),
-        };
+        let message = format!(
+            "MCP server `{}` answered with a complete result that still carries an ask's \
+             `{field}`. An upstream's ask is relayed to you only as an input-required \
+             result, under the operator's grant; this answer is neither a complete result \
+             nor such an ask, so it is not served.",
+            admitted.entry.server
+        );
+        // An ask is relayed only as an input-required result.
+        return forbidden(admitted, message, "ask_not_proxied");
     }
     Settled::Answer {
         status: STATUS_OK,
-        body: relayed(id, value, body),
-        line: CallLine::resolved(entry, vocab::OUTCOME_DISPATCHED, ""),
+        body: relayed(&admitted.id, value, body),
+        line: CallLine::resolved(&admitted.entry, vocab::OUTCOME_DISPATCHED, ""),
     }
 }
 

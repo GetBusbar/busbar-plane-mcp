@@ -725,33 +725,34 @@ fn validate_endpoint(at: &str, def: &McpServerDefCfg) -> Result<(), String> {
             ));
         }
     }
-    // The credential keys are refused rather than ignored: a pipe has no header to carry one.
-    if def.token_exchange.is_some() {
-        return Err(format!(
-            "{at}: `token_exchange:` has no carrier on `transport: stdio` — a pipe has no header \
+    // The network keys are refused rather than ignored: a pipe has no header to carry a
+    // credential, and no address for `allow_private:` to widen.
+    for (set, why) in [
+        (
+            def.token_exchange.is_some(),
+            "`token_exchange:` has no carrier on `transport: stdio` — a pipe has no header \
              block to put a bearer token in. Give the child its credential through `env:`, which is \
-             the channel a child process actually reads one from."
-        ));
-    }
-    if def.aud.is_some() {
-        return Err(format!(
-            "{at}: `aud:` is the RFC 8707 resource indicator for an OUTBOUND token, and \
-             `transport: stdio` mints none. Drop it."
-        ));
-    }
-    if def.upstream_credentials.is_some() {
-        return Err(format!(
-            "{at}: `upstream_credentials:` selects how busbar credentials a NETWORK hop, and \
-             `transport: stdio` makes none. A child process's credential belongs in `env:`."
-        ));
-    }
-    // `allow_private:` widens the dispatch-time SSRF check, and there is no address here for it to
-    // widen. Left set, it would read to an operator as a posture busbar was applying.
-    if def.allow_private {
-        return Err(format!(
-            "{at}: `allow_private:` widens the addressing check for a network hop, and \
-             `transport: stdio` makes none. Drop it."
-        ));
+             the channel a child process actually reads one from.",
+        ),
+        (
+            def.aud.is_some(),
+            "`aud:` is the RFC 8707 resource indicator for an OUTBOUND token, and \
+             `transport: stdio` mints none. Drop it.",
+        ),
+        (
+            def.upstream_credentials.is_some(),
+            "`upstream_credentials:` selects how busbar credentials a NETWORK hop, and \
+             `transport: stdio` makes none. A child process's credential belongs in `env:`.",
+        ),
+        (
+            def.allow_private,
+            "`allow_private:` widens the addressing check for a network hop, and \
+             `transport: stdio` makes none. Drop it.",
+        ),
+    ] {
+        if set {
+            return Err(format!("{at}: {why}"));
+        }
     }
     Ok(())
 }
@@ -826,14 +827,12 @@ pub fn validate_server(name: &str, def: &McpServerDefCfg) -> Result<(), String> 
         validate_capability_name(&at, "tools_allow", tool)?;
         crate::identity::ToolKey::new(id.clone(), tool)
             .map_err(|e| format!("{at}: `tools_allow.{tool}`: {e}"))?;
-        refuse_unknown_ask_methods(&at, "tools_allow", tool, "ask_caller", &allow.ask_caller)?;
-        refuse_unknown_ask_methods(
-            &at,
-            "tools_allow",
-            tool,
-            "task_ask_caller",
-            &allow.task_ask_caller,
-        )?;
+        for (field, rounds) in [
+            ("ask_caller", &allow.ask_caller),
+            ("task_ask_caller", &allow.task_ask_caller),
+        ] {
+            refuse_unknown_ask_methods(&at, "tools_allow", tool, field, rounds)?;
+        }
         // A task-scoped ask on a tool that never creates a task would never be emitted.
         if !allow.task_ask_caller.is_empty() && allow.task_support.is_none() {
             return Err(format!(
