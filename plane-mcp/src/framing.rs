@@ -25,8 +25,8 @@ pub const META_LOGGING_LEVEL: &str = "io.busbar/loggingLevel";
 /// The level a caller that names none is given.
 pub const DEFAULT_LEVEL: &str = "info";
 
-/// The protocol's eight severities, least severe first.
-const SEVERITIES: &[&str] = &[
+/// The protocol's eight severities (RFC 5424's), least severe first.
+pub(crate) const SEVERITIES: &[&str] = &[
     "debug",
     "info",
     "notice",
@@ -55,7 +55,8 @@ pub const JSON: &str = "application/json";
 /// The cache directive an event-stream answer carries.
 pub const NO_STORE: &str = "no-cache, no-store";
 
-fn severity_of(name: &str) -> Option<usize> {
+/// The rank of severity `name` ([`SEVERITIES`]), `None` for a name that is none of them.
+pub(crate) fn severity_of(name: &str) -> Option<usize> {
     SEVERITIES.iter().position(|s| *s == name)
 }
 
@@ -146,6 +147,24 @@ fn push_raw_event(out: &mut String, data: &str) {
     out.push('\n');
 }
 
+/// One answer as an event stream: each of `frames`, then the answer, one `message` event each.
+/// `None` when `body` is not one JSON document (it goes out as it was).
+///
+/// THE ANSWER IS ITS OWN BYTES (Law 11): never parsed and printed again, which would re-order its
+/// members and re-spell its numbers. Each of its lines is one `data:` line, and a client joins them
+/// back with `\n`: a JSON document carries a line break only between its tokens.
+#[must_use]
+pub fn event_stream(body: &[u8], frames: &[Value]) -> Option<Vec<u8>> {
+    let text = std::str::from_utf8(body).ok()?;
+    serde_json::from_str::<serde::de::IgnoredAny>(text).ok()?;
+    let mut out = String::new();
+    for frame in frames {
+        push_event(&mut out, frame);
+    }
+    push_raw_event(&mut out, text);
+    Some(out.into_bytes())
+}
+
 /// Messages as an event stream: one `message` event each, in order.
 #[must_use]
 pub fn events(frames: &[Value]) -> Vec<u8> {
@@ -206,12 +225,9 @@ impl Framing {
     /// joins them back with `\n`: a JSON document carries a line break only between its tokens.
     #[must_use]
     pub fn frame(&self, status: u32, body: Vec<u8>, progress: &[Value]) -> (Vec<u8>, bool) {
-        let Some(text) = std::str::from_utf8(&body)
-            .ok()
-            .filter(|t| status == 200 && serde_json::from_str::<serde::de::IgnoredAny>(t).is_ok())
-        else {
+        if status != 200 {
             return (body, false);
-        };
+        }
         let logs = [
             (
                 "debug",
@@ -222,21 +238,19 @@ impl Framing {
                 json!({ "message": "MCP method completed", "httpStatus": status }),
             ),
         ];
-        let mut out = String::new();
-        for frame in progress {
-            push_event(&mut out, frame);
-        }
+        let mut frames = progress.to_vec();
         for (level, mut data) in logs {
             if level_allows(self.level, level) {
                 data["method"] = json!(self.method);
                 let params =
                     json!({ "level": level, "logger": "busbar.mcp.dispatch", "data": data });
-                let envelope = json!({ "jsonrpc": "2.0", "method": "notifications/message", "params": params });
-                push_event(&mut out, &envelope);
+                frames.push(json!({ "jsonrpc": "2.0", "method": "notifications/message", "params": params }));
             }
         }
-        push_raw_event(&mut out, text);
-        (out.into_bytes(), true)
+        match event_stream(&body, &frames) {
+            Some(stream) => (stream, true),
+            None => (body, false),
+        }
     }
 }
 

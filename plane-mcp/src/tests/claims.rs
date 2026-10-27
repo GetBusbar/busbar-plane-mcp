@@ -23,17 +23,11 @@ fn the_default_mount_is_the_codecs_own() {
     );
 }
 
-/// The discovery path is a FUNCTION OF THE MOUNT, and this is the assertion that says the note
-/// in the module header is still live.
-///
-/// The protected-resource metadata rule inserts the well-known segment between the origin and
-/// the resource's own path,
-/// so an operator who moves the mount moves the discovery document with it. If that composition
-/// ever collapses into a constant — if the answer stops depending on its argument — this goes
-/// red, and the note stops being true and should be deleted. A note that quietly outlives its
-/// cause is worse than no note at all.
+/// The discovery path is a FUNCTION OF THE MOUNT: the protected-resource metadata rule inserts the
+/// well-known segment between the origin and the resource's own path, so the fixed discovery claim
+/// is the one composed from the fixed mount, and another mount would compose another.
 #[test]
-fn the_mount_is_still_configured() {
+fn the_discovery_path_is_composed_from_the_mount() {
     let moved = crate::codec::protected_resource_metadata_path("/elsewhere");
     assert_ne!(moved, DEFAULT_METADATA);
     assert!(moved.ends_with("/elsewhere"));

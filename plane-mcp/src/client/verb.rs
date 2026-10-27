@@ -1,127 +1,57 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE CLOSED SET OF METHODS BUSBAR ISSUES TO AN UPSTREAM MCP SERVER, one enum so the column
-//! `mcp × stdio × busbar-as-client × client-originated` of `tests/data/method-inventory.json` is
-//! enumerable (`tests/method_inventory.rs` compares it in both directions). `initialize` is built
-//! here because a stdio child demands a handshake. Params are data on the child's stdin, never argv.
+//! THE CLOSED SET OF METHODS BUSBAR ISSUES TO AN UPSTREAM MCP SERVER THROUGH ONE BUILDER, each with
+//! a production construction site.
+//!
+//! ## Why a closed enum and not a `&str` method name
+//!
+//! `tests/data/method-inventory.json` is a MATRIX and this module is one of its columns: `mcp × <transport>
+//! × busbar-as-client × client-originated`. A builder that took the method as a string would make
+//! the column's contents a property of its call sites, so a method could be added by one caller and
+//! be invisible to every gate. The enum is what makes an enumeration of the column possible, and
+//! `src/tests/method_inventory_tests.rs` compares the variants PRODUCTION CONSTRUCTS (counted in
+//! the shipped source, never in this file's own list) against the generated inventory: a variant
+//! with no production construction site does not ship, and is not here.
+//!
+//! ## What is issued, and from where
+//!
+//! - `initialize` and `notifications/initialized`: the handshake a STDIO CHILD demands before any
+//!   other request (`crate::tool_program::initialize`, `initialized_notification`). Over streamable
+//!   HTTP the stateless revision deleted the handshake; a session revision's is the client
+//!   ladder's (`super::compat`).
+//!
+//! A caller's resource subscription is never carried upstream: busbar records the uri and relays
+//! what the member announces, so `resources/subscribe` and `resources/unsubscribe` are not issued.
+//!
+//! `tools/call` and `tools/list` are built by `super::jsonrpc` on the dispatch and verify paths.
+//! Every other client-originated method of the inventory is one busbar does not send an upstream
+//! today; the inventory test names each, so issuing one means adding its variant here AND its
+//! production construction site.
+//!
+//! ## Params are DATA, never argv
+//!
+//! Every variant's payload is serialised into the JSON-RPC `params` object. Nothing here can reach
+//! a child's argument vector, which is config-only.
 
 use super::jsonrpc::{envelope, OutboundRequest};
 use crate::codec::{META_CLIENT_CAPABILITIES, META_PROTOCOL_VERSION, PROTOCOL_VERSION};
 
-/// ONE METHOD BUSBAR SENDS TO AN UPSTREAM, with its parameters. Only `Initialize` and
-/// `NotificationsInitialized` have a production caller (the stdio handshake); the rest are the
-/// inventory column's.
-#[allow(dead_code)]
-#[derive(Clone, Debug, PartialEq)]
+/// ONE METHOD BUSBAR SENDS TO AN UPSTREAM, with its parameters.
+///
+/// Every variant carries the data its `params` needs and nothing else. There is deliberately no
+/// `Other(String)` arm: an arm that accepted an arbitrary method name would reopen exactly the
+/// hole this enum closes. Every variant has a production construction site (see the module
+/// header); none is kept for a caller that does not exist.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UpstreamVerb {
-    /// The handshake.
+    /// The handshake a stdio child demands.
     Initialize {
         /// busbar's release, sent as `clientInfo.version`.
         client_version: &'static str,
     },
     /// The handshake's acknowledgement. A NOTIFICATION.
     NotificationsInitialized,
-    /// Liveness.
-    Ping,
-    /// The merged capability advertisement this revision added.
-    ServerDiscover,
-    /// Set the upstream's log verbosity.
-    LoggingSetLevel {
-        /// The RFC 5424 level name.
-        level: String,
-    },
-    /// The upstream's tool list.
-    ToolsList,
-    /// Invoke one tool. `name` is the UN-namespaced tool.
-    ToolsCall {
-        /// The un-namespaced tool name.
-        name: String,
-        /// The tool's arguments object.
-        arguments: serde_json::Value,
-    },
-    /// The upstream's prompt list.
-    PromptsList,
-    /// One prompt, rendered with arguments.
-    PromptsGet {
-        /// The prompt name.
-        name: String,
-        /// The prompt's arguments object.
-        arguments: serde_json::Value,
-    },
-    /// The upstream's resource list.
-    ResourcesList,
-    /// The upstream's resource templates.
-    ResourcesTemplatesList,
-    /// Read one resource.
-    ResourcesRead {
-        /// The resource URI.
-        uri: String,
-    },
-    /// Subscribe to one resource's updates.
-    ResourcesSubscribe {
-        /// The resource URI.
-        uri: String,
-    },
-    /// Drop one resource subscription.
-    ResourcesUnsubscribe {
-        /// The resource URI.
-        uri: String,
-    },
-    /// SEP-2575's replacement for the removed GET stream. A METHOD in this revision.
-    SubscriptionsListen {
-        /// The notification categories asked for.
-        notifications: serde_json::Value,
-    },
-    /// Argument completion.
-    CompletionComplete {
-        /// The prompt or resource template being completed.
-        reference: serde_json::Value,
-        /// The argument name and partial value.
-        argument: serde_json::Value,
-    },
-    /// SEP-2663 tasks. `taskId` is the wire spelling — see the engine's `mcp::tasks`.
-    TasksGet {
-        /// The task id.
-        task_id: String,
-    },
-    /// Hand a task the input it asked for.
-    TasksUpdate {
-        /// The task id.
-        task_id: String,
-        /// The answers, keyed as the task asked.
-        input_responses: serde_json::Value,
-    },
-    /// Cancel one task.
-    TasksCancel {
-        /// The task id.
-        task_id: String,
-    },
-    /// A NOTIFICATION: the caller withdrew a request busbar had already forwarded.
-    NotificationsCancelled {
-        /// The id of the withdrawn request.
-        request_id: serde_json::Value,
-        /// Why it was withdrawn.
-        reason: String,
-    },
-    /// A NOTIFICATION: progress on a long-running call, relayed upstream.
-    NotificationsProgress {
-        /// The token the upstream call was issued with.
-        progress_token: serde_json::Value,
-        /// Progress so far.
-        progress: f64,
-        /// The total, when known.
-        total: Option<f64>,
-    },
-    /// A NOTIFICATION: busbar's exposed root set changed.
-    NotificationsRootsListChanged,
-    /// A NOTIFICATION: the answer to an `elicitation/create` the upstream asked for.
-    NotificationsElicitationResponse {
-        /// The id of the upstream's `elicitation/create`.
-        request_id: serde_json::Value,
-        /// The user's answer.
-        content: serde_json::Value,
-    },
 }
 
 impl UpstreamVerb {
@@ -130,45 +60,17 @@ impl UpstreamVerb {
         match self {
             UpstreamVerb::Initialize { .. } => "initialize",
             UpstreamVerb::NotificationsInitialized => "notifications/initialized",
-            UpstreamVerb::Ping => "ping",
-            UpstreamVerb::ServerDiscover => "server/discover",
-            UpstreamVerb::LoggingSetLevel { .. } => "logging/setLevel",
-            UpstreamVerb::ToolsList => "tools/list",
-            UpstreamVerb::ToolsCall { .. } => "tools/call",
-            UpstreamVerb::PromptsList => "prompts/list",
-            UpstreamVerb::PromptsGet { .. } => "prompts/get",
-            UpstreamVerb::ResourcesList => "resources/list",
-            UpstreamVerb::ResourcesTemplatesList => "resources/templates/list",
-            UpstreamVerb::ResourcesRead { .. } => "resources/read",
-            UpstreamVerb::ResourcesSubscribe { .. } => "resources/subscribe",
-            UpstreamVerb::ResourcesUnsubscribe { .. } => "resources/unsubscribe",
-            UpstreamVerb::SubscriptionsListen { .. } => "subscriptions/listen",
-            UpstreamVerb::CompletionComplete { .. } => "completion/complete",
-            UpstreamVerb::TasksGet { .. } => "tasks/get",
-            UpstreamVerb::TasksUpdate { .. } => "tasks/update",
-            UpstreamVerb::TasksCancel { .. } => "tasks/cancel",
-            UpstreamVerb::NotificationsCancelled { .. } => "notifications/cancelled",
-            UpstreamVerb::NotificationsProgress { .. } => "notifications/progress",
-            UpstreamVerb::NotificationsRootsListChanged => "notifications/roots/list_changed",
-            UpstreamVerb::NotificationsElicitationResponse { .. } => {
-                "notifications/elicitation/response"
-            }
         }
     }
 
     /// Whether this verb is a JSON-RPC NOTIFICATION: no `id`, and no reply ever.
     pub fn is_notification(&self) -> bool {
-        matches!(
-            self,
-            UpstreamVerb::NotificationsInitialized
-                | UpstreamVerb::NotificationsCancelled { .. }
-                | UpstreamVerb::NotificationsProgress { .. }
-                | UpstreamVerb::NotificationsRootsListChanged
-                | UpstreamVerb::NotificationsElicitationResponse { .. }
-        )
+        matches!(self, UpstreamVerb::NotificationsInitialized)
     }
 
-    /// The `params` object, WITHOUT `_meta`, which [`Self::build`] adds once for every verb.
+    /// The `params` object, WITHOUT `_meta` — which [`Self::build`] adds, once, for every verb.
+    ///
+    /// Split that way so no variant can forget the revision's required `_meta`.
     fn params(&self) -> serde_json::Value {
         match self {
             UpstreamVerb::Initialize { client_version } => serde_json::json!({
@@ -176,54 +78,7 @@ impl UpstreamVerb {
                 "capabilities": {},
                 "clientInfo": { "name": "busbar", "version": client_version },
             }),
-            UpstreamVerb::NotificationsInitialized
-            | UpstreamVerb::Ping
-            | UpstreamVerb::ServerDiscover
-            | UpstreamVerb::ToolsList
-            | UpstreamVerb::PromptsList
-            | UpstreamVerb::ResourcesList
-            | UpstreamVerb::ResourcesTemplatesList
-            | UpstreamVerb::NotificationsRootsListChanged => serde_json::json!({}),
-            UpstreamVerb::LoggingSetLevel { level } => serde_json::json!({ "level": level }),
-            UpstreamVerb::ToolsCall { name, arguments } => {
-                serde_json::json!({ "name": name, "arguments": arguments })
-            }
-            UpstreamVerb::PromptsGet { name, arguments } => {
-                serde_json::json!({ "name": name, "arguments": arguments })
-            }
-            UpstreamVerb::ResourcesRead { uri }
-            | UpstreamVerb::ResourcesSubscribe { uri }
-            | UpstreamVerb::ResourcesUnsubscribe { uri } => serde_json::json!({ "uri": uri }),
-            UpstreamVerb::SubscriptionsListen { notifications } => {
-                serde_json::json!({ "notifications": notifications })
-            }
-            UpstreamVerb::CompletionComplete {
-                reference,
-                argument,
-            } => serde_json::json!({ "ref": reference, "argument": argument }),
-            UpstreamVerb::TasksGet { task_id } | UpstreamVerb::TasksCancel { task_id } => {
-                serde_json::json!({ "taskId": task_id })
-            }
-            UpstreamVerb::TasksUpdate {
-                task_id,
-                input_responses,
-            } => serde_json::json!({ "taskId": task_id, "inputResponses": input_responses }),
-            UpstreamVerb::NotificationsCancelled { request_id, reason } => {
-                serde_json::json!({ "requestId": request_id, "reason": reason })
-            }
-            UpstreamVerb::NotificationsProgress {
-                progress_token,
-                progress,
-                total,
-            } => serde_json::json!({
-                "progressToken": progress_token,
-                "progress": progress,
-                "total": total,
-            }),
-            UpstreamVerb::NotificationsElicitationResponse {
-                request_id,
-                content,
-            } => serde_json::json!({ "requestId": request_id, "content": content }),
+            UpstreamVerb::NotificationsInitialized => serde_json::json!({}),
         }
     }
 
@@ -265,6 +120,20 @@ impl UpstreamVerb {
             })
         };
         envelope(url, method, self.target().as_deref(), body, authorization)
+    }
+}
+
+#[cfg(test)]
+impl UpstreamVerb {
+    /// ONE INSTANCE OF EVERY VARIANT, for the tests of the builder's shape. The method inventory
+    /// test counts production construction sites, never this list.
+    pub fn all() -> Vec<UpstreamVerb> {
+        vec![
+            UpstreamVerb::Initialize {
+                client_version: "0.0.0",
+            },
+            UpstreamVerb::NotificationsInitialized,
+        ]
     }
 }
 

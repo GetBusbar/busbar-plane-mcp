@@ -30,7 +30,7 @@ use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::plane::{
     OnPieceIn, OnPieceOut, PlaneDriveIn, PlaneDriveOut, FROM_CALLER, FROM_KERNEL, PIECE_LAST,
 };
-use busbar_contract::abi::sdk::{Lent, Out, Services};
+use busbar_contract::abi::sdk::{Lent, Out, StaticServices};
 use serde_json::Value;
 
 /// How often the instance's tick steps its held subscriptions (predev re-read the generation and
@@ -116,13 +116,9 @@ pub(super) fn piece(
     input: Lent<'_, OnPieceIn>,
     out: &mut Out<'_, OnPieceOut>,
 ) -> Outcome {
-    let given = input.get();
-    let (key, ticket) = (given.unit, given.head.ticket);
-    let caller = input
-        .field(|i| &i.caller_ref)
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
+    let given = input;
+    let (key, ticket) = (given.unit(), given.head().ticket());
+    let caller = input.caller_ref().as_str().unwrap_or_default().to_string();
     let principal = super::principal_of(&caller);
     let step = plane.units.with(&key, |unit| {
         let unit = unit?;
@@ -130,14 +126,14 @@ pub(super) fn piece(
         if unit.pending.is_some() {
             return Some(true);
         }
-        match given.from {
+        match given.from() {
             // The caller went away: the session ends with nothing more to say.
-            FROM_CALLER if given.flags & PIECE_LAST != 0 => {
+            FROM_CALLER if given.flags() & PIECE_LAST != 0 => {
                 unit.pending = Some(frame(Vec::new(), true, true));
                 Some(true)
             }
             FROM_CALLER => open(plane, ticket, principal, unit),
-            FROM_KERNEL if given.attempt_no == 0 => {
+            FROM_KERNEL if given.attempt_no() == 0 => {
                 if plane.listens.with(&key, |l| l.is_none()) {
                     return Some(false);
                 }
@@ -445,7 +441,7 @@ pub(super) fn asks_a_round(
 /// The host's monotonic clock on a fresh handle of the unit's ticket; `None` with no clock or a
 /// failed read, which is never a time (row 159 finding P-M4): no timer is armed at it.
 pub(super) fn mono_ns(
-    services: Option<Services>,
+    services: Option<StaticServices>,
     ticket: Ticket,
     unit: &mut CallUnit,
 ) -> Option<u64> {

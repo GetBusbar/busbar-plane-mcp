@@ -5,156 +5,85 @@
 //! fails refuses the state (busbar's own and a relayed one) and mints none, and never reads the
 //! failure as the epoch (BUSBAR-1.6.0 spec line 1576: the clock is the kernel's one clock; line
 //! 3295-3370: fail closed).
+//!
+//! The door's ask decision and its relayed state's seal are driven here over the host they seal
+//! against (`tool_door::SealHost`), a plain Rust value: a clock that reads a given second, one whose
+//! read fails and one that is not served (both read as no time, as the door's host services answer
+//! them), a signer whose signature is the data's digest, and a random fill of sevens. The door's own
+//! [`DoorSeal`](crate::tool_door::DoorSeal) is the same seam over the host's services.
 
-#![allow(unsafe_code)]
-
-use std::ffi::c_void;
-
-use busbar_contract::abi::host::service::{
-    ClockNowIn, HostSlots, ItemSpan, RandomFillIn, ServiceFn, ServiceOut, SignIn, SERVICES,
-};
-use busbar_contract::abi::mechanism::call::{RawOutcome, Span};
-use busbar_contract::abi::mechanism::ticket::{HostCtx, HostTables};
 use serde_json::json;
 
-use busbar_contract::abi::mechanism::call::Outcome;
-use busbar_contract::abi::mechanism::ticket::Ticket;
+use crate::ask::{self as ask, AskDecision, AskRefusal, AskState, Rejected, UpstreamLeg};
+use crate::tool_door::{decide_ask, Held, SealHost, Site};
+use crate::{codec, door, tools_config};
 use busbar_contract::abi::sdk::publish::Keyed;
-use busbar_contract::abi::sdk::Services;
-use busbar_plane_mcp::ask::{self as ask, AskDecision, AskRefusal, Rejected, UpstreamLeg};
-use busbar_plane_mcp::tool_door::{decide_ask, DoorSeal, Held, Site};
-use busbar_plane_mcp::{codec, door, tools_config};
 use serde_json::Value;
 
-fn answered(out: *mut ServiceOut, len: u64, items: u64) -> RawOutcome {
-    // SAFETY: the wrapper's live `out`.
-    unsafe {
-        (*out).len = len;
-        (*out).items = items;
-        (*out).outcome = RawOutcome::of(Outcome::Ready);
-    }
-    RawOutcome::of(Outcome::Ready)
+/// A HOST'S CLOCK, as the seal reads it: the Unix second it answers, or `None` when its read fails
+/// or it serves no clock.
+struct HostClock {
+    secs: Option<u64>,
 }
 
-/// A signer: key id `k`, the signature the data's digest (64 bytes), so a state opens only as
-/// minted.
-extern "C" fn signs(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
-    // SAFETY: the wrapper hands a `SignIn` naming its live data and buffers, and a live `out`.
-    unsafe {
-        let i = input.cast::<SignIn>().read_unaligned();
-        let data = std::slice::from_raw_parts(i.data.ptr, i.data.len);
+/// A clock at second 1000, where a state is minted.
+static MINTS: HostClock = HostClock { secs: Some(1000) };
+/// A clock past every window minted at [`MINTS`].
+static LAPSED: HostClock = HostClock { secs: Some(9000) };
+/// A host that serves no clock.
+static UNSERVED: HostClock = HostClock { secs: None };
+/// A host whose clock read fails.
+static FAILS: HostClock = HostClock { secs: None };
+
+/// THE HOST THE DOOR SEALS AGAINST, as a value: its clock, a signer whose signature is the data's
+/// digest (64 hex bytes, so a state opens only as minted), a random fill of sevens, and the
+/// instance's ledger of spent approvals (no host claim is served, so the local half is the gate,
+/// as the door's own seal answers a host that serves none).
+struct HostDouble<'a> {
+    clock: &'static HostClock,
+    spent: &'a Keyed<String, u64>,
+}
+
+impl SealHost for HostDouble<'_> {
+    fn sign(&mut self, data: &[u8]) -> Option<Vec<u8>> {
         let digest = busbar_contract::redacted::sha256_hex(data);
-        let sig = &digest.as_bytes()[..64];
-        *i.into.buf = b'k';
-        std::ptr::copy_nonoverlapping(sig.as_ptr(), i.into.buf.add(1), sig.len());
-        *i.into.spans = ItemSpan {
-            key: Span { offset: 0, len: 1 },
-            value: Span { offset: 1, len: 64 },
-        };
-        answered(out, 65, 1)
+        Some(digest.as_bytes()[..64].to_vec())
+    }
+
+    fn now(&mut self) -> Option<u64> {
+        self.clock.secs
     }
 }
 
-extern "C" fn fills(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
-    // SAFETY: the wrapper hands a `RandomFillIn` naming its live buffer, and a live `out`.
-    unsafe {
-        let i = input.cast::<RandomFillIn>().read_unaligned();
-        std::ptr::write_bytes(i.into.buf, 7, i.len as usize);
-        answered(out, i.len, 0)
+impl ask::Seal for HostDouble<'_> {
+    fn mint(&mut self, state: &AskState) -> Option<String> {
+        crate::seal::seal_state(state, &mut |data| SealHost::sign(self, data))
+    }
+
+    fn open(&mut self, blob: &str) -> Result<AskState, Rejected> {
+        crate::seal::unseal_state(blob, &mut |data| SealHost::sign(self, data))
+    }
+
+    fn nonce(&mut self) -> Option<String> {
+        Some([7u8; 16].iter().map(|b| format!("{b:02x}")).collect())
+    }
+
+    fn redeem(&mut self, nonce: &str, expires_at: u64, now: u64) -> bool {
+        self.spent.with_all(|seen| {
+            seen.retain(|_, expiry| *expiry >= now);
+            seen.insert(nonce.to_string(), expires_at).is_none()
+        })
     }
 }
-
-fn clock(input: *const c_void, out: *mut ServiceOut, secs: u64) -> RawOutcome {
-    // SAFETY: the wrapper hands a `ClockNowIn` naming its live reading, and a live `out`.
-    unsafe {
-        let i = input.cast::<ClockNowIn>().read_unaligned();
-        (*i.reading).wall_ns = secs * 1_000_000_000;
-        (*i.reading).mono_ns = 1;
-        answered(out, 0, 0)
-    }
-}
-
-extern "C" fn at_1000(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
-    clock(input, out, 1000)
-}
-
-extern "C" fn at_9000(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
-    clock(input, out, 9000)
-}
-
-/// A host whose clock call fails.
-extern "C" fn broken(_: HostCtx, _: *const c_void, out: *mut ServiceOut) -> RawOutcome {
-    // SAFETY: the wrapper's live `out`.
-    unsafe { (*out).outcome = RawOutcome::of(Outcome::Failed) };
-    RawOutcome::of(Outcome::Failed)
-}
-
-const fn host(clock: Option<ServiceFn>) -> HostSlots {
-    HostSlots {
-        size: std::mem::size_of::<HostSlots>() as u32,
-        slots: SERVICES,
-        clock_now: clock,
-        records_get: None,
-        records_list: None,
-        records_claim: None,
-        dest_judge: None,
-        sign: Some(signs),
-        unit_nest: None,
-        work_open: None,
-        work_find: None,
-        work_settle: None,
-        work_resume: None,
-        trust_sight: None,
-        trust_due: None,
-        verify_lookup: None,
-        verify_store: None,
-        entitlement_check: None,
-        content_scan: None,
-        hook_call: None,
-        random_fill: Some(fills),
-        need_admit: None,
-        trust_verify: None,
-        records_secret: None,
-        disk_append: None,
-        snapshot_read: None,
-        trust_sight_item: None,
-        trust_serves: None,
-        trust_decide: None,
-        trust_state: None,
-        session_emit: None,
-        auth_call: None,
-        unit_hand_in: None,
-        unit_refuse: None,
-    }
-}
-
-static MINTS: HostSlots = host(Some(at_1000));
-static LAPSED: HostSlots = host(Some(at_9000));
-static UNSERVED: HostSlots = host(None);
-static FAILS: HostSlots = host(Some(broken));
 
 fn with_seal<R>(
-    table: &'static HostSlots,
+    table: &'static HostClock,
     spent: &Keyed<String, u64>,
-    f: impl FnOnce(&mut DoorSeal<'_>) -> R,
+    f: impl FnOnce(&mut HostDouble<'_>) -> R,
 ) -> R {
-    let tables = HostTables {
-        size: std::mem::size_of::<HostTables>() as u32,
-        _reserved: 0,
-        ctx: HostCtx::NONE,
-        wake: None,
-        conns: std::ptr::null(),
-        io: std::ptr::null(),
-        services: table,
-    };
-    let (mut issued, mut claim) = (0u32, None);
-    let mut seal = DoorSeal {
-        services: Services::of(&tables).expect("a table was handed"),
-        ticket: Ticket::NONE,
-        issued: &mut issued,
-        claim: &mut claim,
+    let mut seal = HostDouble {
+        clock: table,
         spent,
-        pending: false,
     };
     f(&mut seal)
 }
@@ -192,7 +121,7 @@ fn caps() -> Value {
 }
 
 fn decide_on(
-    table: &'static HostSlots,
+    table: &'static HostClock,
     spent: &Keyed<String, u64>,
     rounds: &[tools_config::AskRoundCfg],
     params: &Value,
@@ -283,7 +212,7 @@ fn a_relayed_state_is_refused_when_the_clock_fails() {
 }
 
 /// A relayed state's seal under the failing clock: the refusal and the words the caller reads.
-fn relayed_under_failed_clock(ttl_secs: u64) -> busbar_plane_mcp::call::AskRefusal {
+fn relayed_under_failed_clock(ttl_secs: u64) -> crate::call::AskRefusal {
     let spent = Keyed::new();
     let leg = UpstreamLeg {
         member: "fs".into(),
@@ -301,7 +230,7 @@ fn relayed_under_failed_clock(ttl_secs: u64) -> busbar_plane_mcp::call::AskRefus
         roots_epoch: 0,
     };
     with_seal(&FAILS, &spent, |seal| {
-        busbar_plane_mcp::tool_door::seal_relayed(seal, "fs", bind, "d", leg, ttl_secs)
+        crate::tool_door::seal_relayed(seal, "fs", bind, "d", leg, ttl_secs)
     })
     .expect_err("a state is never sealed at a time that was not read")
 }
@@ -315,7 +244,7 @@ fn a_relayed_ask_under_a_failed_clock_is_refused_naming_the_clock() {
     assert!(
         refusal
             .to_string()
-            .contains(busbar_plane_mcp::tool_door::CLOCK_UNAVAILABLE),
+            .contains(crate::tool_door::CLOCK_UNAVAILABLE),
         "{refusal}"
     );
 }
@@ -323,12 +252,12 @@ fn a_relayed_ask_under_a_failed_clock_is_refused_naming_the_clock() {
 /// A task parked on its caller's answer (the task relay's window) refuses the same way.
 #[test]
 fn a_task_relay_under_a_failed_clock_is_refused_naming_the_clock() {
-    let refusal = relayed_under_failed_clock(busbar_plane_mcp::tool_tasks::TASK_RELAY_TTL_SECS);
+    let refusal = relayed_under_failed_clock(crate::tool_tasks::TASK_RELAY_TTL_SECS);
     assert_eq!(refusal.audit_reason(), "ask_unavailable");
     assert!(
         refusal
             .to_string()
-            .contains(busbar_plane_mcp::tool_door::CLOCK_UNAVAILABLE),
+            .contains(crate::tool_door::CLOCK_UNAVAILABLE),
         "{refusal}"
     );
 }
