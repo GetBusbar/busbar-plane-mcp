@@ -57,7 +57,11 @@ pub fn tools_call(
     continuation: Option<&serde_json::Value>,
 ) -> OutboundRequest {
     let name = key.tool();
-    // BUSBAR'S OWN TOKEN, never the caller's, and only when the caller asked for progress.
+    // BUSBAR'S OWN TOKEN, never the caller's, and only when the caller asked for progress. Written
+    // here from `request_id`, which is NOT unique across calls (on the HTTP carrier it is the round):
+    // the relayed call's negotiation replaces it with a token no other request of the instance
+    // carries (`door_sessions::Negotiating::begin`, or the id a session sends it under), and a stdio
+    // child's call carries the unit's own id.
     let progress_token: Option<String> = advertise.progress.then(|| format!("busbar-{request_id}"));
     let mut capabilities = serde_json::Map::new();
     for (on, cap) in [
@@ -96,7 +100,9 @@ pub fn tools_call(
     envelope(url, "tools/call", Some(name), body, authorization)
 }
 
-/// Build a `tools/list` for one server.
+/// Build a `tools/list` for one server: the request an operator `connect` and a call's
+/// verify-on-call fetch send a member over HTTP (`crate::tool_door`), and the one a stdio child is
+/// asked over its pipe (`crate::tool_door`'s program leg).
 pub fn tools_list(url: &str, request_id: u64, authorization: Option<&str>) -> OutboundRequest {
     let body = serde_json::json!({
         "jsonrpc": "2.0",

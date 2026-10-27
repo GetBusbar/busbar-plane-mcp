@@ -15,7 +15,7 @@
 //! Moved here from busbar's `crates/busbar/tests/qa_mcp_integrity.rs`, where the same constant was
 //! asserted against a re-implementation of the digest in the test itself; here it is the plane's.
 
-use busbar_plane_mcp::trust::tool_digest;
+use crate::trust::tool_digest;
 use serde_json::json;
 
 #[test]

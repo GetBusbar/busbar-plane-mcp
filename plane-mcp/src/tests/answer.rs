@@ -6,6 +6,7 @@
 use serde_json::{json, Value};
 
 use super::*;
+use crate::tests::everyone;
 use crate::tool_arrival::decide;
 
 const SECTION: &[u8] = br#"{
@@ -26,10 +27,6 @@ fn catalogue() -> Catalogue {
         1,
         &crate::door::read_tools_section(SECTION).expect("the section reads"),
     )
-}
-
-fn everyone(_: &str, _: &str) -> bool {
-    true
 }
 
 /// A stateless-revision request for `method`, decided as an arrival.

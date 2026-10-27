@@ -7,6 +7,9 @@
 //! into the revision the upstream chose; on a refusal of `initialize`, [`Action::OpenStream`] (the
 //! driver carries the call over the `2024-11-05` event stream, `door_legacy`).
 
+// The crate's only public item is `door`: the accessors and variants below were this module's public API; the tests hold them, the door does not reach them (BUSBAR-1.6.0.md l.3560).
+#![cfg_attr(not(test), allow(dead_code))]
+
 use serde_json::Value;
 
 use super::compat::{

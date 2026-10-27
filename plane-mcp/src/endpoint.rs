@@ -4,6 +4,9 @@
 //! THE `mcp:` ENDPOINT BLOCK: its grammar ([`McpCfg`]), its boot refusals ([`McpCfgError`]) and the
 //! validated resource ([`McpResource`]) the composition root lowers it to at boot.
 
+// The crate's only public item is `door`: the accessors and variants below were this module's public API; the tests hold them, the door does not reach them (BUSBAR-1.6.0.md l.3560).
+#![cfg_attr(not(test), allow(dead_code))]
+
 use serde::{Deserialize, Serialize};
 
 /// The top-level `mcp:` config block. Its mere PRESENCE mounts the MCP plane; its absence means the
@@ -233,9 +236,9 @@ fn split_absolute(uri: &str) -> Option<(&str, &str)> {
     let rest = uri
         .strip_prefix("https://")
         .or_else(|| uri.strip_prefix("http://"))?;
-    // The authority must be non-empty, must not itself contain a scheme separator, and must not be
-    // the whole string's remainder only because the string ended at the scheme.
-    let authority_len = rest.find('/').unwrap_or(rest.len());
+    // The authority must be non-empty, and ends at the first `/`, `?` or `#` (a query or fragment
+    // straight after the authority is that, never part of the host).
+    let authority_len = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     if authority_len == 0 {
         return None;
     }

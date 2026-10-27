@@ -10,7 +10,7 @@
 use busbar_contract::abi::host::service::{
     DEST_ALLOWED, DEST_INTERNAL, DEST_METADATA, DEST_NO_HOST, DEST_OBFUSCATED,
 };
-use busbar_contract::net::extract_normalized_host;
+use busbar_contract::net::{extract_normalized_host, url_host_to_ascii};
 use serde_json::Value;
 
 /// THE HOST'S JUDGE, as the walk asks it: one host an argument names (an IPv6 literal bracketed,
@@ -286,6 +286,8 @@ const SPECIAL_SCHEMES: [&str; 6] = ["http", "https", "ws", "wss", "ftp", "file"]
 /// after it skipped, the authority ended at `/`, `?`, `#` or `\`, the host percent-decoded.
 /// All six WHATWG special schemes are read so: the contract reads `http`, `https`, `ws` and `wss`
 /// itself, `ftp` is read as `http` is, and `file` by [`file_host`].
+/// A host outside ASCII is judged as the punycode name a fetching client dials, as 1.5.5 dialled
+/// it: `judge_host` maps every host it is handed through UTS-46 ([`dial_host`]).
 /// `Some(Some(host))`: the value is a URL naming `host`, lower-cased. `Some(None)`: a URL no reader
 /// accepts, refused rather than passed: it opens with any `scheme://`, or with a special scheme
 /// and `:` and holds no ASCII whitespace or control character (a raw URL holds none, so prose such
@@ -470,6 +472,8 @@ fn judge_absolute(url: &str, judge: &mut Judge<'_>) -> Result<(), ArgWhy> {
     // spelled without `//` (`http:host`, `http:/\host`) is read by the contract's `parse_url`, which
     // skips any run of `/` and `\` after a web scheme as WHATWG does. Re-deriving either here would
     // be a second copy of a reader that already exists; the verdict on the host is `dest.judge`'s.
+    // Neither reader is relied on for the IDN mapping: `judge_host` maps whatever host it is handed
+    // through UTS-46 ([`dial_host`]), so a URL's host is judged as the name a client dials.
     let host = if cleaned.contains("://") {
         extract_normalized_host(&cleaned)
     } else {
@@ -485,12 +489,13 @@ fn judge_absolute(url: &str, judge: &mut Judge<'_>) -> Result<(), ArgWhy> {
 /// the plane reads the host and holds no rule about it. `judge`'s verdict is rendered as the
 /// refusal; a host that gave none refuses the value.
 ///
-/// The host is asked as spelled, and then, when it differs, in the one form a fetching client dials
-/// (`url`'s WHATWG host parser, UTS #46 and the IPv4 number rules): `ｌｏｃａｌｈｏｓｔ` is dialled as `localhost`, `１２７.０.０.１` as
-/// `127.0.0.1`, `0x` as `0.0.0.0`. Both must be admitted; a host the WHATWG host parser refuses
-/// is refused (fail closed), because the guard cannot say what a client would dial for it.
+/// The judge is asked about the name a client dials ([`dial_host`], UTS-46), never the spelling
+/// written; a host that name cannot be read from is refused unjudged. That name is asked, and then,
+/// when it differs, the one form a fetching client dials ([`whatwg_dialled`]): `0x` as `0.0.0.0`,
+/// `0x7f.1` as `127.0.0.1`. Both must be admitted; a host the WHATWG host parser refuses is refused
+/// (fail closed), because the guard cannot say what a client would dial for it.
 fn judge_host(raw: &str, judge: &mut Judge<'_>) -> Result<(), ArgWhy> {
-    let host = normalize_host(raw).ok_or_else(|| ArgWhy::NoHost(raw.to_string()))?;
+    let host = dial_host(raw).ok_or_else(|| ArgWhy::NoHost(raw.to_string()))?;
     let dest = if host.contains(':') {
         format!("[{host}]")
     } else {
@@ -523,6 +528,24 @@ fn ask(host: &str, dest: &str, judge: &mut Judge<'_>) -> Result<(), ArgWhy> {
         Some(verdict) => Err(ArgWhy::Refused(host, verdict)),
         None => Err(ArgWhy::Unjudged(host)),
     }
+}
+
+/// THE NAME A CONNECTING CLIENT DIALS for the host `raw`: read as a URL's host is read
+/// ([`normalize_host`]), then, outside ASCII, mapped through UTS-46 by the contract's
+/// `url_host_to_ascii` (the reading 1.5.5's `url` dialled by), with the one trailing root dot the
+/// mapping can make dropped. A fetching client maps `ｌｏｃａｌｈｏｓｔ` to `localhost`, `127。0。0。1`
+/// to `127.0.0.1` and `１６９．２５４．１６９．２５４` to `169.254.169.254`, so those are the names
+/// judged. An ASCII host is the reader's, unchanged. `None` when there is no host, or UTS-46 refuses
+/// it (a disallowed code point, or a mapping that yields a forbidden domain code point) or maps it
+/// to nothing: such a host is refused, never judged as written.
+fn dial_host(raw: &str) -> Option<String> {
+    let read = normalize_host(raw)?;
+    if read.is_ascii() {
+        return Some(read);
+    }
+    let mapped = url_host_to_ascii(&read).ok()?;
+    let host = mapped.strip_suffix('.').unwrap_or(mapped.as_ref());
+    (!host.is_empty() && host.is_ascii()).then(|| host.to_string())
 }
 
 /// Normalize a bare host the same way a URL's host component is normalized, by routing it through
