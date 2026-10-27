@@ -25,7 +25,6 @@ pub mod line;
 pub mod tool_arrival;
 pub mod tool_claims;
 pub mod tool_door;
-pub mod tool_facts;
 pub mod tool_meta;
 pub mod tool_ops;
 /// The `transport: stdio` servers: one long-lived child per server, its messages correlated by id.
@@ -61,38 +60,3 @@ pub mod trust;
 
 /// The registry key MCP is known by.
 pub const PLANE_KEY: &str = "mcp";
-
-use busbar_contract::plugin::{AbiVersion, Kind, Plugin};
-
-/// The MCP plane.
-///
-/// It carries no field: it is the type the plane's declarations (`PlaneMeta`) and its identity
-/// (`Plugin`) hang on, and the served door reads those. There is no cell here, no lock and no
-/// atomic: the purity test asserts that by walking the source, not by trusting this sentence.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct McpPlane;
-
-impl McpPlane {
-    /// The plane. Nothing varies per instance, so there is one value of it.
-    pub const EMPTY: Self = Self;
-}
-
-impl Default for McpPlane {
-    fn default() -> Self {
-        Self::EMPTY
-    }
-}
-
-impl Plugin for McpPlane {
-    fn key(&self) -> &'static str {
-        <Self as busbar_contract::plane::PlaneMeta>::KEY
-    }
-
-    fn kind(&self) -> Kind {
-        Kind::Plane
-    }
-
-    fn abi(&self) -> AbiVersion {
-        AbiVersion(1)
-    }
-}

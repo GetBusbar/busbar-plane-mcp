@@ -20,8 +20,7 @@
 //! retired with that impl (finding 12; the coordinator's order "delete the dead Plane impl with
 //! its struck route"); the served door's own tests carry what the door does.
 
-use busbar_contract::plane::PlaneMeta;
-use busbar_plane_mcp::{codec, tool_ops as ops, McpPlane};
+use busbar_plane_mcp::{codec, tool_ops as ops};
 use std::path::PathBuf;
 
 /// The battery's own source tree: busbar's `testing/mcp-conformance` at the pin (`BUSBAR_CHECKOUT`).
@@ -141,7 +140,7 @@ fn the_method_table_keeps_its_roles_and_its_declared_classes() {
     assert_eq!(rows_of(ops::Sender::Provider).len(), PROVIDER_ROWS);
     for row in ops::METHODS {
         assert!(
-            McpPlane::OP_CLASSES.contains(&row.op),
+            ops::OP_CLASSES.contains(&row.op),
             "{} names the undeclared class {}",
             row.method,
             row.op
