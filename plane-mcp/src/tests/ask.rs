@@ -10,9 +10,19 @@ use serde_json::{json, Value};
 use super::*;
 use crate::tools_config::AskRoundCfg;
 
-/// A seal that writes the state as JSON behind a marker and spends each nonce once.
+fn relay_state(
+    bind: Bind<'_>,
+    args_digest: &str,
+    leg: UpstreamLeg,
+    seal: &mut dyn Seal,
+) -> Option<String> {
+    relay_state_for(bind, args_digest, leg, DEFAULT_TTL_SECS, seal)
+}
+
+/// A seal that writes the state as JSON behind a marker and spends each nonce once (the ask
+/// tests' own stand-in for the host's, shared with the call tests).
 #[derive(Default)]
-struct Plain {
+pub(crate) struct Plain {
     spent: BTreeSet<String>,
     next: u32,
 }
@@ -130,7 +140,6 @@ fn the_exchange_asks_then_proceeds_once() {
     let AskDecision::Ask {
         asks,
         request_state,
-        round,
     } = decide(
         &confirm(),
         3,
@@ -143,7 +152,8 @@ fn the_exchange_asks_then_proceeds_once() {
     else {
         panic!("asks");
     };
-    assert_eq!((asks.len(), round), (1, 0));
+    let sealed = seal.open(&request_state).expect("the minted state opens");
+    assert_eq!((asks.len(), sealed.round), (1, 0));
     let body: Value =
         serde_json::from_slice(&input_required_result(&json!(4), &asks, &request_state))
             .expect("json");
@@ -460,7 +470,7 @@ fn child_leg() -> UpstreamLeg {
     }
 }
 
-/// LAW 11, A STDIO CHILD'S OWN REQUESTS (ARCHITECT Q6): busbar writes none of them, so a retry that
+/// LAW 11, A STDIO CHILD'S OWN REQUESTS: busbar writes none of them, so a retry that
 /// leaves one unanswered is refused (`ask_unanswered`) BEFORE its state is spent, and the caller can
 /// still answer it; the complete retry is the relayed retry, carrying the child's leg, spent once.
 /// RED: a forged state, and a spent one, are refused.
@@ -512,7 +522,7 @@ fn a_childs_relayed_ask_is_answered_whole_by_the_caller_and_spent_once() {
     );
 }
 
-/// THE TASK PATH'S RETRY (ARCHITECT Q6): the state `tasks/update` carries back is opened, bound to
+/// THE TASK PATH'S RETRY: the state `tasks/update` carries back is opened, bound to
 /// its principal and call, and spent once; a forged state, a spent one, another caller's, and a
 /// state of busbar's own ask (no upstream leg) are refused.
 #[test]

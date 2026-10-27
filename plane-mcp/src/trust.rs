@@ -21,11 +21,17 @@
 //! The kernel's trust book records each sighting's catalogue hash ([`catalogue_hash`],
 //! `trust.sight`), which stamps the server's re-verification clock; the operator's view and the
 //! dispatch gate read the comparison above, so both answer the one question the operator is looking
-//! at. The identity axis (`pin_changed`) is reported `false`: an MCP hop through the host connector
-//! presents no certificate key the plane could compare a `cert_spki`/`mtls` pin against.
+//! at. The identity axis (`pin_changed`) is reported `false`, and that is the truth rather than a
+//! gap: under `cert_spki` and `mtls` the pin's key is the far end's key
+//! (`PinMechanismDecl::peer_key`), which the host seals into the registration's member route and the
+//! connector holds every connection to, refusing one whose server presents another key before a
+//! request byte is written. A contact that met a substituted key is a failed contact (`error`),
+//! never a sighting, so every sighting this view renders was made against the pinned key.
+//! `pinned_pubkey` names a manifest issuer's key, not the far end's, so it has no identity axis.
 
 use std::collections::BTreeMap;
 
+use busbar_contract::redacted::sha256_hex;
 use serde_json::Value;
 
 use crate::tools_config::McpServerDefCfg;
@@ -41,12 +47,7 @@ pub fn tool_digest(name: &str, description: &str, input_schema: &Value) -> Strin
         framed.extend_from_slice(&(part.len() as u64).to_be_bytes());
         framed.extend_from_slice(part.as_bytes());
     }
-    format!(
-        "sha256:{}",
-        busbar_contract::abi::sdk::digest::lower_hex(&busbar_contract::abi::sdk::digest::sha256(
-            &framed
-        ))
-    )
+    format!("sha256:{}", sha256_hex(&framed))
 }
 
 /// `value` with every object's keys sorted, recursively: key ORDER is not drift, any change of key,
@@ -137,12 +138,7 @@ pub fn catalogue_hash(observation: &Observation) -> String {
         bytes.extend_from_slice(digest.as_bytes());
         bytes.push(b'\n');
     }
-    format!(
-        "sha256:{}",
-        busbar_contract::abi::sdk::digest::lower_hex(&busbar_contract::abi::sdk::digest::sha256(
-            &bytes
-        ))
-    )
+    format!("sha256:{}", sha256_hex(&bytes))
 }
 
 /// The last contact: the SDK's one shape of a sighting
@@ -194,12 +190,6 @@ pub struct Drift {
     pub removed: Vec<String>,
 }
 
-impl Drift {
-    fn is_empty(&self) -> bool {
-        self.added.is_empty() && self.changed.is_empty() && self.removed.is_empty()
-    }
-}
-
 /// The changes queue of `sighting` against the kernel's `items`. The verdict on a tool offered at
 /// another digest is the kernel's word, never a comparison here, so a tool the kernel holds demoted
 /// is `changed` with or without a successful sighting (after a restart the plane has sighted
@@ -247,7 +237,8 @@ pub fn state(items: &[KernelItem], sighting: &Sighting) -> State {
     if !items.iter().any(KernelItem::serves) {
         return State::Pending;
     }
-    if drift(items, sighting).is_empty() {
+    let d = drift(items, sighting);
+    if d.added.is_empty() && d.changed.is_empty() && d.removed.is_empty() {
         State::Approved
     } else {
         State::Quarantined
@@ -344,6 +335,8 @@ pub fn trust_view(
         name,
         state: state(items, sighting).word(),
         pin_mechanism: def.pin.mechanism.token(),
+        // The connector refused any connection whose server presented another key than the pin's,
+        // so a served sighting is a matching one (the module header).
         pin_changed: false,
         added: d.added,
         changed: d.changed,

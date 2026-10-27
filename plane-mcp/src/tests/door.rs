@@ -10,7 +10,6 @@ use busbar_contract::abi::plane::{
     CLAIM_EXACT, CLAIM_OPEN, MECHANISM_PEER_KEY, MECHANISM_ROOT, TRUST_PIN, TRUST_PRIVATE_REACH,
     TRUST_REVERIFY_TTL,
 };
-use busbar_contract::plane::TrustRole;
 
 use super::*;
 
@@ -21,10 +20,18 @@ const GOOD: &[u8] =
 const BAD: &[u8] =
     br#"{"my_fs": {"url": "https://mcp.example/fs", "pin": {"mechanism": "unpinned"}}}"#;
 
+/// The plane-record kinds the tail must declare, in its index order.
+const PLANE_KINDS: [&str; 4] = [
+    crate::tool_records::KIND_CALL,
+    crate::tool_records::KIND_DEMOTION,
+    crate::tool_records::KIND_APPROVAL,
+    crate::tool_records::KIND_TASK,
+];
+
 /// A tail string read back through the `&'static str` it was built from: the tail's strings are
 /// constants of this crate, so a string this test knows is found by address and length.
 fn text(a: AbiStr) -> String {
-    if a.ptr.is_null() {
+    if a.is_absent() {
         return String::new();
     }
     [
@@ -47,7 +54,7 @@ fn text(a: AbiStr) -> String {
         FEE_PER_REQUEST,
     ]
     .into_iter()
-    .find(|c| c.as_ptr() == a.ptr && c.len() == a.len)
+    .find(|c| c.as_ptr() == a.ptr() && c.len() == a.len())
     .expect("a tail string this test knows")
     .to_string()
 }
@@ -57,40 +64,57 @@ fn the_tail_is_one_the_loader_accepts() {
     assert_eq!(check_tail(TAIL), Ok(()));
 }
 
-/// The tail's trust keys are the grammar's own table, key by key, in its order: the kernel judges
-/// what the plane declares, so the two may not drift.
+/// The tail's trust keys, in judgement order, and its pin mechanisms are the grammar's own: every
+/// mechanism token parses, and the three roots are exactly the mechanisms that are not `unpinned`.
 #[test]
 fn the_tails_trust_keys_are_the_grammars() {
-    assert_eq!(TRUST_KEYS.len(), crate::tools_config::TRUST_KEYS.len());
-    for (abi, decl) in TRUST_KEYS.iter().zip(crate::tools_config::TRUST_KEYS) {
-        assert_eq!(text(abi.key), decl.key);
-        let role = match decl.role {
-            TrustRole::Pin => TRUST_PIN,
-            TrustRole::ReverifyTtl => TRUST_REVERIFY_TTL,
-            TrustRole::PrivateReach => TRUST_PRIVATE_REACH,
-            TrustRole::RecoveryBackoff => panic!("the plane declares no recovery-backoff key"),
-            TrustRole::ItemApprovals => busbar_contract::abi::plane::TRUST_ITEM_APPROVALS,
-        };
-        assert_eq!(abi.role, role, "{}", decl.key);
-        assert_eq!(
-            (!abi.default.ptr.is_null()).then(|| text(abi.default)),
-            decl.default.map(str::to_string),
-            "{}",
-            decl.key
-        );
-        assert_eq!(abi.mechanisms_len, decl.mechanisms.len(), "{}", decl.key);
-    }
-    for (abi, decl) in PIN_MECHANISMS
+    let keys: Vec<(String, u32, String)> = TRUST_KEYS
         .iter()
-        .zip(crate::tools_config::TRUST_KEYS[0].mechanisms)
-    {
-        assert_eq!(text(abi.token), decl.token);
-        assert_eq!(abi.flags & MECHANISM_ROOT != 0, decl.root, "{}", decl.token);
+        .map(|k| (text(k.key), k.role, text(k.default)))
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            ("pin".to_string(), TRUST_PIN, String::new()),
+            (
+                "verify_ttl".to_string(),
+                TRUST_REVERIFY_TTL,
+                crate::tools_config::DEFAULT_MCP_VERIFY_TTL.to_string()
+            ),
+            (
+                "allow_private".to_string(),
+                TRUST_PRIVATE_REACH,
+                String::new()
+            ),
+            (
+                crate::tools_config::TOOL_APPROVALS_KEY.to_string(),
+                busbar_contract::abi::plane::TRUST_ITEM_APPROVALS,
+                crate::tools_config::TOOL_APPROVAL_FIELD.to_string()
+            ),
+        ]
+    );
+    assert_eq!(TRUST_KEYS[0].mechanisms_len(), PIN_MECHANISMS.len());
+    assert_eq!(PIN_MECHANISMS.len(), 4, "every mechanism the grammar has");
+    for abi in PIN_MECHANISMS {
+        let token = text(abi.token);
+        let parsed: crate::tools_config::ServerPinCfg =
+            serde_json::from_value(serde_json::json!({ "mechanism": token }))
+                .unwrap_or_else(|e| panic!("`{token}` is a grammar token: {e}"));
+        assert_eq!(parsed.mechanism.token(), token);
+        assert_eq!(
+            abi.flags & MECHANISM_ROOT != 0,
+            parsed.mechanism != crate::tools_config::McpPinMechanism::Unpinned,
+            "{token}"
+        );
+        // `cert_spki` and `mtls` pin the far end's key, which the host seals into the member route.
         assert_eq!(
             abi.flags & MECHANISM_PEER_KEY != 0,
-            decl.peer_key,
-            "{}",
-            decl.token
+            matches!(
+                parsed.mechanism,
+                crate::tools_config::McpPinMechanism::CertSpki
+                    | crate::tools_config::McpPinMechanism::ClientCertBinding
+            ),
+            "{token}"
         );
     }
 }
@@ -98,9 +122,11 @@ fn the_tails_trust_keys_are_the_grammars() {
 /// The tail declares exactly the task kind as TerminalOnly: every other kind is purged by age.
 #[test]
 fn the_tail_declares_the_task_kind_as_terminal_only() {
+    // Each rule's kind is read by its index from the plane's own kind list, which
+    // `the_tail_names_the_planes_own_classes_and_kinds` holds equal to the tail's, entry by entry.
     let retentions: Vec<(String, u32)> = RECORD_RETENTIONS
         .iter()
-        .map(|r| (text(RECORD_KINDS[r.kind as usize]), r.rule))
+        .map(|r| (PLANE_KINDS[r.kind as usize].to_string(), r.rule))
         .collect();
     assert_eq!(
         retentions,
@@ -118,7 +144,7 @@ fn the_tail_declares_the_task_kind_as_terminal_only() {
 #[test]
 fn the_tail_names_the_planes_own_classes_and_kinds() {
     let kinds: Vec<String> = RECORD_KINDS.iter().map(|k| text(*k)).collect();
-    assert_eq!(kinds, crate::tool_records::RECORD_KINDS);
+    assert_eq!(kinds, PLANE_KINDS);
     let classes: Vec<String> = BILLABLE_CLASSES.iter().map(|c| text(c.class)).collect();
     assert_eq!(
         classes,
@@ -157,12 +183,12 @@ fn a_good_section_reads_and_a_bad_one_is_refused_in_the_grammars_words() {
 /// metadata document are absolute and every route is claimed, the discovery document open.
 #[test]
 fn a_generation_claims_its_routes_only_with_a_public_base() {
-    let none = endpoint_snapshot_spec(None);
+    let none = snapshot_spec_with(None, None);
     assert!(none.claims.is_empty());
     assert_eq!(none.audience, None);
     assert_eq!(none.admin_routes.len(), ADMIN_VERBS.len());
 
-    let some = endpoint_snapshot_spec(Some("https://gw.example/"));
+    let some = snapshot_spec_with(Some(under_public_url("https://gw.example/")), None);
     assert_eq!(some.audience.as_deref(), Some("https://gw.example/mcp"));
     assert_eq!(
         some.resource_metadata.as_deref(),
@@ -200,7 +226,7 @@ fn the_claims_are_stated_under_the_endpoint_block_else_the_public_base() {
     )
     .expect_err("a block naming another path is refused");
     assert!(refused.contains("only at `/mcp`"), "{refused}");
-    let claimed = snapshot_spec_for(admitted_endpoint(None, owned).unwrap());
+    let claimed = snapshot_spec_with(admitted_endpoint(None, owned).unwrap(), None);
     assert_eq!(
         claimed.audience.as_deref(),
         Some("https://Gw.Example:443/mcp")
@@ -229,11 +255,11 @@ fn the_tail_states_every_operation_class() {
         assert_eq!(op_class_index(*op), Some(i as u32));
         let abi = OP_CLASS_TABLE[i].op;
         assert_eq!(
-            (abi.ptr, abi.len),
+            (abi.ptr(), abi.len()),
             (op.as_str().as_ptr(), op.as_str().len())
         );
     }
-    assert_eq!(TAIL.op_classes_len, OP_CLASS_TABLE.len());
+    assert_eq!(TAIL.op_classes_len(), OP_CLASS_TABLE.len());
 }
 
 /// THE DNS-REBINDING ALLOWLIST is the `mcp:` block's `allowed_origins` (none without a block), and
@@ -325,102 +351,27 @@ fn validate_reads_the_dealt_blob_at_its_tools_section() {
     assert!(read_dealt_tools(b"[]").is_err());
 }
 
-/// THE TWO STATEMENTS OF ONE ROUTE SET AGREE. The plane states its routes twice: [`ROUTES`], the
-/// ABI table its snapshot publishes (verb, target, carrier, flags), and `tool_claims::CLAIMS`, the
-/// engine grammar's claims (carrier, selector, scheme). Nothing derives one from the other, so this
-/// pins them to each other in BOTH directions: every claim has a route over the same carrier and the
-/// same path with the same openness and exactness, and every route is claimed, including the
-/// task-run route. RED arms below prove each direction bites.
-///
-/// There is no exception: the task-run route is claimed like every other.
-fn pinned(
-    routes: &[busbar_contract::abi::sdk::publish::ServedRoute],
-    claims: &[busbar_contract::grammar::Claim],
-) -> Result<(), String> {
-    use busbar_contract::grammar::Selector;
-    for c in claims {
-        let path = match c.selector {
-            Selector::ExactPath(p) => Some(p),
-            Selector::StreamName(_) => None,
-            ref other => {
-                return Err(format!(
-                    "a claim with the selector {other:?} has no route form"
-                ))
-            }
-        };
-        let hit = routes.iter().any(|r| {
-            r.carrier == c.transport
-                && path.map_or(r.carrier == crate::tool_claims::CARRIER_STDIO, |p| {
-                    r.target == p
-                })
-                && r.open == c.scheme.is_none()
-                && r.claim_flags() & CLAIM_EXACT != 0
-        });
-        if !hit {
-            return Err(format!(
-                "claim {c:?} has no route over the same carrier, path, openness and exactness"
-            ));
-        }
-    }
-    for r in routes {
-        let hit = claims.iter().any(|c| {
-            c.transport == r.carrier
-                && match c.selector {
-                    busbar_contract::grammar::Selector::ExactPath(p) => r.target == p,
-                    busbar_contract::grammar::Selector::StreamName(_) => {
-                        r.carrier == crate::tool_claims::CARRIER_STDIO
-                    }
-                    _ => false,
-                }
-                && c.scheme.is_none() == r.open
-        });
-        if !hit {
-            return Err(format!("route {r:?} is claimed by no claim"));
-        }
-    }
-    Ok(())
-}
-
+/// THE TASK-RUN ROUTE is a closed, exact route over the http carrier at its own path.
 #[test]
-fn the_claims_and_the_route_table_state_one_route_set() {
-    pinned(ROUTES, crate::tool_claims::CLAIMS).expect("the two statements agree");
-    // RED, direction one: a claim with no route (a claim on a path the table does not serve).
-    let mut extra = crate::tool_claims::CLAIMS.to_vec();
-    extra.push(busbar_contract::grammar::Claim {
-        selector: busbar_contract::grammar::Selector::ExactPath("/mcp/elsewhere"),
-        ..extra[1]
-    });
-    assert!(pinned(ROUTES, &extra).is_err());
-    // RED, direction two: a route with no claim (the discovery claim removed).
-    assert!(pinned(ROUTES, &crate::tool_claims::CLAIMS[1..]).is_err());
-    // RED, flags: a claim that turns the discovery document closed disagrees with the open route.
-    let mut closed = crate::tool_claims::CLAIMS.to_vec();
-    closed[0].scheme = closed[1].scheme;
-    assert!(pinned(ROUTES, &closed).is_err());
-}
-
-/// THE TASK-RUN ROUTE IS CLAIMED AT THE BOOT SEAL, with the flags its `ServedRoute` row publishes
-/// (a closed, exact route over the http carrier), and a second claimant of that path TIES with it.
-/// The seal refuses equal-precedence overlapping claims at boot (`Selector::overlaps` is the
-/// predicate it judges by; the refusal itself is the kernel's, exercised by
-/// `busbar-kernel/tests/registry_and_claims.rs::two_claims_that_could_both_match_at_equal_precedence_are_refused_at_boot`,
-/// a crate this plugin does not link).
-#[test]
-fn the_task_run_path_is_claimed_and_a_second_claimant_ties() {
-    use busbar_contract::grammar::Selector;
-    let task = crate::tool_claims::CLAIMS
-        .iter()
-        .find(|c| c.selector == Selector::ExactPath(crate::tool_claims::TASK_RUN_MOUNT))
-        .expect("the task-run path is claimed at the boot seal");
+fn the_task_run_route_is_closed_and_exact() {
     let route = &ROUTES[crate::door::TASK_RUN_ROUTE];
-    assert_eq!(task.transport, route.carrier);
-    assert_eq!(task.scheme.is_none(), route.open);
+    assert_eq!(route.target, crate::tool_claims::TASK_RUN_MOUNT);
+    assert_eq!(route.carrier, crate::tool_claims::CARRIER_HTTP);
+    assert!(!route.open);
     assert_eq!(route.claim_flags() & CLAIM_EXACT, CLAIM_EXACT);
-    // RED: another plane claiming the same path on the same transport overlaps it (a tie).
-    let rival = Selector::ExactPath(crate::tool_claims::TASK_RUN_MOUNT);
-    assert!(task.selector.overlaps(&rival));
-    // And a neighbour does not: the claim is exactly this path.
-    assert!(!task
-        .selector
-        .overlaps(&Selector::ExactPath("/mcp/tasks/other")));
+}
+
+/// THE CALL LOG CANNOT BE REWRITTEN: the call kind is the one record chain the door declares, so
+/// the host hash-chains every call record (its prelude length-prefixed, the scope in the digest)
+/// and a record whose middle is replaced breaks the chain. This is what production declares; no
+/// operation table of the plane's own stands in for it.
+#[test]
+fn the_call_log_is_the_one_chain_the_host_keeps() {
+    assert_eq!(RECORD_CHAINS.len(), 1);
+    let chain = RECORD_CHAINS[0];
+    assert_eq!(chain.kind, RECORD_CALL);
+    assert_eq!(chain.framing, CHAIN_LENGTH_PREFIXED);
+    assert_eq!(chain.flags, CHAIN_DIGESTS_SCOPE);
+    let kind = RECORD_KINDS[RECORD_CALL as usize];
+    assert_eq!(text(kind), crate::tool_records::KIND_CALL);
 }

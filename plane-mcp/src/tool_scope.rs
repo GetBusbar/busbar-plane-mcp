@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE SCOPE A `token_exchange:` REGISTRATION'S TOKEN IS ASKED FOR (ARCHITECT round 5
-//! Q-L3B-EXCHANGE (B)): derived, never configured — a configured scope list would be a second
+//! THE SCOPE A `token_exchange:` REGISTRATION'S TOKEN IS ASKED FOR: derived, never configured — a configured scope list would be a second
 //! statement of what a caller may reach, and the wider would win.
 //!
 //! * [`caller_downscope`]: a relayed call's — exactly the tools the CALLER is granted on the

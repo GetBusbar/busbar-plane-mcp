@@ -20,9 +20,10 @@ use std::collections::BTreeMap;
 
 use serde_json::{json, Map, Value};
 
+use crate::codec::RESULT_TYPE_COMPLETE;
 use crate::door::{SCOPE, SCOPE_TOOL};
-use crate::jsonrpc::RESULT_TYPE_COMPLETE;
-use crate::sanitize::normalise_opt;
+
+use crate::sanitize::normalise;
 use crate::tools_config::{namespaced, AskRoundCfg, PromptMessageCfg, TaskSupport, ToolsCfg};
 
 /// The caching scope every cacheable result names: a result is scoped to its caller's grant.
@@ -85,22 +86,6 @@ pub struct ResourceEntry {
     pub(crate) blob: Option<String>,
 }
 
-impl ResourceEntry {
-    /// Its rendered fields, in order: uri, name, description, mime type, text, blob (a blank one
-    /// for each it has not).
-    #[must_use]
-    pub fn rendered(&self) -> [&str; 6] {
-        [
-            self.uri.as_str(),
-            self.name.as_deref().unwrap_or(""),
-            self.description.as_deref().unwrap_or(""),
-            self.mime_type.as_deref().unwrap_or(""),
-            self.text.as_deref().unwrap_or(""),
-            self.blob.as_deref().unwrap_or(""),
-        ]
-    }
-}
-
 /// One listed resource template.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResourceTemplateEntry {
@@ -136,6 +121,21 @@ pub enum Lookup<T> {
     NotFound,
     /// More than one the caller may see, named and sorted.
     Ambiguous(Vec<String>),
+}
+
+impl<T> Lookup<T> {
+    /// What `found` comes to: none, exactly one, or several named (by `name`) and sorted.
+    fn of(mut found: Vec<T>, name: impl Fn(&T) -> String) -> Self {
+        match found.len() {
+            0 => Lookup::NotFound,
+            1 => Lookup::One(found.remove(0)),
+            _ => {
+                let mut names: Vec<String> = found.iter().map(name).collect();
+                names.sort();
+                Lookup::Ambiguous(names)
+            }
+        }
+    }
 }
 
 /// MATCH one level-1 uri template against a concrete uri. A binding is non-empty and holds no `/`,
@@ -183,8 +183,27 @@ pub(crate) fn granted(admit: &impl Fn(&str, &str) -> bool, server: &str, namespa
     admit(SCOPE, server) && admit(SCOPE_TOOL, namespaced)
 }
 
+/// The entries the caller may see: both grants of each (`names`: its server and published name).
+fn visible<'a, T>(
+    entries: &'a BTreeMap<String, T>,
+    admit: &impl Fn(&str, &str) -> bool,
+    names: impl Fn(&T) -> (&String, &String),
+) -> Vec<&'a T> {
+    let seen = |e: &&T| {
+        let (server, published) = names(e);
+        granted(admit, server, published)
+    };
+    entries.values().filter(seen).collect()
+}
+
+/// A cacheable `*/list` answer: `{key: entries}` with its hints.
+fn listing(id: &Value, key: &str, entries: impl Iterator<Item = Value>) -> Vec<u8> {
+    let entries: Vec<Value> = entries.collect();
+    complete(id, cache_hints(json!({ key: entries })))
+}
+
 /// A cacheable result with its two hints.
-fn cache_hints(mut value: Value) -> Value {
+pub(crate) fn cache_hints(mut value: Value) -> Value {
     if let Some(obj) = value.as_object_mut() {
         obj.insert("cacheScope".into(), CACHE_SCOPE.into());
         obj.insert("ttlMs".into(), CACHE_TTL_MS.into());
@@ -198,11 +217,7 @@ pub fn complete(id: &Value, mut value: Value) -> Vec<u8> {
     if let Some(obj) = value.as_object_mut() {
         obj.insert("resultType".into(), RESULT_TYPE_COMPLETE.into());
     }
-    let mut envelope = Map::new();
-    envelope.insert("jsonrpc".into(), "2.0".into());
-    envelope.insert("id".into(), id.clone());
-    envelope.insert("result".into(), value);
-    serde_json::to_vec(&Value::Object(envelope)).unwrap_or_default()
+    serde_json::to_vec(&json!({ "jsonrpc": "2.0", "id": id, "result": value })).unwrap_or_default()
 }
 
 impl Catalogue {
@@ -345,26 +360,17 @@ impl Catalogue {
 
     /// The tools this caller may see, in published-name order.
     pub fn tools_for(&self, admit: &impl Fn(&str, &str) -> bool) -> Vec<&ToolEntry> {
-        self.tools
-            .values()
-            .filter(|t| granted(admit, &t.server, &t.namespaced))
-            .collect()
+        visible(&self.tools, admit, |t| (&t.server, &t.namespaced))
     }
 
     /// The prompts this caller may see.
     pub fn prompts_for(&self, admit: &impl Fn(&str, &str) -> bool) -> Vec<&PromptEntry> {
-        self.prompts
-            .values()
-            .filter(|p| granted(admit, &p.server, &p.namespaced))
-            .collect()
+        visible(&self.prompts, admit, |p| (&p.server, &p.namespaced))
     }
 
     /// The resources this caller may see.
     pub fn resources_for(&self, admit: &impl Fn(&str, &str) -> bool) -> Vec<&ResourceEntry> {
-        self.resources
-            .values()
-            .filter(|r| granted(admit, &r.server, &r.namespaced))
-            .collect()
+        visible(&self.resources, admit, |r| (&r.server, &r.namespaced))
     }
 
     /// The resource templates this caller may see.
@@ -372,10 +378,9 @@ impl Catalogue {
         &self,
         admit: &impl Fn(&str, &str) -> bool,
     ) -> Vec<&ResourceTemplateEntry> {
-        self.resource_templates
-            .values()
-            .filter(|t| granted(admit, &t.server, &t.namespaced))
-            .collect()
+        visible(&self.resource_templates, admit, |t| {
+            (&t.server, &t.namespaced)
+        })
     }
 
     /// The prompt a published name names, under the caller's grants. `None` covers no such prompt
@@ -397,20 +402,11 @@ impl Catalogue {
         admit: &impl Fn(&str, &str) -> bool,
         uri: &str,
     ) -> Lookup<&ResourceEntry> {
-        let mut found: Vec<&ResourceEntry> = self
+        let found = self
             .resources_for(admit)
             .into_iter()
-            .filter(|r| r.uri == uri)
-            .collect();
-        match found.len() {
-            0 => Lookup::NotFound,
-            1 => Lookup::One(found.remove(0)),
-            _ => {
-                let mut servers: Vec<String> = found.iter().map(|r| r.server.clone()).collect();
-                servers.sort();
-                Lookup::Ambiguous(servers)
-            }
-        }
+            .filter(|r| r.uri == uri);
+        Lookup::of(found.collect(), |r| r.server.clone())
     }
 
     /// The template a caller's expanded uri matches, among those its grants reach, with its
@@ -420,21 +416,11 @@ impl Catalogue {
         admit: &impl Fn(&str, &str) -> bool,
         uri: &str,
     ) -> Lookup<(&ResourceTemplateEntry, BTreeMap<String, String>)> {
-        let mut found: Vec<(&ResourceTemplateEntry, BTreeMap<String, String>)> = self
+        let found = self
             .resource_templates_for(admit)
             .into_iter()
-            .filter_map(|t| match_uri_template(&t.uri_template, uri).map(|b| (t, b)))
-            .collect();
-        match found.len() {
-            0 => Lookup::NotFound,
-            1 => Lookup::One(found.remove(0)),
-            _ => {
-                let mut names: Vec<String> =
-                    found.iter().map(|(t, _)| t.namespaced.clone()).collect();
-                names.sort();
-                Lookup::Ambiguous(names)
-            }
-        }
+            .filter_map(|t| match_uri_template(&t.uri_template, uri).map(|b| (t, b)));
+        Lookup::of(found.collect(), |(t, _)| t.namespaced.clone())
     }
 
     /// `tools/list`: the caller's tools, minus any the kernel's trust verdict hides (`hidden`).
@@ -444,33 +430,20 @@ impl Catalogue {
         admit: &impl Fn(&str, &str) -> bool,
         hidden: impl Fn(&ToolEntry) -> bool,
     ) -> Vec<u8> {
-        let tools: Vec<Value> = self
-            .tools_for(admit)
-            .into_iter()
-            .filter(|t| !hidden(t))
-            .map(ToolEntry::render)
-            .collect();
-        complete(id, cache_hints(json!({ "tools": tools })))
+        let tools = self.tools_for(admit).into_iter().filter(|t| !hidden(t));
+        listing(id, "tools", tools.map(ToolEntry::render))
     }
 
     /// `prompts/list`.
     pub fn prompts_list(&self, id: &Value, admit: &impl Fn(&str, &str) -> bool) -> Vec<u8> {
-        let prompts: Vec<Value> = self
-            .prompts_for(admit)
-            .into_iter()
-            .map(PromptEntry::render)
-            .collect();
-        complete(id, cache_hints(json!({ "prompts": prompts })))
+        let prompts = self.prompts_for(admit).into_iter();
+        listing(id, "prompts", prompts.map(PromptEntry::render))
     }
 
     /// `resources/list`.
     pub fn resources_list(&self, id: &Value, admit: &impl Fn(&str, &str) -> bool) -> Vec<u8> {
-        let resources: Vec<Value> = self
-            .resources_for(admit)
-            .into_iter()
-            .map(ResourceEntry::render)
-            .collect();
-        complete(id, cache_hints(json!({ "resources": resources })))
+        let resources = self.resources_for(admit).into_iter();
+        listing(id, "resources", resources.map(ResourceEntry::render))
     }
 
     /// `resources/templates/list`: the empty list for a caller who reaches none.
@@ -479,12 +452,12 @@ impl Catalogue {
         id: &Value,
         admit: &impl Fn(&str, &str) -> bool,
     ) -> Vec<u8> {
-        let templates: Vec<Value> = self
-            .resource_templates_for(admit)
-            .into_iter()
-            .map(ResourceTemplateEntry::render)
-            .collect();
-        complete(id, cache_hints(json!({ "resourceTemplates": templates })))
+        let templates = self.resource_templates_for(admit).into_iter();
+        listing(
+            id,
+            "resourceTemplates",
+            templates.map(ResourceTemplateEntry::render),
+        )
     }
 }
 
@@ -494,7 +467,7 @@ impl ToolEntry {
     pub fn render(&self) -> Value {
         let mut obj = Map::new();
         obj.insert("name".into(), self.namespaced.clone().into());
-        if let Some(d) = normalise_opt(self.description.as_deref()) {
+        if let Some(d) = self.description.as_deref().map(normalise) {
             obj.insert("description".into(), d.into());
         }
         obj.insert(
@@ -513,16 +486,33 @@ impl ToolEntry {
     }
 }
 
+/// A listed entry: its key member, then its name and description (normalised) and media type.
+fn listed(
+    key: (&str, &str),
+    name: Option<&str>,
+    description: Option<&str>,
+    mime_type: Option<&String>,
+) -> Value {
+    let mut obj = Map::new();
+    obj.insert(key.0.into(), key.1.into());
+    if let Some(n) = name.map(normalise) {
+        obj.insert("name".into(), n.into());
+    }
+    if let Some(d) = description.map(normalise) {
+        obj.insert("description".into(), d.into());
+    }
+    if let Some(m) = mime_type {
+        obj.insert("mimeType".into(), m.clone().into());
+    }
+    Value::Object(obj)
+}
+
 impl PromptEntry {
     /// The entry as `prompts/list` writes it.
     #[must_use]
     pub fn render(&self) -> Value {
-        let mut obj = Map::new();
-        obj.insert("name".into(), self.namespaced.clone().into());
-        if let Some(d) = normalise_opt(self.description.as_deref()) {
-            obj.insert("description".into(), d.into());
-        }
-        Value::Object(obj)
+        let description = self.description.as_deref();
+        listed(("name", &self.namespaced), None, description, None)
     }
 }
 
@@ -530,18 +520,13 @@ impl ResourceEntry {
     /// The entry as `resources/list` writes it: the resource's own uri.
     #[must_use]
     pub fn render(&self) -> Value {
-        let mut obj = Map::new();
-        obj.insert("uri".into(), self.uri.clone().into());
-        if let Some(n) = normalise_opt(self.name.as_deref()) {
-            obj.insert("name".into(), n.into());
-        }
-        if let Some(d) = normalise_opt(self.description.as_deref()) {
-            obj.insert("description".into(), d.into());
-        }
-        if let Some(m) = &self.mime_type {
-            obj.insert("mimeType".into(), m.clone().into());
-        }
-        Value::Object(obj)
+        let (name, description) = (self.name.as_deref(), self.description.as_deref());
+        listed(
+            ("uri", &self.uri),
+            name,
+            description,
+            self.mime_type.as_ref(),
+        )
     }
 }
 
@@ -549,18 +534,9 @@ impl ResourceTemplateEntry {
     /// The entry as `resources/templates/list` writes it: the operator's own template.
     #[must_use]
     pub fn render(&self) -> Value {
-        let mut obj = Map::new();
-        obj.insert("uriTemplate".into(), self.uri_template.clone().into());
-        if let Some(n) = normalise_opt(self.name.as_deref()) {
-            obj.insert("name".into(), n.into());
-        }
-        if let Some(d) = normalise_opt(self.description.as_deref()) {
-            obj.insert("description".into(), d.into());
-        }
-        if let Some(m) = &self.mime_type {
-            obj.insert("mimeType".into(), m.clone().into());
-        }
-        Value::Object(obj)
+        let (name, description) = (self.name.as_deref(), self.description.as_deref());
+        let key = ("uriTemplate", self.uri_template.as_str());
+        listed(key, name, description, self.mime_type.as_ref())
     }
 }
 

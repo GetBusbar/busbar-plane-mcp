@@ -1,84 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE ARGUMENT HALF OF THE DISPATCH SSRF GUARD: a schema-aware walk of the nested per-request
-//! `tools/call` arguments, finding every URL and every host they carry and asking the host's ONE
-//! destination judge (`dest.judge`, BUSBAR-1.6.0.md Appendix C B.3 item 11) about each. The plane
-//! reads the value; the deployment's egress rules decide it.
-//!
-//! ## The gap this closes, stated as the live consequence
-//!
-//! The transport guard closes the URL/host/address/redirect half: busbar resolves the UPSTREAM's own URL
-//! once, judges every address the resolver returned, and connects to the address that was judged.
-//! Routing is likewise immune to attacker text, because a route is decided on the bound identity
-//! and `super::dispatch` provably reads no free text at all.
-//!
-//! Neither of those makes the PAYLOAD safe. A model that has just read a hostile tool description
-//! can still put `http://169.254.169.254/latest/meta-data/…` into a tool ARGUMENT, and without this
-//! module busbar hands that argument to the upstream untouched. An argument is attacker-influenced
-//! DATA travelling to an operator-chosen destination, which is the classic SSRF shape and a
-//! different shape from the one the routing rule answers.
-//!
-//! ## Why the PINNED schema is what makes this a check rather than a guess
-//!
-//! `super::catalogue` already fetches, canonicalises and hash-pins each tool's input schema, and a
-//! schema that changed to hide or reveal a URL field is DRIFT, which quarantines the server before
-//! any call goes out. So the schema this walk reads is not "whatever the upstream said this
-//! morning" — it is the exact document whose digest an operator approved. [`super::dispatch`]
-//! re-compares that digest immediately before handing the schema here, so the walk cannot be
-//! steered by a schema swapped underneath it.
-//!
-//! ## Two detectors, and why there are two
-//!
-//! 1. **DECLARED.** A string whose schema declares a URL-ish `format` — `uri`, `uri-reference`,
-//!    `iri`, `url`, `hostname`, `idn-hostname`, `ipv4`, `ipv6` — is judged in full: scheme
-//!    allowlist for the URL kinds, host judgement for all of them. Nested objects, arrays, tuple
-//!    positions, `additionalProperties` and `allOf`/`anyOf`/`oneOf` branches are all followed, so
-//!    "several levels deep" is not a special case.
-//!
-//! 2. **UNDECLARED.** Most real MCP tools take a URL in a plain `{"type": "string"}` with no
-//!    `format` at all. A walk that judged only declared fields would therefore refuse almost
-//!    nothing while reporting green, so every string in the arguments is ALSO judged when the whole
-//!    value (after trimming) begins `http://` or `https://`, and when a WHATWG URL reader (the
-//!    `fetch` most MCP servers use) reads the whole value as a URL naming a host, however it is
-//!    spelled: `http:/h`, `https:\\h`, a scheme split by a tab or led by a control character all
-//!    name `h` to the upstream, so `h` is judged. A value that begins with a web scheme and a slash
-//!    but names no host a reader accepts is refused rather than passed. Nothing narrower is
-//!    sniffed — a bare `localhost` in an untyped `query` field stays untouched, because refusing a
-//!    hostname-shaped word in free text breaks real tools and buys nothing an attacker cannot
-//!    restate.
-//!
-//! The counts of both are RETURNED ([`ArgScan`]) rather than kept internal, because a walker that
-//! visits nothing refuses nothing and passes every test it is given. A caller — and the tests —
-//! can assert the walk actually reached fields.
-//!
-//! ## What this module deliberately does NOT do
-//!
-//! - **No host rules of its own.** The scheme allowlist and the host reader are the walk's; every
-//!   verdict on a host is `dest.judge`'s, under the deployment's egress rules (its allow-list, the
-//!   metadata hosts, the private-address setting), so an argument and the connector's dial are
-//!   judged by the same guard.
-//! - **No DNS.** The transport guard resolves and PINS because busbar is the party that connects.
-//!   For an argument busbar is NOT the connecting party: the upstream resolves the name itself,
-//!   later, from its own resolver. A lookup here would therefore be advisory at best — trivially
-//!   defeated by rebinding, since nothing binds our answer to the upstream's connect — while
-//!   costing a per-argument lookup on the dispatch path and turning busbar into a name-resolution
-//!   oracle for whatever a model types. So the judgement is decided from the string alone, and the
-//!   honest consequence is stated rather than softened: a hostname whose A record points at
-//!   loopback is NOT caught here.
-//! - **No `$ref` resolution.** A `$ref` is followed nowhere; a URL field reachable only through one
-//!   is not visited.
-//! - **No mid-string URLs.** A URL embedded inside a longer free-text value in an UNDECLARED field
-//!   is not detected. Substring matching over prose is how a guard acquires false positives, and a
-//!   false positive here refuses a legitimate call.
-//! - **No plaintext-to-public rule.** `super::ssrf` refuses `http` to a public host because
-//!   busbar's own upstream credential rides that request. No busbar credential rides a tool
-//!   argument, so the rule does not transfer and is not applied.
+//! THE ARGUMENT HALF OF THE DISPATCH SSRF GUARD: a value-driven walk of `tools/call` arguments
+//! against the pinned input schema, asking the host's one destination judge (`dest.judge`,
+//! BUSBAR-1.6.0.md Appendix C B.3 item 11) about every host they carry. Declared URL-ish formats
+//! are judged in full; an undeclared string is judged when the whole value is a URL a WHATWG reader
+//! reads as naming a host. No DNS, no `$ref`, no mid-string URLs: the verdict is `dest.judge`'s.
 
 use busbar_contract::abi::host::service::{
     DEST_ALLOWED, DEST_INTERNAL, DEST_METADATA, DEST_NO_HOST, DEST_OBFUSCATED,
 };
-use busbar_contract::net::extract_normalized_host;
+use busbar_contract::net::{extract_normalized_host, url_host_to_ascii};
 use serde_json::Value;
 
 /// THE HOST'S JUDGE, as the walk asks it: one host an argument names (an IPv6 literal bracketed,
@@ -96,20 +28,6 @@ const MAX_VALUE_DEPTH: usize = 64;
 /// from the value depth because a pinned schema can nest combinators independently of how deep the
 /// arguments go.
 const MAX_COMBINATOR_DEPTH: usize = 8;
-
-/// The `format` values that make a string field URL-ish. Matched case-insensitively: JSON Schema
-/// spells these lowercase, and an upstream writing `URI` should not thereby remove a field from the
-/// walk.
-const URLISH_FORMATS: &[&str] = &[
-    "uri",
-    "uri-reference",
-    "iri",
-    "url",
-    "hostname",
-    "idn-hostname",
-    "ipv4",
-    "ipv6",
-];
 
 /// What a URL-ish format says the value IS, which decides how it is read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -245,16 +163,6 @@ pub struct ArgScan {
     pub strings_seen: usize,
 }
 
-impl ArgScan {
-    /// Total values that were actually put through the guard.
-    /// Not read on the dispatch path: `mcp::upstream` acts on the REFUSAL, and the counts exist
-    /// for the floor assertions that stop a walker which visits nothing from passing.
-    #[allow(dead_code)]
-    pub fn judged(&self) -> usize {
-        self.declared_judged + self.undeclared_judged
-    }
-}
-
 /// THE ENTRY POINT: walk `arguments` against the PINNED `schema` and refuse on the first
 /// inadmissible value.
 ///
@@ -296,9 +204,14 @@ fn walk(
                 let mark = pointer.len();
                 pointer.push('/');
                 pointer.push_str(&escape_token(k));
-                let child = child_for_key(schemas, k);
-                let child_refs: Vec<&Value> = child;
-                walk(&child_refs, v, pointer, depth + 1, judge, scan)?;
+                walk(
+                    &child_for_key(schemas, k),
+                    v,
+                    pointer,
+                    depth + 1,
+                    judge,
+                    scan,
+                )?;
                 pointer.truncate(mark);
             }
             Ok(())
@@ -308,9 +221,14 @@ fn walk(
                 let mark = pointer.len();
                 pointer.push('/');
                 pointer.push_str(&i.to_string());
-                let child = child_for_index(schemas, i);
-                let child_refs: Vec<&Value> = child;
-                walk(&child_refs, v, pointer, depth + 1, judge, scan)?;
+                walk(
+                    &child_for_index(schemas, i),
+                    v,
+                    pointer,
+                    depth + 1,
+                    judge,
+                    scan,
+                )?;
                 pointer.truncate(mark);
             }
             Ok(())
@@ -330,67 +248,132 @@ fn judge_string(
 ) -> Result<(), ArgRefusal> {
     scan.strings_seen += 1;
     let trimmed = s.trim();
+    let refused = |declared_format: Option<String>| {
+        move |why| ArgRefusal {
+            pointer: pointer.to_string(),
+            declared_format,
+            why,
+        }
+    };
     if let Some((format, kind)) = first_urlish(schemas) {
         scan.declared_judged += 1;
-        return judge_argument(kind, trimmed, judge).map_err(|why| ArgRefusal {
-            pointer: pointer.to_string(),
-            declared_format: Some(format),
-            why,
-        });
+        return judge_argument(kind, trimmed, judge).map_err(refused(Some(format)));
     }
     if starts_with_http(trimmed) {
         scan.undeclared_judged += 1;
-        return judge_argument(Urlish::AbsoluteUrl, trimmed, judge).map_err(|why| ArgRefusal {
-            pointer: pointer.to_string(),
-            declared_format: None,
-            why,
-        });
+        return judge_argument(Urlish::AbsoluteUrl, trimmed, judge).map_err(refused(None));
     }
     if let Some(found) = whatwg_host(s) {
         scan.undeclared_judged += 1;
-        let judged = match found {
+        return match found {
             Some(host) => judge_host(&host, judge),
             None => Err(ArgWhy::NoHost(s.to_string())),
-        };
-        return judged.map_err(|why| ArgRefusal {
-            pointer: pointer.to_string(),
-            declared_format: None,
-            why,
-        });
+        }
+        .map_err(refused(None));
     }
     Ok(())
 }
 
+/// THE WHATWG SPECIAL SCHEMES: the six a WHATWG URL reader reads by the web rules (a backslash is a
+/// slash, any run of slashes after the scheme is skipped, the authority ends at `/`, `\`, `?` or
+/// `#`). `file` keeps its own host rule ([`file_host`]).
+const SPECIAL_SCHEMES: [&str; 6] = ["http", "https", "ws", "wss", "ftp", "file"];
+
 /// THE HOST A WHATWG URL READER FINDS IN `value`, read as a fetching client reads it, by the
 /// contract's one URL reader (`busbar_contract::net::parse_url`, the reader the host's own
 /// destination guard reads with): leading and trailing C0 controls and spaces stripped, every tab
-/// and newline removed, a backslash read as a slash under a web scheme and any run of slashes after
-/// it skipped, the authority ended at `/`, `?`, `#` or `\`, the host percent-decoded.
-/// A host outside ASCII is the reader's own: it maps it through UTS-46 to the punycode name a
-/// fetching client dials, as 1.5.5 dialled it, so the judge is asked about that name.
-/// `Some(Some(host))`: the value is a URL naming `host`, lower-cased. `Some(None)`: it begins with
-/// a web scheme and a slash but names no host the reader accepts. `None`: it names no host.
+/// and newline removed, a backslash read as a slash under a special scheme and any run of slashes
+/// after it skipped, the authority ended at `/`, `?`, `#` or `\`, the host percent-decoded.
+/// All six WHATWG special schemes are read so: the contract reads `http`, `https`, `ws` and `wss`
+/// itself, `ftp` is read as `http` is, and `file` by [`file_host`].
+/// A host outside ASCII is judged as the punycode name a fetching client dials, as 1.5.5 dialled
+/// it: `judge_host` maps every host it is handed through UTS-46 ([`dial_host`]).
+/// `Some(Some(host))`: the value is a URL naming `host`, lower-cased. `Some(None)`: a URL no reader
+/// accepts, refused rather than passed: it opens with any `scheme://`, or with a special scheme
+/// and `:` and holds no ASCII whitespace or control character (a raw URL holds none, so prose such
+/// as `http: the protocol` is not one), and no host could be read from it. `None`: it names no
+/// host.
 fn whatwg_host(value: &str) -> Option<Option<String>> {
-    match busbar_contract::net::parse_url(value) {
-        Ok(parts) => Some(Some(parts.host.to_ascii_lowercase())),
-        Err(_) => names_web_scheme(value).then_some(None),
+    let cleaned = whatwg_cleaned(value);
+    let special = special_scheme(&cleaned);
+    let read = match special {
+        Some((scheme, after)) if scheme.eq_ignore_ascii_case("file") => match file_host(after) {
+            FileHost::Path => return None,
+            FileHost::Named(host) => Some(host),
+            FileHost::Unread => None,
+        },
+        Some((scheme, after)) if scheme.eq_ignore_ascii_case("ftp") => {
+            busbar_contract::net::parse_url(&format!("http:{after}"))
+                .ok()
+                .map(|p| p.host)
+        }
+        _ => busbar_contract::net::parse_url(value).ok().map(|p| p.host),
+    };
+    match read {
+        Some(host) => Some(Some(host.to_ascii_lowercase())),
+        None => {
+            let raw_url = !cleaned
+                .chars()
+                .any(|c| c.is_ascii_whitespace() || c.is_ascii_control());
+            ((special.is_some() && raw_url) || opens_with_authority(&cleaned)).then_some(None)
+        }
     }
 }
 
-/// Whether `value`, after the WHATWG removals, begins `http:` or `https:` followed by a slash or a
-/// backslash: a web URL by its spelling, whether or not a reader accepts the rest.
-fn names_web_scheme(value: &str) -> bool {
-    let cleaned: String = value
-        .trim_matches(|c: char| c <= ' ')
-        .chars()
-        .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
-        .collect();
-    let lower = cleaned.to_ascii_lowercase();
-    ["http:", "https:"].iter().any(|scheme| {
-        lower
-            .strip_prefix(scheme)
-            .is_some_and(|rest| rest.starts_with(['/', '\\']))
+/// The scheme of `cleaned` and what follows its `:`, when the scheme is a WHATWG special one (in any
+/// case).
+fn special_scheme(cleaned: &str) -> Option<(&str, &str)> {
+    let (scheme, after) = cleaned.split_once(':')?;
+    SPECIAL_SCHEMES
+        .iter()
+        .any(|s| scheme.eq_ignore_ascii_case(s))
+        .then_some((scheme, after))
+}
+
+/// Whether `cleaned` opens with an RFC 3986 scheme and `://`: a URL with an authority by its
+/// spelling, whether or not a reader accepts the rest. Prose that only carries a URL mid-sentence
+/// does not open so (see the module header on mid-string URLs).
+fn opens_with_authority(cleaned: &str) -> bool {
+    cleaned.split_once("://").is_some_and(|(scheme, _)| {
+        scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+            && scheme
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
     })
+}
+
+/// What a WHATWG reader finds after `file:`.
+enum FileHost {
+    /// No host: the value is a path (`file:/etc/x`, `file:///etc/x`).
+    Path,
+    /// The host the reader dials.
+    Named(String),
+    /// A host is spelled but no reader accepts it.
+    Unread,
+}
+
+/// THE HOST OF A `file` URL, by the WHATWG file rule: a host follows only two slashes (either of
+/// `/` and `\`), and runs to the next `/`, `\`, `?` or `#`; an empty one names no host. The host
+/// is read by the contract's reader under a web scheme, so it is normalised as every other host is.
+fn file_host(after: &str) -> FileHost {
+    let mut chars = after.chars();
+    let two_slashes = matches!(
+        (chars.next(), chars.next()),
+        (Some('/' | '\\'), Some('/' | '\\'))
+    );
+    if !two_slashes {
+        return FileHost::Path;
+    }
+    let rest = chars.as_str();
+    let end = rest.find(['/', '\\', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..end];
+    if authority.is_empty() {
+        return FileHost::Path;
+    }
+    match busbar_contract::net::parse_url(&format!("http://{authority}/")) {
+        Ok(parts) => FileHost::Named(parts.host),
+        Err(_) => FileHost::Unread,
+    }
 }
 
 /// THE HOST A `uri-reference` NAMES, under the WHATWG reading: an absolute one's own, or a relative
@@ -489,6 +472,8 @@ fn judge_absolute(url: &str, judge: &mut Judge<'_>) -> Result<(), ArgWhy> {
     // spelled without `//` (`http:host`, `http:/\host`) is read by the contract's `parse_url`, which
     // skips any run of `/` and `\` after a web scheme as WHATWG does. Re-deriving either here would
     // be a second copy of a reader that already exists; the verdict on the host is `dest.judge`'s.
+    // Neither reader is relied on for the IDN mapping: `judge_host` maps whatever host it is handed
+    // through UTS-46 ([`dial_host`]), so a URL's host is judged as the name a client dials.
     let host = if cleaned.contains("://") {
         extract_normalized_host(&cleaned)
     } else {
@@ -503,14 +488,38 @@ fn judge_absolute(url: &str, judge: &mut Judge<'_>) -> Result<(), ArgWhy> {
 /// THE HOST, ASKED OF THE HOST'S ONE JUDGE (`dest.judge`, BUSBAR-1.6.0.md Appendix C B.3 item 11):
 /// the plane reads the host and holds no rule about it. `judge`'s verdict is rendered as the
 /// refusal; a host that gave none refuses the value.
+///
+/// The judge is asked about the name a client dials ([`dial_host`], UTS-46), never the spelling
+/// written; a host that name cannot be read from is refused unjudged. That name is asked, and then,
+/// when it differs, the one form a fetching client dials ([`whatwg_dialled`]): `0x` as `0.0.0.0`,
+/// `0x7f.1` as `127.0.0.1`. Both must be admitted; a host the WHATWG host parser refuses is refused
+/// (fail closed), because the guard cannot say what a client would dial for it.
 fn judge_host(raw: &str, judge: &mut Judge<'_>) -> Result<(), ArgWhy> {
-    let host = normalize_host(raw).ok_or_else(|| ArgWhy::NoHost(raw.to_string()))?;
+    let host = dial_host(raw).ok_or_else(|| ArgWhy::NoHost(raw.to_string()))?;
     let dest = if host.contains(':') {
         format!("[{host}]")
     } else {
         host.clone()
     };
-    match judge(&dest) {
+    ask(&host, &dest, judge)?;
+    let dialled = url::Host::parse(&dest)
+        .map(|h| h.to_string())
+        .map_err(|_| ArgWhy::NoHost(host.clone()))?;
+    if dialled != dest {
+        let bare = dialled
+            .strip_prefix('[')
+            .and_then(|h| h.strip_suffix(']'))
+            .unwrap_or(&dialled)
+            .to_string();
+        ask(&bare, &dialled, judge)?;
+    }
+    Ok(())
+}
+
+/// One host asked of the judge, its verdict rendered as the refusal.
+fn ask(host: &str, dest: &str, judge: &mut Judge<'_>) -> Result<(), ArgWhy> {
+    let host = host.to_string();
+    match judge(dest) {
         Some(DEST_ALLOWED) => Ok(()),
         Some(DEST_METADATA) => Err(ArgWhy::CloudMetadata(host)),
         Some(DEST_OBFUSCATED) => Err(ArgWhy::ObfuscatedHost(host)),
@@ -521,19 +530,35 @@ fn judge_host(raw: &str, judge: &mut Judge<'_>) -> Result<(), ArgWhy> {
     }
 }
 
+/// THE NAME A CONNECTING CLIENT DIALS for the host `raw`: read as a URL's host is read
+/// ([`normalize_host`]), then, outside ASCII, mapped through UTS-46 by the contract's
+/// `url_host_to_ascii` (the reading 1.5.5's `url` dialled by), with the one trailing root dot the
+/// mapping can make dropped. A fetching client maps `ｌｏｃａｌｈｏｓｔ` to `localhost`, `127。0。0。1`
+/// to `127.0.0.1` and `１６９．２５４．１６９．２５４` to `169.254.169.254`, so those are the names
+/// judged. An ASCII host is the reader's, unchanged. `None` when there is no host, or UTS-46 refuses
+/// it (a disallowed code point, or a mapping that yields a forbidden domain code point) or maps it
+/// to nothing: such a host is refused, never judged as written.
+fn dial_host(raw: &str) -> Option<String> {
+    let read = normalize_host(raw)?;
+    if read.is_ascii() {
+        return Some(read);
+    }
+    let mapped = url_host_to_ascii(&read).ok()?;
+    let host = mapped.strip_suffix('.').unwrap_or(mapped.as_ref());
+    (!host.is_empty() && host.is_ascii()).then(|| host.to_string())
+}
+
 /// Normalize a bare host the same way a URL's host component is normalized, by routing it through
 /// the same reader: an IPv6 literal is bracketed so the reader sees an authority rather than a
 /// host:port, and everything else is passed as written.
 fn normalize_host(raw: &str) -> Option<String> {
-    extract_normalized_host(&probe_url(raw))
-}
-
-fn probe_url(host: &str) -> String {
-    if busbar_contract::net::host_ip(host).is_some_and(|ip| ip.is_ipv6()) {
-        format!("https://[{host}]/")
-    } else {
-        format!("https://{host}/")
-    }
+    extract_normalized_host(
+        &if busbar_contract::net::host_ip(raw).is_some_and(|ip| ip.is_ipv6()) {
+            format!("https://[{raw}]/")
+        } else {
+            format!("https://{raw}/")
+        },
+    )
 }
 
 /// Drop a `:port` suffix from an authority, leaving a bracketed IPv6 literal intact for
@@ -561,14 +586,12 @@ fn first_urlish(schemas: &[&Value]) -> Option<(String, Urlish)> {
         let Some(format) = node.get("format").and_then(Value::as_str) else {
             continue;
         };
-        let lower = format.to_ascii_lowercase();
-        if !URLISH_FORMATS.contains(&lower.as_str()) {
-            continue;
-        }
-        let kind = match lower.as_str() {
+        // The URL-ish formats, matched case-insensitively (`URI` must not hide a field).
+        let kind = match format.to_ascii_lowercase().as_str() {
             "uri-reference" => Urlish::Reference,
             "hostname" | "idn-hostname" | "ipv4" | "ipv6" => Urlish::Host,
-            _ => Urlish::AbsoluteUrl,
+            "uri" | "iri" | "url" => Urlish::AbsoluteUrl,
+            _ => continue,
         };
         return Some((format.to_string(), kind));
     }

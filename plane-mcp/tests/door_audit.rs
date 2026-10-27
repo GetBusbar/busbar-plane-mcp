@@ -8,8 +8,21 @@
 //!
 //! The host and its upstreams are the stand-ins `sessions.rs` drives the door under, with a clock
 //! that can be made to fail and one upstream that is down.
+//!
+//! This suite drives the door over its C ABI with a host it stands up itself, so it needs
+//! `unsafe`, and it reaches the crate through `door` alone (the crate's only public item). The
+//! door facts it needs are `tests/support/door_facts.rs`, pinned to the crate's own items in
+//! `src/tests/door_facts_tests.rs`.
+//! Its two pure checks (a name the routing key cannot spell, and the event stream carrying the
+//! answer's own bytes) read crate functions and moved to `src/tests/door_facts_tests.rs`.
 
 #![allow(unsafe_code, dead_code)]
+
+// The door's private constants these tests need, restated and held to the crate's own items by the
+// crate's unit test `door_facts_tests`. Each test binary reads only some of them.
+#[path = "support/door_facts.rs"]
+#[allow(dead_code)]
+mod door_facts;
 
 use std::collections::{HashMap, VecDeque};
 use std::os::raw::c_void;
@@ -21,24 +34,24 @@ use busbar_contract::abi::host::conn::connector::{
     REPLY_BODY, REPLY_END, REPLY_HEAD, REQUEST_BODY, REQUEST_HEAD, SERVICES as CONN_SERVICES,
 };
 use busbar_contract::abi::host::service::{
-    ClockNowIn, HostSlots, RandomFillIn, ServiceOut, DISTRUST_NONE, ENTITLED,
+    ClockNowIn, HostSlots, RandomFillIn, ServiceOut, SessionEmitIn, DISTRUST_NONE, ENTITLED,
     SERVICES as HOST_SERVICES, TRUST_NEW,
 };
 use busbar_contract::abi::mechanism::call::{
     AbiStr, Blob, Field, InHead, OutHead, Outcome, RawOutcome, BLOB_OCTETS, FLAG_RESUME,
 };
 use busbar_contract::abi::mechanism::lifecycle::{
-    slot as life, DriveIn, OpenIn, OpenOut, OpsHead, TickIn, TickOut,
+    slot as life, CancelIn, DriveIn, OpenIn, OpenOut, OpsHead, TickIn, TickOut,
 };
 use busbar_contract::abi::mechanism::ticket::{HostCtx, HostTables, Ticket};
 use busbar_contract::abi::plane::{
-    slot, ArriveIn, ArriveOut, OnPieceIn, OnPieceOut, Ops, OutField, PlaneDriveIn, PlaneDriveOut,
-    PlaneOpenIn, PlaneOpenOut, RecordWrite, ServeIn, ServeOut, UnitCount, AUDIT_REJECTED,
-    EMIT_DONE, EMIT_TO_FAR_END, FROM_CALLER, FROM_FAR_END, FROM_KERNEL, PIECE_HAS_STATUS,
-    PIECE_LAST, RECORD_AUDIT,
+    slot, ArriveIn, ArriveOut, OnPieceIn, OnPieceOut, Ops, OutField, PlaneCancelIn, PlaneCancelOut,
+    PlaneDriveIn, PlaneDriveOut, PlaneOpenIn, PlaneOpenOut, RecordWrite, ServeIn, ServeOut,
+    UnitCount, AUDIT_REJECTED, CANCEL_ABORTED, EMIT_DONE, EMIT_TO_FAR_END, FROM_CALLER,
+    FROM_FAR_END, FROM_KERNEL, PIECE_HAS_STATUS, PIECE_LAST, RECORD_AUDIT,
 };
 use busbar_contract::abi::transport::FrameSpan;
-use busbar_plane_mcp::{door, tool_door};
+use busbar_plane_mcp::door;
 use serde_json::{json, Value};
 
 // ── the host's services ─────────────────────────────────────────────────────────────────────────
@@ -51,6 +64,9 @@ fn answer(out: *mut ServiceOut, outcome: Outcome, value: u64, len: u64) -> RawOu
             outcome: RawOutcome::of(outcome),
             value,
             len,
+            items: 0,
+            needed_bytes: 0,
+            needed_items: 0,
             ..ServiceOut::ZERO
         });
     }
@@ -122,6 +138,21 @@ extern "C" fn sighted(_: HostCtx, _: *const c_void, out: *mut ServiceOut) -> Raw
     answer(out, Outcome::Ready, TRUST_NEW, 0)
 }
 
+/// What the plane wrote unsolicited on carrier sessions (`session.emit`): `(session, bytes)`.
+static EMITTED: Mutex<Vec<(u64, Vec<u8>)>> = Mutex::new(Vec::new());
+
+extern "C" fn session_emit(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
+    // SAFETY: the SDK hands a `SessionEmitIn` over its own bytes, live for the call.
+    let i = unsafe { input.cast::<SessionEmitIn>().read() };
+    // SAFETY: as above.
+    let bytes = unsafe { std::slice::from_raw_parts(i.bytes.ptr(), i.bytes.len()) }.to_vec();
+    EMITTED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .push((i.session, bytes));
+    answer(out, Outcome::Ready, 0, 0)
+}
+
 static HOST_SLOTS: HostSlots = HostSlots {
     size: std::mem::size_of::<HostSlots>() as u32,
     slots: HOST_SERVICES,
@@ -153,7 +184,7 @@ static HOST_SLOTS: HostSlots = HostSlots {
     trust_serves: Some(serves),
     trust_decide: None,
     trust_state: None,
-    session_emit: None,
+    session_emit: Some(session_emit),
     auth_call: None,
     unit_hand_in: None,
     unit_refuse: None,
@@ -414,7 +445,7 @@ extern "C" fn establish(_: HostCtx, input: *const c_void, out: *mut ServiceOut) 
     // SAFETY: the SDK hands an `EstablishIn`.
     let i = unsafe { input.cast::<EstablishIn>().read() };
     // SAFETY: the SDK's target text, live for the call.
-    let url = unsafe { std::slice::from_raw_parts(i.target.ptr, i.target.len) };
+    let url = unsafe { std::slice::from_raw_parts(i.target.ptr(), i.target.len()) };
     let url = String::from_utf8_lossy(url).into_owned();
     let mut ups = upstreams();
     let ups = ups.get_or_insert_with(Upstreams::default);
@@ -634,19 +665,13 @@ fn z<T>() -> T {
 }
 
 fn str_of(s: &str) -> AbiStr {
-    AbiStr {
-        ptr: s.as_ptr(),
-        len: s.len(),
-    }
+    // SAFETY: the test's own bytes, which outlive the call each `in` is built for.
+    unsafe { AbiStr::from_raw_parts(s.as_ptr(), s.len()) }
 }
 
 fn octets(b: &[u8]) -> Blob {
-    Blob {
-        ptr: b.as_ptr(),
-        len: b.len(),
-        fmt: BLOB_OCTETS,
-        flags: 0,
-    }
+    // SAFETY: the test's own bytes, which outlive the call each `in` is built for.
+    unsafe { Blob::from_raw_parts(b.as_ptr(), b.len(), BLOB_OCTETS, 0) }
 }
 
 fn head<T>(op: u32, ticket: Ticket) -> InHead {
@@ -667,7 +692,7 @@ fn out_head<T>() -> OutHead {
 
 fn ops() -> &'static Ops {
     // SAFETY: the door is a `'static` table whose ops are the plane kind's.
-    unsafe { &*(*tool_door::door()).ops.cast::<Ops>() }
+    unsafe { &*door().ops().cast::<Ops>() }
 }
 
 fn lifecycle() -> &'static OpsHead {
@@ -719,11 +744,15 @@ fn open_with(section: &str) -> Door {
         ..z()
     };
     let f = lifecycle().open.expect("the door opens");
-    let ret = f(
-        std::ptr::null_mut(),
-        std::ptr::from_ref(&i).cast(),
-        std::ptr::from_mut(&mut o).cast(),
-    );
+    // SAFETY: the slot is the door's own, called with an in and an out of the types it declares.
+    #[allow(unused_unsafe)]
+    let ret = unsafe {
+        f(
+            std::ptr::null_mut(),
+            std::ptr::from_ref(&i).cast(),
+            std::ptr::from_mut(&mut o).cast(),
+        )
+    };
     assert_eq!(ret.outcome(), Outcome::Ready, "the door opens");
     Door {
         instance: o.open.instance,
@@ -738,9 +767,9 @@ struct Arrived {
 }
 
 fn claim(verb: &str) -> u32 {
-    let i = door::ROUTES
+    let i = door_facts::ROUTES
         .iter()
-        .position(|r| r.verb == verb && r.target == "/mcp" && r.carrier == "http")
+        .position(|&(v, t, c)| v == verb && t == "/mcp" && c == "http")
         .expect("the door routes it");
     u32::try_from(i).unwrap()
 }
@@ -758,11 +787,15 @@ impl Door {
             next_tick_ns: 0,
         };
         let f = lifecycle().tick.expect("tick");
-        let ret = f(
-            self.instance,
-            std::ptr::from_ref(&i).cast(),
-            std::ptr::from_mut(&mut o).cast(),
-        );
+        // SAFETY: the slot is the door's own, called with an in and an out of the types it declares.
+        #[allow(unused_unsafe)]
+        let ret = unsafe {
+            f(
+                self.instance,
+                std::ptr::from_ref(&i).cast(),
+                std::ptr::from_mut(&mut o).cast(),
+            )
+        };
         assert_eq!(ret.outcome(), Outcome::Ready);
     }
 
@@ -780,11 +813,15 @@ impl Door {
         let mut o: PlaneDriveOut = z();
         o.head = out_head::<PlaneDriveOut>();
         let f = lifecycle().drive.expect("drive");
-        let ret = f(
-            self.instance,
-            std::ptr::from_ref(&i).cast(),
-            std::ptr::from_mut(&mut o).cast(),
-        );
+        // SAFETY: the slot is the door's own, called with an in and an out of the types it declares.
+        #[allow(unused_unsafe)]
+        let ret = unsafe {
+            f(
+                self.instance,
+                std::ptr::from_ref(&i).cast(),
+                std::ptr::from_mut(&mut o).cast(),
+            )
+        };
         assert_eq!(ret.outcome(), Outcome::Ready);
     }
 
@@ -835,11 +872,15 @@ impl Door {
         let mut o: ArriveOut = z();
         o.head = out_head::<ArriveOut>();
         let f = ops().arrive.expect("arrive");
-        let ret = f(
-            self.instance,
-            std::ptr::from_ref(&i).cast(),
-            std::ptr::from_mut(&mut o).cast(),
-        );
+        // SAFETY: the slot is the door's own, called with an in and an out of the types it declares.
+        #[allow(unused_unsafe)]
+        let ret = unsafe {
+            f(
+                self.instance,
+                std::ptr::from_ref(&i).cast(),
+                std::ptr::from_mut(&mut o).cast(),
+            )
+        };
         Arrived {
             outcome: ret.outcome(),
             refusal_status: o.refusal_status,
@@ -893,11 +934,15 @@ impl Door {
             let mut o: OnPieceOut = z();
             o.head = out_head::<OnPieceOut>();
             let f = ops().on_piece.expect("on_piece");
-            let ret = f(
-                self.instance,
-                std::ptr::from_ref(&i).cast(),
-                std::ptr::from_mut(&mut o).cast(),
-            );
+            // SAFETY: the slot is the door's own, called with an in and an out of the types it declares.
+            #[allow(unused_unsafe)]
+            let ret = unsafe {
+                f(
+                    self.instance,
+                    std::ptr::from_ref(&i).cast(),
+                    std::ptr::from_mut(&mut o).cast(),
+                )
+            };
             first = false;
             got.outcome = Some(ret.outcome());
             if o.reply_status != 0 {
@@ -1036,46 +1081,11 @@ impl Answered {
     }
 }
 
-/// Two callers' opaque references, as the kernel lends them.
+/// A caller's opaque reference, as the kernel lends it.
 const ALICE: &str = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
-const BOB: &str = "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2";
-
-const INIT_2025: &[u8] = br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"client","version":"1"}}}"#;
-const LIST_2025: &[u8] = br#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#;
-const INITIALIZED: &[u8] = br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
-const ACCEPT_BOTH: (&str, &str) = ("accept", "application/json, text/event-stream");
-
-/// `initialize` on the endpoint, as `caller`: the answer.
-fn initialize(d: &Door, unit: u64, caller: &str) -> Answered {
-    let arrived = d.arrive(unit, "POST", "/mcp", INIT_2025, &[ACCEPT_BOTH]);
-    assert_eq!(
-        arrived.outcome,
-        Outcome::Ready,
-        "a 2025-06-18 `initialize` is served, not refused: {arrived:?}"
-    );
-    d.piece(unit, &Given::caller(caller, INIT_2025))
-}
-
-/// A `tools/list` in session `session` as `caller`.
-fn listed(d: &Door, unit: u64, session: &str, caller: &str) -> Answered {
-    let fields = [
-        ACCEPT_BOTH,
-        ("mcp-session-id", session),
-        ("mcp-protocol-version", "2025-06-18"),
-    ];
-    let arrived = d.arrive(unit, "POST", "/mcp", LIST_2025, &fields);
-    assert_eq!(arrived.outcome, Outcome::Ready, "{arrived:?}");
-    d.piece(unit, &Given::caller(caller, LIST_2025))
-}
 
 // ── (e): busbar as a client ──────────────────────────────────────────────────────────────────────
 
-const CALL: &[u8] = br#"{"jsonrpc":"2.0","id":30,"method":"tools/call","params":{"name":"fs_read_file","arguments":{},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#;
-const CALL_FIELDS: &[(&str, &str)] = &[
-    ("mcp-protocol-version", "2026-07-28"),
-    ("mcp-method", "tools/call"),
-    ("mcp-name", "fs_read_file"),
-];
 const ST_CALL: &[u8] = br#"{"jsonrpc":"2.0","id":31,"method":"tools/call","params":{"name":"st_read_file","arguments":{},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#;
 const ST_FIELDS: &[(&str, &str)] = &[
     ("mcp-protocol-version", "2026-07-28"),
@@ -1142,24 +1152,6 @@ fn walk_refused<'a>(caller: &'a str) -> Given<'a> {
     Given::far(caller, 405, Vec::new(), REFUSED)
 }
 
-/// The `tools/call` POSTs the legacy server received, by the session they were POSTed in and the
-/// path they asked for.
-fn legacy_calls() -> Vec<(String, String)> {
-    seen()
-        .into_iter()
-        .filter(|s| s.body["method"] == json!("tools/call"))
-        .filter_map(|s| {
-            let session = s.url.split(LEGACY_MESSAGES).nth(1)?.to_string();
-            let path = s
-                .body
-                .pointer("/params/arguments/path")?
-                .as_str()?
-                .to_string();
-            Some((session, path))
-        })
-        .collect()
-}
-
 /// The one legacy server's text answer to `answered`, with the caller's own id.
 fn legacy_text(answered: &Answered) -> (Value, String) {
     let body = answered.json();
@@ -1209,11 +1201,15 @@ impl Door {
         let mut o: ServeOut = z();
         o.head = out_head::<ServeOut>();
         let f = ops().serve.expect("serve");
-        let ret = f(
-            self.instance,
-            std::ptr::from_ref(&i).cast(),
-            std::ptr::from_mut(&mut o).cast(),
-        );
+        // SAFETY: the slot is the door's own, called with an in and an out of the types it declares.
+        #[allow(unused_unsafe)]
+        let ret = unsafe {
+            f(
+                self.instance,
+                std::ptr::from_ref(&i).cast(),
+                std::ptr::from_mut(&mut o).cast(),
+            )
+        };
         Served {
             outcome: ret.outcome(),
             status: o.status,
@@ -1242,13 +1238,13 @@ impl Door {
             name: str_of(busbar_contract::abi::host::service::CARRIER_SESSION_FIELD),
             value: str_of(&session),
         }];
-        let route = &door::ROUTES[door::LINE_ROUTE];
+        let route = door_facts::ROUTES[door_facts::LINE_ROUTE];
         let mut i: ArriveIn = z();
         i.head = head::<ArriveIn>(slot::ARRIVE, Ticket::NONE);
         i.unit = unit;
-        i.claim = u32::try_from(door::LINE_ROUTE).unwrap();
-        i.target = str_of(route.target);
-        i.method = str_of(route.verb);
+        i.claim = u32::try_from(door_facts::LINE_ROUTE).unwrap();
+        i.target = str_of(route.1);
+        i.method = str_of(route.0);
         i.body = octets(body);
         (i.fields, i.fields_len) = (fields.as_ptr(), fields.len());
         let mut units = [z::<UnitCount>(); 8];
@@ -1256,11 +1252,15 @@ impl Door {
         let mut o: ArriveOut = z();
         o.head = out_head::<ArriveOut>();
         let f = ops().arrive.expect("arrive");
-        let ret = f(
-            self.instance,
-            std::ptr::from_ref(&i).cast(),
-            std::ptr::from_mut(&mut o).cast(),
-        );
+        // SAFETY: the slot is the door's own, called with an in and an out of the types it declares.
+        #[allow(unused_unsafe)]
+        let ret = unsafe {
+            f(
+                self.instance,
+                std::ptr::from_ref(&i).cast(),
+                std::ptr::from_mut(&mut o).cast(),
+            )
+        };
         Arrived {
             outcome: ret.outcome(),
             refusal_status: o.refusal_status,
@@ -1480,63 +1480,87 @@ fn a_line_refused_at_the_unit_cap_moves_nothing_on_its_session() {
     );
 }
 
-// ── P-M11: a name the routing key cannot spell ──────────────────────────────────────────────────
+// ── a member's resource update reaches a line subscriber once ──────────────────────────────────
 
-/// RED P-M11: A SERVER ID OR A `tools_allow` NAME THE ROUTING KEY CANNOT SPELL IS REFUSED AT
-/// VALIDATE, in words naming it; never accepted and then silently undispatchable.
+/// The stateless member's `notifications/resources/updated` for the readme, as the member spells
+/// it: members out of the usual order and a number in an unusual spelling, so bytes handed on
+/// unread could be told from bytes re-encoded.
+const MEMBER_UPDATE: &str = r#"{"params":{"uri":"file:///readme","revision":1.50E+1},"method":"notifications/resources/updated","jsonrpc":"2.0"}"#;
+
+/// A `subscriptions/listen` line of the readme.
+const LINE_LISTEN: &[u8] = br#"{"jsonrpc":"2.0","id":5,"method":"subscriptions/listen","params":{"notifications":{"resourceSubscriptions":["file:///readme"]},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#;
+
+/// A MEMBER'S RESOURCE UPDATE REACHES A LINE SUBSCRIBER EXACTLY ONCE, as predev relayed it on the
+/// line carrier (gh/predev crates/busbar-plane-mcp/src/door_line.rs: the tick steps the kept
+/// subscription and emits its frames as lines on the carrier session; the relay is subscribe.rs
+/// l.328-345 and `notification` l.249-256): one line emitted on the subscriber's carrier session,
+/// predev's frame byte for byte (re-encoded under the subscription's id, not the member's bytes),
+/// and no further tick emits it again.
 #[test]
-fn a_name_the_routing_key_cannot_spell_is_refused_at_validate() {
-    let tool = br#"{"st": {"url": "https://up.example/st", "pin": {"mechanism": "unpinned"}, "tools_allow": {"read file": {}}}}"#;
-    let refused = door::read_tools_section(tool).expect_err("a tool name with a space");
+fn a_members_update_reaches_a_line_subscriber_exactly_once() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    EMITTED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clear();
+    let d = open();
+    let arrived = d.line(310, 13, LINE_LISTEN);
+    assert_eq!(arrived.outcome, Outcome::Ready, "{arrived:?}");
+    let opened = d.piece(310, &Given::caller(ALICE, LINE_LISTEN));
     assert!(
-        refused.contains("`tools.st`") && refused.contains("read file"),
-        "{refused}"
+        opened.text().contains("acknowledged"),
+        "the line subscription is acknowledged: {} {}",
+        opened.status,
+        opened.text()
     );
-    let server = br#"{"s+t": {"url": "https://up.example/st", "pin": {"mechanism": "unpinned"}, "tools_allow": {"read_file": {}}}}"#;
-    let refused = door::read_tools_section(server).expect_err("a server id with a `+`");
-    assert!(refused.contains("s+t"), "{refused}");
-    let fine = br#"{"st": {"url": "https://up.example/st", "pin": {"mechanism": "unpinned"}, "tools_allow": {"read_file.v2-x": {}}}}"#;
-    assert!(door::read_tools_section(fine).is_ok());
-}
 
-// ── A-M2: the event stream carries the answer's own bytes ─────────────────────────────────────
-
-/// The `data` of the stream's last event, its `data:` lines joined back with `\n` as a client
-/// joins them.
-fn last_data(bytes: &[u8]) -> String {
-    let text = String::from_utf8(bytes.to_vec()).expect("an event stream is text");
-    let last = text
-        .trim_end_matches('\n')
-        .rsplit("\n\n")
-        .next()
-        .expect("an event");
-    last.lines()
-        .filter_map(|l| l.strip_prefix("data: "))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// RED A-M2: THE STREAM CARRIES THE ANSWER'S OWN BYTES (Law 11): its members in the upstream's
-/// order, its numbers as the upstream spelled them (an integer past 64 bits, a float's exponent),
-/// and its line breaks as `data:` lines a client joins back. Never parsed and printed again.
-#[test]
-fn the_stream_carries_the_answers_own_bytes() {
-    let body = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-        "params": {"name": "fs_read", "_meta": {"progressToken": "p"}}});
-    let framing = busbar_plane_mcp::framing::Framing::of(
-        Some(busbar_plane_mcp::framing::EVENT_STREAM),
-        "tools/call",
-        &body,
+    call_st(&d, 311);
+    let far = format!(
+        "event: message\ndata: {MEMBER_UPDATE}\n\nevent: message\ndata: {{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{{\"content\":[],\"resultType\":\"complete\"}}}}\n\n"
     )
-    .expect("framed");
-    let answer = b"{\"jsonrpc\":\"2.0\",\"id\":1,\n  \"result\":{\"zeta\":123456789012345678901234567890,\n  \"alpha\":1.0e0,\"content\":[]}}".to_vec();
-    let (bytes, framed) = framing.frame(200, answer.clone(), &[]);
-    assert!(framed);
+    .into_bytes();
+    let answered = d.piece(
+        311,
+        &Given::far(
+            ALICE,
+            200,
+            vec![("content-type", "text/event-stream")],
+            &far,
+        ),
+    );
+    assert_eq!(answered.status, 200, "{}", answered.text());
+    for _ in 0..5 {
+        d.turn();
+    }
+
+    let predev = serde_json::to_vec(&json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/resources/updated",
+        "params": {
+            "uri": "file:///readme",
+            "_meta": { "io.modelcontextprotocol/subscriptionId": 5 },
+        },
+    }))
+    .unwrap();
+    let emitted = EMITTED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    let updates: Vec<&(u64, Vec<u8>)> = emitted
+        .iter()
+        .filter(|(_, bytes)| {
+            String::from_utf8_lossy(bytes).contains("notifications/resources/updated")
+        })
+        .collect();
     assert_eq!(
-        last_data(&bytes),
-        String::from_utf8(answer).unwrap(),
-        "the answer's own bytes, line for line: {}",
-        String::from_utf8_lossy(&bytes)
+        updates,
+        [&(13, predev)],
+        "one line, predev's relay, on the subscriber's session: {:?}",
+        emitted
+            .iter()
+            .map(|(s, b)| (s, String::from_utf8_lossy(b).into_owned()))
+            .collect::<Vec<_>>()
     );
 }
 
@@ -1562,11 +1586,15 @@ fn unitless_kernel_refusal(d: &Door, status: u32, reason: u32) -> (Outcome, u32,
     let mut o: RefusalOut = z();
     o.head = out_head::<RefusalOut>();
     let f = ops().refusal.expect("refusal");
-    let ret = f(
-        d.instance,
-        std::ptr::from_ref(&i).cast(),
-        std::ptr::from_mut(&mut o).cast(),
-    );
+    // SAFETY: the slot is the door's own, called with an in and an out of the types it declares.
+    #[allow(unused_unsafe)]
+    let ret = unsafe {
+        f(
+            d.instance,
+            std::ptr::from_ref(&i).cast(),
+            std::ptr::from_mut(&mut o).cast(),
+        )
+    };
     // `0`: the kernel's status stands.
     let status = if o.status == 0 { status } else { o.status };
     (
@@ -1601,5 +1629,118 @@ fn a_kernel_refusal_with_no_unit_answers_the_baseline_json_rpc_bytes() {
             br#"{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"request body exceeds the maximum allowed size"}}"#
                 .to_vec()
         )
+    );
+}
+
+// ── cancel: a unit no piece reached is freed; the disposition says how far a unit got ──────────
+
+impl Door {
+    /// The host's own cancel of `unit` (deadline, reload, shutdown), naming it as `arrive` keyed it,
+    /// on its ticket: the outcome and the disposition the door answered.
+    fn cancel(&self, unit: u64) -> (Outcome, u32) {
+        let ticket = Ticket {
+            slot: u32::try_from(unit).unwrap(),
+            generation: 1,
+        };
+        let mut records = [z::<RecordWrite>(); 8];
+        let mut arena = vec![0_u8; 1 << 12];
+        let i = PlaneCancelIn {
+            cancel: CancelIn {
+                head: head::<PlaneCancelIn>(life::CANCEL, ticket),
+                ticket,
+            },
+            records_buf: records.as_mut_ptr(),
+            records_cap: records.len(),
+            arena_buf: arena.as_mut_ptr(),
+            arena_cap: arena.len(),
+            unit,
+        };
+        let mut o: PlaneCancelOut = z();
+        o.cancel.head = out_head::<PlaneCancelOut>();
+        let f = lifecycle().cancel.expect("cancel");
+        let ret = f(
+            self.instance,
+            std::ptr::from_ref(&i).cast(),
+            std::ptr::from_mut(&mut o).cast(),
+        );
+        (ret.outcome(), o.cancel.disposition)
+    }
+}
+
+/// RED: A UNIT CANCELLED BEFORE ITS FIRST PIECE IS FREED. `arrive` keeps a unit with no ticket
+/// until a piece reaches it; the host's cancel names the unit (`PlaneCancelIn::unit`), so a unit
+/// cut between its arrival and its first piece leaves nothing behind. With the table at its cap,
+/// cancelling one such unit frees its place: the next arrival is admitted, not refused `429`.
+#[test]
+fn a_unit_cancelled_before_its_first_piece_is_freed() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open();
+    let mut filler = 5000_u64;
+    loop {
+        let arrived = d.arrive(filler, "POST", "/mcp", FILLER, FILLER_FIELDS);
+        if arrived.outcome != Outcome::Ready {
+            assert_eq!(
+                (arrived.outcome, arrived.refusal_status),
+                (Outcome::Refused, 429),
+                "only the cap refuses a filler"
+            );
+            break;
+        }
+        filler += 1;
+        assert!(filler < 5000 + 8192, "the table has a cap");
+    }
+    // The first filler is cut before any piece reached it.
+    assert_eq!(d.cancel(5000), (Outcome::Ready, CANCEL_ABORTED));
+    let next = d.arrive(filler + 1, "POST", "/mcp", FILLER, FILLER_FIELDS);
+    assert_eq!(
+        next.outcome,
+        Outcome::Ready,
+        "the cancelled unit still holds its place in the table: {next:?}"
+    );
+}
+
+/// A CANCEL IS ABORTED, as predev's door answered every cancel: before the far end answered and
+/// after it began its answer alike (the kernel bills an aborted unit nothing).
+#[test]
+fn a_cancel_is_aborted_before_and_after_the_far_end_answered() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open();
+    let relayed = |unit: u64| {
+        assert_eq!(
+            d.arrive(unit, "POST", "/mcp", ST_CALL, ST_FIELDS).outcome,
+            Outcome::Ready
+        );
+        d.piece(unit, &Given::attempt(ALICE, "st"));
+        let sent = d.pump(unit, &Given::caller(ALICE, ST_CALL));
+        assert!(
+            sent.far,
+            "the call is relayed: {} {}",
+            sent.status,
+            sent.text()
+        );
+    };
+    relayed(90);
+    assert_eq!(
+        d.cancel(90),
+        (Outcome::Ready, CANCEL_ABORTED),
+        "cut before the far end answered: aborted"
+    );
+    relayed(91);
+    let first = Given {
+        flags: PIECE_HAS_STATUS,
+        ..Given::far(
+            ALICE,
+            200,
+            vec![("content-type", "application/json")],
+            br#"{"jsonrpc":"2.0","id":31,"result":"#,
+        )
+    };
+    d.piece(91, &first);
+    assert_eq!(
+        d.cancel(91),
+        (Outcome::Ready, CANCEL_ABORTED),
+        "cut after the far end answered: aborted, as predev answered it"
     );
 }

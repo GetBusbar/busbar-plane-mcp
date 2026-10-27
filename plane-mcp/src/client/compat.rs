@@ -1,22 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE CLIENT HALF OF THE SESSION REVISIONS: how busbar, calling an upstream, speaks
-//! `2025-11-25`, `2025-06-18` or `2024-11-05` when the upstream does not speak the stateless
-//! `2026-07-28` revision busbar sends by default (OWNER 2026-09-29 compat scope; MCP-COMPAT C5).
-//!
-//! Every request busbar issues is built once, in the stateless shape, by [`super::jsonrpc`] and
-//! [`super::verb`]. This module does not build a second set: it LOWERS a built request into a
-//! session revision ([`lower_request`]) and reads the upstream's answers back. The ladder itself
-//! (stateless, then `initialize`, then the event stream, moving only on a refusal) is
-//! [`crate::revision::next_step`]; [`probe_outcome`] is what feeds it.
-//!
-//! Pure: no I/O, no clock, no randomness. The caller owns the connection and the memory of what
-//! each upstream negotiated ([`crate::tool_sessions::UpstreamTable`]).
+//! THE CLIENT HALF OF THE SESSION REVISIONS: how busbar, calling an upstream that does not speak
+//! the stateless `2026-07-28` revision, speaks `2025-11-25`, `2025-06-18` or `2024-11-05`. A request
+//! is built once, stateless, and LOWERED here ([`lower_request`]); the answers are read back for
+//! the ladder ([`super::negotiate`]). Pure: no I/O, no clock, no randomness.
 
 use serde_json::Value;
 
 use super::jsonrpc::OutboundRequest;
+use crate::adapt::H_SESSION_ID;
 use crate::codec::{
     CODE_INVALID_PARAMS, CODE_INVALID_REQUEST, CODE_METHOD_NOT_FOUND,
     CODE_UNSUPPORTED_PROTOCOL_VERSION, H_MCP_METHOD, H_MCP_NAME, H_PROTOCOL_VERSION,
@@ -24,9 +17,9 @@ use crate::codec::{
 };
 use crate::revision::{Revision, StepOutcome};
 
-/// The response header an upstream names its session in, and the request header busbar carries it
-/// back in.
-pub const H_SESSION: &str = crate::adapt::H_SESSION_ID;
+/// The id busbar's own `initialize` carries: `2^53 - 1`, the largest integer a JavaScript peer
+/// reads back exactly, above every other id busbar sends.
+pub const INITIALIZE_ID: u64 = (1 << 53) - 1;
 
 /// Reads what a stateless request's answer says about the upstream's revision.
 ///
@@ -58,17 +51,21 @@ pub fn probe_outcome(status: u16, body: &[u8]) -> StepOutcome {
 }
 
 /// Reads what the answer to busbar's STATELESS request says about the upstream's revision: the
-/// ladder moves only on a refusal that names the revision or a session, and any other answer, an
-/// upstream's own JSON-RPC error included, is the stateless path's answer, handed on as it came (THE
+/// ladder moves on any refusal of the request, and any other answer, an upstream's own JSON-RPC
+/// error at a success status included, is the stateless path's answer, handed on as it came (THE
 /// DESIGN section 2, the mcp bullet: the stateless path of the `2026-07-28` revision stays
 /// byte-identical).
 ///
 /// A refusal of the revision is what a server of an earlier revision answers a request that opens
 /// no session:
 ///
-/// - a `4xx` whose body is no JSON-RPC error: a `2024-11-05` server's `404`/`405` at its event
-///   stream's endpoint, a session server's bare `400` or `404` for the session it was not named;
-/// - a `405`, whatever its body: the endpoint takes no POST;
+/// - ANY `4xx`, whatever its body: the MCP specification (2025-06-18 and 2025-11-25, Streamable
+///   HTTP) has a server that does not support the `MCP-Protocol-Version` it was sent answer
+///   `400 Bad Request` and fixes no JSON-RPC code or wording for it, so no body can tell that
+///   refusal from another; a `2024-11-05` server's `404`/`405` at its event stream's endpoint and a
+///   session server's `400`/`404` for the session it was not named are the same answer. The
+///   earlier revisions are tried before the upstream is taken for a stateless one, and the `4xx`
+///   never reaches the caller as the call's answer;
 /// - a JSON-RPC error `-32022` (the revision is unsupported), at any status;
 /// - a JSON-RPC error whose message names the session or the initialization the request skipped
 ///   (`Bad Request: No valid session ID provided`, `Server not initialized`), at any status.
@@ -79,15 +76,14 @@ pub fn stateless_outcome(status: u16, body: &[u8]) -> StepOutcome {
     if (500..600).contains(&status) {
         return StepOutcome::Unreachable;
     }
+    if (400..500).contains(&status) {
+        return StepOutcome::Refused4xx;
+    }
     let error = serde_json::from_slice::<Value>(body)
         .ok()
         .and_then(|v| v.get("error").filter(|e| e.is_object()).cloned());
     let Some(error) = error else {
-        return if (400..500).contains(&status) {
-            StepOutcome::Refused4xx
-        } else {
-            StepOutcome::Answered
-        };
+        return StepOutcome::Answered;
     };
     let code = error.get("code").and_then(Value::as_i64);
     let message = error
@@ -96,26 +92,25 @@ pub fn stateless_outcome(status: u16, body: &[u8]) -> StepOutcome {
         .unwrap_or("")
         .to_ascii_lowercase();
     let names_session = message.contains("session") || message.contains("initializ");
-    if status == 405 || code == Some(CODE_UNSUPPORTED_PROTOCOL_VERSION) || names_session {
+    if code == Some(CODE_UNSUPPORTED_PROTOCOL_VERSION) || names_session {
         StepOutcome::Refused4xx
     } else {
         StepOutcome::Answered
     }
 }
 
-/// The `initialize` request, sent to `url` with the credential `template` carries. `client_version`
-/// is the caller's own version string (the plane reads no build metadata).
+/// The `initialize` request (id [`INITIALIZE_ID`]), sent to `url` with the credential `template`
+/// carries. `client_version` is the caller's own version string.
 #[must_use]
 pub fn initialize_request(
     template: &OutboundRequest,
     url: &str,
     asked: Revision,
-    request_id: u64,
     client_version: &str,
 ) -> OutboundRequest {
     let body = serde_json::json!({
         "jsonrpc": "2.0",
-        "id": request_id,
+        "id": INITIALIZE_ID,
         "method": crate::adapt::METHOD_INITIALIZE,
         "params": {
             "protocolVersion": asked.wire(),
@@ -153,15 +148,30 @@ pub fn offered_revision(body: &[u8]) -> Option<Revision> {
 /// revision states them once, in `initialize`), the stateless mirror headers go, the version
 /// header names `revision` (where the revision has one) and the session header names `session`.
 /// The URL is `url` (the endpoint, or a `2024-11-05` message address). The credential and every
-/// other header `req` carries are kept.
+/// other header `req` carries are kept. `id`, when given, replaces the request's own (a session's
+/// own next id: a session revision forbids reusing one).
 #[must_use]
 pub fn lower_request(
     req: &OutboundRequest,
     url: &str,
     revision: Revision,
     session: Option<&str>,
+    id: Option<u64>,
 ) -> OutboundRequest {
     let mut body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
+    if let (Some(id), Some(obj)) = (id, body.as_object_mut()) {
+        obj.insert("id".to_string(), Value::from(id));
+        // A progress token the request carries is derived from the id it is sent under, so two
+        // requests in flight never share one.
+        if let Some(token) = obj
+            .get_mut("params")
+            .and_then(|p| p.get_mut("_meta"))
+            .and_then(|m| m.get_mut("progressToken"))
+            .filter(|t| !t.is_null())
+        {
+            *token = Value::from(format!("busbar-{id}"));
+        }
+    }
     if let Some(params) = body.get_mut("params").and_then(Value::as_object_mut) {
         let empty = params
             .get_mut("_meta")
@@ -195,7 +205,7 @@ fn session_envelope(
             k != H_PROTOCOL_VERSION
                 && k != H_MCP_METHOD
                 && k != H_MCP_NAME
-                && k != H_SESSION
+                && k != H_SESSION_ID
                 && !k.starts_with("mcp-param-")
         })
         .cloned()
@@ -204,7 +214,7 @@ fn session_envelope(
         headers.push((H_PROTOCOL_VERSION.to_string(), r.wire().to_string()));
     }
     if let Some(s) = session {
-        headers.push((H_SESSION.to_string(), s.to_string()));
+        headers.push((H_SESSION_ID.to_string(), s.to_string()));
     }
     OutboundRequest {
         url: url.to_string(),
@@ -263,8 +273,6 @@ pub fn message_address(base: &str, event_data: &str) -> Result<String, AddressRe
 pub struct StreamEvent {
     /// The `event:` name, when the event named one.
     pub event: Option<String>,
-    /// The `id:`, when the event carried one.
-    pub id: Option<String>,
     /// The `data:` lines, joined with `\n`.
     pub data: String,
 }
@@ -309,7 +317,6 @@ impl EventReader {
             let raw = String::from_utf8_lossy(&raw[..end]);
             let mut event = StreamEvent {
                 event: None,
-                id: None,
                 data: String::new(),
             };
             let mut data: Vec<&str> = Vec::new();
@@ -321,7 +328,6 @@ impl EventReader {
                 let value = value.strip_prefix(' ').unwrap_or(value);
                 match field {
                     "event" => event.event = Some(value.to_string()),
-                    "id" => event.id = Some(value.to_string()),
                     "data" => data.push(value),
                     _ => {}
                 }
@@ -339,109 +345,6 @@ impl EventReader {
     }
 }
 
-/// What one event on a `2024-11-05` stream means to the client holding it.
-#[derive(Clone, Debug, PartialEq)]
-pub enum LinkEffect {
-    /// The `endpoint` event named the message address: POSTs may start.
-    Ready(String),
-    /// The `endpoint` event named an address busbar will not POST to. The link is unusable.
-    Refused(AddressRefused),
-    /// The answer to a request this link is waiting on, by its id's JSON text.
-    Answer {
-        /// The request id, as JSON text.
-        id: String,
-        /// The whole JSON-RPC response, as sent.
-        body: Vec<u8>,
-    },
-    /// A request or notification from the upstream, for the peer classifier.
-    FromPeer(Value),
-    /// Nothing busbar acts on: a repeat `endpoint`, a response nobody waits for, a body that is
-    /// not JSON.
-    Ignored,
-}
-
-/// THE CLIENT STATE OF ONE `2024-11-05` STREAM: the message address once named, and the ids of the
-/// requests waiting for an answer on it. Bounded: at most `max_waiting` requests wait at once.
-#[derive(Debug)]
-pub struct EventStreamLink {
-    base: String,
-    address: Option<String>,
-    waiting: std::collections::BTreeSet<String>,
-    max_waiting: usize,
-}
-
-impl EventStreamLink {
-    /// A link to the stream opened at `base`, holding at most `max_waiting` open requests.
-    #[must_use]
-    pub fn new(base: &str, max_waiting: usize) -> Self {
-        Self {
-            base: base.to_string(),
-            address: None,
-            waiting: std::collections::BTreeSet::new(),
-            max_waiting: max_waiting.max(1),
-        }
-    }
-
-    /// The message address, once the stream named an acceptable one.
-    #[must_use]
-    pub fn address(&self) -> Option<&str> {
-        self.address.as_deref()
-    }
-
-    /// Registers a request by its `id` before it is POSTed. `false` when the link already holds
-    /// `max_waiting` requests or the id is already waiting.
-    pub fn expect(&mut self, id: &Value) -> bool {
-        if self.waiting.len() >= self.max_waiting {
-            return false;
-        }
-        self.waiting.insert(id.to_string())
-    }
-
-    /// Stops waiting for `id` (its caller gave up).
-    pub fn abandon(&mut self, id: &Value) {
-        self.waiting.remove(&id.to_string());
-    }
-
-    /// Reads one event.
-    pub fn on_event(&mut self, event: &StreamEvent) -> LinkEffect {
-        if event.event.as_deref() == Some("endpoint") {
-            if self.address.is_some() {
-                return LinkEffect::Ignored;
-            }
-            return match message_address(&self.base, &event.data) {
-                Ok(a) => {
-                    self.address = Some(a.clone());
-                    LinkEffect::Ready(a)
-                }
-                Err(r) => LinkEffect::Refused(r),
-            };
-        }
-        if !matches!(
-            event.event.as_deref(),
-            None | Some(crate::adapt::EVENT_MESSAGE)
-        ) {
-            return LinkEffect::Ignored;
-        }
-        let Ok(v) = serde_json::from_str::<Value>(&event.data) else {
-            return LinkEffect::Ignored;
-        };
-        if v.get("method").is_some() {
-            return LinkEffect::FromPeer(v);
-        }
-        let Some(id) = v.get("id").map(Value::to_string) else {
-            return LinkEffect::Ignored;
-        };
-        if self.waiting.remove(&id) {
-            LinkEffect::Answer {
-                id,
-                body: event.data.clone().into_bytes(),
-            }
-        } else {
-            LinkEffect::Ignored
-        }
-    }
-}
-
 #[cfg(test)]
 #[path = "tests/compat_tests.rs"]
-mod tests;
+pub(super) mod tests;

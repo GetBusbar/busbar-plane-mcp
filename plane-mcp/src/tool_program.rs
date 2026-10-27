@@ -31,6 +31,9 @@
 //! * Every id busbar sends a child is its own: a call's carries the unit, so concurrent exchanges on
 //!   one child never share one ([`call_id`], [`list_id`]).
 
+// The crate's only public item is `door`: the accessors and variants below were this module's public API; the tests hold them, the door does not reach them (BUSBAR-1.6.0.md l.3560).
+#![cfg_attr(not(test), allow(dead_code))]
+
 use std::collections::VecDeque;
 use std::task::Poll;
 
@@ -38,7 +41,7 @@ use busbar_contract::abi::host::conn::connector::{
     ReplyPiece, REPLY_ACK, REPLY_BODY, REPLY_END, REPLY_HEAD,
 };
 use busbar_contract::abi::mechanism::ticket::Ticket;
-use busbar_contract::abi::sdk::conn::Host;
+use busbar_contract::abi::sdk::conn::{Host, Replied};
 use serde_json::Value;
 
 use crate::client::jsonrpc::{ServerRequestGrants, HANDSHAKE_REQUEST_ID};
@@ -255,48 +258,6 @@ pub struct ChildAsk {
     pub request: Value,
 }
 
-impl Correlator {
-    /// The reading of an exchange that relays a caller's call ([`Self::relays`]).
-    #[must_use]
-    pub fn relaying() -> Self {
-        Correlator {
-            relays: true,
-            ..Correlator::default()
-        }
-    }
-}
-
-/// A STDIO CHILD'S granted asks judged against the operator's `tools.<server>.sampling_bounds`
-/// (owner ruling Q22c), by the one judgement the http path uses ([`crate::call::judge_sampling_bounds`]).
-/// The first ask past a bound is the refusal; the door writes it on the child's input.
-pub fn judge_child_asks(
-    server: &str,
-    def: &crate::tools_config::McpServerDefCfg,
-    asks: &[ChildAsk],
-) -> Result<(), crate::call::AskRefusal> {
-    crate::call::judge_sampling_bounds(
-        server,
-        &def.sampling_bounds,
-        asks.iter().map(|a| &a.request),
-    )
-}
-
-/// THE CALLER'S ANSWERS TO A STDIO CHILD, bounded by `sampling_bounds.max_input_response_bytes`: the
-/// serialised bytes of every reply that would be written to the child
-/// ([`child_replies`]), judged by the one judgement the http path uses
-/// ([`crate::call::judge_input_response`]). Over the cap is the named refusal, and nothing is written.
-pub fn judge_child_replies(
-    server: &str,
-    def: &crate::tools_config::McpServerDefCfg,
-    replies: &[Vec<u8>],
-) -> Result<(), crate::call::AskRefusal> {
-    crate::call::judge_input_response(
-        server,
-        &def.sampling_bounds,
-        replies.iter().map(Vec::len).sum(),
-    )
-}
-
 /// THE CHILD'S ASKS AS THE CALLER IS HANDED THEM: an `input_required` result whose `inputRequests`
 /// carries each request verbatim, keyed by the child's own id (a string id as it is, any other as
 /// its JSON), and the keys paired with the ids the answers go back under.
@@ -319,9 +280,10 @@ pub fn relayed_asks(asks: &[ChildAsk]) -> (Value, Vec<(String, Value)>) {
         keys.push((key, ask.id.clone()));
     }
     let result = serde_json::json!({
-        "resultType": crate::jsonrpc::RESULT_TYPE_INPUT_REQUIRED,
-        "inputRequests": Value::Object(requests),
-    });
+            "resultType": crate::codec::RESULT_TYPE_INPUT_REQUIRED
+    ,
+            "inputRequests": Value::Object(requests),
+        });
     (result, keys)
 }
 
@@ -342,6 +304,15 @@ pub fn child_replies(child: &crate::ask::ChildLeg, responses: Option<&Value>) ->
 }
 
 impl Correlator {
+    /// The reading of an exchange that relays a caller's call ([`Self::relays`]).
+    #[must_use]
+    pub fn relaying() -> Self {
+        Correlator {
+            relays: true,
+            ..Correlator::default()
+        }
+    }
+
     /// Read `bytes` of member `member`'s messages (its child of `generation`), waiting for the
     /// answer to `wait`: that answer (its bytes) once it came. Messages of the child's own are
     /// handled on the way.
@@ -529,6 +500,87 @@ pub struct ProgramExchange {
     timeout_ms: u32,
 }
 
+/// THE LEASE OPERATIONS AN EXCHANGE MAKES on its member's program: each is the host connector's
+/// service of the same name, numbered `issued` on `ticket` ([`Host`]'s connector). The exchange
+/// drives its child through this seam, so its logic is tested in the crate over a child that is a
+/// plain Rust value (`src/tests/program_tests.rs`); a served door drives it over the host's own.
+pub trait ProgramConn {
+    /// Lease the member's program over `need`, its dial bounded by `timeout_ms`: the stream.
+    fn establish(
+        &self,
+        ticket: Ticket,
+        issued: u32,
+        need: u32,
+        member: &str,
+        timeout_ms: u32,
+    ) -> Poll<Result<u64, String>>;
+    /// The next piece of the reply on `stream`, written into `buf`, its descriptor into `slot`.
+    fn read_reply(
+        &self,
+        ticket: Ticket,
+        issued: u32,
+        stream: u64,
+        buf: &mut [u8],
+        slot: &mut ReplyPiece,
+    ) -> Poll<Result<Replied, String>>;
+    /// Write `bytes` to `stream`: how many the host took.
+    fn write(
+        &self,
+        ticket: Ticket,
+        issued: u32,
+        stream: u64,
+        bytes: &[u8],
+    ) -> Poll<Result<usize, String>>;
+    /// Close `stream`.
+    fn close(&self, ticket: Ticket, issued: u32, stream: u64) -> Poll<()>;
+}
+
+impl ProgramConn for Host {
+    fn establish(
+        &self,
+        ticket: Ticket,
+        issued: u32,
+        need: u32,
+        member: &str,
+        timeout_ms: u32,
+    ) -> Poll<Result<u64, String>> {
+        self.connector_from(ticket, issued)
+            .establish_timed(need, Some(member), "", timeout_ms)
+            .map(|r| r.map_err(|e| e.to_string()))
+    }
+
+    fn read_reply(
+        &self,
+        ticket: Ticket,
+        issued: u32,
+        stream: u64,
+        buf: &mut [u8],
+        slot: &mut ReplyPiece,
+    ) -> Poll<Result<Replied, String>> {
+        self.connector_from(ticket, issued)
+            .read_reply(stream, buf, slot)
+            .map(|r| r.map_err(|e| e.to_string()))
+    }
+
+    fn write(
+        &self,
+        ticket: Ticket,
+        issued: u32,
+        stream: u64,
+        bytes: &[u8],
+    ) -> Poll<Result<usize, String>> {
+        self.connector_from(ticket, issued)
+            .write(stream, bytes)
+            .map(|r| r.map_err(|e| e.to_string()))
+    }
+
+    fn close(&self, ticket: Ticket, issued: u32, stream: u64) -> Poll<()> {
+        self.connector_from(ticket, issued)
+            .close(stream)
+            .map(|_| ())
+    }
+}
+
 impl ProgramExchange {
     /// An exchange with member `member` over need `need`: `messages` sent in order, each read to
     /// the answer to its id when it names one; `greet` = greet a generation the door has not.
@@ -574,18 +626,12 @@ impl ProgramExchange {
         self
     }
 
-    /// The progress frames the exchange relayed.
-    #[must_use]
-    pub fn progress(&self) -> &[Value] {
-        &self.corr.progress
-    }
-
     /// Drive the exchange on `ticket`, its services numbered from `base`: READY with what it came
     /// to, PENDING (to be driven again on the op's next entry), or why it failed. `greeted` says
     /// whether the door already greeted a generation.
     pub fn drive(
         &mut self,
-        host: &Host,
+        host: &dyn ProgramConn,
         ticket: Ticket,
         base: u32,
         greeted: &dyn Fn(u64) -> bool,
@@ -602,41 +648,43 @@ impl ProgramExchange {
                     return Poll::Ready(Err(self.failed.take().unwrap_or_default()));
                 }
             }
-            let mut c = host.connector_from(ticket, base.saturating_add(self.issued));
+            let seq = base.saturating_add(self.issued);
             match self.step.clone() {
                 Step::Establish => {
-                    match c.establish_timed(self.need, Some(&self.member), "", self.timeout_ms) {
+                    match host.establish(ticket, seq, self.need, &self.member, self.timeout_ms) {
                         Poll::Pending => return Poll::Pending,
                         Poll::Ready(Ok(stream)) => {
                             self.issued += 1;
                             self.stream = stream;
                             self.step = Step::Head;
                         }
-                        Poll::Ready(Err(e)) => return Poll::Ready(Err(e.to_string())),
+                        Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                     }
                 }
-                Step::Head => match c.read_reply(self.stream, &mut self.buf, &mut self.slot) {
-                    Poll::Pending => return Poll::Pending,
-                    Poll::Ready(Ok(got)) => {
-                        self.issued += 1;
-                        if got.piece.kind != REPLY_HEAD {
-                            self.fail(CLOSED.to_string());
-                            continue;
+                Step::Head => {
+                    match host.read_reply(ticket, seq, self.stream, &mut self.buf, &mut self.slot) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(Ok(got)) => {
+                            self.issued += 1;
+                            if got.piece.kind != REPLY_HEAD {
+                                self.fail(CLOSED.to_string());
+                                continue;
+                            }
+                            let block = spanned(&self.buf[..got.len], got.piece.fields);
+                            self.generation = generation_of(block);
+                            if self.only.is_some_and(|g| g != self.generation) {
+                                self.queue.clear();
+                            }
+                            if self.greet && !greeted(self.generation) {
+                                self.queue.push_front((initialized_notification(), None));
+                                self.queue
+                                    .push_front((initialize(), Some(HANDSHAKE_REQUEST_ID)));
+                            }
+                            self.step = Step::Next;
                         }
-                        let block = spanned(&self.buf[..got.len], got.piece.fields);
-                        self.generation = generation_of(block);
-                        if self.only.is_some_and(|g| g != self.generation) {
-                            self.queue.clear();
-                        }
-                        if self.greet && !greeted(self.generation) {
-                            self.queue.push_front((initialized_notification(), None));
-                            self.queue
-                                .push_front((initialize(), Some(HANDSHAKE_REQUEST_ID)));
-                        }
-                        self.step = Step::Next;
+                        Poll::Ready(Err(e)) => self.fail(e),
                     }
-                    Poll::Ready(Err(e)) => self.fail(e.to_string()),
-                },
+                }
                 Step::Next => {
                     if let Some(reply) = self.corr.outbox.pop_front() {
                         self.step = Step::Write(reply);
@@ -649,7 +697,7 @@ impl ProgramExchange {
                         self.step = Step::Close;
                     }
                 }
-                Step::Write(message) => match c.write(self.stream, &message) {
+                Step::Write(message) => match host.write(ticket, seq, self.stream, &message) {
                     Poll::Pending => return Poll::Pending,
                     Poll::Ready(Ok(_)) => {
                         self.issued += 1;
@@ -658,44 +706,46 @@ impl ProgramExchange {
                         }
                         self.step = Step::Next;
                     }
-                    Poll::Ready(Err(e)) => self.fail(e.to_string()),
+                    Poll::Ready(Err(e)) => self.fail(e),
                 },
-                Step::Read => match c.read_reply(self.stream, &mut self.buf, &mut self.slot) {
-                    Poll::Pending => return Poll::Pending,
-                    Poll::Ready(Ok(got)) => {
-                        self.issued += 1;
-                        match got.piece.kind {
-                            REPLY_BODY => {
-                                let wait = self.waiting.unwrap_or_default();
-                                let taken = self.corr.take(
-                                    &self.buf[..got.len],
-                                    wait,
-                                    &self.member,
-                                    self.generation,
-                                    peer,
-                                );
-                                match taken {
-                                    Ok(Some(answer)) => {
-                                        self.waiting = None;
-                                        if wait == HANDSHAKE_REQUEST_ID {
-                                            self.greeted(&answer);
-                                        } else {
-                                            self.answer = Some(answer);
+                Step::Read => {
+                    match host.read_reply(ticket, seq, self.stream, &mut self.buf, &mut self.slot) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(Ok(got)) => {
+                            self.issued += 1;
+                            match got.piece.kind {
+                                REPLY_BODY => {
+                                    let wait = self.waiting.unwrap_or_default();
+                                    let taken = self.corr.take(
+                                        &self.buf[..got.len],
+                                        wait,
+                                        &self.member,
+                                        self.generation,
+                                        peer,
+                                    );
+                                    match taken {
+                                        Ok(Some(answer)) => {
+                                            self.waiting = None;
+                                            if wait == HANDSHAKE_REQUEST_ID {
+                                                self.greeted(&answer);
+                                            } else {
+                                                self.answer = Some(answer);
+                                            }
+                                            self.step = Step::Next;
                                         }
-                                        self.step = Step::Next;
+                                        Ok(None) => self.step = Step::Next,
+                                        Err(e) => self.fail(e),
                                     }
-                                    Ok(None) => self.step = Step::Next,
-                                    Err(e) => self.fail(e),
                                 }
+                                REPLY_END | REPLY_ACK => self.fail(CLOSED.to_string()),
+                                _ => {}
                             }
-                            REPLY_END | REPLY_ACK => self.fail(CLOSED.to_string()),
-                            _ => {}
                         }
+                        Poll::Ready(Err(e)) => self.fail(e),
                     }
-                    Poll::Ready(Err(e)) => self.fail(e.to_string()),
-                },
+                }
                 Step::Close => {
-                    if c.close(self.stream).is_pending() {
+                    if host.close(ticket, seq, self.stream).is_pending() {
                         return Poll::Pending;
                     }
                     self.issued += 1;
