@@ -9,8 +9,7 @@
 //! Moved in from the plugin crate's `tests/door_witness.rs` when this crate's only public item
 //! became `door`: these tests read the plane's own tables. The door driven both ways stays there.
 
-use crate::{jsonrpc, tool_facts as facts, tool_ops as ops, McpPlane};
-use busbar_contract::plane::PlaneMeta;
+use crate::{codec, tool_ops as ops};
 use std::path::PathBuf;
 
 /// The battery's own source tree: busbar's `testing/mcp-conformance` at the pin (`BUSBAR_CHECKOUT`).
@@ -81,7 +80,7 @@ fn looks_like_a_method(piece: &str) -> bool {
 #[test]
 fn every_method_the_battery_sends_is_carried() {
     for method in battery_methods() {
-        let carried = ops::method_row_for(&method).is_some() || ops::is_known_notification(&method);
+        let carried = ops::method_row_for(&method).is_some() || NOTICES.contains(&method.as_str());
         // The battery names three notices this node emits rather than receives, and one deliberate
         // nonsense name. Everything else it names, it sends.
         let emitted_only = matches!(
@@ -107,16 +106,20 @@ fn every_method_the_battery_sends_is_carried() {
 const CLIENT_ROWS: usize = 13;
 /// The rows only a paired server may send. See [`CLIENT_ROWS`].
 const PROVIDER_ROWS: usize = 3;
-/// The notices this plane recognises. See [`CLIENT_ROWS`].
-const NOTICE_ROWS: usize = 3;
+/// The notices the battery sends that this plane takes (a notification obliges no answer).
+const NOTICES: &[&str] = &[
+    "notifications/roots/list_changed",
+    "notifications/tools/list_changed",
+    "notifications/resources/updated",
+];
 
 /// The declared method rows of one role.
 fn rows_of(sender: ops::Sender) -> Vec<&'static ops::RpcMethodRow> {
     ops::METHODS.iter().filter(|r| r.sender == sender).collect()
 }
 
-/// The method table keeps the roles the door serves: how many rows each role has, every row's class
-/// is one the plane declares, and exactly the held stream is event-framed.
+/// The method table keeps the roles the door serves: how many rows each role has, and every row's
+/// class is one the plane declares.
 ///
 /// The surviving, plane-free half of what the decode-driven tests asserted (finding 12): the door
 /// reads this same table (`ops::method_row_for`), so the table is what is pinned here.
@@ -124,21 +127,14 @@ fn rows_of(sender: ops::Sender) -> Vec<&'static ops::RpcMethodRow> {
 fn the_method_table_keeps_its_roles_and_its_declared_classes() {
     assert_eq!(rows_of(ops::Sender::Client).len(), CLIENT_ROWS);
     assert_eq!(rows_of(ops::Sender::Provider).len(), PROVIDER_ROWS);
-    assert_eq!(ops::NOTIFICATIONS.len(), NOTICE_ROWS);
     for row in ops::METHODS {
         assert!(
-            McpPlane::OP_CLASSES.contains(&row.op),
+            ops::OP_CLASSES.contains(&row.op),
             "{} names the undeclared class {}",
             row.method,
             row.op
         );
     }
-    let framed: Vec<_> = ops::METHODS
-        .iter()
-        .filter(|r| r.event_framed)
-        .map(|r| r.op)
-        .collect();
-    assert_eq!(framed, vec![ops::OP_SUBSCRIPTIONS_LISTEN]);
 }
 
 /// The revision the battery declares is the revision the codec declares.
@@ -147,7 +143,7 @@ fn the_revision_is_the_codecs_own() {
     let spec = std::fs::read_to_string(battery().join("src/core/spec.mjs"))
         .expect("the battery's own revision is readable");
     assert!(
-        spec.contains(crate::codec::PROTOCOL_VERSION),
+        spec.contains(codec::PROTOCOL_VERSION),
         "the battery and the codec no longer agree on the revision"
     );
 }
@@ -158,14 +154,14 @@ fn the_error_codes_are_the_batterys_own() {
     let source = std::fs::read_to_string(battery().join("src/core/jsonrpc.mjs"))
         .expect("the battery's own code table is readable");
     for code in [
-        jsonrpc::CODE_PARSE_ERROR,
-        jsonrpc::CODE_INVALID_REQUEST,
-        jsonrpc::CODE_METHOD_NOT_FOUND,
-        jsonrpc::CODE_INVALID_PARAMS,
-        jsonrpc::CODE_INTERNAL,
-        jsonrpc::CODE_HEADER_MISMATCH,
-        jsonrpc::CODE_MISSING_CLIENT_CAPABILITY,
-        jsonrpc::CODE_UNSUPPORTED_PROTOCOL_VERSION,
+        busbar_contract::jsonrpc::PARSE_ERROR,
+        codec::CODE_INVALID_REQUEST,
+        codec::CODE_METHOD_NOT_FOUND,
+        codec::CODE_INVALID_PARAMS,
+        codec::CODE_INTERNAL,
+        codec::CODE_HEADER_MISMATCH,
+        codec::CODE_MISSING_CLIENT_CAPABILITY,
+        codec::CODE_UNSUPPORTED_PROTOCOL_VERSION,
     ] {
         assert!(
             names_the_number(&source, code),
@@ -173,12 +169,24 @@ fn the_error_codes_are_the_batterys_own() {
         );
     }
     // And the two the battery calls RETIRED are two this plane cannot write.
-    for retired in jsonrpc::RETIRED_CODES {
+    let written = [
+        busbar_contract::jsonrpc::PARSE_ERROR,
+        codec::CODE_INVALID_REQUEST,
+        codec::CODE_METHOD_NOT_FOUND,
+        codec::CODE_INVALID_PARAMS,
+        codec::CODE_INTERNAL,
+        codec::CODE_HEADER_MISMATCH,
+        codec::CODE_MISSING_CLIENT_CAPABILITY,
+        codec::CODE_UNSUPPORTED_PROTOCOL_VERSION,
+        codec::CODE_REFUSED,
+        codec::CODE_UPSTREAM_UNAVAILABLE,
+    ];
+    for retired in &[-32002_i64, -32042] {
         assert!(
             names_the_number(&source, *retired),
             "the battery no longer names the retired code {retired}"
         );
-        assert!(!jsonrpc::CODES.contains(retired));
+        assert!(!written.contains(retired));
     }
 }
 
@@ -205,9 +213,9 @@ fn the_metadata_keys_are_the_batterys_own() {
     let source = std::fs::read_to_string(battery().join("src/core/jsonrpc.mjs"))
         .expect("the battery's own key table is readable");
     for key in [
-        facts::META_PROTOCOL_VERSION,
-        facts::META_CLIENT_CAPABILITIES,
-        facts::META_PROGRESS_TOKEN,
+        codec::META_PROTOCOL_VERSION,
+        codec::META_CLIENT_CAPABILITIES,
+        "progressToken",
     ] {
         assert!(source.contains(key), "the battery no longer sends {key}");
     }

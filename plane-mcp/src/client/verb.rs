@@ -37,17 +37,6 @@
 use super::jsonrpc::{envelope, OutboundRequest};
 use crate::codec::{META_CLIENT_CAPABILITIES, META_PROTOCOL_VERSION, PROTOCOL_VERSION};
 
-/// THE PROTOCOL REVISION BUSBAR OFFERS A CHILD IN ITS HANDSHAKE.
-///
-/// The same string busbar's own front door serves, and it is offered rather than imposed: a child
-/// that answers `initialize` with a different `protocolVersion` has told busbar what it speaks, and
-/// that answer is recorded rather than argued with. busbar is a gateway, not a conformance test.
-pub const CLIENT_PROTOCOL_VERSION: &str = PROTOCOL_VERSION;
-
-/// What busbar calls itself to a child. A constant, not a config key: an operator who could rename
-/// busbar in a handshake could make one deployment impersonate another in the child's own logs.
-const CLIENT_NAME: &str = "busbar";
-
 /// ONE METHOD BUSBAR SENDS TO AN UPSTREAM, with its parameters.
 ///
 /// Every variant carries the data its `params` needs and nothing else. There is deliberately no
@@ -58,18 +47,15 @@ const CLIENT_NAME: &str = "busbar";
 pub enum UpstreamVerb {
     /// The handshake a stdio child demands.
     Initialize {
-        /// busbar's release, sent as `clientInfo.version`. Handed in by the engine: a plane reads
-        /// no build environment of its own.
+        /// busbar's release, sent as `clientInfo.version`.
         client_version: &'static str,
     },
-    /// The handshake's acknowledgement. A NOTIFICATION: it has no reply, and a client that waited
-    /// for one would hang against every conformant server.
+    /// The handshake's acknowledgement. A NOTIFICATION.
     NotificationsInitialized,
 }
 
 impl UpstreamVerb {
-    /// THE WIRE METHOD NAME. Exhaustive, with no wildcard arm, so a variant added without a name is
-    /// a compile error rather than a method that silently sends the wrong word.
+    /// THE WIRE METHOD NAME.
     pub fn method(&self) -> &'static str {
         match self {
             UpstreamVerb::Initialize { .. } => "initialize",
@@ -77,14 +63,7 @@ impl UpstreamVerb {
         }
     }
 
-    /// Whether this verb is a JSON-RPC NOTIFICATION — no `id`, and NO REPLY EVER.
-    ///
-    /// Decided on the VARIANT rather than by testing whether the method name starts with
-    /// `notifications/`, because that string test is a rule about spelling that would silently
-    /// reclassify any future method whose name happened to match. The distinction matters at the
-    /// transport: the engine's `mcp::client::wire::McpWire::notify` does not read, and a request sent down that path
-    /// would wait for an answer nobody would ever read — which on a stdio child means the answer
-    /// stays in the pipe and desynchronises every subsequent call.
+    /// Whether this verb is a JSON-RPC NOTIFICATION: no `id`, and no reply ever.
     pub fn is_notification(&self) -> bool {
         matches!(self, UpstreamVerb::NotificationsInitialized)
     }
@@ -95,35 +74,15 @@ impl UpstreamVerb {
     fn params(&self) -> serde_json::Value {
         match self {
             UpstreamVerb::Initialize { client_version } => serde_json::json!({
-                "protocolVersion": CLIENT_PROTOCOL_VERSION,
-                // THE EMPTY CAPABILITY SET, and it is the honest one. Sampling, elicitation and
-                // roots are deny-by-default per server (`super::jsonrpc::ServerRequestGrants`), so
-                // declaring a capability busbar then refuses to honour would invite a child to build
-                // a call sequence around authority it will not be given.
+                "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": {},
-                "clientInfo": { "name": CLIENT_NAME, "version": client_version },
+                "clientInfo": { "name": "busbar", "version": client_version },
             }),
             UpstreamVerb::NotificationsInitialized => serde_json::json!({}),
         }
     }
 
-    /// The `Mcp-Name` header's value for this verb, when the revision requires one.
-    ///
-    /// `Some` only where the request NAMES a target the header can mirror. A header that mirrored a
-    /// value the body does not carry would be a header busbar's own ingress answers `-32020` to.
-    /// WHICH member of this verb's `params` the `Mcp-Name` header mirrors, and its value.
-    ///
-    /// The RULE is `crate::codec::name_source_of`'s and is not restated here. This function
-    /// once carried its own copy and the two disagreed about the three tasks methods, so a
-    /// `tasks/get` issued over streamable HTTP went out with no `Mcp-Name` — the exact header
-    /// busbar's own ingress answers `-32020` to. Reading the ingress's table means the requests
-    /// busbar SENDS satisfy the MUSTs busbar ENFORCES, by construction rather than by two authors
-    /// agreeing.
-    ///
-    /// It returns an owned `String` because the value is read back out of the serialised `params`
-    /// rather than off the variant: the member the header mirrors is decided by the wire method, so
-    /// looking it up by name is what keeps the two in step. A per-variant `match` would be the
-    /// second copy again, wearing a different shape.
+    /// The `Mcp-Name` header's value: the `params` member `crate::codec::name_source_of` names.
     fn target(&self) -> Option<String> {
         let source = crate::codec::name_source_of(self.method())?;
         self.params()
@@ -132,11 +91,7 @@ impl UpstreamVerb {
             .map(str::to_string)
     }
 
-    /// BUILD the request. One envelope function, shared with `tools/call`, so the mirrored headers
-    /// this revision REQUIRES cannot be got right on one verb and wrong on another.
-    ///
-    /// `request_id` is IGNORED for a notification, which carries no `id` member at all — a
-    /// notification with an `id` is a request, and a peer would be right to answer it.
+    /// BUILD the request through the shared envelope. `request_id` is ignored for a notification.
     pub fn build(
         &self,
         url: &str,
@@ -148,7 +103,7 @@ impl UpstreamVerb {
             obj.insert(
                 "_meta".to_string(),
                 serde_json::json!({
-                    META_PROTOCOL_VERSION: CLIENT_PROTOCOL_VERSION,
+                    META_PROTOCOL_VERSION: PROTOCOL_VERSION,
                     META_CLIENT_CAPABILITIES: {},
                 }),
             );

@@ -97,7 +97,7 @@ fn every_verb_carries_the_required_meta() {
         );
         assert_eq!(
             meta["io.modelcontextprotocol/protocolVersion"],
-            super::super::verb::CLIENT_PROTOCOL_VERSION,
+            crate::codec::PROTOCOL_VERSION,
             "{} must state the protocol revision in `_meta`",
             verb.method()
         );

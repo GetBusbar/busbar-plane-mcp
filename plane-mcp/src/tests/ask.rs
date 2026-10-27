@@ -10,6 +10,15 @@ use serde_json::{json, Value};
 use super::*;
 use crate::tools_config::AskRoundCfg;
 
+fn relay_state(
+    bind: Bind<'_>,
+    args_digest: &str,
+    leg: UpstreamLeg,
+    seal: &mut dyn Seal,
+) -> Option<String> {
+    relay_state_for(bind, args_digest, leg, DEFAULT_TTL_SECS, seal)
+}
+
 /// A seal that writes the state as JSON behind a marker and spends each nonce once (the ask
 /// tests' own stand-in for the host's, shared with the call tests).
 #[derive(Default)]
@@ -131,7 +140,6 @@ fn the_exchange_asks_then_proceeds_once() {
     let AskDecision::Ask {
         asks,
         request_state,
-        round,
     } = decide(
         &confirm(),
         3,
@@ -144,7 +152,8 @@ fn the_exchange_asks_then_proceeds_once() {
     else {
         panic!("asks");
     };
-    assert_eq!((asks.len(), round), (1, 0));
+    let sealed = seal.open(&request_state).expect("the minted state opens");
+    assert_eq!((asks.len(), sealed.round), (1, 0));
     let body: Value =
         serde_json::from_slice(&input_required_result(&json!(4), &asks, &request_state))
             .expect("json");

@@ -87,18 +87,22 @@ fn red_no_stateless_only_method_reaches_a_session_client() {
 fn raising_adds_the_stateless_meta_and_mirrors_the_name() {
     let mut m = json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
         "params":{"name":"echo","arguments":{},"_meta":{"progressToken":7}}});
-    let mirror = raise(&mut m).unwrap();
-    assert_eq!(mirror.version, "2026-07-28");
-    assert_eq!(mirror.method, "tools/call");
-    assert_eq!(mirror.name.as_deref(), Some("echo"));
+    assert_eq!(raise(&mut m), Some(()));
+    let mirror = crate::codec::mirrored(&m);
+    let get = |n: &str| mirror.iter().find(|(k, _)| k == n).map(|(_, v)| v.as_str());
+    assert_eq!(get("mcp-protocol-version"), Some("2026-07-28"));
+    assert_eq!(get("mcp-method"), Some("tools/call"));
+    assert_eq!(get("mcp-name"), Some("echo"));
     let meta = &m["params"]["_meta"];
     assert_eq!(meta[META_PROTOCOL_VERSION], "2026-07-28");
     assert_eq!(meta[META_CLIENT_CAPABILITIES], json!({}));
     assert_eq!(meta["progressToken"], 7, "the client's own _meta survives");
 
     let mut bare = json!({"jsonrpc":"2.0","id":4,"method":"tools/list"});
-    let mirror = raise(&mut bare).unwrap();
-    assert_eq!(mirror.name, None);
+    assert_eq!(raise(&mut bare), Some(()));
+    assert!(crate::codec::mirrored(&bare)
+        .iter()
+        .all(|(k, _)| k != "mcp-name"));
     assert!(bare["params"]["_meta"].is_object());
 
     let mut bad = json!({"jsonrpc":"2.0","id":5,"method":"tools/list","params":[1]});
@@ -108,12 +112,12 @@ fn raising_adds_the_stateless_meta_and_mirrors_the_name() {
 #[test]
 fn lowering_strips_stateless_members_and_refuses_incomplete_results() {
     let mut r = json!({"tools":[],"resultType":"complete","cacheScope":"caller","ttlMs":1000});
-    lower_result(&mut r).unwrap();
+    assert!(lower_result(&mut r));
     assert_eq!(r, json!({"tools":[]}));
     let mut ir = json!({"resultType":"input_required","inputRequests":{}});
-    assert_eq!(lower_result(&mut ir), Err(NotExpressible));
+    assert!(!lower_result(&mut ir));
     let mut task = json!({"resultType":"task"});
-    assert_eq!(lower_result(&mut task), Err(NotExpressible));
+    assert!(!lower_result(&mut task));
 }
 
 #[test]
@@ -128,7 +132,7 @@ fn red_initialize_declares_no_stateless_only_capability() {
         },
         "methods":["server/discover"]
     });
-    let r = initialize_result(&discovery, Revision::R2025_11_25, false);
+    let r = initialize_result(&discovery, Revision::R2025_11_25);
     assert_eq!(r["protocolVersion"], "2025-11-25");
     assert_eq!(r["serverInfo"]["name"], "busbar");
     let caps = r["capabilities"].as_object().unwrap();
@@ -145,11 +149,11 @@ fn red_initialize_declares_no_stateless_only_capability() {
     );
     assert!(r.get("methods").is_none());
 
-    let old = initialize_result(&discovery, Revision::R2024_11_05, true);
+    let old = initialize_result(&discovery, Revision::R2024_11_05);
     assert!(old["capabilities"].get("completions").is_none());
-    assert_eq!(old["capabilities"]["tools"], json!({"listChanged": true}));
+    assert_eq!(old["capabilities"]["tools"], json!({"listChanged": false}));
 
-    let none = initialize_result(&json!({"capabilities":{}}), Revision::R2025_06_18, true);
+    let none = initialize_result(&json!({"capabilities":{}}), Revision::R2025_06_18);
     assert_eq!(none["capabilities"], json!({}));
 }
 
