@@ -448,13 +448,7 @@ fn red_a_session_or_cursor_a_live_stream_reads_is_never_evicted() {
     let sa = t.open_stream(&a, &owner("alice"), 2).unwrap();
     let sb = t.open_stream(&b, &owner("alice"), 3).unwrap();
     assert!(t.hold_stream(&a, sa) && t.hold_stream(&b, sb));
-    let refused = t.open(
-        entropy(3),
-        owner("alice"),
-        Revision::R2025_11_25,
-        Carriage::Endpoint,
-        4,
-    );
+    let refused = t.open(entropy(3), owner("alice"), Revision::R2025_11_25, 4);
     assert_eq!(refused, Err(OpenRefused::OwnerFull));
     assert!(
         t.revision(&a, &owner("alice"), 5).is_some(),
