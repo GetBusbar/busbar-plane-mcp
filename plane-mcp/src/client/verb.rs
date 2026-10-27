@@ -1,113 +1,28 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE CLOSED SET OF METHODS BUSBAR ISSUES TO AN UPSTREAM MCP SERVER.
-//!
-//! ## Why a closed enum and not a `&str` method name
-//!
-//! `qa/method-inventory.json` is a MATRIX and this module is one of its columns: `mcp × <transport>
-//! × busbar-as-client × client-originated`. A builder that took the method as a string would make
-//! the column's contents a property of its call sites, so a method could be added by one caller and
-//! be invisible to every gate, every audit word and every test that enumerates the surface. The enum
-//! is what makes an enumeration of the whole column possible, and
-//! `tests/method_inventory.rs::the_issued_set_is_exactly_the_inventory_column` compares that enumeration
-//! against the generated inventory IN BOTH DIRECTIONS — so a verb this file forgets is a RED TEST
-//! rather than an absent row, and a verb it invents is a red test rather than a `-32601` in
-//! production.
-//!
-//! ## busbar is a PROXY here, not an originator
-//!
-//! The owner's ruling on the coverage matrix, 2026-08-12, is the reason every one of these exists
-//! rather than the obvious-looking subset:
-//!
-//! > *a gateway probably would not use this* is NOT a reason. busbar sits between a real client and
-//! > a real server, so its client-side verb is not busbar originating anything — it is busbar
-//! > PROXYING the real client's.
-//!
-//! So `resources/subscribe` is here because a caller subscribed; `notifications/cancelled` is here
-//! because a caller cancelled; `initialize` is here because a CHILD PROCESS demands one. Which
-//! brings us to the asymmetry with the HTTP leg, which is the one design decision in this file:
-//!
-//! ## WHY `initialize`, `ping` AND `logging/setLevel` ARE BUILT HERE AND IMPOSSIBLE ON THE HTTP LEG
-//!
-//! `qa/WAIVERS.md` records `mcp|streamable-http|client|client|initialize` (and
-//! `notifications/initialized`, `ping`, `logging/setLevel`, `resources/subscribe`,
-//! `resources/unsubscribe`) as *removed by SEP-2575* — recorded impossibilities, not waivers,
-//! since the waiver list went to zero. That record is correct for HTTP and WRONG for stdio, and
-//! the difference is not a preference:
-//!
-//! - Over streamable HTTP, busbar's peer is a server that speaks the same revision busbar's own
-//!   front door serves. That revision deleted the handshake, so there is nothing to send.
-//! - Over stdio, busbar's peer is a LOCAL CHILD PROCESS the operator named in `command:`. It is
-//!   whatever binary the operator installed — overwhelmingly an SDK server speaking a revision in
-//!   which `initialize` is a MUST and a server may refuse every other request until it arrives.
-//!   busbar does not get to choose the child's revision; the operator chose it by installing it.
-//!
-//! A leg that could not send a handshake could not talk to the stdio ecosystem at all. So the
-//! handshake is BUILT, and it is sent as the child's first message by
-//! the engine's `mcp::client::stdio` — see `StdioChild::handshake`.
-//!
-//! ## Params are DATA, never argv
-//!
-//! Every variant's payload is serialised into the JSON-RPC `params` object and travels on the
-//! child's stdin. Nothing here can reach `StdioCommand::args`, which is config-only. That is the
-//! fourth spawn decision in the engine's `mcp::client::stdio`'s header, expressed here as the absence of any path from
-//! a verb to an argument vector.
+//! THE CLOSED SET OF METHODS BUSBAR ISSUES TO AN UPSTREAM MCP SERVER, one enum so the column
+//! `mcp × stdio × busbar-as-client × client-originated` of `qa/method-inventory.json` is
+//! enumerable (`tests/method_inventory.rs` compares it in both directions). `initialize` is built
+//! here because a stdio child demands a handshake. Params are data on the child's stdin, never argv.
 
 use super::jsonrpc::{envelope, OutboundRequest};
 use crate::codec::{META_CLIENT_CAPABILITIES, META_PROTOCOL_VERSION, PROTOCOL_VERSION};
 
-/// THE PROTOCOL REVISION BUSBAR OFFERS A CHILD IN ITS HANDSHAKE.
-///
-/// The same string busbar's own front door serves, and it is offered rather than imposed: a child
-/// that answers `initialize` with a different `protocolVersion` has told busbar what it speaks, and
-/// that answer is recorded rather than argued with. busbar is a gateway, not a conformance test.
-pub const CLIENT_PROTOCOL_VERSION: &str = PROTOCOL_VERSION;
-
-/// What busbar calls itself to a child. A constant, not a config key: an operator who could rename
-/// busbar in a handshake could make one deployment impersonate another in the child's own logs.
-const CLIENT_NAME: &str = "busbar";
-
-/// ONE METHOD BUSBAR SENDS TO AN UPSTREAM, with its parameters.
-///
-/// Every variant carries the data its `params` needs and nothing else. There is deliberately no
-/// `Other(String)` arm: an arm that accepted an arbitrary method name would reopen exactly the
-/// hole this enum closes, and `-32601` from an upstream is a better answer than a method busbar
-/// invented.
-///
-/// `PartialEq` and NOT `Eq`: `notifications/progress` carries an `f64`, which is the wire type the
-/// specification gives it. Quantising progress to an integer to buy `Eq` would be lying about the
-/// wire to satisfy a derive.
-///
-/// ## WHAT HAS A PRODUCTION CALLER TODAY, and what does not
-///
-/// `ToolsList` is built by the engine's `mcp::connect::refresh` on every scheduled and operator-driven
-/// re-pull, and `ToolsCall`'s wire form is `super::jsonrpc::tools_call` on the dispatch path. The
-/// other twenty-one variants are reached by the engine's `mcp::client::issue::issue` — which is itself reached today
-/// only from the batteries in the engine's `mcp::tests/stdio_client_leg_tests.rs`, because busbar's own
-/// FRONT DOOR does not yet expose a `prompts/list` that proxies through to an upstream's. The verb
-/// exists, is governed, is audited and is proven against a real child process; what is missing is
-/// the inbound method that would call it, and that is the server plane's surface rather than this
-/// module's.
-///
-/// The allow is on the ENUM and states that, rather than being a blanket over the module: anything
-/// else in this file losing its caller still breaks the build. Deleting the variants instead would
-/// be deleting a proven, security-reviewed leg so that a linter is quiet, which is the trade the
-/// stdio transport was already deleted over once.
+/// ONE METHOD BUSBAR SENDS TO AN UPSTREAM, with its parameters. Only `Initialize` and
+/// `NotificationsInitialized` have a production caller (the stdio handshake); the rest are the
+/// inventory column's.
 #[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum UpstreamVerb {
-    /// The handshake. See the module header for why this exists here and is waived on HTTP.
+    /// The handshake.
     Initialize {
-        /// busbar's release, sent as `clientInfo.version`. Handed in by the engine: a plane reads
-        /// no build environment of its own.
+        /// busbar's release, sent as `clientInfo.version`.
         client_version: &'static str,
     },
-    /// The handshake's acknowledgement. A NOTIFICATION: it has no reply, and a client that waited
-    /// for one would hang against every conformant server.
+    /// The handshake's acknowledgement. A NOTIFICATION.
     NotificationsInitialized,
-    /// Liveness. Sent by busbar's own supervisor as a readiness probe, and proxied when a caller
-    /// pings a specific upstream.
+    /// Liveness.
     Ping,
     /// The merged capability advertisement this revision added.
     ServerDiscover,
@@ -116,10 +31,9 @@ pub enum UpstreamVerb {
         /// The RFC 5424 level name.
         level: String,
     },
-    /// The upstream's tool list. The refresh path's request — see the engine's `mcp::connect`.
+    /// The upstream's tool list.
     ToolsList,
-    /// Invoke one tool. `name` is the UN-namespaced tool: the upstream has never heard of busbar's
-    /// `{server}_{tool}` namespacing and would answer `-32602` to it.
+    /// Invoke one tool. `name` is the UN-namespaced tool.
     ToolsCall {
         /// The un-namespaced tool name.
         name: String,
@@ -211,8 +125,7 @@ pub enum UpstreamVerb {
 }
 
 impl UpstreamVerb {
-    /// THE WIRE METHOD NAME. Exhaustive, with no wildcard arm, so a variant added without a name is
-    /// a compile error rather than a method that silently sends the wrong word.
+    /// THE WIRE METHOD NAME.
     pub fn method(&self) -> &'static str {
         match self {
             UpstreamVerb::Initialize { .. } => "initialize",
@@ -243,14 +156,7 @@ impl UpstreamVerb {
         }
     }
 
-    /// Whether this verb is a JSON-RPC NOTIFICATION — no `id`, and NO REPLY EVER.
-    ///
-    /// Decided on the VARIANT rather than by testing whether the method name starts with
-    /// `notifications/`, because that string test is a rule about spelling that would silently
-    /// reclassify any future method whose name happened to match. The distinction matters at the
-    /// transport: the engine's `mcp::client::wire::McpWire::notify` does not read, and a request sent down that path
-    /// would wait for an answer nobody would ever read — which on a stdio child means the answer
-    /// stays in the pipe and desynchronises every subsequent call.
+    /// Whether this verb is a JSON-RPC NOTIFICATION: no `id`, and no reply ever.
     pub fn is_notification(&self) -> bool {
         matches!(
             self,
@@ -262,20 +168,13 @@ impl UpstreamVerb {
         )
     }
 
-    /// The `params` object, WITHOUT `_meta` — which [`Self::build`] adds, once, for every verb.
-    ///
-    /// Split that way so no variant can forget the revision's required `_meta`: a per-variant
-    /// `params` that included it would be twenty-three chances to omit one key.
+    /// The `params` object, WITHOUT `_meta`, which [`Self::build`] adds once for every verb.
     fn params(&self) -> serde_json::Value {
         match self {
             UpstreamVerb::Initialize { client_version } => serde_json::json!({
-                "protocolVersion": CLIENT_PROTOCOL_VERSION,
-                // THE EMPTY CAPABILITY SET, and it is the honest one. Sampling, elicitation and
-                // roots are deny-by-default per server (`super::jsonrpc::ServerRequestGrants`), so
-                // declaring a capability busbar then refuses to honour would invite a child to build
-                // a call sequence around authority it will not be given.
+                "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": {},
-                "clientInfo": { "name": CLIENT_NAME, "version": client_version },
+                "clientInfo": { "name": "busbar", "version": client_version },
             }),
             UpstreamVerb::NotificationsInitialized
             | UpstreamVerb::Ping
@@ -328,23 +227,7 @@ impl UpstreamVerb {
         }
     }
 
-    /// The `Mcp-Name` header's value for this verb, when the revision requires one.
-    ///
-    /// `Some` only where the request NAMES a target the header can mirror. A header that mirrored a
-    /// value the body does not carry would be a header busbar's own ingress answers `-32020` to.
-    /// WHICH member of this verb's `params` the `Mcp-Name` header mirrors, and its value.
-    ///
-    /// The RULE is `crate::codec::name_source_of`'s and is not restated here. This function
-    /// once carried its own copy and the two disagreed about the three tasks methods, so a
-    /// `tasks/get` issued over streamable HTTP went out with no `Mcp-Name` — the exact header
-    /// busbar's own ingress answers `-32020` to. Reading the ingress's table means the requests
-    /// busbar SENDS satisfy the MUSTs busbar ENFORCES, by construction rather than by two authors
-    /// agreeing.
-    ///
-    /// It returns an owned `String` because the value is read back out of the serialised `params`
-    /// rather than off the variant: the member the header mirrors is decided by the wire method, so
-    /// looking it up by name is what keeps the two in step. A per-variant `match` would be the
-    /// second copy again, wearing a different shape.
+    /// The `Mcp-Name` header's value: the `params` member `crate::codec::name_source_of` names.
     fn target(&self) -> Option<String> {
         let source = crate::codec::name_source_of(self.method())?;
         self.params()
@@ -353,11 +236,7 @@ impl UpstreamVerb {
             .map(str::to_string)
     }
 
-    /// BUILD the request. One envelope function, shared with `tools/call`, so the mirrored headers
-    /// this revision REQUIRES cannot be got right on one verb and wrong on another.
-    ///
-    /// `request_id` is IGNORED for a notification, which carries no `id` member at all — a
-    /// notification with an `id` is a request, and a peer would be right to answer it.
+    /// BUILD the request through the shared envelope. `request_id` is ignored for a notification.
     pub fn build(
         &self,
         url: &str,
@@ -369,7 +248,7 @@ impl UpstreamVerb {
             obj.insert(
                 "_meta".to_string(),
                 serde_json::json!({
-                    META_PROTOCOL_VERSION: CLIENT_PROTOCOL_VERSION,
+                    META_PROTOCOL_VERSION: PROTOCOL_VERSION,
                     META_CLIENT_CAPABILITIES: {},
                 }),
             );

@@ -18,16 +18,8 @@ fn entropy(n: u64) -> [u8; 16] {
 }
 
 fn open(t: &mut SessionTable, n: u64, who: &str, now: u64) -> String {
-    t.open(
-        entropy(n),
-        owner(who),
-        Revision::R2025_11_25,
-        Carriage::Endpoint,
-        now,
-    )
-    .unwrap()
-    .as_str()
-    .to_string()
+    t.open(entropy(n), owner(who), Revision::R2025_11_25, now)
+        .unwrap()
 }
 
 fn small(max_sessions: usize, per: usize, total: usize) -> SessionTable {
@@ -56,22 +48,10 @@ fn an_id_is_128_bits_of_the_callers_entropy_in_hex() {
 #[test]
 fn zero_entropy_is_refused_and_a_live_id_is_not_minted_twice() {
     let mut t = SessionTable::new(Bounds::default());
-    let r = t.open(
-        [0; 16],
-        owner("a"),
-        Revision::R2025_06_18,
-        Carriage::Endpoint,
-        0,
-    );
+    let r = t.open([0; 16], owner("a"), Revision::R2025_06_18, 0);
     assert_eq!(r, Err(OpenRefused::NoEntropy));
     open(&mut t, 1, "a", 0);
-    let again = t.open(
-        entropy(1),
-        owner("b"),
-        Revision::R2025_06_18,
-        Carriage::Endpoint,
-        0,
-    );
+    let again = t.open(entropy(1), owner("b"), Revision::R2025_06_18, 0);
     assert_eq!(again, Err(OpenRefused::Collision));
 }
 
@@ -93,7 +73,6 @@ fn red_a_session_is_unknown_to_every_other_principal_and_credential() {
         !t.close(&id, &owner("mallory"), 1),
         "a foreign DELETE ends nothing"
     );
-    assert!(!t.mark_initialized(&id, &owner("mallory"), 1));
     assert_eq!(t.open_stream(&id, &owner("mallory"), 1), None);
     let stream = t.open_stream(&id, &owner("alice"), 1).unwrap();
     assert_eq!(t.push(&id, &owner("mallory"), stream, "x", 1), None);
@@ -103,9 +82,6 @@ fn red_a_session_is_unknown_to_every_other_principal_and_credential() {
         None,
         "a foreign resume reads nothing"
     );
-    assert!(!t
-        .find(&id, &owner("mallory"), 1)
-        .is_some_and(|s| s.initialized));
     // ...and the owner's session survived every one of those.
     assert!(t.close(&id, &owner("alice"), 2));
     assert_eq!(t.revision(&id, &owner("alice"), 3), None);
@@ -232,7 +208,6 @@ fn red_the_upstream_memory_is_bounded() {
     let r = |s: &str| Remembered {
         revision: Revision::R2025_06_18,
         session: Some(s.to_string()),
-        message_address: None,
     };
     u.put("a", r("1"));
     u.put("b", r("2"));
@@ -300,13 +275,7 @@ fn red_an_owner_filling_its_cap_never_evicts_another_owners_session() {
     // Fill the table with other owners; a newcomer with nothing of its own is refused.
     open(&mut t, 200, "carol", 61);
     assert_eq!(t.sessions.len(), 4);
-    let refused = t.open(
-        entropy(300),
-        owner("dave"),
-        Revision::R2025_11_25,
-        Carriage::Endpoint,
-        62,
-    );
+    let refused = t.open(entropy(300), owner("dave"), Revision::R2025_11_25, 62);
     assert_eq!(refused, Err(OpenRefused::Full));
     assert!(
         t.revision(&b, &owner("bob"), 63).is_some(),
@@ -362,7 +331,6 @@ fn in_session(s: &str) -> Remembered {
     Remembered {
         revision: Revision::R2025_06_18,
         session: Some(s.to_string()),
-        message_address: None,
     }
 }
 
@@ -425,7 +393,6 @@ fn red_every_request_in_a_session_takes_its_own_id() {
         Remembered {
             revision: Revision::R2026_07_28,
             session: None,
-            message_address: None,
         },
     );
     assert_eq!(u.next_id(&s), None);
