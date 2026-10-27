@@ -70,7 +70,7 @@ fn a_subscription_that_can_deliver_nothing_is_refused_and_too_many_uris_are_refu
         .collect();
     let many = json!({ "notifications": { "resourceSubscriptions": uris } });
     let refused = Listen::open(Some(&many), json!(1), 0, |_| true).expect_err("too many");
-    assert_eq!(refused["error"]["code"], INVALID_PARAMS);
+    assert_eq!(refused["error"]["code"], crate::codec::CODE_INVALID_PARAMS);
 }
 
 #[test]
