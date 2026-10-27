@@ -55,18 +55,6 @@ impl Refused {
             data: None,
         }
     }
-
-    /// The refusal as the wire carries it: the one JSON-RPC error envelope, `id` or `null`.
-    #[must_use]
-    pub fn body(&self, id: Option<&Value>) -> Vec<u8> {
-        let envelope = busbar_contract::jsonrpc::error_body(
-            id.cloned().unwrap_or(Value::Null),
-            self.code,
-            self.message,
-            self.data.clone(),
-        );
-        serde_json::to_vec(&envelope).unwrap_or_default()
-    }
 }
 
 /// A `Mcp-Name` (or `Mcp-Param-*`) value with this revision's `=?base64?…?=` sentinel decoded, or the

@@ -13,24 +13,7 @@
 use busbar_contract::ids::ClassDirection;
 use busbar_contract::plane::PlaneMeta;
 use busbar_plane_mcp::tool_meta::CLASS_TOOL_CALLS;
-use busbar_plane_mcp::{tool_records as records, McpPlane};
-
-/// Every schema the plane declares carries at least one operation — a schema with none is one no
-/// leg can ever reach, and a record written under it is a record nothing reads back.
-#[test]
-fn every_declared_record_schema_carries_operations() {
-    let schemas = <McpPlane as PlaneMeta>::RECORD_SCHEMAS;
-    assert!(
-        !schemas.is_empty(),
-        "non-vacuity: the plane declares record schemas, and an empty list answers nothing"
-    );
-    for schema in schemas {
-        assert!(
-            !records::operations_for(*schema).is_empty(),
-            "the plane declares the unreachable schema {schema}"
-        );
-    }
-}
+use busbar_plane_mcp::McpPlane;
 
 /// The class a completed call is metered under is one the plane declares.
 ///

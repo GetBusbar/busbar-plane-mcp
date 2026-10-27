@@ -11,7 +11,7 @@
 //!   refuses in the grammar's words;
 //! * `open` judges the same section, reads the deployment's public base URL, keeps the host
 //!   services it was handed and publishes the first generation's snapshot
-//!   ([`door::endpoint_snapshot_spec`]); `refresh` judges the new section and publishes the next generation
+//!   ([`door::snapshot_spec_with`]); `refresh` judges the new section and publishes the next generation
 //!   over the base URL `open` was given; `retire` drops a generation's snapshot, and what the plane
 //!   held for it ([`Held`]) with it. A request is answered from the newest live generation
 //!   ([`McpDoor::current`]);
@@ -93,14 +93,6 @@ pub const STATEMENT: Statement = Statement {
     diag_ids_len: door_sessions::DIAG_IDS.len(),
     ..statement(crate::PLANE_KEY, VERSION, MAX_INFLIGHT)
 };
-
-/// THE CLAIMS AXIS: the pure plane the boot seal registers under its key, and the bytes it claims,
-/// sealed against every other plane's so a tie is refused at boot (the transport each names must be
-/// registered).
-pub const PLANE: crate::McpPlane = crate::McpPlane::EMPTY;
-/// The bytes [`PLANE`] claims.
-pub const CLAIMS: &[busbar_contract::grammar::Claim] =
-    <crate::McpPlane as busbar_contract::plane::PlaneMeta>::CLAIMS;
 
 /// WHAT THE PLANE HOLDS FOR ONE GENERATION: the catalogue built from its section, and the section
 /// itself (each member's registration).
@@ -3434,13 +3426,9 @@ slot!(
                     // A line's `input_required` answer is put to its caller as live requests on
                     // the carrier session ([`door_line::liven`]), before its first byte goes.
                     if unit.line.is_some() && unit.pending.as_ref().is_some_and(|p| !p.headed) {
-                        let principal = if caller.is_empty() {
-                            crate::ask::UNGOVERNED
-                        } else {
-                            caller.as_str()
-                        };
-                        door_line::liven(plane, ticket, principal, unit);
+                        door_line::liven(plane, ticket, unit);
                     }
+
                     let pending = unit.pending.as_mut()?;
                     Some(write(&input, &mut out, pending))
                 });
@@ -3648,7 +3636,8 @@ slot!(
         // JSON-RPC envelope with no id, in the 1.6.0 baseline's bytes (audit K4#2(b): the plane owns
         // the text, the kernel no longer renders it).
         let unitless = (given.unit == 0 && given.cause == REFUSAL_KERNEL)
-            .then(|| unitless_kernel_body(given.reason))
+            .then(|| busbar_contract::jsonrpc::unitless_kernel_body(given.reason))
+
             .flatten();
         let (status, body, allow) = if let Some(body) = unitless {
             // `0`: the kernel's status stands.
@@ -3835,26 +3824,6 @@ slot!(
         Outcome::Ready
     }
 );
-
-/// The JSON-RPC body of a kernel refusal that ended no unit, by its reason: the bytes the kernel's
-/// JSON-RPC transport refusal rendered before the plane owned them (`None` for any other reason).
-fn unitless_kernel_body(reason: u32) -> Option<&'static [u8]> {
-    use busbar_contract::abi::plane::RefusalCode;
-    if reason == RefusalCode::Unauthenticated.code() {
-        Some(UNITLESS_UNAUTHENTICATED)
-    } else if reason == RefusalCode::BodyTooLarge.code() {
-        Some(UNITLESS_BODY_TOO_LARGE)
-    } else {
-        None
-    }
-}
-
-/// A unit-less authentication refusal's body.
-pub const UNITLESS_UNAUTHENTICATED: &[u8] =
-    br#"{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"authentication failed"}}"#;
-
-/// A unit-less body-limit refusal's body.
-pub const UNITLESS_BODY_TOO_LARGE: &[u8] = br#"{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"request body exceeds the maximum allowed size"}}"#;
 
 /// The status of a call no member of its server's pool could be sent to (its breaker is open).
 const STATUS_UNAVAILABLE_UPSTREAM: u32 = 503;

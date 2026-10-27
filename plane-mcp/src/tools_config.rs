@@ -75,11 +75,8 @@
 //! `mcp_tool` grant on the PUBLISHED name, would silently change who can call what. That is why a
 //! collision is a LOUD BOOT REFUSAL and never an automatic rename.
 
-use busbar_contract::{
-    config::UpstreamCreds,
-    plane::{PinMechanismDecl, TrustKeyDecl, TrustRole},
-    section::split_section,
-};
+use busbar_contract::{config::UpstreamCreds, section::split_section};
+
 use serde::{Deserialize, Serialize};
 
 /// The separator between a server id and a tool name in the `{server}_{tool}` namespaced routing
@@ -160,31 +157,6 @@ pub enum McpPinMechanism {
 }
 
 impl McpPinMechanism {
-    /// Is this mechanism an authenticity ROOT at all — and therefore, does it require
-    /// operator-supplied key material? Three of the four are meaningless without it, and the fourth
-    /// is meaningless with it, which is the rule the object form exists to make expressible.
-    ///
-    /// ONE predicate answers both questions on purpose. It is the boot-time rule below AND the one
-    /// question the kernel's `busbar_kernel::trust::declared` asks of a mechanism, so the reader that builds the
-    /// artifact and the refusal that fires at boot cannot come to disagree about what "rooted"
-    /// means.
-    pub fn is_a_root(self) -> bool {
-        !matches!(self, McpPinMechanism::Unpinned)
-    }
-
-    /// Can an MCP hop independently attest a pin declared under `token`? True for the two
-    /// mechanisms pinned on the peer certificate's key (the certificate-key pin and the
-    /// client-certificate binding); `pinned_pubkey` names an MCP-native manifest signature this
-    /// build does not verify and `unpinned` has no root, so neither has an observation source.
-    pub fn observes_the_peer_certificate(token: &str) -> bool {
-        [
-            McpPinMechanism::CertSpki,
-            McpPinMechanism::ClientCertBinding,
-        ]
-        .iter()
-        .any(|m| m.token() == token)
-    }
-
     /// The config token, for diagnostics. Deliberately the same string `serde` accepts.
     pub fn token(self) -> &'static str {
         match self {
@@ -752,69 +724,6 @@ pub const TOOL_APPROVALS_KEY: &str = "tools_allow";
 /// The field of each `tools_allow` entry holding the digest the operator approved the tool at.
 pub const TOOL_APPROVAL_FIELD: &str = "schema_hash";
 
-/// THE KERNEL-OWNED TRUST KEYS of one registration, declared for the kernel to parse and judge:
-/// the `pin:` object over the four mechanisms above (no fingerprint: a server here offers none an
-/// operator could approve out of band), the `verify_ttl:` bound with its default, and the
-/// registration's private reach, `allow_private:` (the connector admits that server's own private
-/// address for its need, never a metadata one), and its tool approvals, `tools_allow:`'s
-/// `schema_hash`. There is no recovery-backoff key; the kernel reads its absence as zero.
-pub const TRUST_KEYS: &[TrustKeyDecl] = &[
-    TrustKeyDecl {
-        key: "pin",
-        role: TrustRole::Pin,
-        fingerprint: false,
-        default: None,
-        mechanisms: &[
-            PinMechanismDecl {
-                token: "pinned_pubkey",
-                root: true,
-                peer_key: false,
-            },
-            PinMechanismDecl {
-                token: "cert_spki",
-                root: true,
-                peer_key: false,
-            },
-            PinMechanismDecl {
-                token: "mtls",
-                root: true,
-                peer_key: false,
-            },
-            PinMechanismDecl {
-                token: "unpinned",
-                root: false,
-                peer_key: false,
-            },
-        ],
-    },
-    TrustKeyDecl {
-        key: "verify_ttl",
-        role: TrustRole::ReverifyTtl,
-        fingerprint: false,
-        default: Some(DEFAULT_MCP_VERIFY_TTL),
-        mechanisms: &[],
-    },
-    TrustKeyDecl {
-        key: "allow_private",
-        role: TrustRole::PrivateReach,
-        fingerprint: false,
-        default: None,
-        mechanisms: &[],
-    },
-    // THE CONFIGURED TOOL APPROVALS (ARCHITECT Q3): `tools_allow.<tool>.schema_hash`, the digest
-    // the operator approved each tool at. The kernel seeds the registration's approved items from
-    // it (the trust key `<tool>`, the upstream's own spelling) and judges every call against it; a
-    // tool written without one is allowed but approved at none, and the core-admin trust verbs
-    // approve and revoke on top of it. The plane keeps reading the map for its catalogue.
-    TrustKeyDecl {
-        key: TOOL_APPROVALS_KEY,
-        role: TrustRole::ItemApprovals,
-        fingerprint: false,
-        default: Some(TOOL_APPROVAL_FIELD),
-        mechanisms: &[],
-    },
-];
-
 /// THE DEPLOYMENT-WIDE MAX VERIFICATION STALENESS a registration gets when it spells no `verify_ttl:`.
 ///
 /// Deliberately the same `5s` as a sibling plane's `DEFAULT_REVERIFY_TTL`,
@@ -1068,20 +977,6 @@ impl ServerTransport {
         match self {
             ServerTransport::StreamableHttp => false,
             ServerTransport::Stdio => true,
-        }
-    }
-
-    /// The ENGINE axis this config value names.
-    ///
-    /// Two types, deliberately: this one is the operator's GRAMMAR, frozen and additive-only, and
-    /// [`busbar_contract::transport::transport::Transport`] is the engine's dispatch axis. Collapsing them would tie a
-    /// wire word an operator has already written to an enum the engine is free to reshape.
-    pub fn axis(self) -> busbar_contract::transport::transport::Transport {
-        match self {
-            ServerTransport::StreamableHttp => {
-                busbar_contract::transport::transport::Transport::Http
-            }
-            ServerTransport::Stdio => busbar_contract::transport::transport::Transport::Stdio,
         }
     }
 }
@@ -1448,7 +1343,7 @@ pub fn validate_server(name: &str, def: &McpServerDefCfg) -> Result<(), String> 
     def.sampling_bounds.validate(&at)?;
 
     // THE PIN and the `verify_ttl:` bound are not judged here: they are the kernel's trust keys
-    // ([`TRUST_KEYS`]), judged by the kernel before the section reaches this validator.
+    // (the door's trust keys), judged by the kernel before the section reaches this validator.
 
     // THE DEADLINE (`timeout:`) is not judged here either: it is the kernel's reserved per-entry key
     // (`busbar_contract::section::ENTRY_TIMEOUT_KEY`), judged by the kernel before the section

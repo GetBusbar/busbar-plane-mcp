@@ -20,8 +20,9 @@ use std::collections::BTreeMap;
 
 use serde_json::{json, Map, Value};
 
+use crate::codec::RESULT_TYPE_COMPLETE;
 use crate::door::{SCOPE, SCOPE_TOOL};
-use crate::jsonrpc::RESULT_TYPE_COMPLETE;
+
 use crate::sanitize::normalise_opt;
 use crate::tools_config::{namespaced, AskRoundCfg, PromptMessageCfg, TaskSupport, ToolsCfg};
 
@@ -83,22 +84,6 @@ pub struct ResourceEntry {
     pub(crate) mime_type: Option<String>,
     pub(crate) text: Option<String>,
     pub(crate) blob: Option<String>,
-}
-
-impl ResourceEntry {
-    /// Its rendered fields, in order: uri, name, description, mime type, text, blob (a blank one
-    /// for each it has not).
-    #[must_use]
-    pub fn rendered(&self) -> [&str; 6] {
-        [
-            self.uri.as_str(),
-            self.name.as_deref().unwrap_or(""),
-            self.description.as_deref().unwrap_or(""),
-            self.mime_type.as_deref().unwrap_or(""),
-            self.text.as_deref().unwrap_or(""),
-            self.blob.as_deref().unwrap_or(""),
-        ]
-    }
 }
 
 /// One listed resource template.

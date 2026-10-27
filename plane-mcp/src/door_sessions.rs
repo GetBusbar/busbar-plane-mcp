@@ -49,7 +49,7 @@ use super::{
 use crate::adapt::{self, SessionMethod};
 use crate::catalogue::Lookup;
 use crate::client::jsonrpc::OutboundRequest;
-use crate::client::negotiate::{Action, HopAnswer, Negotiator, Refusal as Refused, Verb};
+use crate::client::negotiate::{Action, HopAnswer, Negotiator, Refusal as Refused};
 use crate::codec::{
     CODE_INTERNAL, CODE_INVALID_PARAMS, CODE_INVALID_REQUEST, CODE_METHOD_NOT_FOUND, CODE_REFUSED,
     H_MCP_METHOD, H_MCP_NAME, H_PROTOCOL_VERSION, PROTOCOL_VERSION,
@@ -1509,7 +1509,7 @@ impl Negotiating {
     /// The request the first hop sends, when it is one.
     pub(super) fn first_request(&self) -> Option<&OutboundRequest> {
         match &self.next {
-            Some(Action::Send { request, .. }) => Some(request),
+            Some(Action::Send { request }) => Some(request),
             _ => None,
         }
     }
@@ -1567,7 +1567,7 @@ impl Negotiating {
     ) -> Poll<Negotiated> {
         loop {
             match self.next.take() {
-                Some(Action::Send { verb, request }) => {
+                Some(Action::Send { request }) => {
                     let at = base.saturating_add(self.hops.saturating_mul(HOP_SPAN));
                     let polled = exchange_at(
                         instance,
@@ -1575,10 +1575,10 @@ impl Negotiating {
                         at,
                         &request.url,
                         member,
-                        || exchange_request(verb, &request, timeout_ms),
+                        || exchange_request(&request, timeout_ms),
                     );
                     let Poll::Ready(answered) = polled else {
-                        self.next = Some(Action::Send { verb, request });
+                        self.next = Some(Action::Send { request });
                         return Poll::Pending;
                     };
                     self.hops += 1;
@@ -1621,7 +1621,7 @@ impl Negotiating {
                 // THE LAST RUNG: the `2024-11-05` event stream, held by the connector and read on the
                 // driver ticket, this call's request POSTed to the address it names and its answer
                 // taken by its id ([`super::door_legacy`]; row 159 finding 1).
-                Some(Action::OpenStream { .. } | Action::AwaitEvent)
+                Some(Action::OpenStream | Action::AwaitEvent)
                     if plane.host.as_ref().is_some_and(|h| h.lends_connector()) =>
                 {
                     let at = base.saturating_add(self.hops.saturating_mul(HOP_SPAN));
@@ -1667,7 +1667,7 @@ impl Negotiating {
                     }
                 }
                 // No connector to hold a stream over: said, never papered over.
-                Some(Action::OpenStream { .. } | Action::AwaitEvent) | None => {
+                Some(Action::OpenStream | Action::AwaitEvent) | None => {
                     self.keep(plane);
                     return Poll::Ready(Negotiated::Failed(self.legacy_only(member)));
                 }
@@ -1720,24 +1720,18 @@ impl Negotiating {
                 "MCP server `{member}` answered `initialize` with an MCP revision busbar does not \
                  carry as a client (it carries 2025-11-25 and 2025-06-18 on a session)"
             )),
-            Refused::NoCommonRevision | Refused::AddressRefused | Refused::StreamLost => {
-                Negotiated::Failed(self.legacy_only(member))
-            }
         }
     }
 }
 
 /// One hop as the connector's exchange sends it.
 pub(super) fn exchange_request(
-    verb: Verb,
     request: &OutboundRequest,
     timeout_ms: u64,
 ) -> busbar_contract::abi::sdk::exchange::Request {
     busbar_contract::abi::sdk::exchange::Request {
-        method: match verb {
-            Verb::Post => b"POST".to_vec(),
-            Verb::Delete => b"DELETE".to_vec(),
-        },
+        method: b"POST".to_vec(),
+
         target: crate::call::path_of(&request.url).into_bytes(),
         fields: request
             .headers

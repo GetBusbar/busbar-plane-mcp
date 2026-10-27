@@ -7,20 +7,22 @@
 //! The failure this file exists to catch is the one `tests/method_coverage.rs` was written for, one
 //! level down: a column of the matrix whose contents are a property of its call sites drifts from
 //! the specification silently, because an absent verb and a considered-and-inapplicable verb look
-//! identical in source. [`UpstreamVerb::all`] is compared against busbar's `qa/method-inventory.json`
+//! identical in source. `all_verbs` is compared against busbar's `qa/method-inventory.json`
 //! — which is generated from rmcp's own model — in BOTH directions by `tests/method_inventory.rs`
 //! (it reads busbar at the pin); this file holds the enum's own closure.
 
 use super::super::verb::UpstreamVerb;
 
-/// `all()` IS ONE INSTANCE OF EVERY VARIANT, not most of them.
+include!("../../../tests/support/all_verbs.rs");
+
+/// `all_verbs()` IS ONE INSTANCE OF EVERY VARIANT, not most of them.
 ///
-/// Without this, a variant added to the enum and forgotten in `all()` would narrow every test above
+/// Without this, a variant added to the enum and forgotten in `all_verbs()` would narrow every test above
 /// and below silently — the exact shape of the four batteries this release found reporting green
 /// over a shrinking denominator.
 #[test]
 fn every_variant_appears_in_all_exactly_once() {
-    let all = UpstreamVerb::all();
+    let all = all_verbs();
     let mut names: Vec<&str> = all.iter().map(UpstreamVerb::method).collect();
     let before = names.len();
     names.sort_unstable();
@@ -28,7 +30,7 @@ fn every_variant_appears_in_all_exactly_once() {
     assert_eq!(
         before,
         names.len(),
-        "`UpstreamVerb::all()` lists a method twice, which would double-count the column"
+        "`all_verbs()` lists a method twice, which would double-count the column"
     );
 }
 
@@ -40,7 +42,7 @@ fn every_variant_appears_in_all_exactly_once() {
 #[test]
 fn notifications_carry_no_id_and_requests_do() {
     let mut notifications = 0;
-    for verb in UpstreamVerb::all() {
+    for verb in all_verbs() {
         let request = verb.build("https://u.example.com/mcp", 42, None);
         let body: serde_json::Value =
             serde_json::from_slice(&request.body).expect("the body is JSON");
@@ -86,7 +88,7 @@ fn notifications_carry_no_id_and_requests_do() {
 /// so a verb that omitted it would be one busbar could not itself accept.
 #[test]
 fn every_verb_carries_the_required_meta() {
-    for verb in UpstreamVerb::all() {
+    for verb in all_verbs() {
         let request = verb.build("https://u.example.com/mcp", 1, None);
         let body: serde_json::Value = serde_json::from_slice(&request.body).expect("json");
         let meta = &body["params"]["_meta"];
@@ -110,7 +112,7 @@ fn every_verb_carries_the_required_meta() {
 /// the request-smuggling primitive the mirroring exists to close.
 #[test]
 fn the_mirrored_method_header_matches_the_body() {
-    for verb in UpstreamVerb::all() {
+    for verb in all_verbs() {
         let request = verb.build("https://u.example.com/mcp", 1, None);
         let sent: Vec<&str> = request
             .headers
@@ -134,7 +136,7 @@ fn the_mirrored_method_header_matches_the_body() {
 /// header rather than an absent one.
 #[test]
 fn the_credential_is_present_only_when_one_was_planned() {
-    for verb in UpstreamVerb::all() {
+    for verb in all_verbs() {
         let bare = verb.build("https://u.example.com/mcp", 1, None);
         assert!(
             !bare.headers.iter().any(|(n, _)| n == "authorization"),

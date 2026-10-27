@@ -222,16 +222,6 @@ impl McpResource {
         &self.canonical_uri
     }
 
-    /// The ingress mount path (`/mcp` for `https://host/mcp`).
-    pub fn mount_path(&self) -> &str {
-        &self.mount_path
-    }
-
-    /// The RFC 9728 metadata path this deployment serves the document at.
-    pub fn metadata_path(&self) -> &str {
-        &self.metadata_path
-    }
-
     /// The absolute metadata URL, for the `resource_metadata` challenge parameter.
     pub fn metadata_url(&self) -> &str {
         &self.metadata_url
@@ -245,13 +235,6 @@ impl McpResource {
     /// The advisory scope values this resource lists.
     pub fn scopes_supported(&self) -> &[String] {
         &self.scopes_supported
-    }
-
-    /// THE OPERATOR'S BROWSER-ORIGIN ALLOWLIST, as data. The plane keeps the data; the verdict on
-    /// an `Origin` is not made here. The empty allowlist admits no browser origin, which is the
-    /// documented default.
-    pub fn allowed_origins(&self) -> &[String] {
-        &self.allowed_origins
     }
 }
 

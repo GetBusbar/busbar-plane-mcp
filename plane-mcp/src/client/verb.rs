@@ -262,15 +262,6 @@ impl UpstreamVerb {
         )
     }
 
-    /// The `params` object as the ARGUMENT GUARD sees it, before `_meta` is added.
-    ///
-    /// Exposed for exactly one caller, the engine's `mcp::client::issue::issue`, which walks it for URL and host
-    /// fields. `_meta` is deliberately absent: it is BUSBAR's block, not the caller's, so judging it
-    /// would be judging busbar's own protocol declaration as though a caller had chosen it.
-    pub fn params_for_guard(&self) -> serde_json::Value {
-        self.params()
-    }
-
     /// The `params` object, WITHOUT `_meta` — which [`Self::build`] adds, once, for every verb.
     ///
     /// Split that way so no variant can forget the revision's required `_meta`: a per-variant
@@ -395,80 +386,6 @@ impl UpstreamVerb {
             })
         };
         envelope(url, method, self.target().as_deref(), body, authorization)
-    }
-}
-
-impl UpstreamVerb {
-    /// ONE INSTANCE OF EVERY VARIANT, for the tests that enumerate the surface.
-    ///
-    /// A `const` array rather than a derive, because the point is that a NEW VARIANT must be added
-    /// here by hand — `every_issued_method_is_in_the_inventory` counts these against the generated
-    /// matrix, so a variant missing from this list fails that test instead of quietly narrowing
-    /// what the suite covers.
-    pub fn all() -> Vec<UpstreamVerb> {
-        vec![
-            UpstreamVerb::Initialize {
-                client_version: "0.0.0",
-            },
-            UpstreamVerb::NotificationsInitialized,
-            UpstreamVerb::Ping,
-            UpstreamVerb::ServerDiscover,
-            UpstreamVerb::LoggingSetLevel {
-                level: "info".to_string(),
-            },
-            UpstreamVerb::ToolsList,
-            UpstreamVerb::ToolsCall {
-                name: "read".to_string(),
-                arguments: serde_json::json!({}),
-            },
-            UpstreamVerb::PromptsList,
-            UpstreamVerb::PromptsGet {
-                name: "greet".to_string(),
-                arguments: serde_json::json!({}),
-            },
-            UpstreamVerb::ResourcesList,
-            UpstreamVerb::ResourcesTemplatesList,
-            UpstreamVerb::ResourcesRead {
-                uri: "file:///a".to_string(),
-            },
-            UpstreamVerb::ResourcesSubscribe {
-                uri: "file:///a".to_string(),
-            },
-            UpstreamVerb::ResourcesUnsubscribe {
-                uri: "file:///a".to_string(),
-            },
-            UpstreamVerb::SubscriptionsListen {
-                notifications: serde_json::json!({ "toolsListChanged": true }),
-            },
-            UpstreamVerb::CompletionComplete {
-                reference: serde_json::json!({ "type": "ref/prompt", "name": "greet" }),
-                argument: serde_json::json!({ "name": "who", "value": "b" }),
-            },
-            UpstreamVerb::TasksGet {
-                task_id: "t1".to_string(),
-            },
-            UpstreamVerb::TasksUpdate {
-                task_id: "t1".to_string(),
-                input_responses: serde_json::json!([]),
-            },
-            UpstreamVerb::TasksCancel {
-                task_id: "t1".to_string(),
-            },
-            UpstreamVerb::NotificationsCancelled {
-                request_id: serde_json::json!(7),
-                reason: "the caller withdrew".to_string(),
-            },
-            UpstreamVerb::NotificationsProgress {
-                progress_token: serde_json::json!("busbar-7"),
-                progress: 0.5,
-                total: Some(1.0),
-            },
-            UpstreamVerb::NotificationsRootsListChanged,
-            UpstreamVerb::NotificationsElicitationResponse {
-                request_id: serde_json::json!(9),
-                content: serde_json::json!({ "answer": "yes" }),
-            },
-        ]
     }
 }
 

@@ -34,20 +34,6 @@ pub const CARRIER_SSE: &str = "sse";
 /// The transport a locally launched server speaks over.
 pub const CARRIER_STDIO: &str = "stdio";
 
-/// Whether `key` is the locally-launched-server claim key above.
-///
-/// A NAMED QUESTION rather than a comparison at each call site, and the naming is the whole point.
-/// These constants are `&str` CLAIM KEYS — the vocabulary a claim is made against — and not the
-/// engine's `Transport` axis, but they are spelled with the word "transport" in them, so every
-/// `if transport == claims::CARRIER_STDIO` reads to a type-blind reader (and to the axis lint,
-/// which is one) as the agnostic core forking on the wire carrier it is forbidden to see. Asking
-/// the question by name states what is actually being asked, and leaves exactly one line in the
-/// tree that compares against this constant: this one, in the plane that owns it.
-#[must_use]
-pub fn is_stdio(key: &str) -> bool {
-    key == CARRIER_STDIO
-}
-
 /// The credential scheme this plane's claims sit under.
 ///
 /// One scheme with alternatives, not several schemes: which alternative a unit uses is the
@@ -133,21 +119,6 @@ pub const CLAIMS: &[Claim] = &[
     // A locally launched server has no path at all: its frames arrive on a named stream.
     claim(CARRIER_STDIO, Selector::StreamName(STDIO_STREAM)),
 ];
-
-/// Whether this plane declares a claim on `key`.
-///
-/// A NAMED QUESTION on the plane's own declaration, for the same reason `is_stdio` above is one.
-/// The arrival step must establish that the claim it was handed is one of THIS plane's — a plane
-/// may not answer a unit on a surface it never declared — and the only honest source for that
-/// answer is the claim table itself. Asked at the call site it reads as `claim.transport ==
-/// <something>`: an agnostic caller comparing against a wire carrier, which is the shape the axis
-/// lint exists to catch and which a type-blind reader cannot tell apart from the real thing. Asked
-/// here it is what it actually is — a lookup in the declaration — and it leaves exactly one line in
-/// the tree that compares a claim's transport, in the plane that owns the claims.
-#[must_use]
-pub fn declares(key: &str) -> bool {
-    CLAIMS.iter().any(|c| c.transport == key)
-}
 
 #[cfg(test)]
 #[path = "tests/claims.rs"]

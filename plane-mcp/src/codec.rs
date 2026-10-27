@@ -41,15 +41,6 @@ impl ResourceUpdatedParam {
     }
 }
 
-/// The single mount path. MCP names the operation in the BODY (`method`), not the path — the
-/// opposite of OpenAI, and the reason [`handler::McpRequestHandler::resolve_operation`] reads the
-/// body.
-///
-/// `pub` for the same reason [`PROTOCOL_VERSION`] is: `busbar-plane-mcp` declares its transport
-/// claims against this path and may not name the server half, so it reads the value here. A path
-/// the plane copied instead of read is a plane claiming a route nothing is served at.
-pub const PATH_MCP: &str = "/mcp";
-
 /// THE PREFIX THE PROTECTED-RESOURCE METADATA DOCUMENT IS SERVED UNDER (RFC 9728).
 ///
 /// It sits on the CODEC side because two halves read it and they must agree: the server half
@@ -57,6 +48,12 @@ pub const PATH_MCP: &str = "/mcp";
 /// composed path. The composition itself is [`protected_resource_metadata_path`] so that neither
 /// half can spell the join differently.
 pub const PROTECTED_RESOURCE_WELL_KNOWN: &str = "/.well-known/oauth-protected-resource";
+
+/// The discriminator on a result this node is handing over as finished.
+pub const RESULT_TYPE_COMPLETE: &str = "complete";
+
+/// The discriminator on a result that asks the caller for something first.
+pub const RESULT_TYPE_INPUT_REQUIRED: &str = "input_required";
 
 /// THE DISCOVERY PATH FOR A GIVEN MOUNT — `/.well-known/oauth-protected-resource` + the mount.
 ///
@@ -96,10 +93,6 @@ pub const PROTOCOL_VERSION: &str = "2026-07-28";
 /// `pub(crate)` because that assertion is now a cross-crate read.
 /// Invoke a tool by name, with arguments.
 pub const METHOD_TOOLS_CALL: &str = "tools/call";
-/// Register interest in a resource's changes.
-pub const METHOD_RESOURCES_SUBSCRIBE: &str = "resources/subscribe";
-/// Withdraw that interest.
-pub const METHOD_RESOURCES_UNSUBSCRIBE: &str = "resources/unsubscribe";
 /// The server's notice that its tool list is no longer what it was.
 pub const METHOD_NOTIFY_TOOLS_LIST_CHANGED: &str = "notifications/tools/list_changed";
 /// The server's notice that a subscribed resource changed.
@@ -142,8 +135,6 @@ pub const H_PROTOCOL_VERSION: &str = "mcp-protocol-version";
 // exactly the kind of value that reads plausibly while being wrong. The server half and the plane
 // both define their constants AS these, so the compiler holds the equality.
 
-/// The bytes could not be read at all. JSON-RPC standard.
-pub const CODE_PARSE_ERROR: i64 = -32700;
 /// The envelope was not a request. JSON-RPC standard.
 pub const CODE_INVALID_REQUEST: i64 = -32600;
 /// The method named is not one this node answers. JSON-RPC standard; MCP pairs it with `404`.
@@ -167,26 +158,6 @@ pub const CODE_REFUSED: i64 = -32000;
 /// The server this call would have reached could not be reached — the call NEVER HAPPENED, which
 /// is why it is an extension rather than `-32603` (busbar broke) or `-32602` (the caller erred).
 pub const CODE_UPSTREAM_UNAVAILABLE: i64 = -32030;
-
-/// EVERY CODE THIS DIALECT DEFINES. The plane asserts the set it may write is a subset of this, so
-/// a code invented on one side of the seam is a red test rather than a wire nobody recognises.
-pub const CODES: &[i64] = &[
-    CODE_PARSE_ERROR,
-    CODE_INVALID_REQUEST,
-    CODE_METHOD_NOT_FOUND,
-    CODE_INVALID_PARAMS,
-    CODE_INTERNAL,
-    CODE_HEADER_MISMATCH,
-    CODE_MISSING_CLIENT_CAPABILITY,
-    CODE_UNSUPPORTED_PROTOCOL_VERSION,
-    CODE_REFUSED,
-    CODE_UPSTREAM_UNAVAILABLE,
-];
-
-/// The codes THIS revision retired, which a conformant node must never write. A retired code is
-/// worse than an unknown one: a peer that still recognises it will act on a meaning this node did
-/// not intend.
-pub const RETIRED_CODES: &[i64] = &[-32002, -32042];
 
 /// THE METHODS THIS DIALECT DISPATCHES. A method absent from here takes the `-32601` / `404` arm.
 ///

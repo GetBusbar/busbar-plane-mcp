@@ -19,7 +19,8 @@ use busbar_contract::grammar::Selector;
 /// different strings.
 #[test]
 fn the_default_mount_is_the_codecs_own() {
-    assert_eq!(DEFAULT_MOUNT, crate::codec::PATH_MCP);
+    assert_eq!(DEFAULT_MOUNT, "/mcp");
+
     assert_eq!(
         DEFAULT_METADATA,
         crate::codec::protected_resource_metadata_path(DEFAULT_MOUNT)

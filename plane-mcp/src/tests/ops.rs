@@ -2,7 +2,7 @@
 //! measures implementation and nothing else; still a direct child module, so `use
 //! super::*` reaches the private items it always did.
 
-use super::{is_known_notification, method_row_for, Sender, METHODS, NOTIFICATIONS, OP_CLASSES};
+use super::{method_row_for, Sender, METHODS, OP_CLASSES};
 
 /// Every method maps to a class the plane declares.
 #[test]
@@ -52,23 +52,6 @@ fn the_lookup_answers_the_table_and_nothing_else() {
     }
     assert_eq!(method_row_for("this/method/does/not/exist"), None);
     assert_eq!(method_row_for(""), None);
-}
-
-/// A notification is not a method, and a method is not a notification.
-///
-/// The two lists must not overlap: a name in both would be answered and not answered at once.
-#[test]
-fn the_two_lists_do_not_overlap() {
-    for name in NOTIFICATIONS {
-        assert!(method_row_for(name).is_none(), "{name} is in both lists");
-    }
-    for row in METHODS {
-        assert!(
-            !is_known_notification(row.method),
-            "{} is in both lists",
-            row.method
-        );
-    }
 }
 
 /// Every method the codec's own dispatch table names is one this plane carries.

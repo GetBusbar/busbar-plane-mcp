@@ -25,12 +25,13 @@ use serde_json::{json, Map, Value};
 use crate::catalogue::{granted, Catalogue, ToolEntry};
 use crate::checks::decode_sentinel;
 use crate::client::jsonrpc::{self as wire, AdvertisedCaps, RpcOutcome, ServerAsk};
+use crate::codec::RESULT_TYPE_COMPLETE;
 use crate::codec::{
     CODE_HEADER_MISMATCH, CODE_INVALID_PARAMS, CODE_MISSING_CLIENT_CAPABILITY, CODE_REFUSED,
     META_CLIENT_CAPABILITIES,
 };
 use crate::identity::{ServerId, ToolKey};
-use crate::jsonrpc::RESULT_TYPE_COMPLETE;
+
 use crate::tool_arrival::Refusal;
 use crate::tools_config::{
     McpServerDefCfg, SamplingBoundsCfg, TaskSupport, DEFAULT_MAX_INPUT_REQUIRED_ROUNDS,
@@ -400,29 +401,6 @@ pub fn custom_param_mismatch(
         }
     }
     None
-}
-
-/// ADMIT ONE CALL, in the engine's order. `header` reads a request head field by its lower-case
-/// name; `admit` is the caller's grant predicate (scope kind, name); `ask` is busbar's own ask
-/// decision for the resolved tool over the arguments as the caller sent them
-/// ([`crate::ask::decide`]), made before any answer becomes an argument.
-pub fn admit_call(
-    catalogue: &Catalogue,
-    id: &Value,
-    params: Option<&Value>,
-    header: &impl Fn(&str) -> Option<String>,
-    admit: &impl Fn(&str, &str) -> bool,
-    ask: &mut dyn FnMut(&ToolEntry, &Value) -> crate::ask::AskDecision,
-) -> Admission {
-    admit_trusted(
-        catalogue,
-        id,
-        params,
-        header,
-        admit,
-        &mut |_| Trust::Verdict(DISTRUST_NONE),
-        ask,
-    )
 }
 
 /// THE KERNEL'S TRUST VERDICT ON ONE TOOL, as the door read it on the route leg after its live

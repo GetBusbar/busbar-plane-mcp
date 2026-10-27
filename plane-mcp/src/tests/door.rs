@@ -10,7 +10,6 @@ use busbar_contract::abi::plane::{
     CLAIM_EXACT, CLAIM_OPEN, MECHANISM_PEER_KEY, MECHANISM_ROOT, TRUST_PIN, TRUST_PRIVATE_REACH,
     TRUST_REVERIFY_TTL,
 };
-use busbar_contract::plane::TrustRole;
 
 use super::*;
 
@@ -20,6 +19,14 @@ const GOOD: &[u8] =
 /// A registration the grammar refuses: a server id holding the routing-key separator.
 const BAD: &[u8] =
     br#"{"my_fs": {"url": "https://mcp.example/fs", "pin": {"mechanism": "unpinned"}}}"#;
+
+/// The plane-record kinds the tail must declare, in its index order.
+const PLANE_KINDS: [&str; 4] = [
+    crate::tool_records::KIND_CALL,
+    crate::tool_records::KIND_DEMOTION,
+    crate::tool_records::KIND_APPROVAL,
+    crate::tool_records::KIND_TASK,
+];
 
 /// A tail string read back through the `&'static str` it was built from: the tail's strings are
 /// constants of this crate, so a string this test knows is found by address and length.
@@ -57,61 +64,60 @@ fn the_tail_is_one_the_loader_accepts() {
     assert_eq!(check_tail(TAIL), Ok(()));
 }
 
-/// The tail's trust keys are the grammar's own table, key by key, in its order: the kernel judges
-/// what the plane declares, so the two may not drift.
+/// The tail's trust keys, in judgement order, and its pin mechanisms are the grammar's own: every
+/// mechanism token parses, and the three roots are exactly the mechanisms that are not `unpinned`.
 #[test]
 fn the_tails_trust_keys_are_the_grammars() {
-    assert_eq!(TRUST_KEYS.len(), crate::tools_config::TRUST_KEYS.len());
-    for (abi, decl) in TRUST_KEYS.iter().zip(crate::tools_config::TRUST_KEYS) {
-        assert_eq!(text(abi.key), decl.key);
-        let role = match decl.role {
-            TrustRole::Pin => TRUST_PIN,
-            TrustRole::ReverifyTtl => TRUST_REVERIFY_TTL,
-            TrustRole::PrivateReach => TRUST_PRIVATE_REACH,
-            TrustRole::RecoveryBackoff => panic!("the plane declares no recovery-backoff key"),
-            TrustRole::ItemApprovals => busbar_contract::abi::plane::TRUST_ITEM_APPROVALS,
-        };
-        assert_eq!(abi.role, role, "{}", decl.key);
-        assert_eq!(
-            (!abi.default.ptr.is_null()).then(|| text(abi.default)),
-            decl.default.map(str::to_string),
-            "{}",
-            decl.key
-        );
-        assert_eq!(abi.mechanisms_len, decl.mechanisms.len(), "{}", decl.key);
-    }
-    for (abi, decl) in PIN_MECHANISMS
+    let keys: Vec<(String, u32, String)> = TRUST_KEYS
         .iter()
-        .zip(crate::tools_config::TRUST_KEYS[0].mechanisms)
-    {
-        assert_eq!(text(abi.token), decl.token);
-        assert_eq!(abi.flags & MECHANISM_ROOT != 0, decl.root, "{}", decl.token);
+        .map(|k| (text(k.key), k.role, text(k.default)))
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            ("pin".to_string(), TRUST_PIN, String::new()),
+            (
+                "verify_ttl".to_string(),
+                TRUST_REVERIFY_TTL,
+                crate::tools_config::DEFAULT_MCP_VERIFY_TTL.to_string()
+            ),
+            (
+                "allow_private".to_string(),
+                TRUST_PRIVATE_REACH,
+                String::new()
+            ),
+            (
+                crate::tools_config::TOOL_APPROVALS_KEY.to_string(),
+                busbar_contract::abi::plane::TRUST_ITEM_APPROVALS,
+                crate::tools_config::TOOL_APPROVAL_FIELD.to_string()
+            ),
+        ]
+    );
+    assert_eq!(TRUST_KEYS[0].mechanisms_len, PIN_MECHANISMS.len());
+    assert_eq!(PIN_MECHANISMS.len(), 4, "every mechanism the grammar has");
+    for abi in PIN_MECHANISMS {
+        let token = text(abi.token);
+        let parsed: crate::tools_config::ServerPinCfg =
+            serde_json::from_value(serde_json::json!({ "mechanism": token }))
+                .unwrap_or_else(|e| panic!("`{token}` is a grammar token: {e}"));
+        assert_eq!(parsed.mechanism.token(), token);
         assert_eq!(
-            abi.flags & MECHANISM_PEER_KEY != 0,
-            decl.peer_key,
-            "{}",
-            decl.token
+            abi.flags & MECHANISM_ROOT != 0,
+            parsed.mechanism != crate::tools_config::McpPinMechanism::Unpinned,
+            "{token}"
         );
+        assert_eq!(abi.flags & MECHANISM_PEER_KEY, 0, "{token}");
     }
 }
 
 /// The tail declares exactly the task kind as TerminalOnly: every other kind is purged by age.
 #[test]
 fn the_tail_declares_the_task_kind_as_terminal_only() {
-    // Each rule's kind is read by its index from the plane's own kind table, which
+    // Each rule's kind is read by its index from the plane's own kind list, which
     // `the_tail_names_the_planes_own_classes_and_kinds` holds equal to the tail's, entry by entry.
-    // Not through `text`: `RECORD_KINDS` is a const, so this function's use of it is its own
-    // promotion, and whether its strings share an address with the list `text` searches is the
-    // codegen's choice (ModernCI's build answered no).
-    assert_eq!(RECORD_KINDS.len(), crate::tool_records::RECORD_KINDS.len());
     let retentions: Vec<(String, u32)> = RECORD_RETENTIONS
         .iter()
-        .map(|r| {
-            (
-                crate::tool_records::RECORD_KINDS[r.kind as usize].to_string(),
-                r.rule,
-            )
-        })
+        .map(|r| (PLANE_KINDS[r.kind as usize].to_string(), r.rule))
         .collect();
     assert_eq!(
         retentions,
@@ -129,7 +135,7 @@ fn the_tail_declares_the_task_kind_as_terminal_only() {
 #[test]
 fn the_tail_names_the_planes_own_classes_and_kinds() {
     let kinds: Vec<String> = RECORD_KINDS.iter().map(|k| text(*k)).collect();
-    assert_eq!(kinds, crate::tool_records::RECORD_KINDS);
+    assert_eq!(kinds, PLANE_KINDS);
     let classes: Vec<String> = BILLABLE_CLASSES.iter().map(|c| text(c.class)).collect();
     assert_eq!(
         classes,
@@ -168,12 +174,12 @@ fn a_good_section_reads_and_a_bad_one_is_refused_in_the_grammars_words() {
 /// metadata document are absolute and every route is claimed, the discovery document open.
 #[test]
 fn a_generation_claims_its_routes_only_with_a_public_base() {
-    let none = endpoint_snapshot_spec(None);
+    let none = snapshot_spec_with(None, None);
     assert!(none.claims.is_empty());
     assert_eq!(none.audience, None);
     assert_eq!(none.admin_routes.len(), ADMIN_VERBS.len());
 
-    let some = endpoint_snapshot_spec(Some("https://gw.example/"));
+    let some = snapshot_spec_with(Some(under_public_url("https://gw.example/")), None);
     assert_eq!(some.audience.as_deref(), Some("https://gw.example/mcp"));
     assert_eq!(
         some.resource_metadata.as_deref(),
@@ -211,7 +217,7 @@ fn the_claims_are_stated_under_the_endpoint_block_else_the_public_base() {
     )
     .expect_err("a block naming another path is refused");
     assert!(refused.contains("only at `/mcp`"), "{refused}");
-    let claimed = snapshot_spec_for(admitted_endpoint(None, owned).unwrap());
+    let claimed = snapshot_spec_with(admitted_endpoint(None, owned).unwrap(), None);
     assert_eq!(
         claimed.audience.as_deref(),
         Some("https://Gw.Example:443/mcp")

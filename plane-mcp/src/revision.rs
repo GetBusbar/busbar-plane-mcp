@@ -52,10 +52,6 @@ pub const ALL: &[Revision] = &[
     Revision::R2024_11_05,
 ];
 
-/// The revision a session request is read as when it carries no version header and no session
-/// names one: the spec's stated default for a server that cannot otherwise tell.
-pub const HEADERLESS_DEFAULT: &str = "2025-03-26";
-
 impl Revision {
     /// The revision's wire string.
     #[must_use]
@@ -94,12 +90,6 @@ impl Revision {
     #[must_use]
     pub const fn is_event_stream_revision(self) -> bool {
         matches!(self, Self::R2024_11_05)
-    }
-
-    /// Whether a disconnected server stream may be resumed with `Last-Event-ID`.
-    #[must_use]
-    pub const fn resumable(self) -> bool {
-        matches!(self, Self::R2025_06_18 | Self::R2025_11_25)
     }
 }
 
@@ -164,18 +154,6 @@ pub fn sessionless_get(version_header: Option<&str>) -> SessionlessGet {
     }
 }
 
-/// THE CLIENT LADDER: the order in which busbar, as a client, tries to open a conversation with an
-/// upstream whose revision it does not yet know.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ClientStep {
-    /// A stateless `2026-07-28` request.
-    Stateless,
-    /// A POSTed `initialize` naming the latest session revision.
-    Initialize,
-    /// A GET for the `2024-11-05` event stream and its message address.
-    EventStream,
-}
-
 /// What one rung of the ladder observed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StepOutcome {
@@ -188,18 +166,6 @@ pub enum StepOutcome {
     /// No answer at all: the upstream could not be reached, or answered 5xx. Not a revision
     /// signal, so the ladder does not move.
     Unreachable,
-}
-
-/// The next rung after `step` observed `outcome`. `None` means stop: either the rung answered, or
-/// there is nothing left to try, or the failure says nothing about the revision.
-#[must_use]
-pub fn next_step(step: ClientStep, outcome: StepOutcome) -> Option<ClientStep> {
-    match (step, outcome) {
-        (_, StepOutcome::Answered | StepOutcome::Unreachable) => None,
-        (ClientStep::Stateless, StepOutcome::Refused4xx) => Some(ClientStep::Initialize),
-        (ClientStep::Initialize, StepOutcome::Refused4xx) => Some(ClientStep::EventStream),
-        (ClientStep::EventStream, StepOutcome::Refused4xx) => None,
-    }
 }
 
 /// THE CLIENT HALF OF `initialize` NEGOTIATION: the revision the server answered with, if this plane

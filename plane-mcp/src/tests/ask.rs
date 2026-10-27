@@ -10,6 +10,15 @@ use serde_json::{json, Value};
 use super::*;
 use crate::tools_config::AskRoundCfg;
 
+fn relay_state(
+    bind: Bind<'_>,
+    args_digest: &str,
+    leg: UpstreamLeg,
+    seal: &mut dyn Seal,
+) -> Option<String> {
+    relay_state_for(bind, args_digest, leg, DEFAULT_TTL_SECS, seal)
+}
+
 /// A seal that writes the state as JSON behind a marker and spends each nonce once.
 #[derive(Default)]
 struct Plain {

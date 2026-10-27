@@ -68,14 +68,6 @@ fn result(id: Value, result: Value) -> Value {
     json!({"jsonrpc":"2.0","id":id,"result":result})
 }
 
-fn event(name: Option<&str>, data: &str) -> StreamEvent {
-    StreamEvent {
-        event: name.map(str::to_string),
-        id: None,
-        data: data.to_string(),
-    }
-}
-
 #[test]
 fn a_stateless_upstream_is_answered_by_the_request_itself() {
     let mut n = Negotiator::new(call(), None, "1.6.0");
@@ -181,66 +173,22 @@ fn an_offer_this_plane_cannot_carry_is_a_disconnect() {
     assert_eq!(fin, Action::Fail(Refusal::OfferedUnsupported));
 }
 
+/// An upstream refusing the stateless request and `initialize` is handed to the `2024-11-05`
+/// event stream, which the driver carries (`door_legacy`); one remembered as `2024-11-05` goes
+/// there straight away.
 #[test]
-fn an_event_stream_upstream_is_reached_through_the_address_its_stream_names() {
+fn an_event_stream_upstream_is_handed_to_the_stream() {
     let mut n = Negotiator::new(call(), None, "1.6.0");
     n.start();
     n.on_answer(answer(404, json!({})));
-    let open = n.on_answer(answer(404, json!({})));
-    let Action::OpenStream { request } = open else {
-        panic!("expected the stream, got {open:?}")
-    };
-    assert!(request.body.is_empty());
-    assert_eq!(header(&request, "accept"), Some("text/event-stream"));
-    assert_eq!(header(&request, "authorization"), Some("Bearer tok"));
-    assert_eq!(n.on_answer(answer(200, json!(null))), Action::AwaitEvent);
-    let init = n.on_event(&event(Some("endpoint"), "/messages?sessionId=s1"));
-    let (req, body) = sent(&init);
-    assert_eq!(req.url, "https://up.example/messages?sessionId=s1");
-    assert_eq!(body["params"]["protocolVersion"], "2024-11-05");
-    assert_eq!(header(req, H_PROTOCOL_VERSION), None);
-    let id = body["id"].clone();
-    assert_eq!(n.on_answer(accepted()), Action::AwaitEvent);
-    let initialized = n.on_event(&event(
-        Some("message"),
-        &result(id, json!({"protocolVersion":"2024-11-05"})).to_string(),
-    ));
-    assert_eq!(sent(&initialized).1["method"], "notifications/initialized");
-    let the_call = n.on_answer(accepted());
-    let (req, body) = sent(&the_call);
-    assert_eq!(req.url, "https://up.example/messages?sessionId=s1");
-    assert_eq!(body["id"], 5);
-    assert_eq!(n.on_answer(accepted()), Action::AwaitEvent);
-    let unrelated = result(json!(77), json!({})).to_string();
-    assert_eq!(
-        n.on_event(&event(Some("message"), &unrelated)),
-        Action::AwaitEvent
-    );
-    let fin = n.on_event(&event(
-        Some("message"),
-        &result(json!(5), json!({"content":[]})).to_string(),
-    ));
-    let Action::Finish(a) = fin else {
-        panic!("expected the answer, got {fin:?}")
-    };
-    assert_eq!(serde_json::from_slice::<Value>(&a.body).unwrap()["id"], 5);
-    assert_eq!(n.remembered().unwrap().revision, Revision::R2024_11_05);
-}
-
-/// RED: a stream naming a message address on another origin gets nothing POSTed to it, so the
-/// credential never leaves for a host the operator did not register.
-#[test]
-fn red_a_cross_origin_message_address_gets_no_request() {
+    assert_eq!(n.on_answer(answer(404, json!({}))), Action::OpenStream);
     let memo = Remembered {
         revision: Revision::R2024_11_05,
         session: None,
         message_address: None,
     };
     let mut n = Negotiator::new(call(), Some(memo), "1.6.0");
-    assert!(matches!(n.start(), Action::OpenStream { .. }));
-    n.on_answer(answer(200, json!(null)));
-    let a = n.on_event(&event(Some("endpoint"), "https://evil.example/steal"));
-    assert_eq!(a, Action::Fail(Refusal::AddressRefused));
+    assert_eq!(n.start(), Action::OpenStream);
 }
 
 /// A REQUEST LOWERED INTO A REMEMBERED SESSION CARRIES THAT SESSION'S OWN ID (row 159 finding 3):

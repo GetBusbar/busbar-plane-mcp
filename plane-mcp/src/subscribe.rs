@@ -239,12 +239,6 @@ impl Listen {
         })
     }
 
-    /// The accepted filter.
-    #[must_use]
-    pub fn accepted(&self) -> &Filter {
-        &self.accepted
-    }
-
     /// One notification tagged with this subscription.
     fn notification(&self, method: &str, extra: Value) -> Value {
         let mut params = match extra {
@@ -357,13 +351,6 @@ impl Listen {
             }
             Phase::Ended => Step::Closed,
         }
-    }
-
-    /// When the stream next has something to say with nothing changing: its keepalive or its bound.
-    #[must_use]
-    pub fn next_due_ns(&self) -> u64 {
-        (self.last_write_ns.saturating_add(KEEPALIVE_NS))
-            .min(self.opened_ns.saturating_add(MAX_LIFETIME_NS))
     }
 }
 

@@ -59,23 +59,6 @@ fn the_version_header_is_judged_against_the_session() {
 }
 
 #[test]
-fn the_client_ladder_falls_back_on_4xx_only() {
-    use ClientStep::*;
-    use StepOutcome::*;
-    assert_eq!(next_step(Stateless, Refused4xx), Some(Initialize));
-    assert_eq!(next_step(Initialize, Refused4xx), Some(EventStream));
-    assert_eq!(next_step(EventStream, Refused4xx), None);
-    for step in [Stateless, Initialize, EventStream] {
-        assert_eq!(next_step(step, Answered), None);
-        assert_eq!(
-            next_step(step, Unreachable),
-            None,
-            "an outage is not a revision signal"
-        );
-    }
-}
-
-#[test]
 fn a_client_accepts_only_session_revisions_it_implements() {
     assert_eq!(accept_offered("2025-11-25"), Some(Revision::R2025_11_25));
     assert_eq!(accept_offered("2024-11-05"), Some(Revision::R2024_11_05));
@@ -88,12 +71,9 @@ fn a_client_accepts_only_session_revisions_it_implements() {
 }
 
 #[test]
-fn only_the_two_2025_revisions_resume() {
-    assert!(Revision::R2025_06_18.resumable());
-    assert!(Revision::R2025_11_25.resumable());
-    assert!(!Revision::R2024_11_05.resumable());
-    assert!(!Revision::R2026_07_28.resumable());
+fn only_2024_11_05_is_the_event_stream_revision() {
     assert!(Revision::R2024_11_05.is_event_stream_revision());
+    assert!(!Revision::R2025_06_18.is_event_stream_revision());
 }
 
 #[test]

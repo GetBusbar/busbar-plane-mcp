@@ -9,7 +9,7 @@
 //! The settings blob is the plane's own section value, the `tools:` map, as JSON, with the kernel's
 //! reserved sub-keys already read and stripped: the hook bindings and `upstream_credentials` never
 //! reach the plane, and neither do the kernel-owned trust keys each entry carries
-//! ([`crate::tools_config::TRUST_KEYS`]), which the kernel parses and judges first. The plane judges the
+//! (the tail's trust keys), which the kernel parses and judges first. The plane judges the
 //! rest with the grammar the engine uses, [`crate::tools_config::ToolsCfg`] and
 //! [`crate::tools_config::validate_server`].
 //!
@@ -253,7 +253,7 @@ const PIN_MECHANISMS: &[PinMechanism] = &[
     },
 ];
 
-/// The kernel-owned trust keys of one entry, the ABI spelling of [`crate::tools_config::TRUST_KEYS`];
+/// The kernel-owned trust keys of one entry;
 /// declaration order is judgement order. The pin carries no fingerprint: a server here offers
 /// none an operator could approve out of band.
 const TRUST_KEYS: &[TrustKey] = &[
@@ -606,16 +606,6 @@ pub fn read_open(
     Ok((read_tools_section(&rest)?, pools))
 }
 
-/// ONE GENERATION'S SNAPSHOT, owned, for the SDK to publish until that generation's `retire`.
-///
-/// With a readable `public_url` the plane is admitted: it states its audience (the endpoint's
-/// absolute URI) and its protected-resource metadata document, and it claims its routes. Without
-/// one it claims nothing: a plane with no public base has no audience a token could name.
-#[must_use]
-pub fn endpoint_snapshot_spec(public_url: Option<&str>) -> SnapshotSpec {
-    snapshot_spec_for(public_url.map(under_public_url))
-}
-
 /// The audience and metadata document of an endpoint mounted under the deployment's public base
 /// URL: the fixed mount and its RFC 9728 document beneath that base.
 #[must_use]
@@ -693,14 +683,9 @@ pub fn resource_facts(owned: &[u8]) -> Result<Option<Vec<u8>>, String> {
     ))
 }
 
-/// ONE GENERATION'S SNAPSHOT under `admitted` (the endpoint's audience and metadata document,
-/// [`admitted`]); with none it claims nothing.
-#[must_use]
-pub fn snapshot_spec_for(admitted: Option<(String, String)>) -> SnapshotSpec {
-    snapshot_spec_with(admitted, None)
-}
-
-/// [`snapshot_spec_for`], stating its protected-resource `facts` ([`resource_facts`]) beside.
+/// One generation's snapshot under `admitted` (the endpoint's audience and metadata document,
+/// [`admitted_endpoint`]), stating its protected-resource `facts` ([`resource_facts`]) beside; with
+/// none it claims nothing.
 #[must_use]
 pub fn snapshot_spec_with(
     admitted: Option<(String, String)>,

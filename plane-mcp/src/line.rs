@@ -233,25 +233,10 @@ pub fn may_liven(round: u32) -> bool {
     round < MAX_LIVE_ASK_ROUNDS
 }
 
-/// Where a live ask stands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AskStand {
-    /// Waiting on the caller's answer to the ask in flight.
-    Waiting,
-    /// Every ask of the round was answered: the retry went on as its own unit.
-    Answered,
-    /// The caller cancelled the request.
-    Cancelled,
-    /// The caller answered an ask with an error (or not at all): it is handed the result itself.
-    Unanswered,
-}
-
 /// ONE LIVE ASK ROUND for one request: the request it continues, the round's asks in order, the
 /// answers so far, the sealed state the retry echoes, and the unit holding the caller's answer.
 #[derive(Debug, Clone)]
 pub struct LiveAsk {
-    /// The principal it was asked under.
-    pub principal: String,
     /// The request as the caller sent it (its id is the caller's).
     pub original: Value,
     /// The `input_required` result itself: what the caller is handed when it does not answer.
@@ -272,21 +257,13 @@ pub struct LiveAsk {
     pub session: u64,
     /// When the ask in flight lapses, on the host's monotonic clock.
     pub deadline_ns: u64,
-    /// Where it stands.
-    pub stand: AskStand,
 }
 
 impl LiveAsk {
     /// The round an `input_required` `result` asks of `original`; `None` when the result names no
     /// asks or no state (it is then handed to the caller as it is).
     #[must_use]
-    pub fn of(
-        principal: &str,
-        original: Value,
-        fallback: Vec<u8>,
-        result: &Value,
-        round: u32,
-    ) -> Option<Self> {
+    pub fn of(original: Value, fallback: Vec<u8>, result: &Value, round: u32) -> Option<Self> {
         let requests = result.get("inputRequests")?.as_object()?;
         let state = result.get("requestState")?.as_str()?.to_string();
         let mut queued: Vec<(String, String, Value)> = requests
@@ -304,7 +281,6 @@ impl LiveAsk {
         }
         queued.reverse();
         Some(LiveAsk {
-            principal: principal.to_string(),
             original,
             fallback,
             queued,
@@ -315,7 +291,6 @@ impl LiveAsk {
             round,
             session: 0,
             deadline_ns: 0,
-            stand: AskStand::Waiting,
         })
     }
 
