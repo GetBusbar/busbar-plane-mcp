@@ -15,7 +15,11 @@
 //!   answers nothing, and the caller's answers are lines of their own: each answer but the round's
 //!   last emits the next ask; the last is the RETRY, the request as the caller sent it with the
 //!   answers and the sealed state, dispatched as that unit (its own admission). An answer that is an
-//!   error hands the caller the `input_required` result itself.
+//!   error hands the caller the `input_required` result itself. The exceptions: a line whose carrier
+//!   session negotiated a SESSION revision (`2025-06-18`, `2025-11-25`) has its answer lowered into
+//!   that revision first, which turns an `input_required` result into the revision's error (it has
+//!   no such result, as predev lowered it), so there is nothing left to liven; a round past the
+//!   round cap, or past [`MAX_LIVE_ASKS_PER_SESSION`] live on its session, is handed on as it is.
 //! - A SUBSCRIPTION (`subscriptions/listen`) is answered with its acknowledgement and kept on the
 //!   session ([`listen`]): the tick ([`tick`]) steps it, emitting what changed, a `ping` when it has
 //!   been quiet and its last frame at its bound.
@@ -30,8 +34,7 @@ use super::{door_listen, CallUnit, McpDoor, Pending};
 use crate::catalogue::Catalogue;
 use crate::line::{self, Era, LiveAsk, Reply};
 use crate::subscribe::{Listen, Standing, Step as ListenStep, KEEPALIVE_NS};
-use crate::tool_arrival::Disposition;
-use busbar_contract::abi::mechanism::ticket::{CompletionHandle, Ticket};
+use busbar_contract::abi::mechanism::ticket::Ticket;
 
 /// What a line unit is to the carrier.
 #[derive(Debug, Clone, Default)]
@@ -51,10 +54,6 @@ pub(super) struct LineUnit {
     /// ([`crate::adapt::raise`]): its answer is lowered back into it.
     pub(super) raised: bool,
 }
-
-/// After this long with no unit of its caller re-asking its standing and grants, a line
-/// subscription asks its caller a `ping`: the answer is a line, so a unit, and the unit re-asks.
-const RECONFIRM_NS: u64 = KEEPALIVE_NS;
 
 /// After this long with no unit of its caller re-asking its standing and grants (two pings went
 /// unanswered, or the kernel admitted none of its caller's lines, as it admits none of a revoked
@@ -80,28 +79,6 @@ pub(super) struct LineListen {
 }
 
 impl LineListen {
-    /// The subscription `listen`, opened by `owner` at `now_ns` under the entitlement answers
-    /// `entitled`.
-    fn opened(listen: Listen, entitled: BTreeMap<String, bool>, owner: &str, now_ns: u64) -> Self {
-        LineListen {
-            listen: Box::new(listen),
-            entitled,
-            owner: owner.to_string(),
-            standing: Standing::Live,
-            confirmed_ns: now_ns,
-            pinged_ns: now_ns,
-            updates: Vec::new(),
-        }
-    }
-
-    /// A unit of its caller re-asked, at `now_ns`: the grants `entitled` and the standing
-    /// `standing` are what its next frames are stepped under.
-    fn reconfirm(&mut self, entitled: BTreeMap<String, bool>, standing: Standing, now_ns: u64) {
-        self.entitled = entitled;
-        self.standing = standing;
-        self.confirmed_ns = now_ns;
-    }
-
     /// Its caller's standing at `now_ns`: the last unit's answer, or lapsed when none re-confirmed
     /// it for [`UNCONFIRMED_NS`].
     fn standing_at(&self, now_ns: u64) -> Standing {
@@ -128,34 +105,22 @@ impl LineListen {
     fn step_at(&mut self, catalogue: &Catalogue, now_ns: u64) -> ListenStep {
         let standing = self.standing_at(now_ns);
         let updates = std::mem::take(&mut self.updates);
-        let entitled = &self.entitled;
-        let admit = |kind: &str, name: &str| {
-            entitled
-                .get(&format!("{kind}:{name}"))
-                .copied()
-                .unwrap_or(false)
-        };
+        let admit = super::admit(&self.entitled);
         self.listen
             .step(catalogue, &admit, &standing, &updates, now_ns)
     }
 
-    /// Whether busbar asks its caller a `ping` at `now_ns` to have its standing re-asked: none
-    /// re-confirmed it, and none was asked, for [`RECONFIRM_NS`]. Asked, it is noted.
+    /// Whether busbar asks its caller a `ping` at `now_ns` to have its standing re-asked (the
+    /// answer is a line, so a unit, and the unit re-asks): none re-confirmed it, and none was
+    /// asked, for [`KEEPALIVE_NS`]. Asked, it is noted.
     fn wants_ping(&mut self, now_ns: u64) -> bool {
-        let due = now_ns.saturating_sub(self.confirmed_ns) >= RECONFIRM_NS
-            && now_ns.saturating_sub(self.pinged_ns) >= RECONFIRM_NS;
+        let due = now_ns.saturating_sub(self.confirmed_ns) >= KEEPALIVE_NS
+            && now_ns.saturating_sub(self.pinged_ns) >= KEEPALIVE_NS;
         if due {
             self.pinged_ns = now_ns;
         }
         due
     }
-}
-
-/// Whether `owner` holds as many line subscriptions as one caller may, or the instance its total:
-/// the HTTP carrier's bounds ([`door_listen::MAX_LISTENS_PER_OWNER`], [`super::MAX_UNITS`]).
-fn line_quota_full(held: &BTreeMap<(u64, String), LineListen>, owner: &str) -> bool {
-    held.len() >= super::MAX_UNITS
-        || held.values().filter(|l| l.owner == owner).count() >= door_listen::MAX_LISTENS_PER_OWNER
 }
 
 /// THE PERMISSION, RE-ASKED ON A LINE: a unit of the carrier session's caller (any line it sends,
@@ -185,8 +150,9 @@ pub(super) fn reconfirm(plane: &McpDoor, ticket: Ticket, principal: &str, unit: 
             if *s == session && l.owner == principal {
                 // A clock that cannot be read is never a time (P-M4): the re-asked grants and
                 // standing still apply, but the confirmation is not moved to a time never read.
-                let at = now.unwrap_or(l.confirmed_ns);
-                l.reconfirm(entitled.clone(), standing.clone(), at);
+                l.confirmed_ns = now.unwrap_or(l.confirmed_ns);
+                l.entitled.clone_from(&entitled);
+                l.standing = standing.clone();
             }
         }
     });
@@ -216,52 +182,42 @@ pub(super) fn arrive(plane: &McpDoor, session: u64, body: &[u8]) -> Arrival {
         session,
         ..LineUnit::default()
     };
+    let dispatch = read(plane, session, body, &mut unit);
+    Arrival { unit, dispatch }
+}
+
+/// [`arrive`]'s reading of the line into `unit`: the bytes the one dispatch decides on, `None` when
+/// the unit answers its preset.
+fn read(plane: &McpDoor, session: u64, body: &[u8], unit: &mut LineUnit) -> Option<Vec<u8>> {
     let Ok(value) = serde_json::from_slice::<Value>(body) else {
-        return Arrival {
-            unit,
-            dispatch: Some(body.to_vec()),
-        };
+        return Some(body.to_vec());
     };
     if let Some(reply) = line::reply(&value) {
         let n = match &reply {
             Reply::Answered(n, _) | Reply::Failed(n) => *n,
         };
-        let Some(mut live) = plane.live_asks.remove(&(session, n)) else {
-            // An answer to nothing busbar asked on this session: nothing to say.
-            unit.preset = Some(Vec::new());
-            return Arrival {
-                unit,
-                dispatch: None,
-            };
-        };
+        // An answer to nothing busbar asked on this session: nothing to say.
+        unit.preset = Some(Vec::new());
+        let mut live = plane.live_asks.remove(&(session, n))?;
         match reply {
-            Reply::Failed(_) => {
-                unit.preset = Some(live.fallback.clone());
-            }
+            Reply::Failed(_) => unit.preset = Some(live.fallback),
             Reply::Answered(_, result) => {
                 live.answered(result);
-                if live.queued.is_empty() {
-                    if let Some(retry) = live.retry() {
-                        let dispatch = serde_json::to_vec(&retry).unwrap_or_default();
-                        unit.original = Some(retry);
-                        unit.round = live.round.saturating_add(1);
-                        return Arrival {
-                            unit,
-                            dispatch: Some(dispatch),
-                        };
-                    }
-                    unit.preset = Some(live.fallback.clone());
-                } else {
+                if !live.queued.is_empty() {
                     plane.live_asks.insert((session, n), live);
                     unit.next_ask = Some(n);
-                    unit.preset = Some(Vec::new());
+                } else if let Some(retry) = live.retry() {
+                    unit.preset = None;
+                    unit.round = live.round.saturating_add(1);
+                    let dispatch = serde_json::to_vec(&retry).unwrap_or_default();
+                    unit.original = Some(retry);
+                    return Some(dispatch);
+                } else {
+                    unit.preset = Some(live.fallback);
                 }
             }
         }
-        return Arrival {
-            unit,
-            dispatch: None,
-        };
+        return None;
     }
     if let Some(id) = line::cancelled(&value) {
         let key = line::id_key(&id);
@@ -271,37 +227,28 @@ pub(super) fn arrive(plane: &McpDoor, session: u64, body: &[u8]) -> Arrival {
             });
         });
     }
-    match line::era(&value) {
-        Era::Dispatch => {}
-        Era::Opened(revision, answer) => {
-            // THE CARRIER SESSION NOW SPEAKS `revision` (revision by negotiation, THE DESIGN section 2).
-            // The table is bounded and evicts nothing (admission bounds live work): a full one
-            // answers the stateless revision, which needs no entry.
-            let kept = plane.line_revisions.with_all(|m| {
+    let answer = match line::era(&value) {
+        Era::Dispatch => None,
+        // THE CARRIER SESSION NOW SPEAKS `revision` (revision by negotiation, THE DESIGN section 2).
+        // The table is bounded and evicts nothing: a full one answers the stateless revision.
+        Era::Opened(revision, answer) => Some(
+            if plane.line_revisions.with_all(|m| {
                 let full = m.len() >= super::MAX_UNITS && !m.contains_key(&session);
                 if !full {
                     m.insert(session, revision);
                 }
                 !full
-            });
-            let answer = if kept {
+            }) {
                 answer
             } else {
                 line::initialize_result(value.get("id").unwrap_or(&Value::Null))
-            };
-            unit.preset = Some(serde_json::to_vec(&answer).unwrap_or_default());
-            return Arrival {
-                unit,
-                dispatch: None,
-            };
-        }
-        Era::Answer(answer) => {
-            unit.preset = Some(serde_json::to_vec(&answer).unwrap_or_default());
-            return Arrival {
-                unit,
-                dispatch: None,
-            };
-        }
+            },
+        ),
+        Era::Answer(answer) => Some(answer),
+    };
+    if let Some(answer) = answer {
+        unit.preset = Some(serde_json::to_vec(&answer).unwrap_or_default());
+        return None;
     }
     // A LINE OF A SESSION REVISION carries no stateless `_meta`: it is raised into the one
     // dispatch's shape, and its answer lowered back ([`crate::adapt`]).
@@ -315,17 +262,11 @@ pub(super) fn arrive(plane: &McpDoor, session: u64, body: &[u8]) -> Arrival {
             unit.raised = true;
             let dispatch = serde_json::to_vec(&raised).unwrap_or_default();
             unit.original = Some(raised);
-            return Arrival {
-                unit,
-                dispatch: Some(dispatch),
-            };
+            return Some(dispatch);
         }
     }
     unit.original = Some(value);
-    Arrival {
-        unit,
-        dispatch: Some(body.to_vec()),
-    }
+    Some(body.to_vec())
 }
 
 /// Whether a line that the one dispatch refused is a notification: a notification is never
@@ -349,12 +290,9 @@ fn emit(plane: &McpDoor, ticket: Ticket, seq: u32, session: u64, bytes: &[u8]) -
     let Some(services) = plane.services else {
         return false;
     };
-    let handle = CompletionHandle {
-        ticket,
-        seq,
-        _reserved: 0,
-    };
-    services.session_emit(handle, session, bytes).is_ok()
+    services
+        .session_emit(super::handle_at(ticket, seq), session, bytes)
+        .is_ok()
 }
 
 /// THE PRESET ANSWER of a line unit, or the next ask of its round emitted (the unit then answers
@@ -389,10 +327,13 @@ pub(super) fn preset(plane: &McpDoor, ticket: Ticket, unit: &mut CallUnit) -> Op
     Some(Pending::answer(200, bytes, None, &[]))
 }
 
+/// The most live ask rounds one carrier session holds at once ([`liven`]).
+pub(super) const MAX_LIVE_ASKS_PER_SESSION: usize = 64;
+
 /// LIVEN a line unit's answer: an `input_required` result (busbar's own ask, or an upstream's
 /// relayed) is put to the caller as live requests on the session, its first ask emitted now, and
 /// the unit answers nothing. Any other answer, or one that cannot be emitted, is left as it is.
-pub(super) fn liven(plane: &McpDoor, ticket: Ticket, principal: &str, unit: &mut CallUnit) {
+pub(super) fn liven(plane: &McpDoor, ticket: Ticket, unit: &mut CallUnit) {
     let Some(line_unit) = unit.line.as_ref() else {
         return;
     };
@@ -400,7 +341,7 @@ pub(super) fn liven(plane: &McpDoor, ticket: Ticket, principal: &str, unit: &mut
     let round = line_unit.round;
     // The round cap: past it the `input_required` result is handed to the caller as it is (its
     // sealed `requestState` makes that a continuation), never put live again.
-    if !line::may_liven(round) {
+    if round >= line::MAX_LIVE_ASK_ROUNDS {
         return;
     }
     let Some(original) = line_unit.original.clone() else {
@@ -419,15 +360,22 @@ pub(super) fn liven(plane: &McpDoor, ticket: Ticket, principal: &str, unit: &mut
         return;
     };
     if result.get("resultType").and_then(Value::as_str)
-        != Some(crate::jsonrpc::RESULT_TYPE_INPUT_REQUIRED)
+        != Some(crate::codec::RESULT_TYPE_INPUT_REQUIRED)
     {
         return;
     }
-    let Some(mut live) = LiveAsk::of(principal, original, pending.bytes.clone(), result, round)
-    else {
+    // THE LIVE ASKS OF ONE CARRIER SESSION ARE BOUNDED: past [`MAX_LIVE_ASKS_PER_SESSION`] the
+    // answer is handed to the caller as it is (its sealed `requestState` makes that a continuation),
+    // as past the round cap.
+    let held = plane
+        .live_asks
+        .with_all(|m| m.keys().filter(|(s, _)| *s == session).count());
+    if held >= MAX_LIVE_ASKS_PER_SESSION {
+        return;
+    }
+    let Some(mut live) = LiveAsk::of(original, pending.bytes.clone(), result, round) else {
         return;
     };
-    live.session = session;
     // A clock that cannot be read arms no lapse: the answer is left as it is.
     let Some(now) = door_listen::mono_ns(plane.services, ticket, unit) else {
         return;
@@ -462,60 +410,31 @@ pub(super) fn listen(
     unit: &mut CallUnit,
 ) -> Option<Pending> {
     let session = unit.line.as_ref()?.session;
-    let Disposition::Request { row, id } = &unit.disposition else {
-        return None;
-    };
-    if row.op != crate::tool_ops::OP_SUBSCRIPTIONS_LISTEN {
-        return None;
-    }
-    let id = id.clone();
+    let id = door_listen::listen_id(unit)?;
     let held = plane.current().or_else(|| unit.held.clone())?;
-    door_listen::entitled_afresh(plane, ticket, unit, &held);
-    // A subscription opened at a clock read that failed is refused, never opened at the epoch
-    // (row 159 finding P-M4).
-    let Some(now) = door_listen::mono_ns(plane.services, ticket, unit) else {
-        let body = busbar_contract::jsonrpc::error_body(
-            id,
-            crate::codec::CODE_REFUSED,
-            super::CLOCK_UNREAD,
-            None,
-        );
-        return Some(Pending::answer(
-            503,
-            serde_json::to_vec(&body).unwrap_or_default(),
-            None,
-            &[],
-        ));
+    let (mut listen, now) = match door_listen::open_listen(plane, ticket, unit, &held, id.clone()) {
+        Ok(opened) => opened,
+        Err(refused) => return Some(*refused),
     };
-    let entitled = unit.entitled.clone();
-    let admit = |kind: &str, name: &str| {
-        entitled
-            .get(&format!("{kind}:{name}"))
-            .copied()
-            .unwrap_or(false)
-    };
-    let opened = Listen::open(unit.params.as_ref(), id.clone(), now, |uri| {
-        matches!(
-            held.catalogue.resource_by_uri(&admit, uri),
-            crate::catalogue::Lookup::One(_)
-        )
-    });
-    let mut listen = match opened {
-        Err(refusal) => {
-            let body = serde_json::to_vec(&refusal).unwrap_or_default();
-            return Some(Pending::answer(400, body, None, &[]));
-        }
-        Ok(listen) => listen,
-    };
+    let admit = super::admit(&unit.entitled);
     let frames = match listen.step(&held.catalogue, &admit, &Standing::Live, &[], now) {
         ListenStep::Frames(frames) | ListenStep::End(frames) => frames,
         _ => Vec::new(),
     };
     let key = (session, line::id_key(&id));
-    let kept = LineListen::opened(listen, entitled, principal, now);
+    let kept = LineListen {
+        listen: Box::new(listen),
+        entitled: unit.entitled.clone(),
+        owner: principal.to_string(),
+        standing: Standing::Live,
+        confirmed_ns: now,
+        pinged_ns: now,
+        updates: Vec::new(),
+    };
     // THE QUOTA REFUSES THE NEW SUBSCRIPTION, never evicts a held one, as on the HTTP carrier.
     let admitted = plane.line_listens.with_all(|m| {
-        if !m.contains_key(&key) && line_quota_full(m, principal) {
+        let full = door_listen::quota_full(m.values().map(|l| &l.owner), principal);
+        if !m.contains_key(&key) && full {
             return false;
         }
         m.insert(key, kept);
@@ -583,7 +502,7 @@ pub(super) fn tick(plane: &McpDoor, ticket: Ticket, now_ns: u64) {
     let Some(held) = plane.current() else {
         return;
     };
-    let gone = plane.line_listens.with_all(|m| {
+    plane.line_listens.with_all(|m| {
         let mut gone = Vec::new();
         for ((session, key), kept) in m.iter_mut() {
             let (mut bytes, ended) = match kept.step_at(&held.catalogue, now_ns) {
@@ -611,9 +530,7 @@ pub(super) fn tick(plane: &McpDoor, ticket: Ticket, now_ns: u64) {
         for key in &gone {
             m.remove(key);
         }
-        gone
     });
-    let _ = gone;
 }
 
 #[cfg(test)]

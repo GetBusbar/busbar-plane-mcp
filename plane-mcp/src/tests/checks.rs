@@ -146,25 +146,3 @@ fn a_malformed_request_is_refused_before_the_revision_is_judged() {
     let r = check(&v, "tools/list", &without(&f, H_MCP_METHOD)).unwrap_err();
     assert_eq!(r.code, -32020);
 }
-
-/// The body is the one JSON-RPC error envelope (the contract's builder, the one the served engine
-/// renders through), with the id echoed or `null`. Compared as a document: member order is the
-/// JSON library's, and it is the same library in both.
-#[test]
-fn a_refusal_body_is_the_one_error_envelope() {
-    let r = Refused {
-        code: -32020,
-        message: "m",
-        data: None,
-    };
-    let read = |b: Vec<u8>| serde_json::from_slice::<Value>(&b).expect("a document");
-    assert_eq!(
-        read(r.body(Some(&json!(7)))),
-        json!({"jsonrpc": "2.0", "id": 7, "error": {"code": -32020, "message": "m"}})
-    );
-    assert_eq!(
-        read(r.body(None)),
-        json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32020, "message": "m"}})
-    );
-    assert_eq!(STATUS, 400);
-}

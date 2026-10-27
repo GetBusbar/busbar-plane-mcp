@@ -2,11 +2,10 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE `mcp:` ENDPOINT BLOCK: its grammar ([`McpCfg`]), its boot refusals ([`McpCfgError`]) and the
-//! validated resource ([`McpResource`]) derived from it. Pure data and string rules, MOVED here from
-//! the retired host crate with the `tools:` grammar beside it ([`crate::config`]), so the endpoint's
-//! judging survives that crate's deletion unchanged: the same fields, the same refusals, the same
-//! words. The composition root registers the block on the plane axis and lowers it through
-//! [`McpResource::from_cfg`] at boot.
+//! validated resource ([`McpResource`]) the composition root lowers it to at boot.
+
+// The crate's only public item is `door`: the accessors and variants below were this module's public API; the tests hold them, the door does not reach them (BUSBAR-1.6.0.md l.3560).
+#![cfg_attr(not(test), allow(dead_code))]
 
 use serde::{Deserialize, Serialize};
 
@@ -58,19 +57,11 @@ pub struct McpCfg {
 pub struct McpResource {
     /// The canonical URI verbatim, as configured. THE audience.
     canonical_uri: String,
-    /// The path component of `canonical_uri`, normalised to a leading and no trailing slash. The
-    /// ingress mount.
-    mount_path: String,
-    /// The RFC 9728 section 3.1 metadata path: `/.well-known/oauth-protected-resource` with the resource's
-    /// path INSERTED AFTER it, not before. This is the one detail of RFC 9728 that is easy to get
-    /// backwards, and getting it backwards means every compliant client's discovery 404s.
-    metadata_path: String,
-    /// The absolute form of `metadata_path`, which is what goes in the challenge — a client that has
-    /// no credential also has no reason to trust its own reconstruction of our origin.
+    /// The absolute RFC 9728 section 3.1 metadata URL (the well-known prefix, then the resource's
+    /// path), which is what goes in the challenge.
     metadata_url: String,
     authorization_servers: Vec<String>,
     scopes_supported: Vec<String>,
-    allowed_origins: Vec<String>,
 }
 
 /// Why an `mcp:` block was refused at boot. Every arm names the field and what a correct value looks
@@ -201,35 +192,21 @@ impl McpResource {
                 return Err(McpCfgError::AuthorizationServerNotAbsolute(issuer.clone()));
             }
         }
-        let metadata_path = protected_resource_metadata_path(&mount_path);
         Ok(Self {
-            metadata_url: format!("{origin}{metadata_path}"),
+            metadata_url: format!("{origin}{}", protected_resource_metadata_path(&mount_path)),
             canonical_uri: uri.to_string(),
-            mount_path,
-            metadata_path,
             authorization_servers: cfg
                 .authorization_servers
                 .iter()
                 .map(|s| s.trim().to_string())
                 .collect(),
             scopes_supported: cfg.scopes_supported.clone(),
-            allowed_origins: cfg.allowed_origins.clone(),
         })
     }
 
     /// THE audience. Compared for equality by the verifier; never parsed again.
     pub fn canonical_uri(&self) -> &str {
         &self.canonical_uri
-    }
-
-    /// The ingress mount path (`/mcp` for `https://host/mcp`).
-    pub fn mount_path(&self) -> &str {
-        &self.mount_path
-    }
-
-    /// The RFC 9728 metadata path this deployment serves the document at.
-    pub fn metadata_path(&self) -> &str {
-        &self.metadata_path
     }
 
     /// The absolute metadata URL, for the `resource_metadata` challenge parameter.
@@ -246,13 +223,6 @@ impl McpResource {
     pub fn scopes_supported(&self) -> &[String] {
         &self.scopes_supported
     }
-
-    /// THE OPERATOR'S BROWSER-ORIGIN ALLOWLIST, as data. The plane keeps the data; the verdict on
-    /// an `Origin` is not made here. The empty allowlist admits no browser origin, which is the
-    /// documented default.
-    pub fn allowed_origins(&self) -> &[String] {
-        &self.allowed_origins
-    }
 }
 
 /// Split an absolute `http(s)` URI into `(origin, path)`, or `None` when it is not one.
@@ -266,9 +236,9 @@ fn split_absolute(uri: &str) -> Option<(&str, &str)> {
     let rest = uri
         .strip_prefix("https://")
         .or_else(|| uri.strip_prefix("http://"))?;
-    // The authority must be non-empty, must not itself contain a scheme separator, and must not be
-    // the whole string's remainder only because the string ended at the scheme.
-    let authority_len = rest.find('/').unwrap_or(rest.len());
+    // The authority must be non-empty, and ends at the first `/`, `?` or `#` (a query or fragment
+    // straight after the authority is that, never part of the host).
+    let authority_len = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     if authority_len == 0 {
         return None;
     }
@@ -287,12 +257,6 @@ fn normalise_path(path: &str) -> String {
     }
     format!("/{trimmed}")
 }
-
-// THE ENGINE BINDING for the plane's test binary: the one module that names the engine crate. Every
-// App-needing test below reaches the engine through it (the neutral `testkit::engine_kit` seam).
-// Gated on `test-support` alone (never bare `cfg(test)`, where no engine is in the closure): that is
-// also the feature a dependent crate's test binary compiles the plane batteries in under
-// (`admin_view::adminverbs_tests`), so those reach it too; in that feature-only build its helpers
 
 #[cfg(test)]
 #[path = "tests/endpoint.rs"]

@@ -46,7 +46,7 @@ fn the_acknowledgement_is_first_and_carries_the_accepted_subset() {
     let mut l =
         Listen::open(Some(&params), json!("sub"), 0, |u| u == "file:///readme").expect("opened");
     assert_eq!(
-        l.accepted().resources,
+        l.accepted.resources,
         Some(vec!["file:///readme".to_string()])
     );
     let Step::Frames(frames) = l.step(&catalogue(1, SECTION), &everything, &Standing::Live, &[], 1)
@@ -70,7 +70,7 @@ fn a_subscription_that_can_deliver_nothing_is_refused_and_too_many_uris_are_refu
         .collect();
     let many = json!({ "notifications": { "resourceSubscriptions": uris } });
     let refused = Listen::open(Some(&many), json!(1), 0, |_| true).expect_err("too many");
-    assert_eq!(refused["error"]["code"], INVALID_PARAMS);
+    assert_eq!(refused["error"]["code"], crate::codec::CODE_INVALID_PARAMS);
 }
 
 #[test]
@@ -229,13 +229,15 @@ fn the_distinct_uris_are_counted_through_a_set_and_the_ceiling_refuses_at_once()
     let refused = Listen::open(Some(&params), json!("sub"), 0, |_| true).expect_err("over the cap");
     let message = refused["error"]["message"].as_str().expect("a sentence");
     assert!(
-        message.contains(&format!("names {} distinct uris", MAX_SUBSCRIBED_URIS + 1)),
-        "the refusal came at the first uri past the ceiling: {message}"
+        message.contains(&format!(
+            "names more than {MAX_SUBSCRIBED_URIS} distinct uris"
+        )),
+        "the refusal states what it knows (it stopped counting past the ceiling): {message}"
     );
     let copies: Vec<&str> = (0..100_000)
         .map(|n| ["file:///a", "file:///b", "file:///c"][n % 3])
         .collect();
     let params = json!({ "notifications": { "resourceSubscriptions": copies } });
     let l = Listen::open(Some(&params), json!("sub"), 0, |_| true).expect("duplicates fold");
-    assert_eq!(l.accepted().resources.as_ref().map(Vec::len), Some(3));
+    assert_eq!(l.accepted.resources.as_ref().map(Vec::len), Some(3));
 }

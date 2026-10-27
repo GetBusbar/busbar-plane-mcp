@@ -9,7 +9,7 @@
 //! The settings blob is the plane's own section value, the `tools:` map, as JSON, with the kernel's
 //! reserved sub-keys already read and stripped: the hook bindings and `upstream_credentials` never
 //! reach the plane, and neither do the kernel-owned trust keys each entry carries
-//! ([`crate::tools_config::TRUST_KEYS`]), which the kernel parses and judges first. The plane judges the
+//! (the tail's trust keys), which the kernel parses and judges first. The plane judges the
 //! rest with the grammar the engine uses, [`crate::tools_config::ToolsCfg`] and
 //! [`crate::tools_config::validate_server`].
 //!
@@ -22,13 +22,13 @@
 use busbar_contract::abi::host::conn::connector::{
     Need, DIRECTION_OUTBOUND, EGRESS_OPERATOR_INFRASTRUCTURE, EGRESS_PROVIDER, KEEP_NAMED,
 };
-use busbar_contract::abi::mechanism::call::{AbiStr, Blob, BLOB_ABSENT};
-use busbar_contract::abi::mechanism::door::{KindTailHead, Section, SECTION_DECLARING};
+use busbar_contract::abi::mechanism::call::{AbiStr, Blob};
+use busbar_contract::abi::mechanism::door::{Section, SECTION_DECLARING};
 use busbar_contract::abi::plane::{
     AdminRoute, BillableClass, OpClass, PinMechanism, PlaneTail, RecordChain, RecordRetention,
     TrustKey, ANSWER_LAYOUT, CHAIN_DIGESTS_SCOPE, CHAIN_LENGTH_PREFIXED, INGRESS_REQUEST_RESPONSE,
-    INGRESS_RESPONSE_STREAM, MECHANISM_ROOT, SHAPE_PIECEWISE, TRUST_PIN, TRUST_PRIVATE_REACH,
-    TRUST_REVERIFY_TTL,
+    INGRESS_RESPONSE_STREAM, MECHANISM_PEER_KEY, MECHANISM_ROOT, SHAPE_PIECEWISE, TRUST_PIN,
+    TRUST_PRIVATE_REACH, TRUST_REVERIFY_TTL,
 };
 use busbar_contract::abi::sdk::door::abi_str;
 use busbar_contract::abi::sdk::publish::{
@@ -43,39 +43,13 @@ use crate::tools_config::{ToolsCfg, DEFAULT_MCP_VERIFY_TTL, SUBJECT_NOUN};
 
 /// The grant kind that admits traffic on this plane: one registered server.
 pub const SCOPE: &str = "mcp_server";
-/// The signing domain busbar's own ask state is sealed under ([`crate::seal`]): the host's `sign`
-/// derives this domain's subkey from the deployment's fleet-shared key.
-pub const ASK_SIGNING_DOMAIN: &str = "mcp/ask-state/v1";
-/// The key-id prefix of those seals.
-pub const ASK_KID_PREFIX: &str = "busbar-mcp-ask-";
 /// The second grant kind: one tool of a registered server, keyed on its published name.
 pub const SCOPE_TOOL: &str = "mcp_tool";
-/// The plane's human label.
-pub const LABEL: &str = "MCP";
-/// The singular noun for one registration, in admin responses.
-pub const ADMIN_NOUN: &str = "mcp-server";
-/// The record resource kind a registration is audited under.
-pub const AUDIT_KIND: &str = "mcp_server";
 /// The section this plane owns beside `tools:`: its endpoint block.
 pub const ENDPOINT_SECTION: &str = "mcp";
 
-/// WHERE EACH REGISTERED SERVER IS REACHED: its registration's `url`, as a member-target path
-/// (`busbar_contract::section::MEMBER_TARGET_PREFIX`): one member route per server, at its own URL.
-pub const MEMBER_TARGET: &str = "settings.*.url";
-/// The one wire dialect: JSON-RPC 2.0, carried over each of the plane's transports.
-pub const DIALECT: &str = "jsonrpc";
-/// The billable class a call is counted in, and its family.
-pub const CALLS_FAMILY: &str = "count";
-/// The billable class a hop's moved bytes are counted in, and its family.
-pub const BYTES_FAMILY: &str = "byte";
 /// The fee unit this plane declares: one per request.
 pub const FEE_PER_REQUEST: &str = busbar_contract::plane::PER_REQUEST;
-
-/// An absent string.
-const NONE: AbiStr = AbiStr {
-    ptr: std::ptr::null(),
-    len: 0,
-};
 
 /// THE SECTIONS THE PLANE'S STATEMENT DECLARES: `tools:`, which it owns and judges, and its endpoint
 /// block beside it.
@@ -85,21 +59,32 @@ pub const SECTIONS: &[Section] = &[
     Section {
         name: abi_str("tools"),
         flags: SECTION_DECLARING,
-        ..Section::ZERO
+        _reserved: 0,
     },
     Section {
         name: abi_str("mcp"),
-        ..Section::ZERO
+        flags: 0,
+        _reserved: 0,
     },
 ];
 
+/// WHERE EACH REGISTERED SERVER'S CLIENT IDENTITY IS WRITTEN, as a member path (`settings.*.<key>`,
+/// the http need's `trust_from`): a registration's `client_identity` (`{cert, key}`, secret
+/// references), busbar's client certificate for that server, which the host resolves once and the
+/// connector presents on every connection to it. The registration's `pin` key, under `cert_spki`
+/// and `mtls`, is the far end's key the connector holds each of those connections to.
+pub const CLIENT_IDENTITY_FROM: &str = "settings.*.client_identity";
+
 /// THE SECRET REFERENCES ITS SECTION HOLDS, by settings path (`*` = every registration, every
-/// entry): a server's RFC 8693 subject token (busbar's own) and a stdio child's environment values
+/// entry): a server's RFC 8693 subject token (busbar's own), a stdio child's environment values
 /// that are references (a pipe has no header block, so `env:` is the one channel a child gets a
-/// credential through). The kernel enumerates them so `--validate` and boot resolve each one.
+/// credential through), and busbar's client certificate and key for a mutual handshake
+/// ([`CLIENT_IDENTITY_FROM`]). The kernel enumerates them so `--validate` and boot resolve each one.
 pub const SECRET_REFS: &[AbiStr] = &[
     abi_str("settings.*.token_exchange.subject_token"),
     abi_str("settings.*.env.*"),
+    abi_str("settings.*.client_identity.cert"),
+    abi_str("settings.*.client_identity.key"),
 ];
 
 /// The far end's response fields the plane reads: the answer's media type (a JSON document or an
@@ -116,78 +101,66 @@ pub const NEED_UPSTREAM: u32 = 0;
 /// host keeps running (ARCHITECT round 5 Q-L3B-STDIO-UPSTREAM (A)).
 pub const NEED_PROGRAM: u32 = 1;
 
-/// WHERE EACH STDIO SERVER IS REACHED: its registration's own program, as the member-program path
-/// (`busbar_contract::section::MEMBER_PROGRAM`): its `command`, `args` and `env`.
-pub const MEMBER_PROGRAM: &str = busbar_contract::section::MEMBER_PROGRAM;
-
 /// The program need's response field the plane reads: the generation of the child a lease reached.
 pub const KEEP_PROGRAM_HEADERS: &[AbiStr] =
     &[abi_str(busbar_contract::conn::PROGRAM_GENERATION_FIELD)];
 
-const NO_DETAILS: Blob = Blob {
-    fmt: BLOB_ABSENT,
-    ..Blob::ZERO
-};
-
 /// THE PLANE'S CONNECTION NEEDS: outbound over http to the servers the operator registered at a URL,
 /// governed as upstreams a plane reaches (no auth style is named here: each member's credential is
-/// the binding the kernel seals for it, and it adds the fields when it sends); and the `transport:
-/// stdio` servers, each the program its registration names, run by the host as the operator's own
-/// infrastructure with no credential (a pipe carries none), one long-lived child per server.
+/// the binding the kernel seals for it, and it adds the fields when it sends), each held to its
+/// registration's anchors: its pin's key and its client identity ([`CLIENT_IDENTITY_FROM`]); and
+/// the `transport: stdio` servers, each the program its registration names, run by the host as the
+/// operator's own infrastructure with no credential (a pipe carries none), one long-lived child
+/// per server.
 pub const NEEDS: &[Need] = &[
-    Need {
-        direction: DIRECTION_OUTBOUND,
-        egress_class: EGRESS_PROVIDER,
-        transport: abi_str(CARRIER_HTTP),
-        auth: NONE,
-        // Each registered server is reached at its own `url` (ARCHITECT Q-L3B-ROUTES).
-        target_from: abi_str(MEMBER_TARGET),
-        trust_from: NONE,
-        details: NO_DETAILS,
-        keep_response_headers: KEEP_RESPONSE_HEADERS.as_ptr(),
-        keep_response_headers_len: KEEP_RESPONSE_HEADERS.len(),
-        keep_mode: KEEP_NAMED,
-        ..Need::ZERO
+    {
+        let mut n = Need::EMPTY.with_keep_response_headers(KEEP_RESPONSE_HEADERS);
+        n.direction = DIRECTION_OUTBOUND;
+        n.egress_class = EGRESS_PROVIDER;
+        n.transport = abi_str(CARRIER_HTTP);
+        // Each registered server is reached at its own `url` (ARCHITECT Q-L3B-ROUTES), as a
+        // member-target path: one member route per server.
+        n.target_from = abi_str("settings.*.url");
+        // busbar's client identity for it, which the connector presents when the server asks.
+        n.trust_from = abi_str(CLIENT_IDENTITY_FROM);
+        n.keep_mode = KEEP_NAMED;
+        n
     },
-    Need {
-        direction: DIRECTION_OUTBOUND,
-        egress_class: EGRESS_OPERATOR_INFRASTRUCTURE,
-        transport: abi_str(CARRIER_STDIO),
-        auth: NONE,
-        target_from: abi_str(MEMBER_PROGRAM),
-        trust_from: NONE,
-        details: NO_DETAILS,
-        keep_response_headers: KEEP_PROGRAM_HEADERS.as_ptr(),
-        keep_response_headers_len: KEEP_PROGRAM_HEADERS.len(),
-        keep_mode: KEEP_NAMED,
-        ..Need::ZERO
+    {
+        let mut n = Need::EMPTY.with_keep_response_headers(KEEP_PROGRAM_HEADERS);
+        n.direction = DIRECTION_OUTBOUND;
+        n.egress_class = EGRESS_OPERATOR_INFRASTRUCTURE;
+        n.transport = abi_str(CARRIER_STDIO);
+        // Each stdio server is its registration's own program: `command`, `args` and `env`.
+        n.target_from = abi_str(busbar_contract::section::MEMBER_PROGRAM);
+        n.keep_mode = KEEP_NAMED;
+        n
     },
 ];
 
-const DIALECTS: &[AbiStr] = &[abi_str(DIALECT)];
+/// The one wire dialect: JSON-RPC 2.0, carried over each of the plane's transports.
+const DIALECTS: &[AbiStr] = &[abi_str("jsonrpc")];
 
 const SCOPE_KINDS: &[AbiStr] = &[abi_str(SCOPE), abi_str(SCOPE_TOOL)];
 
 const BILLABLE_CLASSES: &[BillableClass] = &[
     BillableClass {
         class: abi_str(crate::tool_meta::CLASS_TOOL_CALLS.as_str()),
-        family: abi_str(CALLS_FAMILY),
+        family: abi_str("count"),
     },
     BillableClass {
         class: abi_str(crate::tool_meta::CLASS_BYTES.as_str()),
-        family: abi_str(BYTES_FAMILY),
+        family: abi_str("byte"),
     },
     // THE FEE UNIT is also a class (the tail check holds `fee_units ⊆ billable_classes`, ARCHITECT
     // Q-L5-FEE (C)): reported `1` on an answer the caller is served with a success, so a unit whose
     // caller is answered otherwise has its `per_request` refunded, as 1.5.5 refunded it.
     BillableClass {
         class: abi_str(FEE_PER_REQUEST),
-        family: abi_str(FEE_FAMILY),
+        // A count of 0 or 1.
+        family: abi_str("count"),
     },
 ];
-
-/// The family of the fee unit's class: a count of 0 or 1.
-pub const FEE_FAMILY: &str = "count";
 
 /// The tail index of the fee unit's class in [`BILLABLE_CLASSES`].
 pub const CLASS_FEE_INDEX: u32 = 2;
@@ -207,18 +180,11 @@ const RECORD_KINDS: &[AbiStr] = &[
 const RECORD_RETENTIONS: &[RecordRetention] =
     &[record_retention(RECORD_TASK, Retention::TerminalOnly)];
 
-/// The kind a completed ask exchange's approval is claimed under, once ([`RECORD_KINDS`]): the
-/// spent-approval ledger is the host's one-time `records.claim` (ARCHITECT Q-L3B-ASK).
-pub const KIND_APPROVAL: &str = crate::tool_records::KIND_APPROVAL;
-
 /// The index of the call record's kind in [`RECORD_KINDS`].
 pub const RECORD_CALL: u32 = 0;
 
 /// The index of the task kind in [`RECORD_KINDS`]: a task's result chunks are written under it.
 pub const RECORD_TASK: u32 = 3;
-
-/// The kind a task's work handle is opened under (`work.open`, [`RECORD_KINDS`]).
-pub const KIND_TASK: &str = crate::tool_records::KIND_TASK;
 
 /// THE CALL LOG IS A CHAIN: each caller's call records are hash-chained by the host, the prelude
 /// (`prev_hash`, the scope, `seq`) LengthPrefixed with the scope in the digest, then the plane's own
@@ -227,91 +193,81 @@ const RECORD_CHAINS: &[RecordChain] = &[RecordChain {
     kind: RECORD_CALL,
     framing: CHAIN_LENGTH_PREFIXED,
     flags: CHAIN_DIGESTS_SCOPE,
-    ..RecordChain::ZERO
+    _reserved: 0,
 }];
 
-/// The pin's four mechanisms; three are authenticity roots and `unpinned` is not.
+/// The pin's four mechanisms; three are authenticity roots and `unpinned` is not. `cert_spki` and
+/// `mtls` pin the far end's KEY ([`MECHANISM_PEER_KEY`]): the host seals it into the registration's
+/// member route and the connector refuses a connection whose server presents another key.
+/// `pinned_pubkey` is a root whose key is a signed manifest's issuer key, kept for the plane and
+/// the kernel's judgement as predev kept it, never compared with the far end's key.
 const PIN_MECHANISMS: &[PinMechanism] = &[
     PinMechanism {
         token: abi_str("pinned_pubkey"),
         flags: MECHANISM_ROOT,
-        ..PinMechanism::ZERO
+        _reserved: 0,
     },
     PinMechanism {
         token: abi_str("cert_spki"),
-        flags: MECHANISM_ROOT,
-        ..PinMechanism::ZERO
+        flags: MECHANISM_ROOT | MECHANISM_PEER_KEY,
+        _reserved: 0,
     },
     PinMechanism {
         token: abi_str("mtls"),
-        flags: MECHANISM_ROOT,
-        ..PinMechanism::ZERO
+        flags: MECHANISM_ROOT | MECHANISM_PEER_KEY,
+        _reserved: 0,
     },
     PinMechanism {
         token: abi_str("unpinned"),
-        ..PinMechanism::ZERO
+        flags: 0,
+        _reserved: 0,
     },
 ];
 
-/// The kernel-owned trust keys of one entry, the ABI spelling of [`crate::tools_config::TRUST_KEYS`];
+/// The kernel-owned trust keys of one entry;
 /// declaration order is judgement order. The pin carries no fingerprint: a server here offers
 /// none an operator could approve out of band.
 const TRUST_KEYS: &[TrustKey] = &[
-    TrustKey {
-        key: abi_str("pin"),
-        role: TRUST_PIN,
-        default: NONE,
-        mechanisms: PIN_MECHANISMS.as_ptr(),
-        mechanisms_len: PIN_MECHANISMS.len(),
-        ..TrustKey::ZERO
+    {
+        let mut k = TrustKey::EMPTY.with_mechanisms(PIN_MECHANISMS);
+        k.key = abi_str("pin");
+        k.role = TRUST_PIN;
+        k
     },
-    TrustKey {
-        key: abi_str("verify_ttl"),
-        role: TRUST_REVERIFY_TTL,
-        default: abi_str(DEFAULT_MCP_VERIFY_TTL),
-        ..TrustKey::ZERO
+    {
+        let mut k = TrustKey::EMPTY;
+        k.key = abi_str("verify_ttl");
+        k.role = TRUST_REVERIFY_TTL;
+        k.default = abi_str(DEFAULT_MCP_VERIFY_TTL);
+        k
     },
-    TrustKey {
-        key: abi_str("allow_private"),
-        role: TRUST_PRIVATE_REACH,
-        default: NONE,
-        ..TrustKey::ZERO
+    {
+        let mut k = TrustKey::EMPTY;
+        k.key = abi_str("allow_private");
+        k.role = TRUST_PRIVATE_REACH;
+        k
     },
-    TrustKey {
-        key: abi_str(crate::tools_config::TOOL_APPROVALS_KEY),
-        role: busbar_contract::abi::plane::TRUST_ITEM_APPROVALS,
-        default: abi_str(crate::tools_config::TOOL_APPROVAL_FIELD),
-        ..TrustKey::ZERO
+    {
+        let mut k = TrustKey::EMPTY;
+        k.key = abi_str(crate::tools_config::TOOL_APPROVALS_KEY);
+        k.role = busbar_contract::abi::plane::TRUST_ITEM_APPROVALS;
+        k.default = abi_str(crate::tools_config::TOOL_APPROVAL_FIELD);
+        k
     },
 ];
 
-const fn op_class(i: usize) -> OpClass {
-    OpClass {
-        op: abi_str(crate::tool_ops::OP_CLASSES[i].as_str()),
-        name: abi_str(crate::tool_ops::OP_CLASSES[i].as_str()),
+/// The operation classes, in [`crate::tool_ops::OP_CLASSES`] order, each named by its own key.
+const OP_CLASS_TABLE: &[OpClass] = &{
+    const N: usize = crate::tool_ops::OP_CLASSES.len();
+    let mut table = [OpClass::ZERO; N];
+    let mut i = 0;
+    while i < N {
+        let key = abi_str(crate::tool_ops::OP_CLASSES[i].as_str());
+        table[i] = OpClass { op: key, name: key };
+        i += 1;
     }
-}
-
-/// The operation classes, in [`crate::tool_ops::OP_CLASSES`] order.
-const OP_CLASS_TABLE: &[OpClass] = &[
-    op_class(0),
-    op_class(1),
-    op_class(2),
-    op_class(3),
-    op_class(4),
-    op_class(5),
-    op_class(6),
-    op_class(7),
-    op_class(8),
-    op_class(9),
-    op_class(10),
-    op_class(11),
-    op_class(12),
-    op_class(13),
-    op_class(14),
-    op_class(15),
-    op_class(16),
-];
+    table
+};
 
 /// The tail index of an operation class, where the table holds it (the SDK's one index rule,
 /// [`class_index`]).
@@ -361,124 +317,94 @@ pub fn forbidden_origin_body() -> Vec<u8> {
 ///
 /// The block, written and malformed, in its grammar's words.
 pub fn allowed_origins(owned: &[u8]) -> Result<Vec<String>, String> {
-    if owned.is_empty() {
-        return Ok(Vec::new());
-    }
-    let Some(block) = serde_json::from_slice::<serde_json::Value>(owned)
-        .map_err(|e| e.to_string())?
-        .get(ENDPOINT_SECTION)
-        .cloned()
-    else {
-        return Ok(Vec::new());
-    };
-    let cfg: crate::endpoint::McpCfg = serde_json::from_value(block).map_err(|e| e.to_string())?;
-    Ok(cfg.allowed_origins)
+    Ok(mcp_block(owned)?
+        .map(|cfg| cfg.allowed_origins)
+        .unwrap_or_default())
 }
 
-/// THE STATEMENT TAIL: the plane's static facts.
-pub const TAIL: &PlaneTail = &PlaneTail {
-    head: KindTailHead {
-        size: std::mem::size_of::<PlaneTail>() as u32,
-        _reserved: 0,
-    },
+/// The `mcp:` block among the sections `owned` keys by name; `None` when it writes none.
+fn mcp_block(owned: &[u8]) -> Result<Option<crate::endpoint::McpCfg>, String> {
+    if owned.is_empty() {
+        return Ok(None);
+    }
+    let value: serde_json::Value = serde_json::from_slice(owned).map_err(|e| e.to_string())?;
+    value
+        .get(ENDPOINT_SECTION)
+        .map(|block| serde_json::from_value(block.clone()).map_err(|e| e.to_string()))
+        .transpose()
+}
+
+const TAIL_VALUE: PlaneTail = {
+    let mut t = PlaneTail::EMPTY
+        .with_dialects(DIALECTS)
+        .with_scope_kinds(SCOPE_KINDS)
+        .with_op_classes(OP_CLASS_TABLE)
+        .with_billable_classes(BILLABLE_CLASSES)
+        .with_fee_units(FEE_UNITS)
+        .with_record_kinds(RECORD_KINDS)
+        .with_record_chains(RECORD_CHAINS)
+        .with_trust_keys(TRUST_KEYS)
+        .with_admin_routes(ADMIN_ROUTES);
     // THE GATE-FIRST HOOK ORDER (spec Part 3 section 12 "Hooks"; ARCHITECT ruling on the mcp
     // fold): the served engine ran an entry's decision gates over the invocation BEFORE its
     // rewrite chain (`tools.hooks` / `tools.<server>.hooks`), and the door's units keep that order.
-    flags: busbar_contract::abi::plane::TAIL_HOOKS_GATED,
-    ingress: INGRESS_REQUEST_RESPONSE | INGRESS_RESPONSE_STREAM,
-    dispatch_shape: SHAPE_PIECEWISE,
-    answer_layout: ANSWER_LAYOUT,
-    scope: abi_str(SCOPE),
-    label: abi_str(LABEL),
-    subject_noun: abi_str(SUBJECT_NOUN),
-    admin_noun: abi_str(ADMIN_NOUN),
-    audit_kind: abi_str(AUDIT_KIND),
-    signing_domain: abi_str(ASK_SIGNING_DOMAIN),
-    signing_kid_prefix: abi_str(ASK_KID_PREFIX),
-    cli_help: abi_str(crate::tool_meta::HELP_FLAGS),
-    dialects: DIALECTS.as_ptr(),
-    dialects_len: DIALECTS.len(),
-    scope_kinds: SCOPE_KINDS.as_ptr(),
-    scope_kinds_len: SCOPE_KINDS.len(),
-    op_classes: OP_CLASS_TABLE.as_ptr(),
-    op_classes_len: OP_CLASS_TABLE.len(),
-    billable_classes: BILLABLE_CLASSES.as_ptr(),
-    billable_classes_len: BILLABLE_CLASSES.len(),
-    fee_units: FEE_UNITS.as_ptr(),
-    fee_units_len: FEE_UNITS.len(),
-    record_kinds: RECORD_KINDS.as_ptr(),
-    record_kinds_len: RECORD_KINDS.len(),
-    record_chains: RECORD_CHAINS.as_ptr(),
-    record_chains_len: RECORD_CHAINS.len(),
-    trust_keys: TRUST_KEYS.as_ptr(),
-    trust_keys_len: TRUST_KEYS.len(),
-    caller_credential_refusal: NONE,
-    admin_routes: ADMIN_ROUTES.as_ptr(),
-    admin_routes_len: ADMIN_ROUTES.len(),
-    admin_openapi: Blob {
-        ptr: ADMIN_OPENAPI.as_ptr(),
-        len: ADMIN_OPENAPI.len(),
-        fmt: busbar_contract::abi::mechanism::call::BLOB_JSON,
-        ..Blob::ZERO
-    },
+    t.flags = busbar_contract::abi::plane::TAIL_HOOKS_GATED;
+    t.ingress = INGRESS_REQUEST_RESPONSE | INGRESS_RESPONSE_STREAM;
+    t.dispatch_shape = SHAPE_PIECEWISE;
+    t.answer_layout = ANSWER_LAYOUT;
+    t.scope = abi_str(SCOPE);
+    t.label = abi_str("MCP");
+    t.subject_noun = abi_str(SUBJECT_NOUN);
+    // A registration, in admin responses, and the record resource kind it is audited under.
+    t.admin_noun = abi_str("mcp-server");
+    t.audit_kind = abi_str("mcp_server");
+    // The signing domain busbar's own ask state is sealed under ([`crate::seal`]): the host's
+    // `sign` derives its subkey from the deployment's fleet-shared key.
+    t.signing_domain = abi_str("mcp/ask-state/v1");
+    t.signing_kid_prefix = abi_str("busbar-mcp-ask-");
+    t.cli_help = abi_str(crate::tool_meta::HELP_FLAGS);
+    t.admin_openapi = Blob::json(ADMIN_OPENAPI.as_bytes());
     // No stream ceiling (ARCHITECT STREAM-CEILING, 2026-10-07): predev's mcp engine put no bound on
     // a stalled consumer (its event and subscribe streams were pull-based bodies, `session_serve.rs`,
     // `subscribe.rs`), so the mcp plane states none and keeps that behaviour.
-    record_retentions: RECORD_RETENTIONS.as_ptr(),
-    record_retentions_len: RECORD_RETENTIONS.len(),
-    ..PlaneTail::ZERO
+    t.record_retentions = RECORD_RETENTIONS.as_ptr();
+    t.record_retentions_len = RECORD_RETENTIONS.len();
+    t
 };
+
+/// THE STATEMENT TAIL: the plane's static facts.
+pub const TAIL: &PlaneTail = &TAIL_VALUE;
 
 /// EVERY ROUTE THE PLANE SERVES, in the order the engine mounts them: the discovery document, the
 /// endpoint's three verbs, and the event-framed answer on the same path.
 pub const ROUTES: &[ServedRoute] = &[
-    ServedRoute {
-        verb: "GET",
-        target: DEFAULT_METADATA,
-        carrier: CARRIER_HTTP,
-        open: true,
-    },
-    ServedRoute {
-        verb: "POST",
-        target: DEFAULT_MOUNT,
-        carrier: CARRIER_HTTP,
-        open: false,
-    },
-    ServedRoute {
-        verb: "GET",
-        target: DEFAULT_MOUNT,
-        carrier: CARRIER_HTTP,
-        open: false,
-    },
-    ServedRoute {
-        verb: "DELETE",
-        target: DEFAULT_MOUNT,
-        carrier: CARRIER_HTTP,
-        open: false,
-    },
-    ServedRoute {
-        verb: "POST",
-        target: DEFAULT_MOUNT,
-        carrier: CARRIER_SSE,
-        open: false,
-    },
+    route("GET", DEFAULT_METADATA, CARRIER_HTTP, true),
+    route("POST", DEFAULT_MOUNT, CARRIER_HTTP, false),
+    route("GET", DEFAULT_MOUNT, CARRIER_HTTP, false),
+    route("DELETE", DEFAULT_MOUNT, CARRIER_HTTP, false),
+    route("POST", DEFAULT_MOUNT, CARRIER_SSE, false),
     // THE TASK-RUN CLAIM (ARCHITECT round 5 Q-L3B-TASKS (b) → (A)): a task's continuation, nested
     // by the unit that created the task.
-    ServedRoute {
-        verb: "POST",
-        target: TASK_RUN_MOUNT,
-        carrier: CARRIER_HTTP,
-        open: false,
-    },
+    route("POST", TASK_RUN_MOUNT, CARRIER_HTTP, false),
     // THE LINE CARRIER (ARCHITECT Q1a, round 4 Q-L3B-STDIO-SHAPE (B)): the host holds the process's
     // own stdin/stdout open as one carrier session and opens a unit per line.
-    ServedRoute {
-        verb: "POST",
-        target: DEFAULT_MOUNT,
-        carrier: CARRIER_STDIO,
-        open: false,
-    },
+    route("POST", DEFAULT_MOUNT, CARRIER_STDIO, false),
 ];
+
+/// One [`ROUTES`] row.
+const fn route(
+    verb: &'static str,
+    target: &'static str,
+    carrier: &'static str,
+    open: bool,
+) -> ServedRoute {
+    ServedRoute {
+        verb,
+        target,
+        carrier,
+        open,
+    }
+}
 
 /// The index of the task-run claim in [`ROUTES`].
 pub const TASK_RUN_ROUTE: usize = 5;
@@ -606,16 +532,6 @@ pub fn read_open(
     Ok((read_tools_section(&rest)?, pools))
 }
 
-/// ONE GENERATION'S SNAPSHOT, owned, for the SDK to publish until that generation's `retire`.
-///
-/// With a readable `public_url` the plane is admitted: it states its audience (the endpoint's
-/// absolute URI) and its protected-resource metadata document, and it claims its routes. Without
-/// one it claims nothing: a plane with no public base has no audience a token could name.
-#[must_use]
-pub fn endpoint_snapshot_spec(public_url: Option<&str>) -> SnapshotSpec {
-    snapshot_spec_for(public_url.map(under_public_url))
-}
-
 /// The audience and metadata document of an endpoint mounted under the deployment's public base
 /// URL: the fixed mount and its RFC 9728 document beneath that base.
 #[must_use]
@@ -640,18 +556,8 @@ pub fn admitted_endpoint(
     public_url: Option<&str>,
     owned: &[u8],
 ) -> Result<Option<(String, String)>, String> {
-    let block = if owned.is_empty() {
-        None
-    } else {
-        serde_json::from_slice::<serde_json::Value>(owned)
-            .map_err(|e| e.to_string())?
-            .get(ENDPOINT_SECTION)
-            .cloned()
-    };
-    match block {
-        Some(block) => {
-            let cfg: crate::endpoint::McpCfg =
-                serde_json::from_value(block).map_err(|e| e.to_string())?;
+    match mcp_block(owned)? {
+        Some(cfg) => {
             let resource =
                 crate::endpoint::McpResource::from_cfg(&cfg).map_err(|e| e.to_string())?;
             Ok(Some((
@@ -671,17 +577,9 @@ pub fn admitted_endpoint(
 ///
 /// The block, written and malformed, in its grammar's words.
 pub fn resource_facts(owned: &[u8]) -> Result<Option<Vec<u8>>, String> {
-    if owned.is_empty() {
-        return Ok(None);
-    }
-    let Some(block) = serde_json::from_slice::<serde_json::Value>(owned)
-        .map_err(|e| e.to_string())?
-        .get(ENDPOINT_SECTION)
-        .cloned()
-    else {
+    let Some(cfg) = mcp_block(owned)? else {
         return Ok(None);
     };
-    let cfg: crate::endpoint::McpCfg = serde_json::from_value(block).map_err(|e| e.to_string())?;
     let resource = crate::endpoint::McpResource::from_cfg(&cfg).map_err(|e| e.to_string())?;
     Ok(Some(
         serde_json::json!({
@@ -693,14 +591,9 @@ pub fn resource_facts(owned: &[u8]) -> Result<Option<Vec<u8>>, String> {
     ))
 }
 
-/// ONE GENERATION'S SNAPSHOT under `admitted` (the endpoint's audience and metadata document,
-/// [`admitted`]); with none it claims nothing.
-#[must_use]
-pub fn snapshot_spec_for(admitted: Option<(String, String)>) -> SnapshotSpec {
-    snapshot_spec_with(admitted, None)
-}
-
-/// [`snapshot_spec_for`], stating its protected-resource `facts` ([`resource_facts`]) beside.
+/// One generation's snapshot under `admitted` (the endpoint's audience and metadata document,
+/// [`admitted_endpoint`]), stating its protected-resource `facts` ([`resource_facts`]) beside; with
+/// none it claims nothing.
 #[must_use]
 pub fn snapshot_spec_with(
     admitted: Option<(String, String)>,

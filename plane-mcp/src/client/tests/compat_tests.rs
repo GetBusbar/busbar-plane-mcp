@@ -45,6 +45,39 @@ fn a_refusal_moves_the_ladder_and_an_outage_does_not() {
     );
 }
 
+/// RED: ANY `4xx` to the stateless request refuses its revision, whatever JSON-RPC error rides it.
+/// The MCP specification has a server answer an unsupported `MCP-Protocol-Version` with `400 Bad
+/// Request` and fixes no code or wording, so a `400` carrying an error that names neither the
+/// session nor `-32022` is still the revision refused, never the call's answer.
+#[test]
+fn red_any_4xx_to_the_stateless_request_refuses_its_revision() {
+    for status in [400u16, 401, 404, 405, 409, 422] {
+        let body = json!({"jsonrpc":"2.0","id":null,
+            "error":{"code":-32600,"message":"Bad Request: Unsupported protocol version"}})
+        .to_string();
+        assert_eq!(
+            stateless_outcome(status, body.as_bytes()),
+            StepOutcome::Refused4xx,
+            "{status}"
+        );
+        assert_eq!(stateless_outcome(status, b""), StepOutcome::Refused4xx);
+    }
+    assert_eq!(stateless_outcome(503, b""), StepOutcome::Unreachable);
+    // A success status: the stateless path's own answer, an upstream's own error included.
+    let own =
+        json!({"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"bad args"}}).to_string();
+    assert_eq!(
+        stateless_outcome(200, own.as_bytes()),
+        StepOutcome::Answered
+    );
+    let unsupported =
+        json!({"jsonrpc":"2.0","id":1,"error":{"code":-32022,"message":"m"}}).to_string();
+    assert_eq!(
+        stateless_outcome(200, unsupported.as_bytes()),
+        StepOutcome::Refused4xx
+    );
+}
+
 #[test]
 fn lowering_drops_the_stateless_meta_and_mirror_and_keeps_the_credential() {
     let lowered = lower_request(
@@ -52,6 +85,7 @@ fn lowering_drops_the_stateless_meta_and_mirror_and_keeps_the_credential() {
         "https://up.example/rpc",
         Revision::R2025_06_18,
         Some("sid1"),
+        None,
     );
     let body: Value = serde_json::from_slice(&lowered.body).unwrap();
     assert_eq!(
@@ -61,7 +95,7 @@ fn lowering_drops_the_stateless_meta_and_mirror_and_keeps_the_credential() {
     );
     assert_eq!(body["params"]["arguments"], json!({"x":"y"}));
     assert_eq!(header(&lowered, H_PROTOCOL_VERSION), Some("2025-06-18"));
-    assert_eq!(header(&lowered, H_SESSION), Some("sid1"));
+    assert_eq!(header(&lowered, crate::adapt::H_SESSION_ID), Some("sid1"));
     assert_eq!(header(&lowered, H_MCP_METHOD), None);
     assert_eq!(header(&lowered, H_MCP_NAME), None);
     assert_eq!(header(&lowered, "authorization"), Some("Bearer tok"));
@@ -79,6 +113,7 @@ fn the_event_stream_revision_carries_no_version_header_and_an_empty_meta_goes() 
         "https://up.example/messages?sessionId=a",
         Revision::R2024_11_05,
         None,
+        None,
     );
     assert_eq!(lowered.url, "https://up.example/messages?sessionId=a");
     assert_eq!(header(&lowered, H_PROTOCOL_VERSION), None);
@@ -92,7 +127,6 @@ fn initialize_asks_for_a_revision_and_names_busbar() {
         &stateless_call(),
         "https://up.example/rpc",
         Revision::R2025_11_25,
-        9,
         "1.6.0",
     );
     let body: Value = serde_json::from_slice(&init.body).unwrap();
@@ -113,7 +147,7 @@ fn initialize_asks_for_a_revision_and_names_busbar() {
     );
     let body: Value = serde_json::from_slice(&done.body).unwrap();
     assert!(body.get("id").is_none());
-    assert_eq!(header(&done, H_SESSION), Some("s"));
+    assert_eq!(header(&done, crate::adapt::H_SESSION_ID), Some("s"));
 }
 
 #[test]
@@ -167,66 +201,10 @@ fn the_event_reader_joins_split_chunks_and_is_bounded() {
     assert_eq!(got.len(), 2);
     assert_eq!(got[0].event.as_deref(), Some("endpoint"));
     assert_eq!(got[0].data, "/m?s=1");
-    assert_eq!(got[1].id.as_deref(), Some("0-1"));
     assert_eq!(got[1].data, "{\"a\":\n1}");
     assert!(r.feed(&[b'x'; 100]).is_empty());
     assert!(
         r.overflowed(),
         "an event that never ends is dropped, not buffered forever"
     );
-}
-
-fn ev(event: Option<&str>, data: &str) -> StreamEvent {
-    StreamEvent {
-        event: event.map(str::to_string),
-        id: None,
-        data: data.to_string(),
-    }
-}
-
-#[test]
-fn a_link_is_ready_once_and_answers_only_what_it_waits_for() {
-    let mut link = EventStreamLink::new("https://up.example/events", 2);
-    assert_eq!(link.address(), None);
-    assert_eq!(
-        link.on_event(&ev(Some("endpoint"), "/messages?sessionId=a")),
-        LinkEffect::Ready("https://up.example/messages?sessionId=a".to_string())
-    );
-    assert_eq!(
-        link.on_event(&ev(Some("endpoint"), "/elsewhere")),
-        LinkEffect::Ignored,
-        "the address is named once"
-    );
-    assert!(link.expect(&json!(7)));
-    assert!(!link.expect(&json!(7)), "one waiter per id");
-    assert!(link.expect(&json!("x")));
-    assert!(!link.expect(&json!(9)), "bounded");
-    let answer = r#"{"jsonrpc":"2.0","id":7,"result":{}}"#;
-    assert!(
-        matches!(link.on_event(&ev(Some("message"), answer)), LinkEffect::Answer { ref id, .. } if id == "7")
-    );
-    assert_eq!(
-        link.on_event(&ev(Some("message"), answer)),
-        LinkEffect::Ignored,
-        "answered once"
-    );
-    let unsolicited = r#"{"jsonrpc":"2.0","id":99,"result":{}}"#;
-    assert_eq!(link.on_event(&ev(None, unsolicited)), LinkEffect::Ignored);
-    let note = r#"{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}"#;
-    assert!(matches!(
-        link.on_event(&ev(Some("message"), note)),
-        LinkEffect::FromPeer(_)
-    ));
-    link.abandon(&json!("x"));
-    assert!(link.expect(&json!(9)));
-}
-
-#[test]
-fn red_a_link_refuses_a_cross_origin_endpoint() {
-    let mut link = EventStreamLink::new("https://up.example/events", 2);
-    assert_eq!(
-        link.on_event(&ev(Some("endpoint"), "https://evil.example/m")),
-        LinkEffect::Refused(AddressRefused::CrossOrigin)
-    );
-    assert_eq!(link.address(), None);
 }

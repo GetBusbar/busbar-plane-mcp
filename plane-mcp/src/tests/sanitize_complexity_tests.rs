@@ -8,14 +8,15 @@
 //! sender can spell in a 200 KB body, so the two adversarial shapes below carry a wall-clock bound
 //! as well as an output assertion.
 //!
-//! WHY THESE TWO LIVE OUT HERE AND THE REST OF THE SUITE LIVES IN `src/tests/`. They read a clock,
-//! and this crate's purity oracle (`tests/purity.rs::the_plane_performs_no_input_or_output`) walks
-//! `src/` and refuses one — rightly, because a plane that reads a clock can answer differently for
-//! a reason no caller can see. Measuring what a pure function COSTS is not the plane reading a
-//! clock; it is a harness reading one from outside. So the rule stays absolute and the guard stays
-//! running, which is the arrangement a waiver would have destroyed.
+//! WHY THEY READ A CLOCK AND THE SURFACE MAY NOT. This crate's purity oracle
+//! (`tests/purity.rs::the_plane_performs_no_input_or_output`) walks the shipped source and refuses a
+//! clock, rightly: a plane that reads one can answer differently for a reason no caller can see.
+//! Measuring what a pure function COSTS is not the plane reading a clock; it is a harness reading
+//! one from outside. This test module (moved in from `tests/` when the crate's only public item
+//! became `door`) is not on the surface, and the oracle skips the test modules, so the rule stays
+//! absolute and the guard stays running.
 
-use busbar_plane_mcp::sanitize::normalise;
+use crate::sanitize::normalise;
 
 /// AN UNTERMINATED `<` MUST NOT COST MORE THAN THE BYTES IT ARRIVED IN.
 ///

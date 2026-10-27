@@ -1,68 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! SESSION STATE FOR THE SESSION REVISIONS: plane state, bounded, and bound to its owner.
+//! SESSION STATE FOR THE SESSION REVISIONS: plane state, per process, bounded, and bound to its
+//! owner. No statics, no clock (the caller passes `now_ms`), no randomness (the caller passes the
+//! entropy).
 //!
-//! The `2025-06-18`, `2025-11-25` and `2024-11-05` revisions open a conversation with `initialize`
-//! and keep it in a session the server names. That state belongs to this plane and to no other
-//! kind, and it is held here as a plain value with `&mut` methods: the caller owns the one table per
-//! plane instance and serialises access to it. Nothing here is process-global (no statics), reads a
-//! clock (the caller passes `now_ms`), or draws randomness (the caller passes the entropy).
-//!
-//! ## Bounded, in count and in bytes, with eviction
-//!
-//! A session costs memory for as long as it lives, and a client that never sends DELETE never gives
-//! it back. So every dimension has a ceiling in [`Bounds`]:
-//!
-//! - `max_owner_sessions`: an owner opening one more evicts ITS OWN least recently used session.
-//! - `max_sessions`: when the whole table is full, the opener's own least recently used session
-//!   gives way; an opener with none is refused ([`OpenRefused::Full`]).
-//! - `idle_ms`: a session untouched for this long is gone at the next lookup or sweep.
-//! - `max_session_bytes`: a session's buffered events are trimmed OLDEST FIRST to fit. A trimmed
-//!   event can no longer be replayed; the replay says so instead of pretending the tail is whole.
-//! - `max_owner_bytes` and `max_total_bytes`: an owner over its byte share, or a table over its
-//!   total, is brought back under by evicting THAT OWNER'S other sessions, least recently used
-//!   first, then trimming the session being written.
-//!
-//! ONE OWNER'S PRESSURE NEVER EVICTS ANOTHER OWNER'S SESSION OR EVENTS (reviewer follow-up 1,
-//! ARCHITECT 2026-09-29). Every eviction and every trim above lands on the owner whose open or
-//! write caused it, so a caller filling its quota can cost itself sessions and replayable events and
-//! can cost nobody else anything.
-//! - `stream_cap`: how many resumable event stream cursors one session may hold; opening one more drops
-//!   the oldest.
-//!
-//! An evicted or expired session answers exactly as an unknown one does. The spec's rule for that
-//! (404, and the client re-initialises) is what makes eviction safe to do at all.
-//!
-//! ## Per-process memory, deliberately
-//!
-//! Sessions are not shared between replicas. A client whose next request lands on another replica
-//! is told its session is unknown and re-initialises, which is the spec's own recovery path. A
-//! shared session store would make every replica a reader of every other replica's conversation
-//! for no gain the protocol does not already give.
-//!
-//! ## Which GET opens which stream
-//!
-//! A GET naming a session opens that session's stream (or resumes it with `Last-Event-ID`). A GET
-//! naming no session opens a `2024-11-05` event stream only when it accepts `text/event-stream` AND
-//! carries no `MCP-Protocol-Version` header, which every later revision's client sends and a
-//! `2024-11-05` client never does; any other sessionless GET, and a sessionless DELETE, is `405`,
-//! as the single-endpoint revisions say (ARCHITECT ruling 2026-09-29;
-//! [`crate::revision::sessionless_get`]).
-//!
-//! ## Bound to the principal that opened it
-//!
-//! A session id is a bearer of nothing. The table records the [`Owner`] (principal and credential) that
-//! opened each session, and a lookup under any other owner answers "unknown", indistinguishable from
-//! a session that never existed, so a leaked id is not a probe. The id is 128 bits from the caller's
-//! CSPRNG, and an all-zero entropy buffer (the failure shape of a refused entropy source) is refused
-//! rather than minted. Log only [`log_prefix`] of an id, never the whole of it.
-//!
-//! The ungoverned open chain has ONE principal and ONE credential for every caller, so there the
-//! binding isolates nothing, which matches that posture's wildcard grants. It matters most for the
-//! `2024-11-05` transport, whose session id travels in the message address's URL query (where logs
-//! and intermediaries can read it): the serving side emits one operator warning per instance the
-//! first time such a stream opens without governance (reviewer follow-up 2, ARCHITECT 2026-09-29).
+//! Every dimension has a ceiling in [`Bounds`], and ONE OWNER'S PRESSURE NEVER EVICTS ANOTHER
+//! OWNER'S SESSION OR EVENTS: every eviction and trim lands on the owner whose open or write caused
+//! it. ADMISSION BOUNDS LIVE WORK, NOTHING EVICTS IT (THE DESIGN l.199): a session holding a live
+//! stream is never given way for another, and a cursor a live stream reads is never dropped; only an
+//! idle session gives way, and an open past a ceiling with none to give is refused. An evicted,
+//! expired or foreign session answers exactly as an unknown one does (404, and the client
+//! re-initialises), so a leaked id is not a probe. An all-zero entropy buffer is refused.
+
+// The crate's only public item is `door`: the accessors and variants below were this module's public API; the tests hold them, the door does not reach them (BUSBAR-1.6.0.md l.3560).
+#![cfg_attr(not(test), allow(dead_code))]
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -118,38 +70,6 @@ pub struct Owner {
     pub credential: String,
 }
 
-/// How a session's messages are carried.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Carriage {
-    /// The single endpoint: POST, the GET stream and DELETE.
-    Endpoint,
-    /// The `2024-11-05` event stream, with messages POSTed to the address it named.
-    EventStream,
-}
-
-/// A minted session id: 32 lowercase hex digits, 128 bits.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SessionId(String);
-
-impl SessionId {
-    /// The id as the wire carries it.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-/// The part of a session id that may be logged: its first eight characters, or nothing when the
-/// value is not a well-formed id at all (so a hostile header is never echoed into a log).
-#[must_use]
-pub fn log_prefix(id: &str) -> &str {
-    if id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()) {
-        &id[..8]
-    } else {
-        ""
-    }
-}
-
 /// Why a session could not be opened.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OpenRefused {
@@ -158,9 +78,11 @@ pub enum OpenRefused {
     NoEntropy,
     /// The id already names a live session. The caller draws fresh entropy and tries again.
     Collision,
-    /// The table is full and the opener holds no session that could give way. Another owner's
-    /// session is never evicted to make room.
+    /// The table is full and the opener holds no idle session that could give way. Another
+    /// owner's session is never evicted to make room.
     Full,
+    /// The opener holds as many sessions as one owner may, each with a live stream: none gives way.
+    OwnerFull,
 }
 
 /// What one owner holds.
@@ -183,6 +105,8 @@ struct ReplayEvent {
 #[derive(Debug)]
 struct Stream {
     id: u32,
+    /// How many live streams read this cursor: while any does, it is never dropped.
+    live: u32,
     next_seq: u64,
     /// The highest seq ever trimmed away, or 0 when nothing was trimmed.
     trimmed_through: u64,
@@ -193,8 +117,6 @@ struct Stream {
 struct Session {
     owner: Owner,
     revision: Revision,
-    carriage: Carriage,
-    initialized: bool,
     last_ms: u64,
     open: Vec<Stream>,
     next_stream: u32,
@@ -203,6 +125,11 @@ struct Session {
 }
 
 impl Session {
+    /// A live stream reads one of its cursors: it is live work, never evicted.
+    fn held(&self) -> bool {
+        self.open.iter().any(|s| s.live > 0)
+    }
+
     fn base_bytes(owner: &Owner) -> usize {
         SESSION_OVERHEAD + owner.principal.len() + owner.credential.len()
     }
@@ -294,12 +221,6 @@ impl SessionTable {
         }
     }
 
-    /// The ceilings this table enforces.
-    #[must_use]
-    pub const fn bounds(&self) -> Bounds {
-        self.bounds
-    }
-
     /// Whether `id` names a session the table still holds, whoever owns it (state kept beside a
     /// session is dropped once this is false).
     #[must_use]
@@ -307,37 +228,20 @@ impl SessionTable {
         self.sessions.contains_key(id)
     }
 
-    /// Live sessions (expired ones not yet swept included).
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.sessions.len()
-    }
-
-    /// Whether the table holds no session.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.sessions.is_empty()
-    }
-
-    /// Bytes charged to the table.
-    #[must_use]
-    pub const fn total_bytes(&self) -> usize {
-        self.total_bytes
-    }
-
-    /// Opens a session for `owner`. `entropy` is 16 bytes from the caller's CSPRNG.
+    /// Opens a session for `owner`: its id, 32 lowercase hex digits from `entropy` (16 bytes from
+    /// the caller's CSPRNG).
     ///
     /// # Errors
     /// [`OpenRefused::NoEntropy`] for an all-zero buffer, [`OpenRefused::Collision`] when the id is
-    /// already live, [`OpenRefused::Full`] when only another owner's session could make room.
+    /// already live, [`OpenRefused::Full`] when only another owner's session could make room, and
+    /// [`OpenRefused::OwnerFull`] when the owner is at its count and every session it holds is live.
     pub fn open(
         &mut self,
         entropy: [u8; 16],
         owner: Owner,
         revision: Revision,
-        carriage: Carriage,
         now_ms: u64,
-    ) -> Result<SessionId, OpenRefused> {
+    ) -> Result<String, OpenRefused> {
         if entropy.iter().all(|b| *b == 0) {
             return Err(OpenRefused::NoEntropy);
         }
@@ -352,7 +256,7 @@ impl SessionTable {
         }
         while self.owner_sessions(&owner) >= self.bounds.max_owner_sessions.max(1) {
             if !self.evict_lru_of(&owner, None) {
-                break;
+                return Err(OpenRefused::OwnerFull);
             }
         }
         while self.sessions.len() >= self.bounds.max_sessions.max(1) {
@@ -369,8 +273,6 @@ impl SessionTable {
             Session {
                 owner,
                 revision,
-                carriage,
-                initialized: false,
                 last_ms: now_ms,
                 open: Vec::new(),
                 next_stream: 0,
@@ -382,7 +284,7 @@ impl SessionTable {
             self.remove(&id);
             return Err(OpenRefused::Full);
         }
-        Ok(SessionId(id))
+        Ok(id)
     }
 
     /// Finds `id` for `owner`, refreshing its idle clock. Unknown, expired and foreign sessions all
@@ -407,23 +309,6 @@ impl SessionTable {
         self.find(id, owner, now_ms).map(|s| s.revision)
     }
 
-    /// How `id` is carried, when `owner` holds it.
-    pub fn carriage(&mut self, id: &str, owner: &Owner, now_ms: u64) -> Option<Carriage> {
-        self.find(id, owner, now_ms).map(|s| s.carriage)
-    }
-
-    /// Records `notifications/initialized`. `false` when `owner` does not hold `id`.
-    pub fn mark_initialized(&mut self, id: &str, owner: &Owner, now_ms: u64) -> bool {
-        self.find(id, owner, now_ms)
-            .map(|s| s.initialized = true)
-            .is_some()
-    }
-
-    /// Whether `id` has seen `notifications/initialized`.
-    pub fn is_initialized(&mut self, id: &str, owner: &Owner, now_ms: u64) -> bool {
-        self.find(id, owner, now_ms).is_some_and(|s| s.initialized)
-    }
-
     /// Ends `id` (DELETE). `false` when `owner` does not hold it.
     pub fn close(&mut self, id: &str, owner: &Owner, now_ms: u64) -> bool {
         if self.find(id, owner, now_ms).is_none() {
@@ -433,14 +318,27 @@ impl SessionTable {
         true
     }
 
-    /// Opens a resumable stream in `id`. When the session is at `stream_cap`, the oldest stream
-    /// and its buffered events are dropped first.
+    /// Ends `id` whoever holds it: its owner's own end, taken by the plane (a `2024-11-05` session
+    /// ends with its stream).
+    pub fn end(&mut self, id: &str) {
+        self.remove(id);
+    }
+
+    /// Opens a resumable stream in `id`. When the session is at `stream_cap`, the oldest cursor no
+    /// live stream reads, and its buffered events, are dropped first. `None` when `owner` does not
+    /// hold `id`, or when every cursor at the cap is read by a live stream (the open is refused;
+    /// no live stream is ended for it).
     pub fn open_stream(&mut self, id: &str, owner: &Owner, now_ms: u64) -> Option<u32> {
         let stream_cap = self.bounds.stream_cap.max(1);
         let s = self.find(id, owner, now_ms)?;
         let mut freed = 0;
         while s.open.len() >= stream_cap {
-            let dropped = s.open.remove(0);
+            let Some(oldest) = s.open.iter().position(|st| st.live == 0) else {
+                s.bytes -= freed;
+                self.release_bytes(owner, freed);
+                return None;
+            };
+            let dropped = s.open.remove(oldest);
             freed += dropped
                 .events
                 .iter()
@@ -452,12 +350,39 @@ impl SessionTable {
         s.next_stream = s.next_stream.wrapping_add(1);
         s.open.push(Stream {
             id: stream,
+            live: 0,
             next_seq: 1,
             trimmed_through: 0,
             events: VecDeque::new(),
         });
         self.release_bytes(owner, freed);
         Some(stream)
+    }
+
+    /// A live stream reads `stream` of `id` (its GET is held open): until [`Self::release_stream`],
+    /// the cursor is never dropped and the session never evicted. `false` when there is no such
+    /// cursor.
+    pub fn hold_stream(&mut self, id: &str, stream: u32) -> bool {
+        let Some(st) = self
+            .sessions
+            .get_mut(id)
+            .and_then(|s| s.open.iter_mut().find(|st| st.id == stream))
+        else {
+            return false;
+        };
+        st.live = st.live.saturating_add(1);
+        true
+    }
+
+    /// The live stream reading `stream` of `id` ended.
+    pub fn release_stream(&mut self, id: &str, stream: u32) {
+        if let Some(st) = self
+            .sessions
+            .get_mut(id)
+            .and_then(|s| s.open.iter_mut().find(|st| st.id == stream))
+        {
+            st.live = st.live.saturating_sub(1);
+        }
     }
 
     /// Buffers `data` as the next event on `stream` and returns its event id. The buffer is then
@@ -559,13 +484,13 @@ impl SessionTable {
         }
     }
 
-    /// Evicts `owner`'s least recently used session other than `keep`. `false` when there is none.
-    /// Never another owner's.
+    /// Evicts `owner`'s least recently used IDLE session other than `keep`. `false` when there is
+    /// none. Never another owner's, and never one a live stream reads.
     fn evict_lru_of(&mut self, owner: &Owner, keep: Option<&str>) -> bool {
         let victim = self
             .sessions
             .iter()
-            .filter(|(k, s)| s.owner == *owner && Some(k.as_str()) != keep)
+            .filter(|(k, s)| s.owner == *owner && Some(k.as_str()) != keep && !s.held())
             .min_by_key(|(k, s)| (s.last_ms, (*k).clone()))
             .map(|(k, _)| k.clone());
         match victim {
@@ -599,23 +524,18 @@ impl SessionTable {
 }
 
 /// WHAT BUSBAR REMEMBERS ABOUT ONE UPSTREAM, as a client: the revision it negotiated and, on a
-/// session revision, the upstream's session and the message address it named.
+/// session revision, the upstream's session.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Remembered {
     /// The negotiated revision.
     pub revision: Revision,
     /// The upstream's session id, on a session revision.
     pub session: Option<String>,
-    /// The `2024-11-05` message address the upstream's event stream named.
-    pub message_address: Option<String>,
 }
 
 impl Remembered {
     fn bytes(&self, key: &str) -> usize {
-        SESSION_OVERHEAD
-            + key.len()
-            + self.session.as_ref().map_or(0, String::len)
-            + self.message_address.as_ref().map_or(0, String::len)
+        SESSION_OVERHEAD + key.len() + self.session.as_ref().map_or(0, String::len)
     }
 }
 
@@ -634,16 +554,18 @@ pub fn upstream_key(member: &str, binding: &str) -> String {
 pub const SESSION_FIRST_ID: u64 = 1 << 32;
 
 /// The client's per-upstream memory, bounded in count and bytes with least-recently-used eviction.
-/// Forgetting an upstream costs one renegotiation and nothing else. Each remembered session also
-/// numbers the requests busbar sends in it ([`UpstreamTable::next_id`]), so no id repeats within
-/// one session (the session revisions forbid it).
+/// Forgetting an upstream costs one renegotiation and nothing else. The requests busbar sends in a
+/// remembered session are numbered by ONE counter for the whole instance ([`UpstreamTable::next_id`],
+/// [`UpstreamTable::take_id`]), never reset by an eviction, a session remembered again, or a
+/// session forgotten and opened anew, so no id repeats within any session (the session revisions
+/// forbid it), whatever became of the memory in between.
 #[derive(Debug)]
 pub struct UpstreamTable {
     max_entries: usize,
     max_bytes: usize,
     entries: BTreeMap<String, (Remembered, u64)>,
-    /// The next request id per remembered session, by key: kept while the session is.
-    ids: BTreeMap<String, u64>,
+    /// The next id the instance issues: monotonic for the instance's life.
+    next: u64,
     bytes: usize,
     tick: u64,
 }
@@ -656,28 +578,10 @@ impl UpstreamTable {
             max_entries: max_entries.max(1),
             max_bytes,
             entries: BTreeMap::new(),
-            ids: BTreeMap::new(),
+            next: SESSION_FIRST_ID,
             bytes: 0,
             tick: 0,
         }
-    }
-
-    /// Upstreams remembered.
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    /// Whether nothing is remembered.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
-    /// Bytes charged.
-    #[must_use]
-    pub const fn bytes(&self) -> usize {
-        self.bytes
     }
 
     /// What is remembered about `upstream`, refreshing its recency.
@@ -690,33 +594,26 @@ impl UpstreamTable {
         })
     }
 
-    /// THE NEXT REQUEST ID of `upstream`'s remembered session, taken: unique within that session
-    /// for as long as it is remembered. `None` when nothing with a session is remembered for it.
+    /// THE NEXT REQUEST ID for `upstream`'s remembered session, taken from the instance's one
+    /// counter ([`Self::take_id`]): never issued before by this instance, so never repeated in that
+    /// session or any other. `None` when nothing with a session is remembered for it.
     pub fn next_id(&mut self, upstream: &str) -> Option<u64> {
         self.entries
             .get(upstream)
             .filter(|(r, _)| r.session.is_some())?;
-        let id = self
-            .ids
-            .entry(upstream.to_string())
-            .or_insert(SESSION_FIRST_ID);
-        let taken = *id;
-        *id = id.saturating_add(1);
-        Some(taken)
+        Some(self.take_id())
     }
 
-    /// Remembers `value` for `upstream`, evicting least-recently-used upstreams to fit. The same
-    /// session remembered again keeps its id numbering; another session starts its own.
+    /// AN ID NEVER ISSUED BEFORE by this instance: the counter only goes up, from
+    /// [`SESSION_FIRST_ID`], for the instance's life.
+    pub fn take_id(&mut self) -> u64 {
+        let taken = self.next;
+        self.next = self.next.saturating_add(1);
+        taken
+    }
+
+    /// Remembers `value` for `upstream`, evicting least-recently-used upstreams to fit.
     pub fn put(&mut self, upstream: &str, value: Remembered) {
-        let same = self
-            .entries
-            .get(upstream)
-            .is_some_and(|(r, _)| r.session.is_some() && r.session == value.session);
-        let kept = if same {
-            self.ids.get(upstream).copied()
-        } else {
-            None
-        };
         self.forget(upstream);
         let cost = value.bytes(upstream);
         if cost > self.max_bytes {
@@ -737,9 +634,6 @@ impl UpstreamTable {
         self.bytes += cost;
         self.entries
             .insert(upstream.to_string(), (value, self.tick));
-        if let Some(id) = kept {
-            self.ids.insert(upstream.to_string(), id);
-        }
     }
 
     /// Forgets `upstream` (its session ended, or it answered 404 for it).
@@ -747,7 +641,6 @@ impl UpstreamTable {
         if let Some((r, _)) = self.entries.remove(upstream) {
             self.bytes -= r.bytes(upstream);
         }
-        self.ids.remove(upstream);
     }
 }
 
