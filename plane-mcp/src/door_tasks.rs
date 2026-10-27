@@ -882,14 +882,11 @@ pub(super) fn continuation_asked(
     child: Option<crate::ask::ChildLeg>,
     asked: (&str, &str, Option<usize>),
 ) -> Step {
-    let Some(TaskUnit::Run(mut run)) = unit.task.take() else {
-        return Step::Declined;
-    };
-    let step = asking(
-        plane, ticket, principal, unit, &mut run, result, round, child, asked,
-    );
-    unit.task = Some(TaskUnit::Run(run));
-    step
+    with_run(unit, |unit, run| {
+        asking(
+            plane, ticket, principal, unit, run, result, round, child, asked,
+        )
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1023,10 +1020,17 @@ pub(super) fn continuation_answered(
 }
 
 fn advance(plane: &McpDoor, ticket: Ticket, principal: &str, unit: &mut CallUnit) -> Step {
+    with_run(unit, |unit, run| {
+        running(plane, ticket, principal, unit, run)
+    })
+}
+
+/// `f` on `unit`'s continuation, held apart from the unit while it runs.
+fn with_run(unit: &mut CallUnit, f: impl FnOnce(&mut CallUnit, &mut Run) -> Step) -> Step {
     let Some(TaskUnit::Run(mut run)) = unit.task.take() else {
         return Step::Declined;
     };
-    let step = running(plane, ticket, principal, unit, &mut run);
+    let step = f(unit, &mut run);
     unit.task = Some(TaskUnit::Run(run));
     step
 }
