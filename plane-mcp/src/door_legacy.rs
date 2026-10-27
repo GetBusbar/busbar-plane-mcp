@@ -199,7 +199,7 @@ impl Link {
         // The GET carries the request's own head (its credential and the rest) lowered into the
         // revision (no stateless mirror: a 2024-11-05 server reads none of it), minus what a body
         // states, and asks for the event stream.
-        let fields = lower_request(template, url, Revision::R2024_11_05, None).headers;
+        let fields = lower_request(template, url, Revision::R2024_11_05, None, None).headers;
         let kept = fields.iter().filter(|(n, _)| {
             !n.eq_ignore_ascii_case("content-type") && !n.eq_ignore_ascii_case("accept")
         });
@@ -832,13 +832,12 @@ fn framed_answer(body: Vec<u8>, frames: Vec<Value>) -> (Vec<u8>, bool) {
     let Ok(answer) = serde_json::from_slice::<Value>(&body) else {
         return (body, false);
     };
-    let mut out = Vec::new();
-    for frame in frames.iter().chain(std::iter::once(&answer)) {
-        out.extend_from_slice(b"event: message\ndata: ");
-        out.extend(serde_json::to_vec(frame).unwrap_or_default());
-        out.extend_from_slice(b"\n\n");
-    }
-    (out, true)
+    let out: String = frames
+        .iter()
+        .chain(std::iter::once(&answer))
+        .map(|f| crate::adapt::frame(None, Some(crate::adapt::EVENT_MESSAGE), &f.to_string()))
+        .collect();
+    (out.into_bytes(), true)
 }
 
 /// A CALL OVER THE HELD STREAM of `key` (a member and a caller binding), on the call's own ticket:
@@ -1029,23 +1028,19 @@ pub(super) fn call(
                 }
             }
             Next::PostCall(address, id) => {
-                let mut request = lower_request(original, &address, Revision::R2024_11_05, None);
+                let mut request =
+                    lower_request(original, &address, Revision::R2024_11_05, None, Some(id));
+                // A progress token the request carries names this call on the stream, so the
+                // server's progress reaches this call and no other.
                 if let Ok(mut body) = serde_json::from_slice::<Value>(&request.body) {
-                    if let Some(obj) = body.as_object_mut() {
-                        obj.insert("id".to_string(), Value::from(id));
-                        // A progress token the request carries names this call on the stream, so
-                        // the server's progress reaches this call and no other.
-                        if let Some(token) = obj
-                            .get_mut("params")
-                            .and_then(|p| p.get_mut("_meta"))
-                            .and_then(|m| m.get_mut("progressToken"))
-                            .filter(|t| !t.is_null())
-                        {
-                            *token = Value::from(format!("{PROGRESS_PREFIX}{id}"));
+                    if let Some(token) = body
+                        .pointer_mut("/params/_meta/progressToken")
+                        .filter(|t| !t.is_null())
+                    {
+                        *token = Value::from(format!("{PROGRESS_PREFIX}{id}"));
+                        if let Ok(bytes) = serde_json::to_vec(&body) {
+                            request.body = bytes;
                         }
-                    }
-                    if let Ok(bytes) = serde_json::to_vec(&body) {
-                        request.body = bytes;
                     }
                 }
                 match post(

@@ -153,15 +153,20 @@ pub fn offered_revision(body: &[u8]) -> Option<Revision> {
 /// revision states them once, in `initialize`), the stateless mirror headers go, the version
 /// header names `revision` (where the revision has one) and the session header names `session`.
 /// The URL is `url` (the endpoint, or a `2024-11-05` message address). The credential and every
-/// other header `req` carries are kept.
+/// other header `req` carries are kept. `id`, when given, replaces the request's own (a session's
+/// own next id: a session revision forbids reusing one).
 #[must_use]
 pub fn lower_request(
     req: &OutboundRequest,
     url: &str,
     revision: Revision,
     session: Option<&str>,
+    id: Option<u64>,
 ) -> OutboundRequest {
     let mut body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
+    if let (Some(id), Some(obj)) = (id, body.as_object_mut()) {
+        obj.insert("id".to_string(), Value::from(id));
+    }
     if let Some(params) = body.get_mut("params").and_then(Value::as_object_mut) {
         let empty = params
             .get_mut("_meta")

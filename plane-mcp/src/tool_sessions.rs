@@ -64,15 +64,6 @@ pub struct Owner {
     pub credential: String,
 }
 
-/// How a session's messages are carried.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Carriage {
-    /// The single endpoint: POST, the GET stream and DELETE.
-    Endpoint,
-    /// The `2024-11-05` event stream, with messages POSTed to the address it named.
-    EventStream,
-}
-
 /// Why a session could not be opened.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OpenRefused {
@@ -116,8 +107,6 @@ struct Stream {
 struct Session {
     owner: Owner,
     revision: Revision,
-    carriage: Carriage,
-    initialized: bool,
     last_ms: u64,
     open: Vec<Stream>,
     next_stream: u32,
@@ -235,7 +224,6 @@ impl SessionTable {
         entropy: [u8; 16],
         owner: Owner,
         revision: Revision,
-        carriage: Carriage,
         now_ms: u64,
     ) -> Result<String, OpenRefused> {
         if entropy.iter().all(|b| *b == 0) {
@@ -269,8 +257,6 @@ impl SessionTable {
             Session {
                 owner,
                 revision,
-                carriage,
-                initialized: false,
                 last_ms: now_ms,
                 open: Vec::new(),
                 next_stream: 0,
@@ -305,18 +291,6 @@ impl SessionTable {
     /// The revision `id` negotiated, when `owner` holds it.
     pub fn revision(&mut self, id: &str, owner: &Owner, now_ms: u64) -> Option<Revision> {
         self.find(id, owner, now_ms).map(|s| s.revision)
-    }
-
-    /// How `id` is carried, when `owner` holds it.
-    pub fn carriage(&mut self, id: &str, owner: &Owner, now_ms: u64) -> Option<Carriage> {
-        self.find(id, owner, now_ms).map(|s| s.carriage)
-    }
-
-    /// Records `notifications/initialized`. `false` when `owner` does not hold `id`.
-    pub fn mark_initialized(&mut self, id: &str, owner: &Owner, now_ms: u64) -> bool {
-        self.find(id, owner, now_ms)
-            .map(|s| s.initialized = true)
-            .is_some()
     }
 
     /// Ends `id` (DELETE). `false` when `owner` does not hold it.
