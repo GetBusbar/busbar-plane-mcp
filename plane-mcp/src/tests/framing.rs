@@ -5,6 +5,15 @@ use serde_json::{json, Value};
 
 use super::*;
 
+/// The `data:` text of each event, as written (one line per event here).
+fn data_lines(bytes: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .filter_map(|l| l.strip_prefix("data: "))
+        .map(str::to_string)
+        .collect()
+}
+
 fn events(bytes: &[u8]) -> Vec<Value> {
     String::from_utf8_lossy(bytes)
         .lines()
@@ -76,9 +85,10 @@ fn the_stream_carries_progress_then_the_records_then_the_answer() {
     let body = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list",
         "params": {"_meta": {META_LOGGING_LEVEL: "debug"}}});
     let framing = Framing::of(Some(EVENT_STREAM), "tools/list", &body).expect("framed");
-    let answer = br#"{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}"#.to_vec();
+    // Members out of order and a number spelt as no printer would: the answer is its own bytes.
+    let answer = br#"{"result":{"tools":[],"n":1e3,"f":1.0},"jsonrpc":"2.0","id":1}"#.to_vec();
     let progress = [json!({"jsonrpc": "2.0", "method": "notifications/progress"})];
-    let (bytes, framed) = framing.frame(200, answer, &progress);
+    let (bytes, framed) = framing.frame(200, answer.clone(), &progress);
     assert!(framed);
     let e = events(&bytes);
     assert_eq!(
@@ -89,21 +99,45 @@ fn the_stream_carries_progress_then_the_records_then_the_answer() {
     assert_eq!(e[0]["method"], "notifications/progress");
     assert_eq!(e[1]["params"]["level"], "debug");
     assert_eq!(e[2]["params"]["data"]["message"], "MCP method completed");
-    assert_eq!(e[3]["id"], 1);
+    assert_eq!(
+        data_lines(&bytes)[3].as_bytes(),
+        answer.as_slice(),
+        "the answer's own bytes, never printed again"
+    );
+}
+
+/// An answer spread over lines goes out one `data:` line per line, each line its own bytes, so a
+/// client joining them with `\n` reads the answer's text back.
+#[test]
+fn a_multi_line_answer_is_one_data_line_per_line() {
+    let body = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {"_meta": {}}});
+    let framing = Framing::of(Some(EVENT_STREAM), "tools/list", &body).expect("framed");
+    let answer =
+        b"{\"jsonrpc\": \"2.0\",\n  \"id\": 1,\n  \"result\": {\"b\": 2, \"a\": 1.50}}".to_vec();
+    let (bytes, framed) = framing.frame(200, answer.clone(), &[]);
+    assert!(framed);
+    let text = String::from_utf8(bytes).expect("utf-8");
+    let last = text
+        .rsplit("event: message\n")
+        .next()
+        .expect("the answer's event");
+    let joined: Vec<&str> = last
+        .lines()
+        .filter_map(|l| l.strip_prefix("data: "))
+        .collect();
+    assert_eq!(joined.join("\n").as_bytes(), answer.as_slice());
 }
 
 #[test]
 fn the_default_level_drops_the_debug_record() {
     let body = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {"_meta": {}}});
     let framing = Framing::of(Some(EVENT_STREAM), "tools/list", &body).expect("framed");
-    let (bytes, _) = framing.frame(
-        200,
-        br#"{"jsonrpc":"2.0","id":1,"result":{}}"#.to_vec(),
-        &[],
-    );
+    let answer = br#"{"jsonrpc":"2.0","id":1,"result":{}}"#.to_vec();
+    let (bytes, _) = framing.frame(200, answer.clone(), &[]);
     let e = events(&bytes);
     assert_eq!(e.len(), 2);
     assert_eq!(e[0]["params"]["level"], "info");
+    assert_eq!(data_lines(&bytes)[1].as_bytes(), answer.as_slice());
 }
 
 #[test]

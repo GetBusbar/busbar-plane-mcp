@@ -42,16 +42,24 @@ pub const ASK_METHODS: &[&str] = &[ASK_ELICITATION, ASK_SAMPLING, ASK_ROOTS];
 
 /// `tools.<server>.pin.mechanism`: which authenticity root this registration has. The `Mcp` prefix
 /// keeps the config-schema fingerprint's flat ident map from clashing with a sibling plane's.
+/// `cert_spki` and `mtls` pin the FAR END'S KEY: the host seals it into the registration's member
+/// route and the connector refuses every connection whose server presents another.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum McpPinMechanism {
-    /// A signed tool manifest verified against an operator-supplied, out-of-band issuer public key.
+    /// A signed tool manifest's operator-supplied, out-of-band issuer public key. It is a root (it
+    /// carries key material, and makes the registration approvable), not a pin of the far end's
+    /// key: the connector does not compare it with the server's certificate, and this build
+    /// verifies no MCP-native manifest signature under it, as predev did not.
     PinnedPubkey,
-    /// No server-side signature exists, so the pin degrades to the endpoint's certificate SPKI hash
-    /// — a real network-layer authenticity root, and still not trust-on-first-use.
+    /// The endpoint's certificate key, pinned: the host seals it into the registration's member
+    /// route and the connector refuses, before a request byte is written, a connection whose
+    /// server presents another key (and any connection that is not secured). Not
+    /// trust-on-first-use: the key is the operator's, written before the first contact.
     CertSpki,
-    /// A client-certificate-authenticated (mutual TLS) binding; pinned on the peer certificate SPKI
-    /// hash. The operator's config word for it is fixed by the explicit rename below.
+    /// A client-certificate-authenticated (mutual TLS) binding: the far end's key is pinned as under
+    /// `cert_spki`, and busbar presents the registration's `client_identity:` in the handshake.
+    /// The operator's config word for it is fixed by the explicit rename below.
     #[serde(rename = "mtls")]
     ClientCertBinding,
     /// NO authenticity root. Registrable, never approvable — low-risk dev use has to be spelled out
@@ -78,11 +86,38 @@ pub struct ServerPinCfg {
     /// Which root this is. REQUIRED: a pin whose mechanism is inferred is a pin whose meaning
     /// changes when the code that infers it changes.
     pub mechanism: McpPinMechanism,
-    /// The operator-supplied material: an issuer public key, or a certificate SPKI hash. Absent only
-    /// for `unpinned`.
+    /// The operator-supplied material. Under `cert_spki` and `mtls`, the far end's key pin: the
+    /// SHA-256 of its certificate's SubjectPublicKeyInfo in standard base64
+    /// (`busbar_contract::transport::trust::key_pin`'s spelling, the string the connector compares
+    /// the observed key against). Under `pinned_pubkey`, a manifest issuer's public key. Absent
+    /// only for `unpinned`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
 }
+
+/// `tools.<server>.client_identity` — THE CERTIFICATE BUSBAR PRESENTS to this server's endpoint.
+///
+/// A SIBLING of `pin:`, not a field inside it: `pin:` says how busbar knows the server is the one
+/// the operator meant, this says how the server knows the connection is busbar's. The host reads
+/// it at the http need's `trust_from` path ([`crate::door::CLIENT_IDENTITY_FROM`]), resolves both
+/// references once, and the connector presents the certificate on every connection to the server.
+///
+/// Both fields are SECRET REFERENCES (`{env: ..}`, `{file: ..}` or a `kind: secret` module), the
+/// spelling busbar's own inbound `tls:` uses: there is no way to write PEM bytes here, so a private
+/// key never sits in a config dump, a `--validate` output or an admin read.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClientIdentityCfg {
+    /// PEM certificate chain busbar presents, leaf first.
+    pub cert: busbar_contract::secret_ref::SecretRef,
+    /// PEM private key for `cert:` (PKCS#8, PKCS#1 or SEC1).
+    pub key: busbar_contract::secret_ref::SecretRef,
+}
+
+/// `Eq` is asserted rather than derived because [`busbar_contract::secret_ref::SecretRef`] derives
+/// only `PartialEq`; every field compares structurally and none is a float, and the registration
+/// this rides in must be comparable so a config apply can be recognised as a no-op.
+impl Eq for ClientIdentityCfg {}
 
 /// `tools.<server>.tools_allow.<tool>` — one approved tool, and the slot its approved schema hash
 /// lives in.
@@ -427,6 +462,11 @@ pub struct McpServerDefCfg {
     pub cwd: Option<String>,
     /// The out-of-band trust root. Required, even when `unpinned`.
     pub pin: ServerPinCfg,
+    /// busbar's client certificate for this server ([`ClientIdentityCfg`]). REQUIRED under
+    /// `pin.mechanism: mtls`, optional under the other mechanisms, refused on an `http://` url and
+    /// on `transport: stdio` (neither has a TLS handshake to present it in).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_identity: Option<ClientIdentityCfg>,
     /// `<n><s|m|h|d>`: the longest an observation is reused before verify-on-call re-fetches. Absent =
     /// [`DEFAULT_MCP_VERIFY_TTL`]; `0` = every call. Judged by the kernel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -715,6 +755,37 @@ fn validate_endpoint(at: &str, def: &McpServerDefCfg) -> Result<(), String> {
             return Err(format!("{at}: {why}"));
         }
     }
+    if def.client_identity.is_some() {
+        return Err(format!(
+            "{at}: `client_identity:` is a TLS client certificate, and `transport: stdio` makes no \
+             handshake to present it in. Drop it."
+        ));
+    }
+    Ok(())
+}
+
+/// THE CLIENT IDENTITY, matched against the pin's mechanism and the url's scheme.
+///
+/// `mtls` means the server is served behind mutual TLS: a registration that says so and names no
+/// certificate is refused at the server's handshake (`CertificateRequired`), on the first call,
+/// rather than here where the operator is. And a client certificate is a TLS-handshake object:
+/// over `http://` there is no handshake to present it in, so one written there would read as a
+/// protection that is not applied.
+fn validate_client_identity(at: &str, def: &McpServerDefCfg) -> Result<(), String> {
+    if def.pin.mechanism == McpPinMechanism::ClientCertBinding && def.client_identity.is_none() {
+        return Err(format!(
+            "{at}: `pin.mechanism: mtls` needs `client_identity:` — the `cert:` and `key:` \
+             references to the certificate busbar PRESENTS to this server. `mtls` means the server \
+             is served behind mutual TLS, and a client with nothing to present is refused at the \
+             handshake with `CertificateRequired`, not at the pin."
+        ));
+    }
+    if def.client_identity.is_some() && def.url.starts_with("http://") {
+        return Err(format!(
+            "{at}: `client_identity:` is a TLS client certificate and `url:` is `http://`, which \
+             has no handshake to present it in. Name an `https://` endpoint, or drop the identity."
+        ));
+    }
     Ok(())
 }
 
@@ -777,6 +848,7 @@ pub fn validate_server(name: &str, def: &McpServerDefCfg) -> Result<(), String> 
 
     validate_endpoint(&at, def)?;
     def.sampling_bounds.validate(&at)?;
+    validate_client_identity(&at, def)?;
 
     // The pin, `verify_ttl:` and `timeout:` are the kernel's keys, judged before this validator.
 
@@ -910,34 +982,120 @@ pub fn validate_server(name: &str, def: &McpServerDefCfg) -> Result<(), String> 
     Ok(())
 }
 
-/// THE UNIQUENESS INVARIANT over the whole effective registry: one published wire name resolves to
-/// exactly one `(server, tool)`. Every name (override or default) against every other, refused
-/// rather than resolved, because the `mcp_tool` grant keys on the published name.
+/// Where a published wire name CAME FROM, so a collision error can name both sides the way the
+/// operator will have to fix them: one of them is a line they typed, the other may be a name nobody
+/// typed at all.
+struct PublishedName {
+    server: String,
+    /// The map the capability is declared in: `tools_allow`, `prompts_allow`, `resources_allow`
+    /// or `resource_templates_allow`.
+    family: &'static str,
+    /// The capability's key in that map: a tool or prompt name, a URI or a URI template.
+    capability: String,
+    /// `true` when the name came from `publish_as:`, `false` when it is the `{server}_{tool}`
+    /// default. Carried rather than re-derived, because re-deriving means comparing the name to
+    /// `namespaced(server, tool)` and getting the wrong answer for the one config where it matters:
+    /// `publish_as:` set to exactly the default.
+    overridden: bool,
+}
+
+impl PublishedName {
+    /// The half of the error message that describes ONE claimant.
+    fn describe(&self) -> String {
+        let Self {
+            server,
+            family,
+            capability,
+            overridden,
+        } = self;
+        if *overridden {
+            format!("`tools.{server}.{family}.{capability}.publish_as:`")
+        } else {
+            format!(
+                "the default `{{server}}{NAMESPACE_SEP}{{tool}}` name of \
+                 `tools.{server}.{family}.{capability}`"
+            )
+        }
+    }
+}
+
+/// THE UNIQUENESS INVARIANT, once, over the WHOLE registry: one published wire name resolves to
+/// exactly one `(server, capability)`.
+///
+/// EVERY CAPABILITY, not only tools. A prompt, a resource and a resource template are published
+/// under `{server}_{name}` too, and each is admitted by an `mcp_tool:` grant on that published name
+/// (`catalogue::Catalogue::grants`): a tool published as `bar_greet` on server `foo` and a prompt
+/// `greet` on server `bar` would make one `mcp_tool: bar_greet` grant admit both.
+///
+/// This is the validation that replaces the guarantee `{server}_{tool}` used to give by
+/// construction, so it has to be TOTAL in both directions or it is not a replacement:
+///
+/// 1. It walks EVERY tool of EVERY server, building each one's published name — the `publish_as:`
+///    override where there is one, the namespaced default where there is not.
+/// 2. It compares against that whole set. **Not overrides against each other.** The collision that
+///    a naive check misses is an override against a DEFAULT: `publish_as: foo_bar` on any server
+///    collides with server `foo`'s tool `bar`, and nobody typed `foo_bar` on the `foo` side for the
+///    naive check to compare it with. An implementation that only compared overrides to overrides
+///    would accept that config and look correct doing it.
+///
+/// A collision is refused rather than resolved. Resolving it — last-writer-wins, or an automatic
+/// suffix — would leave one wire name pointing at a `(server, tool)` the operator did not choose,
+/// and because the engine's `crate::mcp::catalogue` keys the `mcp_tool` grant on the published name, that
+/// silently moves an authorization decision. A boot refusal an operator reads is strictly better
+/// than a dispatch an hour later that reaches the wrong upstream.
+///
+/// Called from core's config resolve, through this section's `validate_registry` (the substrate's
+/// plane-section seam) — the ONE point every path converges on: boot,
+/// `busbar --validate`, the admin config-apply rebuild and the admin dry-run validate endpoint all
+/// run it over the EFFECTIVE registry (file base + applied overlay). Deliberately NOT called from
+/// `ToolsCfg`'s `Deserialize`: that sees only the file, so a server added through the API would
+/// never be compared against it — a check that looked total and was not.
 pub fn validate_published_names(cfg: &ToolsCfg) -> Result<(), String> {
-    let mut published = std::collections::BTreeMap::new();
+    let mut published: std::collections::BTreeMap<String, PublishedName> =
+        std::collections::BTreeMap::new();
     for (server, def) in &cfg.servers {
-        for (tool, allow) in &def.tools_allow {
-            // The same name `Catalogue::build` publishes; the claimant as the operator must fix it.
+        // THE SAME LINES `Catalogue::build` runs, through the SAME function, and that is
+        // load-bearing rather than tidy: this check is only meaningful if the set it walks is
+        // byte-identical to the set that is published. A second local `{server}_{tool}` formula
+        // here would validate one set and publish another the day either changed.
+        let tools = def.tools_allow.iter().map(|(tool, allow)| {
             let name = allow
                 .publish_as
                 .clone()
                 .unwrap_or_else(|| namespaced(server, tool));
-            let claim = if allow.publish_as.is_some() {
-                format!("`tools.{server}.tools_allow.{tool}.publish_as:`")
-            } else {
-                format!(
-                    "the default `{{server}}{NAMESPACE_SEP}{{tool}}` name of \
-                     `tools.{server}.tools_allow.{tool}`"
-                )
+            (name, TOOL_APPROVALS_KEY, tool, allow.publish_as.is_some())
+        });
+        let prompts = def
+            .prompts_allow
+            .keys()
+            .map(|k| (namespaced(server, k), "prompts_allow", k, false));
+        let resources = def
+            .resources_allow
+            .keys()
+            .map(|k| (namespaced(server, k), "resources_allow", k, false));
+        let templates = def
+            .resource_templates_allow
+            .keys()
+            .map(|k| (namespaced(server, k), "resource_templates_allow", k, false));
+        for (name, family, capability, overridden) in
+            tools.chain(prompts).chain(resources).chain(templates)
+        {
+            let claim = PublishedName {
+                server: server.clone(),
+                family,
+                capability: capability.clone(),
+                overridden,
             };
             if let Some(prior) = published.get(&name) {
                 return Err(format!(
-                    "`tools`: two tools would both be published as `{name}` — {prior} and {claim}. A \
-                     published name is the wire name `tools/list` emits, the name `tools/call` \
-                     dispatches on, AND the value an `mcp_tool:` grant names, so one name meaning \
-                     two (server, tool) pairs would make one grant silently authorize both. busbar \
-                     refuses to boot rather than pick one. Change one `publish_as:`, or remove it \
-                     to publish the `{{server}}{NAMESPACE_SEP}{{tool}}` default."
+                    "`tools`: two capabilities would both be published as `{name}` — {} and {}. \
+                     A published name is the wire name busbar's listings emit, the name a call or \
+                     read dispatches on, AND the value an `mcp_tool:` grant names, so one name \
+                     meaning two (server, capability) pairs would make one grant silently \
+                     authorize both. busbar refuses to boot rather than pick one. Change or remove \
+                     a `publish_as:`, or rename one capability.",
+                    prior.describe(),
+                    claim.describe(),
                 ));
             }
             published.insert(name, claim);

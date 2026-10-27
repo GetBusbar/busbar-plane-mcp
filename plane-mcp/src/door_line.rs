@@ -15,7 +15,11 @@
 //!   answers nothing, and the caller's answers are lines of their own: each answer but the round's
 //!   last emits the next ask; the last is the RETRY, the request as the caller sent it with the
 //!   answers and the sealed state, dispatched as that unit (its own admission). An answer that is an
-//!   error hands the caller the `input_required` result itself.
+//!   error hands the caller the `input_required` result itself. The exceptions: a line whose carrier
+//!   session negotiated a SESSION revision (`2025-06-18`, `2025-11-25`) has its answer lowered into
+//!   that revision first, which turns an `input_required` result into the revision's error (it has
+//!   no such result, as predev lowered it), so there is nothing left to liven; a round past the
+//!   round cap, or past [`MAX_LIVE_ASKS_PER_SESSION`] live on its session, is handed on as it is.
 //! - A SUBSCRIPTION (`subscriptions/listen`) is answered with its acknowledgement and kept on the
 //!   session ([`listen`]): the tick ([`tick`]) steps it, emitting what changed, a `ping` when it has
 //!   been quiet and its last frame at its bound.
@@ -323,6 +327,9 @@ pub(super) fn preset(plane: &McpDoor, ticket: Ticket, unit: &mut CallUnit) -> Op
     Some(Pending::answer(200, bytes, None, &[]))
 }
 
+/// The most live ask rounds one carrier session holds at once ([`liven`]).
+pub(super) const MAX_LIVE_ASKS_PER_SESSION: usize = 64;
+
 /// LIVEN a line unit's answer: an `input_required` result (busbar's own ask, or an upstream's
 /// relayed) is put to the caller as live requests on the session, its first ask emitted now, and
 /// the unit answers nothing. Any other answer, or one that cannot be emitted, is left as it is.
@@ -355,6 +362,15 @@ pub(super) fn liven(plane: &McpDoor, ticket: Ticket, unit: &mut CallUnit) {
     if result.get("resultType").and_then(Value::as_str)
         != Some(crate::codec::RESULT_TYPE_INPUT_REQUIRED)
     {
+        return;
+    }
+    // THE LIVE ASKS OF ONE CARRIER SESSION ARE BOUNDED: past [`MAX_LIVE_ASKS_PER_SESSION`] the
+    // answer is handed to the caller as it is (its sealed `requestState` makes that a continuation),
+    // as past the round cap.
+    let held = plane
+        .live_asks
+        .with_all(|m| m.keys().filter(|(s, _)| *s == session).count());
+    if held >= MAX_LIVE_ASKS_PER_SESSION {
         return;
     }
     let Some(mut live) = LiveAsk::of(original, pending.bytes.clone(), result, round) else {

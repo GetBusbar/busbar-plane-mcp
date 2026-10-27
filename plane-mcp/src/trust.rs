@@ -21,8 +21,13 @@
 //! The kernel's trust book records each sighting's catalogue hash ([`catalogue_hash`],
 //! `trust.sight`), which stamps the server's re-verification clock; the operator's view and the
 //! dispatch gate read the comparison above, so both answer the one question the operator is looking
-//! at. The identity axis (`pin_changed`) is reported `false`: an MCP hop through the host connector
-//! presents no certificate key the plane could compare a `cert_spki`/`mtls` pin against.
+//! at. The identity axis (`pin_changed`) is reported `false`, and that is the truth rather than a
+//! gap: under `cert_spki` and `mtls` the pin's key is the far end's key
+//! (`PinMechanismDecl::peer_key`), which the host seals into the registration's member route and the
+//! connector holds every connection to, refusing one whose server presents another key before a
+//! request byte is written. A contact that met a substituted key is a failed contact (`error`),
+//! never a sighting, so every sighting this view renders was made against the pinned key.
+//! `pinned_pubkey` names a manifest issuer's key, not the far end's, so it has no identity axis.
 
 use std::collections::BTreeMap;
 
@@ -330,6 +335,8 @@ pub fn trust_view(
         name,
         state: state(items, sighting).word(),
         pin_mechanism: def.pin.mechanism.token(),
+        // The connector refused any connection whose server presented another key than the pin's,
+        // so a served sighting is a matching one (the module header).
         pin_changed: false,
         added: d.added,
         changed: d.changed,

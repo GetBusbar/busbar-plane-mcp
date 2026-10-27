@@ -249,12 +249,18 @@ fn an_abandoned_active_task_is_cancelled_by_the_sweep_and_then_ages_out() {
     let mut old = Task::new("old", "key-abandon", 1, "d", T0);
     old.runner = Some((9, ticket));
     tasks.insert("old".into(), old);
-    // Exactly AT the ceiling is not abandoned (the bound is strict, matching `is_expired`).
+    // Exactly AT the ceiling is not abandoned (the bound is strict, matching `is_expired`): the
+    // young task's age at the sweep is the ceiling itself, the old one's a millisecond past it.
     tasks.insert(
         "young".into(),
-        Task::new("young", "key-abandon", 2, "d", T0 + ACTIVE_TASK_ABANDON_MS),
+        Task::new("young", "key-abandon", 2, "d", T0 + 1),
     );
     let sweep_now = T0 + ACTIVE_TASK_ABANDON_MS + 1;
+    assert_eq!(
+        sweep_now - tasks["young"].stamps().1,
+        ACTIVE_TASK_ABANDON_MS,
+        "the young task sits exactly at the ceiling"
+    );
     let swept = sweep(&mut tasks, sweep_now);
     assert_eq!(
         tasks["old"].status(),
@@ -278,9 +284,11 @@ fn an_abandoned_active_task_is_cancelled_by_the_sweep_and_then_ages_out() {
         "after the retention the cancelled task is dropped like any other terminal task"
     );
     assert!(swept.strike.is_empty(), "it wrote no result to strike");
-    assert!(
-        tasks.contains_key("young"),
-        "the active task survives every sweep"
+    // By then the young task too is past the ceiling: cancelled by that sweep, never dropped.
+    assert_eq!(
+        tasks.get("young").map(Task::status),
+        Some(Status::Cancelled),
+        "an active task past the ceiling is cancelled, never dropped"
     );
 }
 
@@ -513,6 +521,9 @@ fn a_live_tasks_state_reads_back_from_its_records() {
     let requests: Map<String, Value> =
         serde_json::from_value(json!({"r": {"method": "roots/list"}})).unwrap();
     relayed.park_relay(&requests, "sealed".into(), json!({"name": "fs_x"}), T0 + 3);
+    // The relayed task is parked on an ask its caller has not answered, so `take_relay` is `None`
+    // on both sides below; the park itself is what must read back.
+    assert!(relayed.relay.is_some(), "the relayed task is parked");
     for held in [own, relayed] {
         let parts = live_parts(&held.id, &held.live()).expect("a state the records keep");
         assert!(parts
@@ -524,7 +535,11 @@ fn a_live_tasks_state_reads_back_from_its_records() {
         assert_eq!(read.detailed(), held.detailed());
         assert_eq!(read.answers(), held.answers());
         assert_eq!(read.asked, held.asked);
-        assert_eq!(read.relay.is_some(), held.relay.is_some());
+        assert_eq!(
+            read.relay, held.relay,
+            "the upstream ask it is parked on reads back"
+        );
+        assert_eq!(read.live(), held.live(), "the whole live state reads back");
         assert_eq!(read.take_relay(), held.clone().take_relay());
     }
 }

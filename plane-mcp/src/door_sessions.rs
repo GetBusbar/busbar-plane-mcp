@@ -48,11 +48,13 @@ use busbar_contract::abi::sdk::{Instance, Lent, Out};
 /// first `2024-11-05` stream (the index of its id in the Statement's diagnostic ids).
 pub(super) const UNGOVERNED_LEGACY_STREAM: u32 = 0;
 
-/// The Statement's diagnostic ids, in index order.
+/// The names of the Statement's diagnostic ids, in index order: each the `BUSBAR-NNNN` banner of
+/// the catalog code it raises (`declares.json`), so the host's log resolves its entry.
+pub(super) const DIAG_NAMES: &[&str] = &["BUSBAR-7106"];
+
+/// The Statement's diagnostic ids, in index order ([`DIAG_NAMES`]).
 pub(super) const DIAG_IDS: &[busbar_contract::abi::mechanism::call::AbiStr] =
-    &[busbar_contract::abi::sdk::door::abi_str(
-        "mcp-legacy-stream-ungoverned",
-    )];
+    &[busbar_contract::abi::sdk::door::abi_str(DIAG_NAMES[0])];
 
 /// The words of [`UNGOVERNED_LEGACY_STREAM`].
 const UNGOVERNED_WORDS: &str =
@@ -87,18 +89,6 @@ const MAX_RESOURCE_SUB_URI_BYTES: usize = 2048;
 /// The most announced updates a session holds until its stream collects them; past it, the oldest
 /// gives way.
 const MAX_PENDING_UPDATES: usize = 64;
-
-/// The RFC 5424 severities `logging/setLevel` names, least severe first.
-const LEVELS: &[&str] = &[
-    "debug",
-    "info",
-    "notice",
-    "warning",
-    "error",
-    "critical",
-    "alert",
-    "emergency",
-];
 
 /// How a session message arrived. A session is carried on the event stream exactly when its
 /// revision is the event-stream revision.
@@ -175,10 +165,13 @@ pub(super) enum SessionArrived {
 }
 
 /// THE OWNER a unit's session is bound to: the kernel's caller reference (derived from the
-/// principal's key id), or the ungoverned chain's one constant. An empty reference is the
-/// ungoverned chain's alone: the kernel never lends a governed caller an empty one, and a node
-/// with no signing key derives each caller's reference from the deployment keyset, so callers of a
-/// governed deployment never fold into one owner.
+/// principal's key id), or the ungoverned chain's one constant.
+///
+/// AN EMPTY REFERENCE IS THE UNGOVERNED CHAIN, and nothing else: the kernel lends every principal
+/// it verified on a governed chain a non-empty reference derived from the deployment keyset, and
+/// never an empty one (a busbar test pins that guarantee), so an empty reference reaches the plane
+/// only where no chain governs the deployment. The plane is handed no other governance fact, and
+/// needs none.
 pub(super) fn owner_of(caller: &str) -> Owner {
     let who = super::principal_of(caller);
     Owner {
@@ -408,7 +401,7 @@ fn open_session(
     owner: &Owner,
     revision: Revision,
     now: u64,
-) -> Result<String, &'static str> {
+) -> Result<String, (u32, &'static str)> {
     for _ in 0..2 {
         let mut entropy = [0_u8; 16];
         let drawn = plane.services.is_some_and(|s| {
@@ -416,21 +409,39 @@ fn open_session(
                 .is_ok()
         });
         if !drawn {
-            return Err("the host's random source did not answer, so no session id can be minted");
+            return Err((
+                STATUS_UNAVAILABLE,
+                "the host's random source did not answer, so no session id can be minted",
+            ));
         }
         let opened = with_sessions(plane, |t| t.open(entropy, owner.clone(), revision, now));
         match opened {
             Some(Ok(id)) => return Ok(id),
             Some(Err(OpenRefused::Collision)) => {}
             Some(Err(OpenRefused::NoEntropy)) => {
-                return Err("the host's random source answered no entropy")
+                return Err((
+                    STATUS_UNAVAILABLE,
+                    "the host's random source answered no entropy",
+                ))
+            }
+            Some(Err(OpenRefused::OwnerFull)) => {
+                return Err((
+                    STATUS_QUOTA,
+                    "this caller holds as many MCP sessions as this node keeps for one caller, \
+                     each with a live stream: end one (DELETE it, or close its stream) and open \
+                     again",
+                ))
             }
             Some(Err(OpenRefused::Full)) | None => {
-                return Err("this caller holds as many MCP sessions as this node keeps for it")
+                return Err((
+                    STATUS_UNAVAILABLE,
+                    "this node holds as many MCP sessions as it keeps, and none of this caller's \
+                     is idle to give way",
+                ))
             }
         }
     }
-    Err("two fresh session ids collided")
+    Err((STATUS_UNAVAILABLE, "two fresh session ids collided"))
 }
 
 /// A JSON-RPC error envelope.
@@ -594,7 +605,7 @@ fn open_endpoint(
     };
     let session = match open_session(plane, ticket, unit, owner, revision, now) {
         Ok(session) => session,
-        Err(why) => return unavailable(id, why),
+        Err((status, why)) => return answer_of(status, rpc_error(id, CODE_REFUSED, why)),
     };
     let result = adapt::initialize_result(&discovered, revision);
     let body = serde_json::to_vec(&crate::line::result(id, result)).unwrap_or_default();
@@ -679,7 +690,7 @@ fn here(
         }
         "logging/setLevel" => {
             let level = value.pointer("/params/level").and_then(Value::as_str);
-            match level.filter(|l| LEVELS.contains(l)) {
+            match level.filter(|l| crate::framing::SEVERITIES.contains(l)) {
                 Some(level) => {
                     state_of(plane, session, owner, |s| s.level = Some(level.to_string()));
                     ok(json!({}))
@@ -798,14 +809,15 @@ pub(super) fn heard(
                     .get(&id.to_string())
                     .and_then(|s| s.level);
                 let level = frame.pointer("/params/level").and_then(Value::as_str);
-                let rank = |l: &str| LEVELS.iter().position(|x| *x == l);
+                let rank = crate::framing::severity_of;
                 let passes = match (floor.as_deref().and_then(rank), level.and_then(rank)) {
                     (Some(floor), Some(level)) => level >= floor,
                     (Some(_), None) => false,
                     (None, _) => true,
                 };
+                // The record goes on as the upstream wrote it.
                 if passes {
-                    deliver_frame(plane, id, owner, &frame.to_string(), now);
+                    let _delivered = deliver_frame(plane, id, owner, data.trim(), now);
                 }
             }
             _ => {}
@@ -865,40 +877,50 @@ pub(super) fn lower(plane: &McpDoor, ticket: Ticket, caller: &str, unit: &mut Ca
         *pending = unavailable(&Value::Null, super::CLOCK_UNREAD);
         return;
     };
-    let Ok(mut v) = serde_json::from_slice::<Value>(&pending.bytes) else {
+    let Ok(v) = serde_json::from_slice::<Value>(&pending.bytes) else {
         return;
     };
-    let inexpressible = v
-        .get_mut("result")
-        .is_some_and(|result| !adapt::lower_result(result));
-    if inexpressible {
-        let id = v.get("id").cloned().unwrap_or(Value::Null);
-        v = busbar_contract::jsonrpc::error_body(
-            id,
-            CODE_REFUSED,
-            "this answer asks for input or names a task, which this session's MCP revision \
-             cannot carry",
-            None,
-        );
-    }
     let rpc = v.get("jsonrpc").is_some() && (v.get("result").is_some() || v.get("error").is_some());
-    let bytes = serde_json::to_vec(&v).unwrap_or_default();
+    // THE ANSWER IS RELAYED AS ITS OWN BYTES (Law 11): handed on unchanged when nothing is lowered,
+    // and otherwise only the stateless-only members' spans are cut out ([`adapt::lower_answer`]).
+    let bytes = match adapt::lower_answer(&pending.bytes) {
+        None => return,
+        Some(adapt::Lowered::Unchanged) => std::mem::take(&mut pending.bytes),
+        Some(adapt::Lowered::Spliced(bytes)) => bytes,
+        Some(adapt::Lowered::Inexpressible) => {
+            let id = v.get("id").cloned().unwrap_or(Value::Null);
+            serde_json::to_vec(&busbar_contract::jsonrpc::error_body(
+                id,
+                CODE_REFUSED,
+                "this answer asks for input or names a task, which this session's MCP revision \
+                 cannot carry",
+                None,
+            ))
+            .unwrap_or_default()
+        }
+    };
     if line {
         pending.bytes = bytes;
         return;
     }
     match legacy {
         Some(session) => {
-            deliver_frame(
+            let delivered = deliver_frame(
                 plane,
                 &session,
                 &owner_of(caller),
                 &String::from_utf8_lossy(&bytes),
                 now,
             );
-            pending.bytes.clear();
-            pending.fields.clear();
-            pending.status = STATUS_ACCEPTED;
+            // No stream took the answer (it ended while the message ran): the POST is told the
+            // session is gone, never accepted for an answer nobody will read.
+            if delivered {
+                pending.bytes.clear();
+                pending.fields.clear();
+                pending.status = STATUS_ACCEPTED;
+            } else {
+                *pending = not_found(&v.get("id").cloned().unwrap_or(Value::Null));
+            }
         }
         None => {
             if rpc {
@@ -942,15 +964,22 @@ pub(super) fn holds(plane: &McpDoor, unit: u64) -> bool {
     })
 }
 
-/// `data` buffered on `session`'s stream, and the stream named due.
-fn deliver_frame(plane: &McpDoor, session: &str, owner: &Owner, data: &str, now: u64) {
+/// `data` buffered on `session`'s stream, and the stream named due: `false` when no live stream
+/// took it.
+fn deliver_frame(plane: &McpDoor, session: &str, owner: &Owner, data: &str, now: u64) -> bool {
     let target = plane
         .streams
         .with_all(|m| m.values().find(|s| s.session == session).map(|s| s.stream));
-    if let Some(stream) = target {
-        with_sessions(plane, |t| t.push(session, owner, stream, data, now));
+    let Some(stream) = target else {
+        return false;
+    };
+    let pushed = with_sessions(plane, |t| t.push(session, owner, stream, data, now))
+        .flatten()
+        .is_some();
+    if pushed {
         due(plane, session);
     }
+    pushed
 }
 
 /// Every stream of `session` named due, and the driver woken.
@@ -1012,11 +1041,36 @@ pub(super) fn tick(plane: &McpDoor) {
     }
 }
 
-/// The op on `ticket` was cancelled: the stream it carried is dropped.
+/// The op on `ticket` was cancelled: the stream it carried is ended.
 pub(super) fn cancelled(plane: &McpDoor, ticket: Ticket) {
-    plane
-        .streams
-        .with_all(|m| m.retain(|_, s| s.ticket != ticket));
+    let keys: Vec<u64> = plane.streams.with_all(|m| {
+        m.iter()
+            .filter(|(_, s)| s.ticket == ticket)
+            .map(|(k, _)| *k)
+            .collect()
+    });
+    for key in keys {
+        end_stream(plane, key);
+    }
+}
+
+/// ENDS the held stream of unit `key`: it is no longer live work, so its cursor (kept for a
+/// resuming GET) and its session may give way again.
+fn end_stream(plane: &McpDoor, key: u64) -> Option<Stream> {
+    let ended = plane.streams.remove(&key)?;
+    with_sessions(plane, |t| {
+        t.release_stream(&ended.session, ended.stream);
+        // A `2024-11-05` SESSION LIVES AS LONG AS ITS STREAM: its answers have nowhere else to go,
+        // so a message POSTed after the stream ended is told the session is unknown (`404`) before
+        // it runs, never run, charged and its answer dropped.
+        if ended.legacy {
+            t.end(&ended.session);
+        }
+    });
+    if ended.legacy {
+        plane.session_state.remove(&ended.session);
+    }
+    Some(ended)
 }
 
 /// What an idle stream writes to say it is alive.
@@ -1029,13 +1083,9 @@ pub(super) fn piece(
     input: Lent<'_, OnPieceIn>,
     out: &mut Out<'_, OnPieceOut>,
 ) -> Outcome {
-    let given = input.get();
-    let (key, ticket) = (given.unit, given.head.ticket);
-    let caller = input
-        .field(|i| &i.caller_ref)
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
+    let given = input;
+    let (key, ticket) = (given.unit(), given.head().ticket());
+    let caller = input.caller_ref().as_str().unwrap_or_default().to_string();
     let owner = owner_of(&caller);
     let mut say_ungoverned = false;
     let step = plane.units.with(&key, |unit| {
@@ -1044,9 +1094,9 @@ pub(super) fn piece(
         if unit.pending.is_some() {
             return Some(true);
         }
-        match given.from {
-            FROM_CALLER if given.flags & PIECE_LAST != 0 => {
-                plane.streams.remove(&key);
+        match given.from() {
+            FROM_CALLER if given.flags() & PIECE_LAST != 0 => {
+                end_stream(plane, key);
                 unit.pending = Some(door_listen::frame(Vec::new(), true, true));
                 Some(true)
             }
@@ -1055,14 +1105,22 @@ pub(super) fn piece(
                 say_ungoverned = legacy_ungoverned;
                 Some(wrote)
             }
-            FROM_KERNEL if given.attempt_no == 0 => step_stream(plane, ticket, unit),
+            FROM_KERNEL if given.attempt_no() == 0 => step_stream(plane, ticket, unit),
             FROM_KERNEL => Some(false),
             _ => None,
         }
     });
-    // THE UNGOVERNED CHAIN SAYS SO, once per instance, on its first `2024-11-05` stream.
-    if say_ungoverned && plane.said_ungoverned.insert((), ()).is_none() {
-        let _reported = out.diag(UNGOVERNED_LEGACY_STREAM, SEVERITY_WARN, UNGOVERNED_WORDS);
+    // THE UNGOVERNED CHAIN SAYS SO, once per instance, on its first `2024-11-05` stream: latched
+    // only once the envelope carried it, so a report the envelope had no room for is made again on
+    // the next such stream.
+    if say_ungoverned {
+        plane.said_ungoverned.with_all(|said| {
+            if !said.contains_key(&())
+                && out.diag(UNGOVERNED_LEGACY_STREAM, SEVERITY_WARN, UNGOVERNED_WORDS)
+            {
+                said.insert((), ());
+            }
+        });
     }
     match step {
         None => Outcome::Refused,
@@ -1085,7 +1143,7 @@ pub(super) fn piece(
                 }
                 Some(Ok(Written::Done)) => {
                     plane.units.remove(&key);
-                    plane.streams.remove(&key);
+                    end_stream(plane, key);
                     Outcome::Ready
                 }
             }
@@ -1151,8 +1209,9 @@ fn open_stream(
             let opened = open_session(plane, ticket, unit, owner, Revision::R2024_11_05, now);
             let session = match opened {
                 Ok(session) => session,
-                Err(why) => {
-                    unit.pending = Some(unavailable(&Value::Null, why));
+                Err((status, why)) => {
+                    let body = rpc_error(&Value::Null, CODE_REFUSED, why);
+                    unit.pending = Some(answer_of(status, body));
                     return Some((true, false));
                 }
             };
@@ -1183,13 +1242,32 @@ fn open_stream(
                     (session, replay.stream, delivered, false, bytes)
                 }
                 None => {
-                    let stream =
-                        with_sessions(plane, |t| t.open_stream(&session, owner, now)).flatten()?;
+                    let opened =
+                        with_sessions(plane, |t| t.open_stream(&session, owner, now)).flatten();
+                    // THE SESSION'S CURSORS ARE ALL READ BY LIVE STREAMS: the new one is refused,
+                    // and no live stream is ended for it.
+                    let Some(stream) = opened else {
+                        let refusal = Refusal {
+                            status: STATUS_QUOTA,
+                            id: None,
+                            code: CODE_REFUSED,
+                            message: "this MCP session holds as many open streams as a session \
+                                      keeps; close one and open again"
+                                .to_string(),
+                            data: Some(json!({ "reason": "stream_quota" })),
+                        };
+                        unit.pending =
+                            Some(Pending::answer(refusal.status, refusal.body(), None, &[]));
+                        return Some((true, false));
+                    };
                     (session, stream, 0, false, KEEPALIVE.to_vec())
                 }
             }
         }
     };
+    // THE STREAM IS LIVE WORK: its session is never evicted, nor its cursor dropped, while it is
+    // held ([`end_stream`] lets it go).
+    with_sessions(plane, |t| t.hold_stream(&session, stream));
     // One stream per live unit, so the unit table's admission bound (it refuses past `MAX_UNITS`,
     // and evicts nothing) bounds this table too.
     plane.streams.insert(
@@ -1258,8 +1336,8 @@ fn step_stream(plane: &McpDoor, ticket: Ticket, unit: &mut CallUnit) -> Option<b
     })
     .flatten();
     let Some(replay) = replay else {
-        // The session is gone (ended, expired, evicted): so is its stream.
-        plane.streams.remove(&unit.key);
+        // The session is gone (ended or expired): so is its stream.
+        end_stream(plane, unit.key);
         unit.pending = Some(door_listen::frame(Vec::new(), true, true));
         return Some(true);
     };
@@ -1360,6 +1438,14 @@ impl Negotiating {
     ) -> Self {
         let key = crate::tool_sessions::upstream_key(member, binding);
         let (remembered, session_id) = remembered(plane, &key);
+        // A request lowered into a remembered session carries a token derived from the id it is
+        // sent under (the negotiator writes both); any other carries one drawn here from the
+        // instance's one counter, so two calls in flight never share a progress token (the round's
+        // id, `0` on every first round, is no such thing).
+        let original = match session_id {
+            Some(_) => original,
+            None => with_progress_token(plane, original),
+        };
         let stateless_known = remembered
             .as_ref()
             .is_some_and(|r| r.revision == Revision::R2026_07_28);
@@ -1672,6 +1758,28 @@ pub(super) fn fetch_in(
         }
         Negotiated::Failed(reason) => Err(reason),
     })
+}
+
+/// `request` with the progress token it carries (when it asks for progress at all) replaced by one
+/// no other request of this instance carries: `busbar-` and an id from the instance's one counter.
+fn with_progress_token(plane: &McpDoor, mut request: OutboundRequest) -> OutboundRequest {
+    let Ok(mut body) = serde_json::from_slice::<Value>(&request.body) else {
+        return request;
+    };
+    let Some(token) = body
+        .pointer_mut("/params/_meta/progressToken")
+        .filter(|t| !t.is_null())
+    else {
+        return request;
+    };
+    let Some(n) = plane.upstreams.with(&(), |t| t.map(|t| t.take_id())) else {
+        return request;
+    };
+    *token = Value::from(format!("busbar-{n}"));
+    if let Ok(bytes) = serde_json::to_vec(&body) {
+        request.body = bytes;
+    }
+    request
 }
 
 /// `body` (one JSON-RPC answer) with its top-level `id` put back to `id` when it is `sent`, the

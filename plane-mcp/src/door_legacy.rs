@@ -431,7 +431,7 @@ impl Link {
     }
 
     /// The connector for the next handle of the cycle, or none once the cycle's span is spent.
-    fn next(host: &Host, driver: Ticket, issued: u32) -> Option<Connector<'_>> {
+    fn next<'h>(host: &'h Host, driver: Ticket, issued: u32) -> Option<Connector<'h>> {
         (issued < CYCLE_SPAN).then(|| host.connector_from(driver, LINK_SEQ.saturating_add(issued)))
     }
 
@@ -839,15 +839,11 @@ fn framed_answer(body: Vec<u8>, frames: Vec<Value>) -> (Vec<u8>, bool) {
     if frames.is_empty() {
         return (body, false);
     }
-    let Ok(answer) = serde_json::from_slice::<Value>(&body) else {
-        return (body, false);
-    };
-    let out: String = frames
-        .iter()
-        .chain(std::iter::once(&answer))
-        .map(|f| crate::adapt::frame(None, Some(crate::adapt::EVENT_MESSAGE), &f.to_string()))
-        .collect();
-    (out.into_bytes(), true)
+    // The answer rides as its own bytes (Law 11), as the stateless path frames one.
+    match crate::framing::event_stream(&body, &frames) {
+        Some(stream) => (stream, true),
+        None => (body, false),
+    }
 }
 
 /// A CALL OVER THE HELD STREAM of `key` (a member and a caller binding), on the call's own ticket:
@@ -878,7 +874,9 @@ pub(super) fn call(
                         Some(idle) => idle.die(IDLE, &mut woken),
                         None => {
                             return Err(format!(
-                                "MCP server `{member}`: busbar already holds {MAX_LINKS}                                  2024-11-05 event streams, each in use by a call, and opens no                                  more until one is let go"
+                                "MCP server `{member}`: busbar already holds {MAX_LINKS} \
+                                 2024-11-05 event streams, each in use by a call, and opens no \
+                                 more until one is let go"
                             ))
                         }
                     }

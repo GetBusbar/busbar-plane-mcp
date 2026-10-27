@@ -14,8 +14,9 @@
 //! | `2024-11-05` | `initialize`                    | yes      | none           | an event stream that names a message address |
 //!
 //! `2025-03-26` is not implemented: it is the only revision that allows batched bodies, and a
-//! client that asks for it is offered `2025-06-18` in the `initialize` answer, which the spec's
-//! negotiation rule permits (the client disconnects if it cannot speak what it is offered).
+//! client that asks for it (or for any revision this plane does not implement) is offered the
+//! latest session revision, `2025-11-25`, in the `initialize` answer ([`negotiate`]), which the
+//! spec's negotiation rule permits (the client disconnects if it cannot speak what it is offered).
 //!
 //! OWNER RULING 2026-09-29: 1.6.0 interoperates with all four, in both directions. The revision
 //! negotiation below is the spec's own: the client names the revision it wants in `initialize`; a

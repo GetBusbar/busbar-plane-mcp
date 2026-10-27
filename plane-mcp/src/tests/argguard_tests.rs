@@ -893,6 +893,133 @@ fn a_trailing_root_dot_is_judged_as_the_name_it_roots() {
     }
 }
 
+/// `ｌｏｃａｌｈｏｓｔ` in full-width letters: a fetching client's UTS-46 mapping reads `localhost`.
+const FULLWIDTH_LOCALHOST: &str =
+    "\u{ff4c}\u{ff4f}\u{ff43}\u{ff41}\u{ff4c}\u{ff48}\u{ff4f}\u{ff53}\u{ff54}";
+/// `127。0。0。1` with ideographic full stops: UTS-46 reads `127.0.0.1`.
+const IDEOGRAPHIC_LOOPBACK: &str = "127\u{3002}0\u{3002}0\u{3002}1";
+/// `１６９．２５４．１６９．２５４` in full-width digits and stops: UTS-46 reads `169.254.169.254`.
+const FULLWIDTH_METADATA: &str = "\u{ff11}\u{ff16}\u{ff19}\u{ff0e}\u{ff12}\u{ff15}\u{ff14}\u{ff0e}\
+                                  \u{ff11}\u{ff16}\u{ff19}\u{ff0e}\u{ff12}\u{ff15}\u{ff14}";
+
+/// A HOST A CLIENT MAPS ONTO A FORBIDDEN ADDRESS IS REFUSED AS THAT ADDRESS, in every field the
+/// guard reads a host from: a declared `uri` (the absolute-URL judge), a declared `hostname` (the
+/// bare-host judge), an undeclared `https://` value and a `http:/` spelling only a WHATWG reader
+/// takes for a URL. A fetching client maps each spelling through UTS-46 before it dials, so the
+/// judge must be asked about the mapped name: asked about the spelling as written, the stand-in
+/// judge (like the host's) recognises none of them and the value would pass.
+#[test]
+fn a_host_a_client_maps_to_a_forbidden_address_is_refused_as_that_address() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "uri": {"type": "string", "format": "uri"},
+            "host": {"type": "string", "format": "hostname"},
+            "free": {"type": "string"}
+        }
+    });
+    for (spelled, dialled) in [
+        (FULLWIDTH_LOCALHOST, "localhost"),
+        (IDEOGRAPHIC_LOOPBACK, "127.0.0.1"),
+        (FULLWIDTH_METADATA, "169.254.169.254"),
+    ] {
+        for (field, value) in [
+            ("uri", format!("https://{spelled}/x")),
+            ("host", spelled.to_string()),
+            ("free", format!("https://{spelled}/x")),
+            ("free", format!("http:/{spelled}/x")),
+        ] {
+            let mut asked: Vec<String> = Vec::new();
+            let mut stand_in = public();
+            let got = guard(&schema, &json!({ field: value.as_str() }), |dest: &str| {
+                asked.push(dest.to_string());
+                stand_in(dest)
+            });
+            let why = got.as_ref().err().map(|e| e.why.clone());
+            let expected = if dialled == "169.254.169.254" {
+                ArgWhy::CloudMetadata(dialled.into())
+            } else {
+                ArgWhy::InternalHost(dialled.into())
+            };
+            assert_eq!(
+                why,
+                Some(expected),
+                "`{value}` in `{field}` is the address `{dialled}` and is refused as it: {got:?}"
+            );
+            assert_eq!(asked, [dialled], "`{value}` in `{field}`");
+        }
+    }
+}
+
+/// A HOST OUTSIDE ASCII IS NEVER JUDGED AS WRITTEN. The judge is asked about the punycode name a
+/// fetching client dials (`bücher.example` is `xn--bcher-kva.example` to it), whichever reader
+/// found the host; and a host UTS-46 refuses, or maps onto a forbidden domain code point
+/// (`ｂ＜.example` maps to `b<.example`), is refused with no host and never reaches the judge.
+#[test]
+fn a_host_outside_ascii_is_judged_as_the_name_a_client_dials_never_as_written() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "uri": {"type": "string", "format": "uri"},
+            "host": {"type": "string", "format": "idn-hostname"},
+            "free": {"type": "string"}
+        }
+    });
+    let allow_all = |asked: &mut Vec<String>, dest: &str| {
+        asked.push(dest.to_string());
+        Some(DEST_ALLOWED)
+    };
+    for (field, value, dialled) in [
+        (
+            "uri",
+            "https://b\u{fc}cher.example/x",
+            "xn--bcher-kva.example",
+        ),
+        ("host", "b\u{fc}cher.example", "xn--bcher-kva.example"),
+        (
+            "free",
+            "https:\\\\b\u{fc}cher.example\\",
+            "xn--bcher-kva.example",
+        ),
+        (
+            "free",
+            "http:/\u{ff4c}\u{ff4f}\u{ff43}\u{ff41}\u{ff4c}\u{ff48}\u{ff4f}\u{ff53}\u{ff54}/x",
+            "localhost",
+        ),
+    ] {
+        let mut asked: Vec<String> = Vec::new();
+        let got = guard(&schema, &json!({ field: value }), |dest: &str| {
+            allow_all(&mut asked, dest)
+        });
+        assert!(got.is_ok(), "`{value}` in `{field}`: {got:?}");
+        assert_eq!(
+            asked,
+            [dialled],
+            "`{value}` in `{field}` is judged as it is dialled"
+        );
+    }
+    for (field, value) in [
+        ("uri", "https://\u{ff42}\u{ff1c}.example/x"),
+        ("host", "\u{ff42}\u{ff1c}.example"),
+    ] {
+        let mut asked: Vec<String> = Vec::new();
+        let got = guard(&schema, &json!({ field: value }), |dest: &str| {
+            allow_all(&mut asked, dest)
+        });
+        assert!(
+            matches!(
+                &got,
+                Err(ArgRefusal {
+                    why: ArgWhy::NoHost(_),
+                    ..
+                })
+            ),
+            "`{value}` in `{field}` names no host a client can dial and is refused: {got:?}"
+        );
+        assert!(asked.is_empty(), "`{value}` was judged: {asked:?}");
+    }
+}
+
 // ═════════════════════════════════════════════════════════════════════════════════════════════════
 //   THE WHATWG SPECIAL SCHEMES, AND A URL NO READER ACCEPTS
 // ═════════════════════════════════════════════════════════════════════════════════════════════════

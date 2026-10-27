@@ -6,6 +6,7 @@
 use serde_json::{json, Value};
 
 use super::*;
+use crate::tests::everyone;
 
 const SECTION: &[u8] = br#"{
   "fs": {
@@ -34,10 +35,6 @@ fn catalogue() -> Catalogue {
         1,
         &crate::door::read_tools_section(SECTION).expect("the section reads"),
     )
-}
-
-fn everyone(_: &str, _: &str) -> bool {
-    true
 }
 
 fn only_fs(kind: &str, name: &str) -> bool {
@@ -173,4 +170,17 @@ fn a_template_binds_one_segment_and_never_a_subtree() {
         crate::catalogue::match_uri_template(t, "file:///t/7/data/x"),
         None
     );
+}
+
+/// RED: A TEMPLATE IS SUBSTITUTED IN ONE PASS. A bound value that itself spells another
+/// placeholder is copied as it is, never substituted again; a placeholder no binding names stays.
+#[test]
+fn a_bound_value_spelling_a_placeholder_is_not_substituted_again() {
+    let bindings: std::collections::BTreeMap<String, String> = [
+        ("a".to_string(), "{b}".to_string()),
+        ("b".to_string(), "x".to_string()),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(super::substitute("{a}-{b}-{c}-{", &bindings), "{b}-x-{c}-{");
 }

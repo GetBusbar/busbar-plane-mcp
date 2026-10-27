@@ -45,6 +45,39 @@ fn a_refusal_moves_the_ladder_and_an_outage_does_not() {
     );
 }
 
+/// RED: ANY `4xx` to the stateless request refuses its revision, whatever JSON-RPC error rides it.
+/// The MCP specification has a server answer an unsupported `MCP-Protocol-Version` with `400 Bad
+/// Request` and fixes no code or wording, so a `400` carrying an error that names neither the
+/// session nor `-32022` is still the revision refused, never the call's answer.
+#[test]
+fn red_any_4xx_to_the_stateless_request_refuses_its_revision() {
+    for status in [400u16, 401, 404, 405, 409, 422] {
+        let body = json!({"jsonrpc":"2.0","id":null,
+            "error":{"code":-32600,"message":"Bad Request: Unsupported protocol version"}})
+        .to_string();
+        assert_eq!(
+            stateless_outcome(status, body.as_bytes()),
+            StepOutcome::Refused4xx,
+            "{status}"
+        );
+        assert_eq!(stateless_outcome(status, b""), StepOutcome::Refused4xx);
+    }
+    assert_eq!(stateless_outcome(503, b""), StepOutcome::Unreachable);
+    // A success status: the stateless path's own answer, an upstream's own error included.
+    let own =
+        json!({"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"bad args"}}).to_string();
+    assert_eq!(
+        stateless_outcome(200, own.as_bytes()),
+        StepOutcome::Answered
+    );
+    let unsupported =
+        json!({"jsonrpc":"2.0","id":1,"error":{"code":-32022,"message":"m"}}).to_string();
+    assert_eq!(
+        stateless_outcome(200, unsupported.as_bytes()),
+        StepOutcome::Refused4xx
+    );
+}
+
 #[test]
 fn lowering_drops_the_stateless_meta_and_mirror_and_keeps_the_credential() {
     let lowered = lower_request(
