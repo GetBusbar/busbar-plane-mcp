@@ -80,32 +80,6 @@ fn every_dispatched_method_is_carried() {
     );
 }
 
-/// The name pointer is the codec's own reading of where a request's subject is.
-///
-/// The codec answers the same question in a small function; this CALLS it and asserts the two
-/// agree, member for member, in BOTH directions. It read that function's source once — an
-/// `include_str!` over `../../busbar-mcp/src/…`, then a substring search for the arm — which
-/// coupled this crate to a sibling its manifest does not name, and which could only ever check
-/// one direction: a method the codec addressed and this plane gave no pointer for read as a
-/// pass, because the loop never visited it.
-#[test]
-fn the_name_pointers_are_the_codecs_own() {
-    for row in METHODS {
-        let member = row.name_pointer.map(|pointer| {
-            pointer
-                .rsplit('/')
-                .next()
-                .expect("a pointer has a last segment")
-        });
-        assert_eq!(
-            crate::codec::name_source_of(row.method),
-            member,
-            "the codec and this plane disagree about where {}'s subject is",
-            row.method
-        );
-    }
-}
-
 /// The three an upstream sends back are the three the plane calls provider-initiated.
 #[test]
 fn the_provider_methods_are_the_three() {

@@ -13,12 +13,6 @@ use crate::{
     tool_claims as claims, tool_facts as facts, tool_ops as ops, tool_records as records, McpPlane,
 };
 
-/// The family the count-shaped class rolls up into.
-const COUNT_FAMILY: &str = "count";
-
-/// The family the byte-shaped class rolls up into.
-const BYTE_FAMILY: &str = "byte";
-
 /// The two classes this plane meters.
 ///
 /// A tool call is FLAT-metered: the call class divides by one and counts calls, and a rate card that
@@ -36,16 +30,16 @@ const BYTE_FAMILY: &str = "byte";
 /// could not reach.
 const METER_CLASSES: &[MeterClassDecl] = &[
     MeterClassDecl {
-        key: MeterClassId::new("tool_calls"),
-        family: COUNT_FAMILY,
+        key: CLASS_TOOL_CALLS,
+        family: "count",
         // Sized from the answer: a call has been made once it has been answered, and a call that
         // never reached a server is not a call this node made.
         direction: ClassDirection::Response,
         default_divisor: 1,
     },
     MeterClassDecl {
-        key: MeterClassId::new("bytes"),
-        family: BYTE_FAMILY,
+        key: CLASS_BYTES,
+        family: "byte",
         // Sized from the ANSWER, because the answer is what the metering step measures: the one
         // quantity this plane reports under this class is the length of the document it just read
         // back. The class used to declare itself sized from the request instead, which is a hold
@@ -63,12 +57,6 @@ pub const CLASS_TOOL_CALLS: MeterClassId = MeterClassId::new("tool_calls");
 /// The class key the bytes an exchange moved are counted under.
 pub const CLASS_BYTES: MeterClassId = MeterClassId::new("bytes");
 
-/// The read-only verb that lists the registered servers.
-pub const VERB_TOOLS: AdminVerbId = AdminVerbId::new("tools");
-
-/// The read-only verb that answers for the ONE registration the subject names.
-pub const VERB_SERVER: AdminVerbId = AdminVerbId::new("server");
-
 /// The verbs this plane answers.
 ///
 /// Two, and which two is the point. The codec answers a projection over every registration and a
@@ -82,7 +70,8 @@ pub const VERB_SERVER: AdminVerbId = AdminVerbId::new("server");
 /// plane's record schemas, and the plane contributes the shape rather than the action. Liveness is
 /// not here either, for a different reason — a plane holds a registration table and no runtime
 /// state, so a health answer would be a guess wearing a fact's clothes.
-const INTROSPECTION_VERBS: &[AdminVerbId] = &[VERB_TOOLS, VERB_SERVER];
+const INTROSPECTION_VERBS: &[AdminVerbId] =
+    &[AdminVerbId::new("tools"), AdminVerbId::new("server")];
 
 /// The schema of this plane's own configuration block.
 ///
