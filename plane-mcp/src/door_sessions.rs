@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE SESSION REVISIONS AND THE LEGACY EVENT STREAM, SERVED, IN BOTH DIRECTIONS (THE DESIGN
-//! section 2, the mcp bullet).
+//! The session revisions and the legacy event stream, served, in both directions.
 //!
 //! INBOUND: a POST with the stateless marker, or naming neither a session nor `initialize`, is the
 //! stateless path, untouched. `initialize` opens a session (revision by negotiation only) whose
@@ -77,7 +76,7 @@ const STATUS_ACCEPTED: u32 = 202;
 const STATUS_QUOTA: u32 = 429;
 
 /// The most held session streams (`GET`s, the `2024-11-05` stream's included) one owner holds open
-/// at once: the per-owner quota THE DESIGN section 2 (the mcp bullet) names, the same bound
+/// at once: the per-owner quota, the same bound
 /// `subscriptions/listen` holds a caller to. A caller at it is refused its next one; no held stream
 /// is evicted for it.
 const MAX_STREAMS_PER_OWNER: usize = super::door_listen::MAX_LISTENS_PER_OWNER;
@@ -881,7 +880,7 @@ pub(super) fn lower(plane: &McpDoor, ticket: Ticket, caller: &str, unit: &mut Ca
         return;
     };
     let rpc = v.get("jsonrpc").is_some() && (v.get("result").is_some() || v.get("error").is_some());
-    // THE ANSWER IS RELAYED AS ITS OWN BYTES (Law 11): handed on unchanged when nothing is lowered,
+    // The answer is relayed as its own bytes: handed on unchanged when nothing is lowered,
     // and otherwise only the stateless-only members' spans are cut out ([`adapt::lower_answer`]).
     let bytes = match adapt::lower_answer(&pending.bytes) {
         None => return,
@@ -1408,7 +1407,7 @@ pub(super) struct Negotiating {
     /// The last answer's body as sent, and whether it is an event stream.
     raw: (Vec<u8>, bool),
     /// The conversation's key: the member and the caller binding it is negotiated for. What busbar
-    /// learns is kept under it, so one caller's session is never another's (row 159 finding 3).
+    /// learns is kept under it, so one caller's session is never another's.
     key: String,
     /// The upstream is known to speak only the `2024-11-05` event stream: the walk's refusal of the
     /// stateless request goes straight to the held stream ([`super::door_legacy`]).
@@ -1605,7 +1604,7 @@ impl Negotiating {
                 }
                 // THE LAST RUNG: the `2024-11-05` event stream, held by the connector and read on the
                 // driver ticket, this call's request POSTed to the address it names and its answer
-                // taken by its id ([`super::door_legacy`]; row 159 finding 1).
+                // taken by its id ([`super::door_legacy`]).
                 Some(Action::OpenStream)
                     if plane.host.as_ref().is_some_and(|h| h.lends_connector()) =>
                 {
@@ -1716,10 +1715,10 @@ pub(super) fn exchange_request(
 /// A FETCH OF THE DOOR'S OWN (verify-on-call's `tools/list`), negotiated: every hop over the
 /// connector from `base`, the conversation parked on the unit while one pends.
 ///
-/// The conversation is the CALLER's (`binding`, row 159 finding 3); an answer to a request that
+/// The conversation is the caller's (`binding`); an answer to a request that
 /// carried its session's own id is handed back under the original's id, which the fetch correlates.
 /// The conversation is kept in `slot` while it pends: a unit's, or an operator `connect`'s (which
-/// has no unit, row 159 finding A-H1).
+/// has no unit).
 pub(super) fn fetch_in(
     instance: &Instance<'_, McpDoor>,
     plane: &McpDoor,

@@ -21,7 +21,7 @@
 //! NOTIFICATION is neither: it carries no identifier, obliges no answer, and the specification
 //! forbids replying to one.
 
-// The crate's only public item is `door`: the accessors and variants below were this module's public API; the tests hold them, the door does not reach them (BUSBAR-1.6.0.md l.3560).
+// The crate's only public item is `door`: the accessors and variants below were this module's public API; the tests hold them, the door does not reach them.
 #![cfg_attr(not(test), allow(dead_code))]
 
 use busbar_contract::ids::OpClassId;
@@ -68,7 +68,7 @@ pub const OP_SUBSCRIPTIONS_LISTEN: OpClassId = OpClassId::new("subscriptions_lis
 /// An upstream asking the caller for a completion, mid-call.
 ///
 /// This is provider-initiated: the upstream sends it and busbar relays it to the caller, who answers
-/// it or not. busbar runs no completion for it and opens no unit of another plane (Law 11).
+/// it or not. busbar runs no completion for it and opens no unit of another plane.
 pub const OP_SAMPLING: OpClassId = OpClassId::new("sampling");
 
 /// An upstream asking which roots it may work under, mid-call.

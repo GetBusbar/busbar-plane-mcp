@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE `2024-11-05` HTTP+SSE CLIENT RUNG, HELD (row 159 finding 1): busbar reaches a registered
+//! The `2024-11-05` HTTP+SSE client rung, held: busbar reaches a registered
 //! server that speaks only the legacy event-stream revision.
 //!
 //! * ONE HELD STREAM per member AND caller binding: its `GET`, its `endpoint` event, the message
@@ -338,7 +338,7 @@ impl Link {
         }
     }
 
-    /// ONE MESSAGE OF THE SERVER'S OWN, routed as the other rungs route it (Law 11: busbar answers
+    /// One message of the server's own, routed as the other rungs route it (busbar answers
     /// only the protocol's housekeeping, and an ask it cannot carry to the caller is refused, never
     /// answered for the caller).
     fn peer_message(
@@ -839,7 +839,7 @@ fn framed_answer(body: Vec<u8>, frames: Vec<Value>) -> (Vec<u8>, bool) {
     if frames.is_empty() {
         return (body, false);
     }
-    // The answer rides as its own bytes (Law 11), as the stateless path frames one.
+    // The answer rides as its own bytes, as the stateless path frames one.
     match crate::framing::event_stream(&body, &frames) {
         Some(stream) => (stream, true),
         None => (body, false),

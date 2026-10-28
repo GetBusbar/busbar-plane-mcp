@@ -3,7 +3,7 @@
 
 //! THE ARGUMENT HALF OF THE DISPATCH SSRF GUARD: a value-driven walk of `tools/call` arguments
 //! against the pinned input schema, asking the host's one destination judge (`dest.judge`,
-//! BUSBAR-1.6.0.md Appendix C B.3 item 11) about every host they carry. Declared URL-ish formats
+//!) about every host they carry. Declared URL-ish formats
 //! are judged in full; an undeclared string is judged when the whole value is a URL a WHATWG reader
 //! reads as naming a host. No DNS, no `$ref`, no mid-string URLs: the verdict is `dest.judge`'s.
 
@@ -286,7 +286,7 @@ const SPECIAL_SCHEMES: [&str; 6] = ["http", "https", "ws", "wss", "ftp", "file"]
 /// after it skipped, the authority ended at `/`, `?`, `#` or `\`, the host percent-decoded.
 /// All six WHATWG special schemes are read so: the contract reads `http`, `https`, `ws` and `wss`
 /// itself, `ftp` is read as `http` is, and `file` by [`file_host`].
-/// A host outside ASCII is judged as the punycode name a fetching client dials, as 1.5.5 dialled
+/// A host outside ASCII is judged as the punycode name a fetching client dials, as the client dials
 /// it: `judge_host` maps every host it is handed through UTS-46 ([`dial_host`]).
 /// `Some(Some(host))`: the value is a URL naming `host`, lower-cased. `Some(None)`: a URL no reader
 /// accepts, refused rather than passed: it opens with any `scheme://`, or with a special scheme
@@ -485,7 +485,7 @@ fn judge_absolute(url: &str, judge: &mut Judge<'_>) -> Result<(), ArgWhy> {
     judge_host(&host, judge)
 }
 
-/// THE HOST, ASKED OF THE HOST'S ONE JUDGE (`dest.judge`, BUSBAR-1.6.0.md Appendix C B.3 item 11):
+/// The host, asked of the host's one judge (`dest.judge`):
 /// the plane reads the host and holds no rule about it. `judge`'s verdict is rendered as the
 /// refusal; a host that gave none refuses the value.
 ///
@@ -532,7 +532,7 @@ fn ask(host: &str, dest: &str, judge: &mut Judge<'_>) -> Result<(), ArgWhy> {
 
 /// THE NAME A CONNECTING CLIENT DIALS for the host `raw`: read as a URL's host is read
 /// ([`normalize_host`]), then, outside ASCII, mapped through UTS-46 by the contract's
-/// `url_host_to_ascii` (the reading 1.5.5's `url` dialled by), with the one trailing root dot the
+/// `url_host_to_ascii`, with the one trailing root dot the
 /// mapping can make dropped. A fetching client maps `ｌｏｃａｌｈｏｓｔ` to `localhost`, `127。0。0。1`
 /// to `127.0.0.1` and `１６９．２５４．１６９．２５４` to `169.254.169.254`, so those are the names
 /// judged. An ASCII host is the reader's, unchanged. `None` when there is no host, or UTS-46 refuses

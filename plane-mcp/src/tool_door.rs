@@ -19,7 +19,7 @@
 //!   names the ones whose step is due ([`door_listen`]), `cancel` drops the cancelled unit, and
 //!   `release`/`close` hold nothing the SDK does not already drop.
 //!
-//! The request path (THE DESIGN Part 3, the plane driver):
+//! The request path (the plane driver):
 //!
 //! * `arrive` decides what the arrival is ([`crate::tool_arrival::decide`]) and keeps it, with the
 //!   generation it arrived under and how its answer is framed ([`crate::framing::Framing`]),
@@ -102,10 +102,10 @@ pub const STATEMENT: Statement = {
 };
 
 busbar_contract::statement_extensions!(
-    /// The Statement's extensions: this plugin's whole `declares` document (BUSBAR-1.6.0.md l.246),
+    /// The Statement's extensions: this plugin's whole `declares` document,
     /// the one `declares.json` the release also signs into a dropped-in plane's manifest. It states
-    /// the plane's breaker fact (ARCHITECT Q4: one transient failure below the trip threshold never
-    /// benches a member, the posture ruled for this plane, which 1.5.5 did not have), the codes it
+    /// the plane's breaker fact (one transient failure below the trip threshold never
+    /// benches a member), the codes it
     /// raises (`diagnostics::DIAGNOSTICS`; the tests hold the two equal) and the carriers it needs.
     /// Why no bench: an MCP call's errors are mostly the tool's own answer (a tool says no), not a
     /// sign the server is unhealthy, so only a trip benches it.
@@ -399,8 +399,8 @@ slot!(
 slot!(
     /// `cancel`: the cancelled unit's state is dropped, found by its ticket or, cancelled before any
     /// piece reached it, by the unit the host names. Answered `CANCEL_OK_PARTIAL` when the far end
-    /// had begun its answer, so the units it reported bill when its answer was streamed (owner
-    /// billing rule R21: the ledger records what the dialect did), else `CANCEL_ABORTED`.
+    /// had begun its answer, so the units it reported bill when its answer was streamed (the
+    /// ledger records what the dialect did), else `CANCEL_ABORTED`.
     Cancel, PlaneCancelIn, PlaneCancelOut, |instance, input, mut out| {
         let mut stopped = Vec::new();
         let mut answered = false;
@@ -413,7 +413,7 @@ slot!(
             let cancelled =
                 |key: &u64, u: &CallUnit| u.ticket == Some(ticket) || (unit != 0 && *key == unit);
             // A task's continuation the kernel cancelled leaves its task cancelled, audited as the
-            // served engine audited a task its shutdown stopped (SEAM-L(r)).
+            // a task its shutdown stopped is audited.
             stopped = door_tasks::cancelled(plane, ticket);
             plane.units.with_all(|m| {
                 answered = m.iter().any(|(k, u)| {
@@ -545,7 +545,7 @@ struct CallUnit {
 }
 
 /// The retry of a stdio child's relayed ask, binding the work handle the ask is correlated under
-/// (spec Part 3 B.3 item 10): the handle numbers its host calls were issued under (a call that pends
+/// the handle numbers its host calls were issued under (a call that pends
 /// is re-issued under its first number), the handle found, and whether it is done.
 #[derive(Debug, Default)]
 struct ChildWork {
@@ -608,14 +608,14 @@ struct Pending {
     audits: Vec<crate::call::AuditRow>,
     /// The unit's ledger lane, named with its first call: the registered SERVER the call resolved
     /// to, as `mcp_server:<server>` ([`server_lane`]), the key the rate card prices and the usage
-    /// rows read (architect ruling 2026-10-23, R-11); `None` = the route entry the walk picked.
+    /// rows read; `None` = the route entry the walk picked.
     lane: Option<String>,
     /// The counts its first call reports (the unit's cumulative usage, read off the far end).
     units: Vec<UnitCount>,
 }
 
-/// THE LEDGER LANE OF A CALL TO `server` (architect ruling 2026-10-23, R-11): the plane bills each
-/// call under its registered SERVER, `mcp_server:<server>` (the door's first scope kind and the
+/// The ledger lane of a call to `server`: the plane bills each
+/// call under its registered server, `mcp_server:<server>` (the door's first scope kind and the
 /// registration's name), as the a2a plane bills an agent under `agent:<id>` and as the kernel holds
 /// a present `tools.rate_card` to every registration at boot. A per-tool key names no lane.
 pub(crate) fn server_lane(server: &str) -> String {
@@ -641,7 +641,7 @@ fn clock_s(services: Option<StaticServices>, ticket: Ticket, unit: &mut CallUnit
 }
 
 /// The kernel's wall clock in Unix milliseconds; `None` with no clock or a failed read, which is
-/// never a time (row 159 finding P-M4): its caller refuses, stamps nothing or keeps its last time.
+/// never a time: its caller refuses, stamps nothing or keeps its last time.
 fn wall_ms(services: Option<StaticServices>, ticket: Ticket, issued: &mut u32) -> Option<u64> {
     clock(services, ticket, issued).map(|r| r.wall_ns / 1_000_000)
 }
@@ -651,8 +651,7 @@ fn mono_ms(services: Option<StaticServices>, ticket: Ticket, unit: &mut CallUnit
     clock(services, ticket, &mut unit.issued).map(|r| r.mono_ns / 1_000_000)
 }
 
-/// WHETHER THE WALK SPENT THE SERVER'S `timeout:` ON A DISPATCHED CALL (ARCHITECT ruling on the
-/// timed-out answer): the unit handed its relayed request to the walk, and at least the server's
+/// Whether the walk spent the server's `timeout:` on a dispatched call: the unit handed its relayed request to the walk, and at least the server's
 /// own attempt bound has passed since — the member was dialled and did not answer within it. A walk
 /// that refused at its first pick dispatched nothing (no request was handed over), and a dial that
 /// failed fails at once, well inside the bound: both keep the not-dispatched words.
@@ -745,15 +744,15 @@ impl Pending {
         } else if bytes.is_empty() {
             Vec::new()
         } else {
-            // A WHOLE answer states its length, as the served engine's JSON answers did (an event
-            // stream is relayed piece by piece and states none).
+            // A whole answer states its length (an event stream is relayed piece by piece and
+            // states none).
             vec![
                 (CONTENT_TYPE.to_string(), JSON.to_string()),
                 (CONTENT_LENGTH.to_string(), bytes.len().to_string()),
             ]
         };
-        // THE FEE UNIT: earned by an answer the caller is served with a success (1.5.5 refunded the
-        // per-request fee of an end whose caller status was not a success).
+        // The fee unit: earned by an answer the caller is served with a success (the per-request
+        // fee of an end whose caller status was not a success is refunded).
         let units = if (200..=299).contains(&status) {
             vec![UnitCount {
                 class: door::CLASS_FEE_INDEX,
@@ -778,7 +777,7 @@ impl Pending {
     /// refused, unreachable or failed leg (both classes are response classes, `tool_meta.rs`: a call
     /// that never reached a server is not a call this node made, and the byte class is "the length
     /// of the document it just read back"). The plane states its counts; the kernel prices them
-    /// (the design's money section, "The plane reports; the kernel writes"; Law 6).
+    /// (the plane reports; the kernel writes).
     /// Classes by [`door::TAIL`] index: `0` tool calls, `1` bytes.
     fn counted(mut self, answered: usize) -> Self {
         self.units.push(UnitCount {
@@ -847,7 +846,7 @@ const NOT_ALLOWED_TEXT: &str = r#"{"allow":"POST"}"#;
 const FORBIDDEN_ORIGIN_TEXT: &str = r#"{"origin":"forbidden"}"#;
 
 /// Why a unit that needs a time is refused when the host's clock read fails: a failed read is never
-/// a time (row 159 finding P-M4), so nothing is stamped, armed or judged at the epoch.
+/// a time, so nothing is stamped, armed or judged at the epoch.
 const CLOCK_UNREAD: &str = "the host's clock could not be read, and busbar never stamps, arms or \
                             judges anything at a time it made up";
 
@@ -885,7 +884,7 @@ slot!(
             out.set(|o| &o.refusal_status, crate::tool_arrival::STATUS_NOT_FOUND);
             return out.fail(Refusal::bare());
         }
-        // THE ORIGIN FIRST (the served engine's order: who may speak at all, one field read): a
+        // The origin first (who may speak at all, one field read): a
         // browser origin that is neither loopback nor on the operator's allowlist is refused, the
         // DNS-rebinding defence. A request with no `Origin` is not a browser's, and goes on.
         let origin = head(fields, "origin");
@@ -896,7 +895,7 @@ slot!(
                 FORBIDDEN_ORIGIN_TEXT.to_string(),
             );
         }
-        // THE ENDPOINT'S THREE VERBS (THE DESIGN section 2, the mcp bullet): the stateless revision's
+        // The endpoint's three verbs: the stateless revision's
         // POST is the path it always was; `initialize`, a session's messages and streams, DELETE
         // and the `2024-11-05` stream are the session revisions' ([`door_sessions`]); a GET or
         // DELETE naming no session (and no legacy stream) is `405`.
@@ -935,7 +934,7 @@ slot!(
         };
         // A session unit the session answers itself: nothing for the one dispatch to decide.
         let session_local = session_unit.is_some() && session_body.is_none();
-        // A TASK'S CONTINUATION (ARCHITECT round 5 Q-L3B-TASKS (b) → (A)): the task it runs, and the
+        // A task's continuation: the task it runs, and the
         // call it carries, decided below as the `tools/call` it is.
         let task_run = (input.claim() as usize == door::TASK_RUN_ROUTE)
             .then(|| door_tasks::run_arrival(body));
@@ -952,7 +951,7 @@ slot!(
         // free places overshoot by no more than the instance's in-flight bound. It is judged before
         // a line of the line carrier is read: reading one moves its carrier session (a live ask's
         // answer is taken, a revision kept, a cancel applied), and a line the cap refuses has moved
-        // nothing (row 159 finding A-M3).
+        // nothing.
         let at_cap = plane
             .units
             .with_all(|held| held.len() >= MAX_UNITS && !held.contains_key(&input.unit()));
@@ -969,7 +968,7 @@ slot!(
             };
             return refused_arrival(&mut out, refusal.status, refusal_text(&refusal));
         }
-        // A LINE OF THE LINE CARRIER (ARCHITECT Q1a): what it is to the carrier session it arrived
+        // A line of the line carrier: what it is to the carrier session it arrived
         // over, and the bytes the one dispatch decides on (none: the unit answers its preset).
         let line_route = input.claim() as usize == door::LINE_ROUTE;
         // A SHORT ANSWER APPLIES NOTHING, and the re-call reads what was stored: reading a line
@@ -1086,7 +1085,7 @@ slot!(
                 param_fields.push((name.clone(), value.clone()));
             }
         }
-        // THE ROUTE (ARCHITECT Q-SW6 / Q-FL3): a relayed call names the one registered server its
+        // The route: a relayed call names the one registered server its
         // published tool is served by, a DIRECT entry of the `tools:` section; the kernel resolves
         // (plane key, entry) and never parses the name.
         let held = plane.current();
@@ -1102,8 +1101,7 @@ slot!(
         };
         // Every other arrival (a listing, a read, a notice, a call naming no published tool) is the
         // plane's own to answer: it names no entry and is admitted with no walk (Q-L3B-LOCAL).
-        // A server that is a member of a pool routes over the POOL (ARCHITECT round 4
-        // Q-L3B-SURFACES (h)): the kernel's one walk fails it over, under the breaker; a tool the
+        // A server that is a member of a pool routes over the pool: the kernel's one walk fails it over, under the breaker; a tool the
         // pool does not name `repeatable:` is performed at most once.
         match called {
             Some((held, entry)) => match held.pool_of(&entry.server) {
@@ -1117,7 +1115,7 @@ slot!(
             },
             None => out.local(),
         }
-        // THE SUBSCRIPTION ON THE HTTP CARRIER (ARCHITECT round 5 Q-L3B-K6-HTTP (a)): a K6 session,
+        // The subscription on the HTTP carrier: a session,
         // the long-lived response its caller leg ([`door_listen`]).
         // On the line carrier the subscription is kept on the carrier session instead
         // ([`door_line::listen`]).
@@ -1128,7 +1126,7 @@ slot!(
             out.session();
         }
         // THE ADMISSION ESTIMATE of busbar's own ask: a prompt whose operator asks its caller first
-        // costs the round it asks, on the caller's budget, as the served engine charged it (a
+        // costs the round it asks, on the caller's budget (a
         // retry carrying the answers asks nothing, and is charged nothing).
         if let (Disposition::Request { row, .. }, Some(held), Some(v)) =
             (&disposition, held.as_ref(), value.as_ref())
@@ -1205,8 +1203,8 @@ fn ask_entitlements(
     }
 }
 
-/// THE KERNEL'S DESTINATION JUDGE on a host a call's arguments name (BUSBAR-1.6.0.md Appendix C
-/// B.3 item 11: `dest.judge`, called where the argument guard runs): the deployment's egress rules
+/// The kernel's destination judge on a host a call's arguments name (`dest.judge`, called where
+/// the argument guard runs): the deployment's egress rules
 /// under its default class, private reach refused outright for a registration that was granted
 /// none (`allow_private`, as `DEST_REFUSE_PRIVATE`). The name alone is judged, never resolved, so
 /// it never pends (the B.2 row: "may pend: no"); a host that serves no judge, pends or fails
@@ -1416,8 +1414,7 @@ enum Looked {
 /// stamped on the kernel's trust book and kept, so the trust gate judges the call against what the
 /// server serves NOW. A fetch that fails is the `error` state, which serves nothing (fail closed).
 /// A registration with no `url:` has nothing to fetch, and a host that lends the door no connector
-/// relays nothing either. The fetch carries the member's binding, as its relayed calls do (ARCHITECT
-/// round 5 Q-L3B-DOOR-EXCHANGE): a `passthrough` registration's is lent the unit's caller
+/// relays nothing either. The fetch carries the member's binding, as its relayed calls do: a `passthrough` registration's is lent the unit's caller
 /// credential, a `token_exchange:` registration's exchanges for its approved set
 /// ([`crate::tool_scope::registration_scope`]).
 fn verify_on_call(
@@ -1440,7 +1437,7 @@ fn verify_on_call(
     let Some(services) = plane.services else {
         return Looked::Fresh;
     };
-    // A failed read is never a time (row 159 finding P-M4): the cached list is then stale and
+    // A failed read is never a time: the cached list is then stale and
     // fetched again, and what that fetch landed is not stamped.
     let now_ms = wall_ms(Some(services), ticket, &mut unit.issued);
     let sighting = match unit.verified.take() {
@@ -1476,7 +1473,7 @@ fn verify_on_call(
             } else {
                 // The verify fetch carries the member's down-scope (token_exchange) or the caller's
                 // lent credential (passthrough) through the connector binding (Q-L3B-DOOR-EXCHANGE).
-                // The fetch is bounded by the server's own `timeout:` (ARCHITECT timeout ruling):
+                // The fetch is bounded by the server's own `timeout:`:
                 // an upstream is not trusted to answer.
                 let timeout_ms = def.timeout_ms();
                 // The fetch is the stateless `tools/list` first, NEGOTIATED with an upstream that
@@ -1496,7 +1493,7 @@ fn verify_on_call(
             }
         }
     };
-    // AN UNREACHABLE RE-FETCH (ARCHITECT Q3 (c)) is reported as such: the kernel keeps its last
+    // An unreachable re-fetch is reported as such: the kernel keeps its last
     // verdict, and the call fails as an upstream failure (`trust_of`).
     if record_sighting(
         &services,
@@ -1510,8 +1507,8 @@ fn verify_on_call(
         return Looked::Pending;
     }
     // THE FRESHNESS CLOCK starts only on a list that LANDED, read at a time the clock gave: an
-    // unreachable server is fetched again on its next call (row 159 finding A-H1), and a failed
-    // clock read stamps nothing (P-M4).
+    // unreachable server is fetched again on its next call, and a failed
+    // clock read stamps nothing.
     let landed = matches!(sighting, Sighting::Seen(_));
     plane.sightings.insert(server.to_string(), sighting);
     match now_ms {
@@ -1527,7 +1524,7 @@ fn verify_on_call(
 
 /// THE SIGHTING ON THE KERNEL'S TRUST BOOK (`trust.sight` of the observed catalogue, or
 /// `trust.unreachable`, on [`SIGHT_SEQ`]); `true` when it pended. A landed list then sights EACH TOOL
-/// (ARCHITECT Q3): the digest it offers each of `server`'s catalogue tools at, under the tool's
+/// The digest it offers each of `server`'s catalogue tools at, under the tool's
 /// trust key, on fresh handles from `seq`; never pends, and an unserved book leaves the item
 /// unsighted, which `trust.serves` refuses.
 fn record_sighting(
@@ -1606,8 +1603,7 @@ fn kernel_items(plane: &McpDoor, ticket: Ticket, server: &str) -> Vec<crate::tru
     }
 }
 
-/// THE KERNEL'S APPROVE ON ONE TOOL, as the route leg asks it (ARCHITECT Q3; the kernel loop's
-/// Approve step): `trust.serves` over the tool's registration (the counterparty) and its trust key
+/// The kernel's Approve on one tool, as the route leg asks it: `trust.serves` over the tool's registration (the counterparty) and its trust key
 /// (the tool as `tools_allow` names it, the upstream's own spelling), at its last sighting. The door
 /// judges nothing: the one fact it renders on its own is that its last re-fetch could not reach
 /// the server (the call then fails as an upstream failure). A host that answers no trust service
@@ -1658,7 +1654,7 @@ fn queued_turn(plane: &McpDoor, ticket: Ticket, unit: &mut CallUnit) -> Option<R
     Some(Err(()))
 }
 
-/// A STDIO CALL WAITING ITS TURN (finding 5), called again on the wake of the call ahead of it
+/// A stdio call waiting its turn, called again on the wake of the call ahead of it
 /// leaving its member's line or at its deadline: sent once it is first in line; answered busy,
 /// never sent, once its deadline passed while it waited. `None` for a unit that is not waiting.
 fn take_turn(
@@ -1693,9 +1689,8 @@ fn take_turn(
 /// reach ([`Admission::Unreached`]). It is `status` and `body` (the upstream-failure tool error), and
 /// `line` (the call log's `refused` line, under its fixed reason), logged under `(scope, generation,
 /// ts)`, with NO FEE UNIT. A call that was never sent delivered nothing, so it earns no fee and the
-/// kernel gives back the one its admission counted (ARCHITECT rulings 2026-10-14 on
-/// busbar-plane-mcp#14: #62 "bill what was delivered", Q35 "a hop refused before the socket is
-/// refunded", applied uniformly across planes).
+/// kernel gives back the one its admission counted (bill what was delivered; a hop
+/// refused before the socket is refunded).
 fn never_sent_answer(
     status: u32,
     body: Vec<u8>,
@@ -1722,7 +1717,7 @@ fn answer_body(
     // Every line of a carrier session's caller re-asks the standing and grants its subscriptions on
     // that session are stepped under ([`door_line::reconfirm`]).
     door_line::reconfirm(plane, ticket, principal, unit);
-    // A SESSION REVISION'S UNIT: its session checked against its owner first (a mismatch is `404`
+    // A session revision's unit: its session checked against its owner first (a mismatch is `404`
     // on every path); what the session answers itself is answered here.
     if let Some(step) = door_sessions::answer(plane, ticket, caller, unit) {
         return Some(step);
@@ -1759,7 +1754,7 @@ fn answer_body(
     }
     let mut params = unit.params.clone();
     let disposition = unit.disposition.clone();
-    // THE POOL'S TWIN (ARCHITECT round 4 Q-L3B-SURFACES (h)): the kernel's walk picked another
+    // The pool's twin: the kernel's walk picked another
     // member of the called tool's pool. The call is that member's own tool, admitted as its own
     // (its grants, its trust state, its argument guard), and interchangeable only when its approved
     // digest is the primary's; a member with no such twin is declined, and the walk moves on.
@@ -1823,7 +1818,7 @@ fn answer_body(
             }
         }
     }
-    // THE KERNEL'S APPROVE, asked on the route leg after the re-fetch (ARCHITECT Q3): the called
+    // The kernel's Approve, asked on the route leg after the re-fetch: the called
     // tool's verdict, and on a listing every granted tool's, each its own `trust.serves`.
     let verdict = called.map(|entry| {
         (
@@ -2193,8 +2188,8 @@ fn child_record(member: &str, child: &crate::ask::ChildLeg) -> Vec<u8> {
 /// The record a relayed ask's work handle is settled with when nobody came back for it.
 const CHILD_LAPSED: &[u8] = b"a1|lapsed";
 
-/// RELAY AN UPSTREAM'S ASK TO THE CALLER (Law 11: busbar answers nothing on the caller's behalf;
-/// BUSBAR-1.6.0 Part 3 B.3 item 10: the ask is plane traffic to the caller). Its result goes to the
+/// Relay an upstream's ask to the caller (busbar answers nothing on the caller's behalf; the ask
+/// is plane traffic to the caller). Its result goes to the
 /// caller with `inputRequests` verbatim under busbar's one sealed state, bound to the principal, the
 /// call (tool, arguments as sent) and the generation, nesting the member that asked and its own
 /// state. A stdio child's own requests are first given a work handle (`work.open`): across separate
@@ -2316,7 +2311,7 @@ fn open_child_work(
             c.work = Some(opened.reference.to_string());
             let now_ms = wall_ms(Some(services), ticket, issued);
             // A failed clock read gives the handle no lapse (never one at the epoch): it is
-            // settled at once and the ask refused (row 159 finding P-M4).
+            // settled at once and the ask refused.
             let Some(now_ms) = now_ms else {
                 let h = door_tasks::handle(ticket, issued, &mut None);
                 let _unheard = services.work_settle(h, opened.handle, CHILD_LAPSED);
@@ -2519,14 +2514,14 @@ enum MemberSend {
     Step(Step),
     /// The member is not one this call may be sent to: the walk moves on.
     Decline,
-    /// The caller's reply to the member's ask is over the member's `sampling_bounds` (owner ruling
-    /// Q22c): refused by name, never forwarded.
+    /// The caller's reply to the member's ask is over the member's `sampling_bounds`:
+    /// refused by name, never forwarded.
     Judged(Box<AdmittedCall>, crate::call::AskRefusal),
     /// The work handle a stdio child's relayed ask is correlated under is gone, another's or spent.
     Spent(Box<AdmittedCall>),
 }
 
-/// THE ONE MEMBER-SEND (row 159 mcp findings C-H2, C-H3, C-M4): an admitted call sent to `member`,
+/// The one member-send: an admitted call sent to `member`,
 /// the synchronous call's and a task's continuation's alike. The caller's reply to a relayed ask is
 /// judged against the member's bound before anything is sent; a `transport: stdio` member's call
 /// goes to its child (a relayed ask's retry binding the work handle the ask is correlated under);
@@ -2630,7 +2625,7 @@ fn send_to_member(
         // always was, or, to an upstream busbar holds a session with, that request
         // lowered into the session ([`door_sessions::Negotiating`]).
         let original = door_sessions::original(&def.url, &outbound);
-        // The conversation is this CALLER's (row 159 finding 3): a session busbar
+        // The conversation is this caller's: a session busbar
         // holds with the member for another caller is never this call's.
         let negotiating = door_sessions::Negotiating::begin(plane, member, caller, original);
         if let Some(first) = negotiating.first_request() {
@@ -2639,7 +2634,7 @@ fn send_to_member(
         }
         unit.negotiating = Some(Box::new(negotiating));
     }
-    // ONE CALL AT A TIME on a child whose asks are relayed (finding 5): a call behind
+    // One call at a time on a child whose asks are relayed: a call behind
     // another in its member's line waits its turn, within its own deadline.
     let now = mono_ms(services, ticket, unit);
     if door_program::serialised(def)
@@ -2661,8 +2656,8 @@ fn send_to_member(
     Some(MemberSend::Step(Step::Write))
 }
 
-/// THE DOWN-SCOPE a `token_exchange:` member's token is asked for on this unit's call (ARCHITECT
-/// round 5 Q-L3B-EXCHANGE (B), [`crate::tool_scope::caller_downscope`]): the kernel's entitlement
+/// The down-scope a `token_exchange:` member's token is asked for on this unit's call
+/// ([`crate::tool_scope::caller_downscope`]): the kernel's entitlement
 /// answers for every tool the member serves, and whether the caller's tool grant is a wildcard (a
 /// grant no tool name can be: only a wildcard holds it). `None` for a member that does not
 /// exchange.
@@ -2810,7 +2805,7 @@ slot!(
                             match far {
                                 door_program::Far::Taken => return Some(Step::Taken),
                                 door_program::Far::Pending => return Some(Step::Pending),
-                                // THE CHILD ASKED busbar's caller (Law 11): its requests, verbatim,
+                                // The child asked busbar's caller: its requests, verbatim,
                                 // are relayed under the call's next round; past the operator's round
                                 // cap they are refused on the child's input and the call read on.
                                 door_program::Far::Asked(asks) => {
@@ -2913,7 +2908,7 @@ slot!(
                                 unit.negotiating = None;
                                 settled
                             } else {
-                                // THE CLIENT LADDER (THE DESIGN section 2, the mcp bullet): an
+                                // The client ladder: an
                                 // upstream that refuses the stateless request is negotiated with
                                 // over the door's connector; one that answered is handed on as it
                                 // answered.
@@ -2978,12 +2973,12 @@ slot!(
                         }
                     };
                     let mut frames = std::mem::take(&mut relay.frames);
-                    // AN UPSTREAM'S ASK, RELAYED (Law 11): its result goes to the caller with
+                    // An upstream's ask, relayed: its result goes to the caller with
                     // `inputRequests` verbatim, under busbar's one sealed state, which pins the
                     // member that asked and nests the upstream's own; busbar answers none of it.
                     let settled = match settled {
-                        // A TASK'S CONTINUATION parks its task on the ask, and the caller answers it
-                        // through `tasks/update` (ARCHITECT Q6).
+                        // A task's continuation parks its task on the ask, and the caller answers it
+                        // through `tasks/update`.
                         Settled::Relay {
                             result,
                             round,
@@ -3058,7 +3053,7 @@ slot!(
                     if relay.sse {
                         frames.extend(crate::call::progress_frames(&relay.far));
                         // A progress stream is untrusted upstream input: at most 256 frames across
-                        // every round of one call, as the served engine bounded it.
+                        // every round of one call.
                         frames.truncate(256);
                         // What the upstream said beside its answer: its resource updates reach the
                         // sessions watching them, its log records the caller's own session.
@@ -3301,7 +3296,7 @@ slot!(
         // What the refused unit's arrival read: the request id its caller sent (an answer the
         // caller cannot correlate is not an answer), the tool a refused `tools/call` named, and
         // what it is to the tasks extension: a call that would have created a task (its budget
-        // refusal is the served engine's task-path words), or a task's continuation (its task
+        // refusal is the task-path words), or a task's continuation (its task
         // fails).
         let (unit_id, called, creates_task, run_reference) = instance
             .get()
@@ -3321,10 +3316,10 @@ slot!(
                 })
             })
             .unwrap_or_default();
-        // THE WORDS the refusal is said in: the kernel's text, but for the walk's exhaustion (an open
-        // breaker, a walk out of members or out of time) the reason's own word, as predev's door said
-        // it, wherever this door repeats the words (its generic error, a task's failure): the
-        // kernel's text there is the walk's own sentence, which predev never handed this door.
+        // The words the refusal is said in: the kernel's text, but for the walk's exhaustion (an
+        // open breaker, a walk out of members or out of time) the reason's own word, wherever this
+        // door repeats the words (its generic error, a task's failure): the kernel's text there is
+        // the walk's own sentence.
         let text: &[u8] = if given.cause() != REFUSAL_ARRIVE
             && given.reason() == busbar_contract::abi::plane::RefusalCode::BreakerOpen.code()
         {
@@ -3370,8 +3365,8 @@ slot!(
             }
         } else {
             let message = std::str::from_utf8(text).unwrap_or_default();
-            // THE CALLER'S BUDGET said no (a spent budget, a rate, a frozen group): said in the
-            // served engine's words, its reason the one the caller acts on.
+            // The caller's budget said no (a spent budget, a rate, a frozen group): its reason is
+            // the one the caller acts on.
             let budget = [
                 busbar_contract::abi::plane::RefusalCode::OverBudget,
                 busbar_contract::abi::plane::RefusalCode::RateLimited,
@@ -3379,15 +3374,13 @@ slot!(
             ]
             .into_iter()
             .any(|r| r.code() == given.reason());
-            // A CALL THE CALLER IS NOT GRANTED (the kernel's grant check said no before the plane
-            // decided it): answered as the served engine answered it, `404 not_granted` in the
-            // words an unknown tool gets.
+            // A call the caller is not granted (the kernel's grant check said no before the plane
+            // decided it): answered `404 not_granted` in the words an unknown tool gets.
             let scope_denied =
                 given.reason() == busbar_contract::abi::plane::RefusalCode::ScopeDenied.code();
             let ungranted = scope_denied && !creates_task;
-            // THE AUDIT ROW of a call the KERNEL refused before the plane decided it (SEAM-L(o)):
-            // a scope denial or a hook's veto is the served engine's rejected `mcp_tool.call` on the
-            // tool the caller named.
+            // The audit row of a call the kernel refused before the plane decided it: a scope
+            // denial or a hook's veto is a rejected `mcp_tool.call` on the tool the caller named.
             if scope_denied || given.cause() == REFUSAL_GATE {
                 audit = called
                     .as_deref()
@@ -3441,8 +3434,8 @@ slot!(
                 );
                 (refusal.status, refusal.body(), false)
             } else {
-            // A BUDGET REFUSAL carries the wait the kernel's window reset names (ARCHITECT Q5:
-            // every plane's budget refusal renders it as `Retry-After`, never 0).
+            // A budget refusal carries the wait the kernel's window reset names (every plane's
+            // budget refusal renders it as `Retry-After`, never 0).
             if budget && given.retry_after_s() > 0 {
                 retry_after = Some(given.retry_after_s());
             }
@@ -3462,8 +3455,8 @@ slot!(
                     id: unit_id.clone(),
                     code: crate::codec::CODE_REFUSED,
                     message: message.to_string(),
-                    // A HOOK'S VETO carries the served engine's reason (`hook_rejected`) and the name
-                    // of the hook that vetoed it (SEAM-L(p)), where the kernel names one.
+                    // A hook's veto carries the reason (`hook_rejected`) and the name of the hook
+                    // that vetoed it, where the kernel names one.
                     data: (given.cause() == REFUSAL_GATE).then(|| {
                         let reason = busbar_contract::vocab::REASON_HOOK_REJECTED;
                         match std::str::from_utf8(input.hook().bytes()) {
@@ -3586,7 +3579,7 @@ fn exchange_at(
     };
     let mut state = match instance.resume::<Exchange>() {
         Some(parked) => *parked,
-        // The exchange reaches the REGISTRATION `member` (SEAM-4p): its own private reach applies.
+        // The exchange reaches the registration `member`: its own private reach applies.
         None => match Exchange::request(request()) {
             Ok(s) => s.as_member(member),
             Err(e) => return std::task::Poll::Ready(Err(e)),
@@ -3622,8 +3615,8 @@ fn list_request(
     request
 }
 
-/// THE SIGHTING a `connect`'s exchange landed: the server's tool list re-hashed, or why the contact
-/// failed, in the served engine's words.
+/// The sighting a `connect`'s exchange landed: the server's tool list re-hashed, or why the
+/// contact failed.
 fn sighting_of(
     answer: Result<busbar_contract::abi::sdk::exchange::ExchangeResponse, String>,
     sent_id: u64,
@@ -3662,7 +3655,7 @@ fn sighting_of(
 }
 
 slot!(
-    /// `serve`: the trust verbs over the section's registrations (ARCHITECT Q-L3B-VERBS):
+    /// `serve`: the trust verbs over the section's registrations:
     /// `connect` fetches the server's live tool list over the door's own need, re-hashes it, records
     /// the sighting's catalogue hash on the kernel's trust book (`trust.sight`) and answers the trust
     /// view; `changes` answers the same view off the last sighting, contacting nothing; `health`
@@ -3733,10 +3726,10 @@ slot!(
                 "server `{name}` registers no `url:` this door can reach it at"
             )),
             None => {
-                // THE FETCH IS VERIFY-ON-CALL'S (row 159 finding A-H1): the stateless `tools/list`
+                // The fetch is verify-on-call's: the stateless `tools/list`
                 // first, NEGOTIATED with a server that requires a session or speaks only the
                 // `2024-11-05` event stream ([`door_sessions::fetch_in`]), every hop on the
-                // connector to the REGISTRATION `name` (SEAM-4p: its own private reach applies),
+                // connector to the registration `name` (its own private reach applies),
                 // bounded by the server's own `timeout:` (an operator verb that hangs is one that
                 // gets killed and retried). The conversation is the operator's own binding, never a
                 // caller's.
@@ -3776,7 +3769,7 @@ slot!(
         plane.sightings.insert(name.clone(), sighting.clone());
         // THE FRESHNESS CLOCK records that the operator's connect SAW the list: a call within
         // `verify_ttl` of it reuses this sighting rather than fetching the list again. A contact
-        // that failed stamps nothing (row 159 finding A-H1): the next call fetches again, never
+        // that failed stamps nothing: the next call fetches again, never
         // answered "never sent" off the operator's failed refresh for `verify_ttl`.
         plane.checked.remove(name);
         if let (Some(services), Sighting::Seen(_)) = (plane.services, &sighting) {
@@ -3800,8 +3793,8 @@ slot!(
 slot!(
     /// `project`: a `tools/call` as the hook kind's request view: one turn of tool arguments
     /// ([`crate::call::invocation`]), named by the plane's key, the `{tool, arguments}` body, and the
-    /// prompt view a content-granted hook reads (the one `user` turn, the arguments as JSON text, as
-    /// the served engine projected an invocation). A request-stage hook's rewrite
+    /// prompt view a content-granted hook reads (the one `user` turn, the arguments as JSON text).
+    /// A request-stage hook's rewrite
     /// ([`crate::call::rewritten`]) is applied first: the rewritten request is answered in
     /// `rewritten` (the body the kernel keeps and re-pushes from then on) and is the body projected.
     /// Any other request carries no invocation for a hook to read: REFUSED.
@@ -3820,8 +3813,8 @@ slot!(
             .is_some()
             .then(|| request.as_ref().and_then(|v| v.get("params").cloned()));
         let Some(invocation) = request.and_then(crate::call::invocation) else {
-            // ANY OTHER REQUEST carries no invocation for a hook to read, and names no entry its
-            // hooks are attached to: an empty view (the served engine fired no hook on it), never a
+            // Any other request carries no invocation for a hook to read, and names no entry its
+            // hooks are attached to: an empty view, never a
             // refusal (a bound hook stage asks every routed unit).
             out.set(
                 |o| &o.body,
@@ -3842,15 +3835,15 @@ slot!(
             });
         }
         let shape = busbar_contract::ir::facts::IrFacts::shape(&invocation);
-        // THE ENTRY the call's hooks are attached to: the registered server its published tool is
-        // served by (the served engine fired `tools.hooks` and `tools.<server>.hooks` by server).
+        // The entry the call's hooks are attached to: the registered server its published tool is
+        // served by (`tools.hooks` and `tools.<server>.hooks` fire by server).
         let entry = instance
             .get()
             .and_then(McpDoor::current)
             .and_then(|held| held.catalogue.tool(&invocation.tool).map(|t| t.server.clone()))
             .unwrap_or_default();
-        // THE SESSION an incremental gate scan is keyed on: the caller's `x-session-id`, as the
-        // served engine read it; none when the caller sent none.
+        // The session an incremental gate scan is keyed on: the caller's `x-session-id`; none
+        // when the caller sent none.
         let session = head(input.fields(), "x-session-id")
             .filter(|v| !v.is_empty())
             .map(str::to_string);
@@ -3939,11 +3932,10 @@ mod door_line;
 /// unit and relay state.
 #[path = "door_program.rs"]
 mod door_program;
-/// THE SESSION REVISIONS AND THE LEGACY EVENT STREAM, both directions (THE DESIGN section 2, the mcp
-/// bullet): a child of the door, so it reads the door's own unit, answer and stream state.
+/// The session revisions and the legacy event stream, both directions: a child of the door, so it reads the door's own unit, answer and stream state.
 #[path = "door_sessions.rs"]
 mod door_sessions;
-/// THE TASKS EXTENSION'S UNITS (ARCHITECT round 5 Q-L3B-TASKS (b) → (A)): a child of the door, so it
+/// The tasks extension's units: a child of the door, so it
 /// reads the door's own unit and answer state.
 #[path = "door_tasks.rs"]
 mod door_tasks;
