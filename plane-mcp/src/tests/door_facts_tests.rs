@@ -89,7 +89,8 @@ fn the_door_witness_restates_what_the_planes_functions_answer() {
         ),
         "the witness's audience and metadata document under its public base URL"
     );
-    let invocation = crate::call::invocation(stated::RELAY_CALL).expect("a call is an invocation");
+    let call: Value = serde_json::from_slice(stated::RELAY_CALL).expect("a document");
+    let invocation = crate::call::invocation(call).expect("a call is an invocation");
     assert_eq!(
         busbar_contract::ir::facts::IrFacts::shape(&invocation).text_chars,
         stated::RELAY_CALL_TEXT_CHARS

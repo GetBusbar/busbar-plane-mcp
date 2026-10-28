@@ -753,20 +753,20 @@ fn advertised(admitted: &AdmittedCall, def: &McpServerDefCfg) -> AdvertisedCaps 
 }
 
 /// THE `{tool, arguments}` PROJECTION of a `tools/call` body, as the hook kind reads an invocation:
-/// the published name and the arguments as the caller sent them. `None` for any other body.
+/// the published name and the arguments as the caller sent them, moved out of the parsed request.
+/// `None` for any other body.
 #[must_use]
-pub fn invocation(body: &[u8]) -> Option<busbar_contract::ir::invoke::InvokeReq> {
-    let value: Value = serde_json::from_slice(body).ok()?;
-    if value.get("method")?.as_str()? != crate::codec::METHOD_TOOLS_CALL {
+pub fn invocation(mut request: Value) -> Option<busbar_contract::ir::invoke::InvokeReq> {
+    if request.get("method")?.as_str()? != crate::codec::METHOD_TOOLS_CALL {
         return None;
     }
-    let params = value.get("params")?;
+    let params = request.get_mut("params")?;
+    let tool = params.get("name")?.as_str()?.to_string();
     Some(busbar_contract::ir::invoke::InvokeReq {
-        tool: params.get("name")?.as_str()?.to_string(),
+        tool,
         arguments: params
-            .get("arguments")
-            .cloned()
-            .unwrap_or_else(|| json!({})),
+            .get_mut("arguments")
+            .map_or_else(|| json!({}), Value::take),
         extra: busbar_contract::ir::SourceScopedExtra::default(),
     })
 }
@@ -779,12 +779,12 @@ pub fn invocation(body: &[u8]) -> Option<busbar_contract::ir::invoke::InvokeReq>
 /// JSON string that parses to an object) or, for an entry with no `role`, the entry itself; the LAST
 /// entry that yields an object wins.
 ///
-/// `None` = not applied (no usable object, a body that is not a `tools/call`, a reply that is not
-/// JSON): the unit proceeds with the body it had, as a rewrite that cannot be applied left the
-/// served engine's call untouched. `Some` is the rewritten request, whole, with every member the
-/// caller sent but `params.arguments` as it was.
+/// `None` = not applied (no usable object, a request that is not a `tools/call`, a reply that is
+/// not JSON): `request` is untouched and the unit proceeds with the body it had, as a rewrite that
+/// cannot be applied left the served engine's call untouched. `Some`: `request` is rewritten in
+/// place, every member the caller sent but `params.arguments` as it was.
 #[must_use]
-pub fn rewritten(body: &[u8], rewrite: &[u8]) -> Option<Vec<u8>> {
+pub fn rewritten(request: &mut Value, rewrite: &[u8]) -> Option<()> {
     let reply: Value = serde_json::from_slice(rewrite).ok()?;
     let mut arguments: Option<Value> = None;
     for message in reply.get("messages")?.as_array()? {
@@ -805,13 +805,12 @@ pub fn rewritten(body: &[u8], rewrite: &[u8]) -> Option<Vec<u8>> {
         }
     }
     let arguments = arguments?;
-    let mut request: Value = serde_json::from_slice(body).ok()?;
     if request.get("method").and_then(Value::as_str) != Some(crate::codec::METHOD_TOOLS_CALL) {
         return None;
     }
     let params = request.get_mut("params")?.as_object_mut()?;
     params.insert("arguments".to_string(), arguments);
-    serde_json::to_vec(&request).ok()
+    Some(())
 }
 
 /// One request bound for the far end: the verb, the target path the kernel joins onto the
