@@ -415,7 +415,7 @@ slot!(
             stopped = door_tasks::cancelled(plane, ticket);
             plane.units.with_all(|m| {
                 answered = m.iter().any(|(k, u)| {
-                    cancelled(k, &*u) && u.relay.as_ref().is_some_and(|r| r.status != 0)
+                    cancelled(k, u) && u.relay.as_ref().is_some_and(|r| r.status != 0)
                 });
                 m.retain(|k, u| !cancelled(k, &*u));
             });
