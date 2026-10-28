@@ -1105,6 +1105,200 @@ mod both_ways {
         }
     }
 
+    /// [`Grants`], and a random source that answers (fresh bytes at every call): a host the plane
+    /// can mint a session id on.
+    struct Minting(Grants, std::sync::atomic::AtomicU64);
+
+    impl busbar_plugin_loader::dispatch::HostServices for Minting {
+        fn now(&self) -> busbar_plugin_loader::dispatch::Reading {
+            busbar_plugin_loader::dispatch::Reading {
+                wall_ns: 0,
+                mono_ns: 0,
+            }
+        }
+        fn dest_judge(
+            &self,
+            _: &str,
+            _: u32,
+            _: u32,
+            _: Option<busbar_plugin_loader::dispatch::Later>,
+        ) -> busbar_plugin_loader::dispatch::Ran {
+            busbar_plugin_loader::dispatch::Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn records_get(
+            &self,
+            _: &Caller,
+            _: &str,
+            _: &[u8],
+            _: busbar_plugin_loader::dispatch::Later,
+        ) -> busbar_plugin_loader::dispatch::Ran {
+            busbar_plugin_loader::dispatch::Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn records_list(
+            &self,
+            _: &Caller,
+            _: busbar_contract::services::RecordsList,
+            _: busbar_plugin_loader::dispatch::Later,
+        ) -> busbar_plugin_loader::dispatch::Ran {
+            busbar_plugin_loader::dispatch::Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn records_claim(
+            &self,
+            _: &Caller,
+            _: &str,
+            _: &[u8],
+            _: u64,
+            _: busbar_plugin_loader::dispatch::Later,
+        ) -> busbar_plugin_loader::dispatch::Ran {
+            busbar_plugin_loader::dispatch::Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn sign(&self, _: &Caller, _: &[u8]) -> Stored {
+            Stored::refused(UNSERVED)
+        }
+        fn unit_nest(
+            &self,
+            _: &Caller,
+            _: Option<u64>,
+            _: busbar_contract::services::NestAsk,
+            _: busbar_contract::services::Later,
+        ) -> busbar_contract::services::Ran {
+            busbar_contract::services::Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn work_open(
+            &self,
+            _: &Caller,
+            _: Option<u64>,
+            _: &str,
+            _: &[u8],
+            _: busbar_contract::services::Later,
+        ) -> busbar_contract::services::Ran {
+            busbar_contract::services::Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn work_find(
+            &self,
+            _: &Caller,
+            _: Option<u64>,
+            _: &[u8],
+            _: busbar_contract::services::Later,
+        ) -> busbar_contract::services::Ran {
+            busbar_contract::services::Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn work_settle(
+            &self,
+            _: &Caller,
+            _: Option<u64>,
+            _: u64,
+            _: &[u8],
+            _: busbar_contract::services::Later,
+        ) -> busbar_contract::services::Ran {
+            busbar_contract::services::Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn work_resume(
+            &self,
+            _: &Caller,
+            _: Option<u64>,
+            _: u64,
+            _: busbar_contract::services::Later,
+        ) -> busbar_contract::services::Ran {
+            busbar_contract::services::Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn trust_sight(
+            &self,
+            _: &Caller,
+            _: &str,
+            _: &str,
+            _: busbar_plugin_loader::dispatch::Later,
+        ) -> busbar_plugin_loader::dispatch::Ran {
+            busbar_plugin_loader::dispatch::Ran::Now(Stored::refused(UNSERVED))
+        }
+        /// The kernel's Approve as this section's approvals seed it: `read_file` approved at its
+        /// digest, `draft` allowed and pending (ARCHITECT Q3: the door renders the verdict).
+        fn trust_serves(
+            &self,
+            _: &Caller,
+            counterparty: &str,
+            item: Option<&str>,
+            _: Option<&str>,
+        ) -> Stored {
+            use busbar_contract::abi::host::service::{
+                DISTRUST_NONE, DISTRUST_NOT_APPROVED, DISTRUST_UNKNOWN_ITEM,
+            };
+            Stored::ready(match (counterparty, item) {
+                ("fs", Some("read_file")) => DISTRUST_NONE,
+                ("fs", Some("draft")) => DISTRUST_NOT_APPROVED,
+                _ => DISTRUST_UNKNOWN_ITEM,
+            })
+        }
+        fn trust_due(&self, _: &Caller) -> Stored {
+            Stored::refused(UNSERVED)
+        }
+        fn trust_verify(&self, _: &Caller, _: &str, _: &[u8], _: &[u8]) -> Stored {
+            Stored::refused(UNSERVED)
+        }
+        fn entitlement_check(&self, _: &Caller, unit: Option<u64>, target: &str) -> Stored {
+            Stored::ready(if unit.is_some() && self.0 .0.contains(&target) {
+                busbar_contract::abi::host::service::ENTITLED
+            } else {
+                busbar_contract::abi::host::service::NOT_ENTITLED
+            })
+        }
+        fn random_fill(&self, len: u64) -> Stored {
+            let n = self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Stored {
+                bytes: (0..len).map(|i| (n as u8).wrapping_add(i as u8)).collect(),
+                ..Stored::ready(0)
+            }
+        }
+        fn records_secret(
+            &self,
+            _: &str,
+            _: &str,
+            _: busbar_plugin_loader::dispatch::Later,
+        ) -> busbar_plugin_loader::dispatch::Ran {
+            busbar_plugin_loader::dispatch::Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn disk_append(
+            &self,
+            _: &busbar_contract::services::DiskDest,
+            _: Vec<u8>,
+            _: busbar_plugin_loader::dispatch::Later,
+        ) -> busbar_plugin_loader::dispatch::Ran {
+            busbar_plugin_loader::dispatch::Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn verify_lookup(
+            &self,
+            _: &Caller,
+            _: &[u8],
+            _: busbar_plugin_loader::dispatch::Later,
+        ) -> busbar_plugin_loader::dispatch::Ran {
+            busbar_plugin_loader::dispatch::Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn verify_store(&self, _: &Caller, _: &[u8], _: &[u8], _: u64) -> Stored {
+            Stored::refused(UNSERVED)
+        }
+        fn content_scan(
+            &self,
+            _: &Caller,
+            _: Option<u64>,
+            _: &[u8],
+            _: busbar_plugin_loader::dispatch::Later,
+        ) -> busbar_plugin_loader::dispatch::Ran {
+            busbar_plugin_loader::dispatch::Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn hook_call(
+            &self,
+            _: &Caller,
+            _: Option<u64>,
+            _: busbar_contract::services::HookAsk,
+            _: busbar_plugin_loader::dispatch::Later,
+        ) -> busbar_plugin_loader::dispatch::Ran {
+            busbar_plugin_loader::dispatch::Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn snapshot_read(&self, _: &Caller, _: u32) -> busbar_contract::services::Snapshot {
+            busbar_contract::services::Snapshot::Refused(UNSERVED)
+        }
+    }
+
     use busbar_contract::services::{Caller, Stored, UNSERVED};
 
     /// Every grant the relayed calls need.
@@ -1697,6 +1891,95 @@ mod both_ways {
         );
         assert_ne!(r.reply, h.reply, "the answer is where the two differ");
         assert_ne!(red, honest);
+    }
+    // ── the host log ────────────────────────────────────────────────────────────────────────────────
+
+    /// The host's envelope sink, keeping the text of every diagnostic and log record a call
+    /// carried: what the host writes to the plugin's own log file.
+    #[derive(Default)]
+    struct HostLog(std::sync::Mutex<Vec<String>>);
+
+    impl busbar_plugin_loader::dispatch::EnvelopeSink for HostLog {
+        fn metric(&self, _: busbar_plugin_loader::dispatch::Metric<'_>) {}
+        fn diag(&self, d: busbar_plugin_loader::dispatch::Diagnostic<'_>) {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(String::from_utf8_lossy(d.text).into_owned());
+        }
+        fn dropped(&self, _: busbar_plugin_loader::dispatch::Dropped) {}
+    }
+
+    /// THE PLANE'S DIAGNOSTIC REACHES THE HOST'S LOG, DROPPED IN AS LINKED (owner ruling
+    /// 2026-10-27): the first `2024-11-05` event stream an ungoverned caller opens raises the
+    /// plane's declared diagnostic (`BUSBAR-7106`) in the answer's envelope, which reaches the host's
+    /// sink, the one that writes the plugin's own log file, from the dropped-in image as from the
+    /// linked door.
+    #[test]
+    fn the_ungoverned_stream_diagnostic_reaches_the_host_log_dropped_in_as_linked() {
+        let d = Dispatcher::with_services(
+            DispatchConfig::default(),
+            Arc::new(Minting(Grants(&[]), std::sync::atomic::AtomicU64::new(1))),
+        );
+        const ACCEPT: &[Field] = &[field("accept", "text/event-stream")];
+        for dropped_in in [false, true] {
+            let log = Arc::new(HostLog::default());
+            let bound = Bind {
+                sink: log.clone(),
+                ..bind(&d)
+            };
+            let p: Plugin<Plane> = if dropped_in {
+                let path = busbar_plugin_loader::conformance::cdylib_of("busbar_plane_mcp_plugin");
+                let stated = LinkedRow::of_loaded(crate::loaded_door())
+                    .expect("the door renders its Statement")
+                    .statement;
+                load_dropped(&path, &stated, bound).expect("the dropped door loads")
+            } else {
+                let row = LinkedRow::of_loaded(crate::loaded_door())
+                    .expect("the linked door states its Statement");
+                load_linked(&row, bound).expect("the linked door loads")
+            };
+            let mut i: PlaneOpenIn = z();
+            i.open.head = in_head();
+            (i.open.generation, i.open.settings) = (1, octets(SECTION));
+            i.public_url = text(PUBLIC_URL.as_bytes());
+            let mut o: PlaneOpenOut = z();
+            o.open.head = out_head();
+            assert_eq!(p.open(&mut Frame::new(i, o)).0.outcome, Outcome::Ready);
+            let (arrived, _) = arrive(&p, "stream", 171, ("GET", "/mcp"), b"", ACCEPT);
+            assert_eq!(arrived.outcome, Outcome::Ready, "{}", arrived.detail);
+            let mut reply = vec![0_u8; 1 << 12];
+            let (mut fields, mut arena) = ([z::<OutField>(); 16], vec![0_u8; 4096]);
+            let mut records = [z::<RecordWrite>(); 16];
+            let mut units = [z::<UnitCount>(); 8];
+            let mut i: OnPieceIn = z();
+            i.head = in_head();
+            (i.unit, i.stream, i.from, i.flags) = (171, 171, FROM_CALLER, 0);
+            i.bytes = octets(b"");
+            (i.reply_buf, i.reply_cap) = (reply.as_mut_ptr(), reply.len());
+            (i.fields_buf, i.fields_cap) = (fields.as_mut_ptr(), fields.len());
+            (i.arena_buf, i.arena_cap) = (arena.as_mut_ptr(), arena.len());
+            (i.records_buf, i.records_cap) = (records.as_mut_ptr(), records.len());
+            (i.units_buf, i.units_cap) = (units.as_mut_ptr(), units.len());
+            let mut o: OnPieceOut = z();
+            o.head = out_head();
+            let mut f = Frame::new(i, o);
+            let c = p.call(slot::ON_PIECE, &mut f);
+            let said = format!(
+                "status={} reply={}",
+                f.out.reply_status,
+                String::from_utf8_lossy(&reply[..f.out.emitted as usize])
+            );
+            assert_eq!(c.outcome, Outcome::Ready, "dropped-in {dropped_in}: {said}");
+            let lines = log
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(
+                lines.iter().any(|l| l.contains("ungoverned chain")),
+                "dropped-in {dropped_in}: the diagnostic reaches the host log: {lines:?} ({said})"
+            );
+        }
     }
 }
 
