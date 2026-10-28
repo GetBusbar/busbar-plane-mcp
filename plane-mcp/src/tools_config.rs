@@ -50,7 +50,7 @@ pub enum McpPinMechanism {
     /// A signed tool manifest's operator-supplied, out-of-band issuer public key. It is a root (it
     /// carries key material, and makes the registration approvable), not a pin of the far end's
     /// key: the connector does not compare it with the server's certificate, and this build
-    /// verifies no MCP-native manifest signature under it, as predev did not.
+    /// verifies no MCP-native manifest signature under it.
     PinnedPubkey,
     /// The endpoint's certificate key, pinned: the host seals it into the registration's member
     /// route and the connector refuses, before a request byte is written, a connection whose
@@ -341,7 +341,7 @@ pub struct ResourceTemplateAllowCfg {
 }
 
 /// `tools.<server>.sampling_bounds`: the size bounds on a relayed `sampling/createMessage` ask
-/// (owner ruling Q22c); past any bound it is refused by name.
+/// ; past any bound it is refused by name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SamplingBoundsCfg {

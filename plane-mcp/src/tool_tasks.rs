@@ -74,7 +74,7 @@ pub const RESULT_CHUNK_BYTES: usize = 480;
 
 /// The most chunks one task's result (or its live state) is written in: what one answer's record
 /// writes hold (`busbar_contract::abi::plane::check::MAX_RECORDS`, 1024) with the strikes of the
-/// state it replaces beside it. THE TASK STORE IS HOST RECORDS (THE DESIGN, the mcp bullet): a
+/// state it replaces beside it. The task store is host records: a
 /// result longer than this settles the task `failed` in words ([`kept_bytes`]), and a live state
 /// longer than this is refused where it would be made; neither is held only in hand.
 pub const MAX_RESULT_CHUNKS: usize = 480;
@@ -180,7 +180,7 @@ pub struct Task {
     pub unsettled: bool,
     /// How many result chunks were written for it.
     pub chunks: u32,
-    /// THE UPSTREAM'S ASK IT IS PARKED ON, relayed (Law 11): answered through `tasks/update` and
+    /// The upstream's ask it is parked on, relayed: answered through `tasks/update` and
     /// carried back to the member that asked, never merged into the tool's arguments.
     relay: Option<RelayPark>,
     /// THE ROUND OF ITS OWN ASKS IT IS PARKED ON, and the call its run resumes with: the
@@ -473,7 +473,7 @@ impl Task {
         }
     }
 
-    /// PARK ON THE UPSTREAM'S ASK, relayed to the caller (Law 11): `input_required`, its
+    /// Park on the upstream's ask, relayed to the caller: `input_required`, its
     /// `inputRequests` the upstream's own, verbatim and in its order, under busbar's sealed `state`;
     /// the retry runs `params`. A terminal task does not park.
     pub fn park_relay(
@@ -511,7 +511,7 @@ impl Task {
     }
 
     /// Deliver `inputResponses`. Keys the task is not waiting on are IGNORED rather than refused:
-    /// only a key the current round asked is kept (row 159 mcp finding C-H1: an answer may only
+    /// only a key the current round asked is kept (an answer may only
     /// supply what was asked for, as the synchronous call's rule says). On a task parked on its
     /// upstream's ask the answers are the upstream's: kept for the retry, never merged into the
     /// tool's arguments.
@@ -911,8 +911,8 @@ pub fn read_chunks<'a>(chunks: impl Iterator<Item = &'a [u8]>) -> Option<Value> 
 
 /// The arguments a continuation calls with: the admitted arguments, with the caller's gathered ask
 /// answers merged in under the operator's own keys, and NEVER over an argument the call was
-/// admitted with (row 159 mcp finding C-H1: the hooks and the argument guard judged the admitted
-/// arguments; an answer may never rewrite one). A clone, never a mutation.
+/// admitted with (the hooks and the argument guard judged the admitted arguments; an answer may
+/// never rewrite one). A clone, never a mutation.
 #[must_use]
 pub fn merge_answers(arguments: &Value, answers: &Map<String, Value>) -> Value {
     if answers.is_empty() {

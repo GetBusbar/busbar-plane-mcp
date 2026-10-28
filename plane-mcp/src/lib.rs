@@ -39,7 +39,7 @@ mod tool_scope;
 mod tool_tasks;
 mod tools_config;
 
-/// THE DOOR: this plugin's one public item (BUSBAR-1.6.0.md l.3567, Crate shape).
+/// The door: this plugin's one public item.
 pub use tool_door::door;
 
 /// THE PLANE'S DECLARED METADATA (`declares.json`), as the tests read it: the one document the
