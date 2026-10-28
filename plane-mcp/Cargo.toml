@@ -37,6 +37,9 @@ description = "The MCP plane for busbar: the plugin contract's plane kind implem
 # without naming this crate or resolving its checkout. Links no native library.
 links = "busbar-door-cells-busbar-plane-mcp"
 
+[lints]
+workspace = true
+
 [lib]
 name = "busbar_plane_mcp"
 path = "src/lib.rs"
