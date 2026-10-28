@@ -1929,7 +1929,7 @@ mod both_ways {
                 ..bind(&d)
             };
             let p: Plugin<Plane> = if dropped_in {
-                let path = busbar_plugin_loader::conformance::cdylib_of("busbar_plane_mcp_plugin");
+                let path = busbar_test_kit::conformance::cdylib_of("busbar_plane_mcp_plugin");
                 let stated = LinkedRow::of_loaded(crate::loaded_door())
                     .expect("the door renders its Statement")
                     .statement;
