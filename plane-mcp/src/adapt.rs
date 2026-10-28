@@ -15,7 +15,7 @@
 //! `subscriptions/listen`, the tasks extension) are never offered to a session client, whether it
 //! asks for them by name or reads the capabilities `initialize` answered with. The session's own
 //! verbs (`resources/subscribe`, `resources/unsubscribe`, `logging/setLevel`) stay for the old
-//! revisions (THE DESIGN section 2, the mcp bullet) and are answered from the session's state.
+//! revisions and are answered from the session's state.
 //!
 //! The `2024-11-05` event-stream framing lives here as values ([`frame`], [`endpoint_event`]);
 //! writing them to a connection is the caller's.

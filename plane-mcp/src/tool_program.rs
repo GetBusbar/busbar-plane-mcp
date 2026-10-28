@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! STDIO UPSTREAM SERVERS (ARCHITECT round 5 Q-L3B-STDIO-UPSTREAM (A)): a `transport: stdio`
+//! Stdio upstream servers: a `transport: stdio`
 //! registration is a member of the door's PROGRAM need ([`crate::door::NEED_PROGRAM`]), and the
 //! host keeps ONE long-lived program per member. Every exchange the door has with that program — the
 //! relayed `tools/call` over the kernel's walk, verify-on-call's `tools/list`, an operator's
@@ -17,7 +17,7 @@
 //!   notification brings verify-on-call forward; every other notification is passed over; `ping`,
 //!   an unknown method and an UNGRANTED authority ask are ANSWERED (the empty result, `-32601`, the
 //!   operator's refusal), once per child generation whichever exchange read it first
-//!   ([`Peer::claim`]). A GRANTED authority ask is busbar's caller's to answer (Law 11), and only
+//!   ([`Peer::claim`]). A granted authority ask is busbar's caller's to answer, and only
 //!   the caller whose call it serves: calls whose asks may be relayed reach a child ONE AT A TIME,
 //!   in arrival order (the door's line), so the ask is the call's first in line ([`first_in_line`],
 //!   fixed by the first exchange to read it, [`Peer::owner`]); that call's exchange takes it
@@ -31,7 +31,7 @@
 //! * Every id busbar sends a child is its own: a call's carries the unit, so concurrent exchanges on
 //!   one child never share one ([`call_id`], [`list_id`]).
 
-// The crate's only public item is `door`: the accessors and variants below were this module's public API; the tests hold them, the door does not reach them (BUSBAR-1.6.0.md l.3560).
+// The crate's only public item is `door`: the accessors and variants below were this module's public API; the tests hold them, the door does not reach them.
 #![cfg_attr(not(test), allow(dead_code))]
 
 use std::collections::VecDeque;
@@ -214,15 +214,15 @@ pub enum AskOwner {
     Refused,
 }
 
-/// THE CALL A CHILD'S ASK BELONGS TO (finding 5). A request over stdio names no call it serves
+/// The call a child's ask belongs to. A request over stdio names no call it serves
 /// (MCP carries no related-request id on the wire, a call's progress token is its own and is never
 /// echoed on an ask, and the child numbers its own requests), so the door makes the answer
 /// unambiguous instead: calls whose asks may be relayed reach a child one at a time, in arrival
 /// order, and the ask is the call FIRST in that line. `line` is the child's member's calls in
 /// arrival order, each its id and the generation its lease reached (`0` before its head, which
 /// counts on every generation). An empty line, or one whose first call is on another generation's
-/// child, is `None`: the ask is refused, never handed to whichever exchange reads first (Law 11:
-/// relayed down the session it belongs to, as-is).
+/// child, is `None`: the ask is refused, never handed to whichever exchange reads first (relayed
+/// down the session it belongs to, as-is).
 pub fn first_in_line(line: impl IntoIterator<Item = (u64, u64)>, generation: u64) -> Option<u64> {
     let (call, on) = line.into_iter().next()?;
     (on == 0 || on == generation).then_some(call)
@@ -248,7 +248,7 @@ pub struct Correlator {
     pub asks: Vec<ChildAsk>,
 }
 
-/// ONE REQUEST OF A CHILD'S OWN, for busbar's caller to answer (Law 11): its id (the answer goes
+/// One request of a child's own, for busbar's caller to answer: its id (the answer goes
 /// back under it) and the request as the child sent it, less its envelope.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChildAsk {
@@ -398,7 +398,7 @@ impl Correlator {
                 None
             }
             ServerMessage::UnknownNotification(_) => None,
-            // A GRANTED AUTHORITY ASK is the caller's (Law 11), and only the caller whose call it
+            // A granted authority ask is the caller's, and only the caller whose call it
             // serves: the exchange relaying the call first in the child's line takes it, every
             // other passes it over, and one raised while no call is open is refused once.
             ServerMessage::Request { id, verb }
@@ -612,7 +612,7 @@ impl ProgramExchange {
         }
     }
 
-    /// Opened under `timeout_ms`: the server's own `timeout:` (ARCHITECT timeout ruling).
+    /// Opened under `timeout_ms`: the server's own `timeout:`.
     #[must_use]
     pub fn timed(mut self, timeout_ms: u64) -> Self {
         self.timeout_ms = u32::try_from(timeout_ms).unwrap_or(u32::MAX);

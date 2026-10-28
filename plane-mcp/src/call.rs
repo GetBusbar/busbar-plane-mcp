@@ -233,7 +233,7 @@ pub enum Admission {
     /// Busbar asks its own caller first: the `input_required` answer and the call-log line.
     Asked(Vec<u8>, CallLine),
     /// Answered here and never sent: the upstream-failure tool error of a call whose server the
-    /// door's live re-fetch could not reach (ARCHITECT Q3 (c)), and the call-log line.
+    /// door's live re-fetch could not reach, and the call-log line.
     Unreached(Vec<u8>, CallLine),
 }
 
@@ -271,7 +271,7 @@ fn not_exposed(name: &str) -> String {
     format!("`{name}` is not a tool this server exposes")
 }
 
-/// THE ANSWER TO A CALL THE CALLER IS NOT GRANTED, in the served engine's words: `404`, the same
+/// The answer to a call the caller is not granted: `404`, the same
 /// sentence an unknown tool gets (the catalogue does not leak what it hides), its audit reason
 /// `not_granted` in `data`. The kernel's grant check refuses such a call before the plane decides it
 /// (`ScopeDenied`), and the plane renders that refusal as the served engine answered it.
@@ -406,7 +406,7 @@ pub fn custom_param_mismatch(
 }
 
 /// THE KERNEL'S TRUST VERDICT ON ONE TOOL, as the door read it on the route leg after its live
-/// re-fetch (ARCHITECT Q3: route, re-fetch and sight, the kernel's Approve, serve). The door states
+/// re-fetch (route, re-fetch and sight, the kernel's Approve, serve). The door states
 /// facts and judges none: the verdict is `trust.serves`'s, and the only answer the door renders on
 /// its own is the fact that its re-fetch failed, which leaves nothing to sight.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -465,7 +465,7 @@ fn trust_answer(id: &Value, name: &str, entry: &ToolEntry, trust: Trust) -> Opti
             Some(CallLine::asked(name, "not_approved")),
         ),
         // A tool offered at another digest than the one approved is the rug-pull: its server is
-        // quarantined (ARCHITECT Q3: changed digest -> quarantined), the served engine's words.
+        // quarantined (changed digest -> quarantined).
         DISTRUST_CHANGED | DISTRUST_QUARANTINED => refused(
             format!(
                 "MCP server `{server}` is quarantined, so it serves nothing; review its changes \
@@ -551,7 +551,7 @@ pub fn admit_trusted(
         );
     }
     // THE KERNEL'S APPROVE, as the route leg asks it: the door states the tool's registration and
-    // trust key, and renders the verdict (ARCHITECT Q3).
+    // trust key, and renders the verdict.
     if let Some(answer) = trust_answer(id, name, entry, trust(entry)) {
         return answer;
     }
@@ -699,11 +699,11 @@ pub fn own_answers(admitted: &AdmittedCall) -> Option<Map<String, Value>> {
     (!own.is_empty()).then_some(own)
 }
 
-/// THE ARGUMENT GUARD ([`crate::argguard`]) on an admitted call: the arguments that go out (the
+/// The argument guard ([`crate::argguard`]) on an admitted call: the arguments that go out (the
 /// caller's, with the operator-bounded answers merged) are walked against the tool's approved input
 /// schema, and every URL or host they carry is asked of the host's ONE destination judge: `judge`
-/// answers `dest.judge`'s verdict for the tool and the host (BUSBAR-1.6.0.md Appendix C B.3 item
-/// 11), `None` when it gave none. A refused one refuses the call before it is sent. A tool that
+/// answers `dest.judge`'s verdict for the tool and the host,
+/// `None` when it gave none. A refused one refuses the call before it is sent. A tool that
 /// declared no schema is walked against `{"type": "object"}`: the walk is value-driven, so declaring
 /// no schema narrows what it calls "declared" and nothing else. Any other admission is unchanged.
 pub fn judge_arguments(
@@ -771,8 +771,8 @@ pub fn invocation(mut request: Value) -> Option<busbar_contract::ir::invoke::Inv
     })
 }
 
-/// A REQUEST-STAGE HOOK'S REWRITE, APPLIED TO A `tools/call` (`project`'s `rewrite`; BUSBAR-1.6.0.md
-/// Part 3 section 12, "Hooks": the plane applies it in its own dialect and re-projects). The hook
+/// A request-stage hook's rewrite, applied to a `tools/call` (`project`'s `rewrite`: the plane
+/// applies it in its own dialect and re-projects). The hook
 /// stage hands the plane the hook's reply as `{"messages": [...], "tools": ...}`; an invocation has
 /// one untrusted content member, its `arguments` object, and the rewrite REPLACES it under the
 /// served engine's invoke rewrite contract: a `messages` entry's `content` (an object verbatim, or a
@@ -867,8 +867,7 @@ pub fn outbound(
     })
 }
 
-/// THE REQUEST FOR ONE ROUND to a `transport: stdio` member (ARCHITECT round 5
-/// Q-L3B-STDIO-UPSTREAM (A)): the same `tools/call` body, carrying `id` (the unit's own on the
+/// The request for one round to a `transport: stdio` member: the same `tools/call` body, carrying `id` (the unit's own on the
 /// child, `crate::tool_program::call_id`), sent as one message on the member's program; no head
 /// field rides a pipe. `None` for a member that is not a program.
 #[must_use]
@@ -919,8 +918,7 @@ fn call_request(
 /// error, 200 `isError`, as a call whose upstream failed. The call log does not say `dispatched`:
 /// that word means the call went out (`busbar_contract::vocab`), and this one did not. It is
 /// `refused` under [`REASON_QUEUE_DEADLINE`], audited rejected. The door answers it with no fee unit
-/// (ARCHITECT/coordinator ruling 2026-10-14, after #62 "bill what was delivered" and Q35 "a hop
-/// refused before the socket is refunded", applied uniformly across planes).
+/// (bill what was delivered; a hop refused before the socket is refunded).
 #[must_use]
 pub fn never_sent(admitted: &AdmittedCall, reason: &str) -> Settled {
     failure_answer(
@@ -1067,7 +1065,7 @@ pub enum AskRefusal {
         reason: String,
     },
     /// A granted `sampling/createMessage` ask is larger than the operator's
-    /// `tools.<server>.sampling_bounds` allow (owner ruling Q22c): refused by name, never relayed.
+    /// `tools.<server>.sampling_bounds` allow: refused by name, never relayed.
     SamplingBound {
         /// The server.
         server: String,
@@ -1355,7 +1353,7 @@ pub fn judge_input_response(
     Ok(())
 }
 
-/// THE ONE JUDGEMENT of a relayed ask's size (owner ruling Q22c), shared by the http path
+/// The one judgement of a relayed ask's size, shared by the http path
 /// ([`judge_ask`]) and the stdio relay (the door's child-ask judgement): every request whose
 /// `method` is `sampling/createMessage` is measured against the server's `sampling_bounds`, and the
 /// first bound it exceeds is returned as a named refusal. Other methods are not measured.
