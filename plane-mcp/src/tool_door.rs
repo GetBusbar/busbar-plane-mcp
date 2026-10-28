@@ -107,6 +107,8 @@ busbar_contract::statement_extensions!(
     /// the plane's breaker fact (ARCHITECT Q4: one transient failure below the trip threshold never
     /// benches a member, the posture ruled for this plane, which 1.5.5 did not have), the codes it
     /// raises (`diagnostics::DIAGNOSTICS`; the tests hold the two equal) and the carriers it needs.
+    /// Why no bench: an MCP call's errors are mostly the tool's own answer (a tool says no), not a
+    /// sign the server is unhealthy, so only a trip benches it.
     EXTENSIONS: [(
         busbar_contract::abi::mechanism::extensions::EXT_DECLARES,
         include_bytes!("../declares.json")
