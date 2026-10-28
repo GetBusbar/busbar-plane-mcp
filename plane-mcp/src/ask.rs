@@ -119,7 +119,7 @@ pub struct AskState {
     /// The principal's roots epoch at mint, when the exchange includes a roots ask.
     #[serde(rename = "e", default, skip_serializing_if = "Option::is_none")]
     pub roots_epoch: Option<u64>,
-    /// THE UPSTREAM'S ASK RELAYED TO THE CALLER (Law 11: busbar answers nothing on the caller's
+    /// The upstream's ask relayed to the caller (busbar answers nothing on the caller's
     /// behalf): the member that asked, and its own `requestState`, nested in this one sealed state.
     /// Present only on a state minted for a relayed ask; busbar's own rounds were already answered.
     #[serde(rename = "u", default, skip_serializing_if = "Option::is_none")]
@@ -157,7 +157,7 @@ pub struct UpstreamLeg {
     pub answers: Option<Map<String, Value>>,
 }
 
-/// THE CHILD'S SIDE OF A RELAYED ASK (spec Part 3 B.3 item 10: across separate HTTP arrivals the
+/// THE CHILD'S SIDE OF A RELAYED ASK (across separate HTTP arrivals the
 /// ask is correlated with `work.*`): the child generation that asked (an answer is never written to
 /// the next), the id of the call the child still owes an answer to, each `inputRequests` key the
 /// caller was handed with the child's own request id, and the reference of the work handle the
@@ -514,7 +514,7 @@ pub fn asks_for_round(round: &AskRoundCfg, capabilities: &Value) -> Vec<CallerAs
         .collect()
 }
 
-/// THE DECISION, in the engine's order: no rounds; the presented state opened and matched; the
+/// The decision, in order: no rounds; the presented state opened and matched; the
 /// cap; a completed exchange redeemed once; an unanswered retry; the round's asks filtered by the
 /// caller's capabilities; a fresh state sealed. `seal` is `None` when the deployment cannot seal.
 pub fn decide(

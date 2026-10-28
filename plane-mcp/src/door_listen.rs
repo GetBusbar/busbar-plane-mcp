@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! `subscriptions/listen` ON THE HTTP CARRIER: A K6 SESSION (ARCHITECT round 4 Q-L3B-SURFACES (a),
-//! confirmed round 5 Q-L3B-K6-HTTP (a)). `arrive` states `ROUTE_SESSION` for it, so the driver
+//! `subscriptions/listen` on the HTTP carrier: a duplex session. `arrive` states `ROUTE_SESSION` for it, so the driver
 //! serves the unit as a duplex session whose caller leg is the long-lived response; every rule of
 //! the subscription is [`crate::subscribe`]'s, the same state machine the line carrier drives.
 //!
@@ -17,8 +16,8 @@
 //!   keepalive comment (`: keepalive`) when it has been quiet for
 //!   [`crate::subscribe::KEEPALIVE_NS`], and its last frame at its bound or on a lapsed permission,
 //!   after which the session is done. A new generation (`refresh`) names them at once ([`wake_all`]).
-//! - Every frame is one `message` event (`event: message`, `data: <json>`), as predev wrote them.
-//! - THE SESSION'S ONE LINE carries the request's fee unit, reported with the acknowledgement.
+//! - Every frame is one `message` event (`event: message`, `data: <json>`).
+//! - The session's one line carries the request's fee unit, reported with the acknowledgement.
 
 use super::{admit, ask_entitlements, write, CallUnit, Held, McpDoor, Pending, Written, MAX_UNITS};
 use crate::catalogue::Lookup;
@@ -33,8 +32,8 @@ use busbar_contract::abi::plane::{
 use busbar_contract::abi::sdk::{Lent, Out, StaticServices};
 use serde_json::Value;
 
-/// How often the instance's tick steps its held subscriptions (predev re-read the generation and
-/// re-asked the permission every 250 ms of a stream's life).
+/// How often the instance's tick steps its held subscriptions (the generation is re-read and
+/// the permission re-asked every 250 ms of a stream's life).
 pub(super) const POLL_NS: u64 = 250_000_000;
 
 /// The most subscriptions one caller holds open at once. A caller at it is refused its next one:
@@ -225,7 +224,7 @@ pub(super) fn listen_id(unit: &CallUnit) -> Option<Value> {
 
 /// OPENS the subscription `id` over `held`, on either carrier: the unit's grants entitled afresh and
 /// the clock read. `Err` the answer refusing it: `503` for a clock read that failed (never opened
-/// at the epoch, row 159 finding P-M4), `400` in the request's own words.
+/// at the epoch), `400` in the request's own words.
 pub(super) fn open_listen(
     plane: &McpDoor,
     ticket: Ticket,
@@ -439,7 +438,7 @@ pub(super) fn asks_a_round(
 }
 
 /// The host's monotonic clock on a fresh handle of the unit's ticket; `None` with no clock or a
-/// failed read, which is never a time (row 159 finding P-M4): no timer is armed at it.
+/// failed read, which is never a time: no timer is armed at it.
 pub(super) fn mono_ns(
     services: Option<StaticServices>,
     ticket: Ticket,
@@ -455,8 +454,8 @@ pub(super) fn entitled_afresh(plane: &McpDoor, ticket: Ticket, unit: &mut CallUn
     ask_entitlements(plane.services, ticket, unit, &held.catalogue.grants());
 }
 
-/// THE PERMISSION, RE-ASKED THIS FRAME: the kernel re-resolves the unit's principal live; one
-/// that no longer stands is lapsed, in predev's words, and ends the subscription on
+/// The permission, re-asked this frame: the kernel re-resolves the unit's principal live; one
+/// that no longer stands is lapsed and ends the subscription on
 /// this frame (on either carrier).
 pub(super) fn standing(
     plane: &McpDoor,

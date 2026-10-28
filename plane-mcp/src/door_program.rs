@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE STDIO SERVERS' LEG, in the door (ARCHITECT round 5 Q-L3B-STDIO-UPSTREAM (A)): a
+//! The stdio servers' leg, in the door: a
 //! `transport: stdio` registration is a member of the program need ([`door::NEED_PROGRAM`]); the
 //! host keeps one long-lived child per member, and every exchange the door has with it is
 //! correlated by id ([`crate::tool_program`]).
@@ -13,7 +13,7 @@
 //!   member's; its answer is the message carrying the unit's id among everything the child writes
 //!   ([`far`]), and a request of the child's own read on the way is answered on a lease of its own
 //!   (`ping`, an unknown method, an ungranted ask) or, a granted authority ask, handed up as busbar's
-//!   caller's to answer ([`Far::Asked`], Law 11) — the caller of the call FIRST IN THE CHILD'S
+//!   caller's to answer ([`Far::Asked`]) — the caller of the call FIRST IN THE CHILD'S
 //!   LINE ([`Relaying`]): calls to a member whose grants let its asks be relayed reach its child one
 //!   at a time, in arrival order, each holding its place until its answer is read (across a relayed
 //!   ask's round trip, until its retry or the ask's state lapses); a call behind it waits its turn
@@ -28,7 +28,7 @@ use crate::tool_program::{
     first_in_line, list_id, AskOwner, Correlator, Exchanged, Peer, ProgramExchange,
 };
 
-/// THE LINE OF CALLS RELAYED TO STDIO CHILDREN, by serial (arrival order) (finding 5): every
+/// THE LINE OF CALLS RELAYED TO STDIO CHILDREN, by serial (arrival order): every
 /// relayed call is entered before its request could reach the kernel's walk and leaves when its
 /// relay is dropped (or, holding its place across a relayed ask's round trip, when that lapses).
 /// For a member whose asks may be relayed, only the call first in its line is sent ([`in_line`]),
@@ -519,7 +519,7 @@ pub(super) enum Far {
     Pending,
     /// The answer to the call's id, or why there is none.
     Settled(Result<Vec<u8>, String>),
-    /// The child asked for something busbar's caller answers (Law 11): its granted requests, in
+    /// The child asked for something busbar's caller answers: its granted requests, in
     /// order, unanswered.
     Asked(Vec<crate::tool_program::ChildAsk>),
 }

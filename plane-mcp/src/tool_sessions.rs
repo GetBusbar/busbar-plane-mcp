@@ -7,13 +7,13 @@
 //!
 //! Every dimension has a ceiling in [`Bounds`], and ONE OWNER'S PRESSURE NEVER EVICTS ANOTHER
 //! OWNER'S SESSION OR EVENTS: every eviction and trim lands on the owner whose open or write caused
-//! it. ADMISSION BOUNDS LIVE WORK, NOTHING EVICTS IT (THE DESIGN l.199): a session holding a live
+//! it. ADMISSION BOUNDS LIVE WORK, NOTHING EVICTS IT: a session holding a live
 //! stream is never given way for another, and a cursor a live stream reads is never dropped; only an
 //! idle session gives way, and an open past a ceiling with none to give is refused. An evicted,
 //! expired or foreign session answers exactly as an unknown one does (404, and the client
 //! re-initialises), so a leaked id is not a probe. An all-zero entropy buffer is refused.
 
-// The crate's only public item is `door`: the accessors and variants below were this module's public API; the tests hold them, the door does not reach them (BUSBAR-1.6.0.md l.3560).
+// The crate's only public item is `door`: the accessors and variants below were this module's public API; the tests hold them, the door does not reach them.
 #![cfg_attr(not(test), allow(dead_code))]
 
 use std::collections::{BTreeMap, VecDeque};
@@ -541,7 +541,7 @@ impl Remembered {
 
 /// The key of one remembered upstream conversation: the member AND the caller binding it was
 /// negotiated for (the caller reference the kernel lends; the ungoverned chain's is empty). Two
-/// callers of one member never share a session (row 159 finding 3): a session revision's server
+/// callers of one member never share a session: a session revision's server
 /// keeps per-session state, binds a session to the identity that opened it, and maps request ids
 /// to answers within it.
 #[must_use]

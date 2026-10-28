@@ -18,7 +18,7 @@
 //! latest session revision, `2025-11-25`, in the `initialize` answer ([`negotiate`]), which the
 //! spec's negotiation rule permits (the client disconnects if it cannot speak what it is offered).
 //!
-//! OWNER RULING 2026-09-29: 1.6.0 interoperates with all four, in both directions. The revision
+//! The plane interoperates with all four, in both directions. The revision
 //! negotiation below is the spec's own: the client names the revision it wants in `initialize`; a
 //! server that implements it answers with it, and otherwise answers with the latest revision it does
 //! implement. A client with a stateless probe that is refused falls back to `initialize`, and a
@@ -112,7 +112,7 @@ pub fn header_disagrees(session: Revision, header: Option<&str>) -> bool {
     header.is_some_and(|h| h != session.wire())
 }
 
-/// THE SESSIONLESS GET (ARCHITECT ruling 2026-09-29): whether it opens the `2024-11-05` event
+/// The sessionless GET: whether it opens the `2024-11-05` event
 /// stream (`false`: `405`). A `2024-11-05` client never sends `MCP-Protocol-Version` and every
 /// later revision's client does, so the header alone tells them apart; a revision this plane does
 /// not implement reads as the latest session revision, as [`negotiate`] reads it.

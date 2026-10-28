@@ -8,7 +8,7 @@
 //! a request busbar sends satisfies the MUSTs busbar enforces. There is no session: every request
 //! is self-describing. `params.name` is the UN-namespaced tool (busbar's `{server}_{tool}` is its
 //! own). An upstream's `InputRequiredResult` is relayed to the caller only under the operator's
-//! per-server grant ([`ServerRequestGrants`], deny by default), re-read every round (Law 11).
+//! per-server grant ([`ServerRequestGrants`], deny by default), re-read every round.
 
 use crate::codec::{
     H_MCP_METHOD, H_MCP_NAME, H_PROTOCOL_VERSION, META_CLIENT_CAPABILITIES, META_PROTOCOL_VERSION,
@@ -298,7 +298,7 @@ fn input_required_kind(result: &serde_json::Value) -> Option<ServerAsk> {
 #[serde(deny_unknown_fields)]
 pub struct ServerRequestGrants {
     /// The server may ask for `sampling/createMessage`: relayed to the caller, who runs the
-    /// completion or not; busbar runs none on its behalf (Law 11).
+    /// completion or not; busbar runs none on its behalf.
     #[serde(default)]
     pub sampling: bool,
     /// The server may ask for `elicitation/create`, relayed as `sampling`.
