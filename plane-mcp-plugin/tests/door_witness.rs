@@ -2037,4 +2037,85 @@ mod bounds {
             "the first unit was evicted to make room"
         );
     }
+
+    // ── the host log ────────────────────────────────────────────────────────────────────────────────
+
+    /// The host's envelope sink, keeping the text of every diagnostic and log record a call
+    /// carried: what the host writes to the plugin's own log file.
+    #[derive(Default)]
+    struct HostLog(std::sync::Mutex<Vec<String>>);
+
+    impl busbar_plugin_loader::dispatch::EnvelopeSink for HostLog {
+        fn metric(&self, _: busbar_plugin_loader::dispatch::Metric<'_>) {}
+        fn diag(&self, d: busbar_plugin_loader::dispatch::Diagnostic<'_>) {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(String::from_utf8_lossy(d.text).into_owned());
+        }
+        fn dropped(&self, _: busbar_plugin_loader::dispatch::Dropped) {}
+    }
+
+    /// THE PLANE'S DIAGNOSTIC REACHES THE HOST'S LOG, DROPPED IN AS LINKED (owner ruling
+    /// 2026-10-27): the first `2024-11-05` event stream an ungoverned caller opens raises the
+    /// plane's declared diagnostic (`BUSBAR-7106`) in the answer's envelope, which reaches the host's
+    /// sink, the one that writes the plugin's own log file, from the dropped-in image as from the
+    /// linked door.
+    #[test]
+    fn the_ungoverned_stream_diagnostic_reaches_the_host_log_dropped_in_as_linked() {
+        let d = served(&[]);
+        const ACCEPT: &[Field] = &[field("accept", "text/event-stream")];
+        for dropped_in in [false, true] {
+            let log = Arc::new(HostLog::default());
+            let bound = Bind {
+                sink: log.clone(),
+                ..bind(&d)
+            };
+            let p: Plugin<Plane> = if dropped_in {
+                let path = busbar_plugin_loader::conformance::cdylib_of("busbar_plane_mcp_plugin");
+                let stated = LinkedRow::of_loaded(crate::loaded_door())
+                    .expect("the door renders its Statement")
+                    .statement;
+                load_dropped(&path, &stated, bound).expect("the dropped door loads")
+            } else {
+                let row = LinkedRow::of_loaded(crate::loaded_door())
+                    .expect("the linked door states its Statement");
+                load_linked(&row, bound).expect("the linked door loads")
+            };
+            let mut i: PlaneOpenIn = z();
+            i.open.head = in_head();
+            (i.open.generation, i.open.settings) = (1, octets(SECTION));
+            i.public_url = text(PUBLIC_URL.as_bytes());
+            let mut o: PlaneOpenOut = z();
+            o.open.head = out_head();
+            assert_eq!(p.open(&mut Frame::new(i, o)).0.outcome, Outcome::Ready);
+            let (arrived, _) = arrive(&p, "stream", 171, ("GET", "/mcp"), b"", ACCEPT);
+            assert_eq!(arrived.outcome, Outcome::Ready, "{}", arrived.detail);
+            let mut reply = vec![0_u8; 1 << 12];
+            let (mut fields, mut arena) = ([z::<OutField>(); 16], vec![0_u8; 4096]);
+            let mut records = [z::<RecordWrite>(); 16];
+            let mut units = [z::<UnitCount>(); 8];
+            let mut i: OnPieceIn = z();
+            i.head = in_head();
+            (i.unit, i.stream, i.from, i.flags) = (171, 171, FROM_CALLER, 0);
+            i.bytes = octets(b"");
+            (i.reply_buf, i.reply_cap) = (reply.as_mut_ptr(), reply.len());
+            (i.fields_buf, i.fields_cap) = (fields.as_mut_ptr(), fields.len());
+            (i.arena_buf, i.arena_cap) = (arena.as_mut_ptr(), arena.len());
+            (i.records_buf, i.records_cap) = (records.as_mut_ptr(), records.len());
+            (i.units_buf, i.units_cap) = (units.as_mut_ptr(), units.len());
+            let mut o: OnPieceOut = z();
+            o.head = out_head();
+            let c = p.call(slot::ON_PIECE, &mut Frame::new(i, o));
+            assert_eq!(c.outcome, Outcome::Ready, "dropped-in {dropped_in}");
+            let lines = log
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(
+                lines.iter().any(|l| l.contains("ungoverned chain")),
+                "dropped-in {dropped_in}: the diagnostic reaches the host log: {lines:?}"
+            );
+        }
+    }
 }
