@@ -1105,6 +1105,200 @@ mod both_ways {
         }
     }
 
+    /// [`Grants`], and a random source that answers (fresh bytes at every call): a host the plane
+    /// can mint a session id on.
+    struct Minting(Grants, std::sync::atomic::AtomicU64);
+
+    impl busbar_plugin_loader::dispatch::HostServices for Minting {
+        fn now(&self) -> busbar_plugin_loader::dispatch::Reading {
+            busbar_plugin_loader::dispatch::Reading {
+                wall_ns: 0,
+                mono_ns: 0,
+            }
+        }
+        fn dest_judge(
+            &self,
+            _: &str,
+            _: u32,
+            _: u32,
+            _: Option<busbar_plugin_loader::dispatch::Later>,
+        ) -> busbar_plugin_loader::dispatch::Ran {
+            busbar_plugin_loader::dispatch::Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn records_get(
+            &self,
+            _: &Caller,
+            _: &str,
+            _: &[u8],
+            _: busbar_plugin_loader::dispatch::Later,
+        ) -> busbar_plugin_loader::dispatch::Ran {
+            busbar_plugin_loader::dispatch::Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn records_list(
+            &self,
+            _: &Caller,
+            _: busbar_contract::services::RecordsList,
+            _: busbar_plugin_loader::dispatch::Later,
+        ) -> busbar_plugin_loader::dispatch::Ran {
+            busbar_plugin_loader::dispatch::Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn records_claim(
+            &self,
+            _: &Caller,
+            _: &str,
+            _: &[u8],
+            _: u64,
+            _: busbar_plugin_loader::dispatch::Later,
+        ) -> busbar_plugin_loader::dispatch::Ran {
+            busbar_plugin_loader::dispatch::Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn sign(&self, _: &Caller, _: &[u8]) -> Stored {
+            Stored::refused(UNSERVED)
+        }
+        fn unit_nest(
+            &self,
+            _: &Caller,
+            _: Option<u64>,
+            _: busbar_contract::services::NestAsk,
+            _: busbar_contract::services::Later,
+        ) -> busbar_contract::services::Ran {
+            busbar_contract::services::Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn work_open(
+            &self,
+            _: &Caller,
+            _: Option<u64>,
+            _: &str,
+            _: &[u8],
+            _: busbar_contract::services::Later,
+        ) -> busbar_contract::services::Ran {
+            busbar_contract::services::Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn work_find(
+            &self,
+            _: &Caller,
+            _: Option<u64>,
+            _: &[u8],
+            _: busbar_contract::services::Later,
+        ) -> busbar_contract::services::Ran {
+            busbar_contract::services::Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn work_settle(
+            &self,
+            _: &Caller,
+            _: Option<u64>,
+            _: u64,
+            _: &[u8],
+            _: busbar_contract::services::Later,
+        ) -> busbar_contract::services::Ran {
+            busbar_contract::services::Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn work_resume(
+            &self,
+            _: &Caller,
+            _: Option<u64>,
+            _: u64,
+            _: busbar_contract::services::Later,
+        ) -> busbar_contract::services::Ran {
+            busbar_contract::services::Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn trust_sight(
+            &self,
+            _: &Caller,
+            _: &str,
+            _: &str,
+            _: busbar_plugin_loader::dispatch::Later,
+        ) -> busbar_plugin_loader::dispatch::Ran {
+            busbar_plugin_loader::dispatch::Ran::Now(Stored::refused(UNSERVED))
+        }
+        /// The kernel's Approve as this section's approvals seed it: `read_file` approved at its
+        /// digest, `draft` allowed and pending (ARCHITECT Q3: the door renders the verdict).
+        fn trust_serves(
+            &self,
+            _: &Caller,
+            counterparty: &str,
+            item: Option<&str>,
+            _: Option<&str>,
+        ) -> Stored {
+            use busbar_contract::abi::host::service::{
+                DISTRUST_NONE, DISTRUST_NOT_APPROVED, DISTRUST_UNKNOWN_ITEM,
+            };
+            Stored::ready(match (counterparty, item) {
+                ("fs", Some("read_file")) => DISTRUST_NONE,
+                ("fs", Some("draft")) => DISTRUST_NOT_APPROVED,
+                _ => DISTRUST_UNKNOWN_ITEM,
+            })
+        }
+        fn trust_due(&self, _: &Caller) -> Stored {
+            Stored::refused(UNSERVED)
+        }
+        fn trust_verify(&self, _: &Caller, _: &str, _: &[u8], _: &[u8]) -> Stored {
+            Stored::refused(UNSERVED)
+        }
+        fn entitlement_check(&self, _: &Caller, unit: Option<u64>, target: &str) -> Stored {
+            Stored::ready(if unit.is_some() && self.0 .0.contains(&target) {
+                busbar_contract::abi::host::service::ENTITLED
+            } else {
+                busbar_contract::abi::host::service::NOT_ENTITLED
+            })
+        }
+        fn random_fill(&self, len: u64) -> Stored {
+            let n = self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Stored {
+                bytes: (0..len).map(|i| (n as u8).wrapping_add(i as u8)).collect(),
+                ..Stored::ready(0)
+            }
+        }
+        fn records_secret(
+            &self,
+            _: &str,
+            _: &str,
+            _: busbar_plugin_loader::dispatch::Later,
+        ) -> busbar_plugin_loader::dispatch::Ran {
+            busbar_plugin_loader::dispatch::Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn disk_append(
+            &self,
+            _: &busbar_contract::services::DiskDest,
+            _: Vec<u8>,
+            _: busbar_plugin_loader::dispatch::Later,
+        ) -> busbar_plugin_loader::dispatch::Ran {
+            busbar_plugin_loader::dispatch::Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn verify_lookup(
+            &self,
+            _: &Caller,
+            _: &[u8],
+            _: busbar_plugin_loader::dispatch::Later,
+        ) -> busbar_plugin_loader::dispatch::Ran {
+            busbar_plugin_loader::dispatch::Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn verify_store(&self, _: &Caller, _: &[u8], _: &[u8], _: u64) -> Stored {
+            Stored::refused(UNSERVED)
+        }
+        fn content_scan(
+            &self,
+            _: &Caller,
+            _: Option<u64>,
+            _: &[u8],
+            _: busbar_plugin_loader::dispatch::Later,
+        ) -> busbar_plugin_loader::dispatch::Ran {
+            busbar_plugin_loader::dispatch::Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn hook_call(
+            &self,
+            _: &Caller,
+            _: Option<u64>,
+            _: busbar_contract::services::HookAsk,
+            _: busbar_plugin_loader::dispatch::Later,
+        ) -> busbar_plugin_loader::dispatch::Ran {
+            busbar_plugin_loader::dispatch::Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn snapshot_read(&self, _: &Caller, _: u32) -> busbar_contract::services::Snapshot {
+            busbar_contract::services::Snapshot::Refused(UNSERVED)
+        }
+    }
+
     use busbar_contract::services::{Caller, Stored, UNSERVED};
 
     /// Every grant the relayed calls need.
@@ -1723,7 +1917,10 @@ mod both_ways {
     /// linked door.
     #[test]
     fn the_ungoverned_stream_diagnostic_reaches_the_host_log_dropped_in_as_linked() {
-        let d = served(&[]);
+        let d = Dispatcher::with_services(
+            DispatchConfig::default(),
+            Arc::new(Minting(Grants(&[]), std::sync::atomic::AtomicU64::new(1))),
+        );
         const ACCEPT: &[Field] = &[field("accept", "text/event-stream")];
         for dropped_in in [false, true] {
             let log = Arc::new(HostLog::default());
