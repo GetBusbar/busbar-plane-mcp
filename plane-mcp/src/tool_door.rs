@@ -47,10 +47,10 @@ use busbar_contract::abi::plane::{
     ArriveIn, ArriveOut, OnPieceIn, OnPieceOut, OutField, PlaneCancelIn, PlaneCancelOut,
     PlaneDriveIn, PlaneDriveOut, PlaneOpenIn, PlaneOpenOut, PlaneRefreshOut, PlaneSnapshot,
     ProjectIn, ProjectOut, RecordWrite, RefusalIn, RefusalOut, ServeIn, ServeOut, UnitCount,
-    AUDIT_APPLIED, AUDIT_REJECTED, CANCEL_ABORTED, EMIT_DONE, EMIT_TO_FAR_END, FROM_CALLER,
-    FROM_FAR_END, FROM_KERNEL, PIECE_HAS_STATUS, PIECE_LAST, PRINCIPAL_REQUIRED, RECORD_AUDIT,
-    RECORD_PUT, REFUSAL_ARRIVE, REFUSAL_GATE, REFUSAL_KERNEL, ROUTE_DIRECT, ROUTE_POOL,
-    UNITS_REPORTED, VERDICT_RETRY,
+    AUDIT_APPLIED, AUDIT_REJECTED, CANCEL_ABORTED, CANCEL_OK_PARTIAL, EMIT_DONE, EMIT_TO_FAR_END,
+    FROM_CALLER, FROM_FAR_END, FROM_KERNEL, PIECE_HAS_STATUS, PIECE_LAST, PRINCIPAL_REQUIRED,
+    RECORD_AUDIT, RECORD_PUT, REFUSAL_ARRIVE, REFUSAL_GATE, REFUSAL_KERNEL, ROUTE_DIRECT,
+    ROUTE_POOL, UNITS_REPORTED, VERDICT_RETRY,
 };
 use busbar_contract::abi::sdk::door::statement;
 use busbar_contract::abi::sdk::exchange::{REPLY_MAX, REPLY_OVER_BOUND};
@@ -398,10 +398,12 @@ slot!(
 
 slot!(
     /// `cancel`: the cancelled unit's state is dropped, found by its ticket or, cancelled before any
-    /// piece reached it, by the unit the host names. Answered `CANCEL_ABORTED`, as predev's door
-    /// answered every cancel.
+    /// piece reached it, by the unit the host names. Answered `CANCEL_OK_PARTIAL` when the far end
+    /// had begun its answer, so the units it reported bill when its answer was streamed (owner
+    /// billing rule R21: the ledger records what the dialect did), else `CANCEL_ABORTED`.
     Cancel, PlaneCancelIn, PlaneCancelOut, |instance, input, mut out| {
         let mut stopped = Vec::new();
+        let mut answered = false;
         if let Some(plane) = instance.get() {
             let ticket = input.cancel().ticket();
             // THE UNIT THE HOST NAMES: `arrive` keyed it, and a unit cancelled before its first
@@ -413,7 +415,12 @@ slot!(
             // A task's continuation the kernel cancelled leaves its task cancelled, audited as the
             // served engine audited a task its shutdown stopped (SEAM-L(r)).
             stopped = door_tasks::cancelled(plane, ticket);
-            plane.units.with_all(|m| m.retain(|k, u| !cancelled(k, &*u)));
+            plane.units.with_all(|m| {
+                answered = m.iter().any(|(k, u)| {
+                    cancelled(k, u) && u.relay.as_ref().is_some_and(|r| r.status != 0)
+                });
+                m.retain(|k, u| !cancelled(k, &*u));
+            });
             door_listen::cancelled(plane, ticket);
             door_sessions::cancelled(plane, ticket);
             door_legacy::cancelled(plane, ticket);
@@ -431,7 +438,10 @@ slot!(
         let (aw, _) = arena.settle(false);
         out.set(|o| &o.records_written, rw as u32);
         out.set(|o| &o.arena_written, aw as u64);
-        out.set(|o| &o.cancel.disposition, CANCEL_ABORTED);
+        out.set(
+            |o| &o.cancel.disposition,
+            if answered { CANCEL_OK_PARTIAL } else { CANCEL_ABORTED },
+        );
         Outcome::Ready
     }
 );
