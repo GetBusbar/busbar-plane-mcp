@@ -6,7 +6,7 @@
 //!
 //! ## Why a closed enum and not a `&str` method name
 //!
-//! `qa/method-inventory.json` is a MATRIX and this module is one of its columns: `mcp × <transport>
+//! `tests/data/method-inventory.json` is a MATRIX and this module is one of its columns: `mcp × <transport>
 //! × busbar-as-client × client-originated`. A builder that took the method as a string would make
 //! the column's contents a property of its call sites, so a method could be added by one caller and
 //! be invisible to every gate. The enum is what makes an enumeration of the column possible, and
