@@ -1,0 +1,1857 @@
+{
+  "_comment": [
+    "The MCP method inventory: every method x originator x role x transport cell, moved here from busbar's qa/method-inventory.json."
+  ],
+  "mcp_revision": "2026-07-28",
+  "derived_from": {
+    "mcp": "rmcp 3.1.2 src/model.rs"
+  },
+  "roles": [
+    "server",
+    "client"
+  ],
+  "methods": [
+    {
+      "protocol": "mcp",
+      "method": "completion/complete",
+      "originator": "client",
+      "kind": "request",
+      "derived_from": "rmcp 3.1.2 ClientRequest::CompleteRequest",
+      "transports": [
+        "streamable-http",
+        "stdio"
+      ],
+      "na": {}
+    },
+    {
+      "protocol": "mcp",
+      "method": "elicitation/create",
+      "originator": "server",
+      "kind": "request",
+      "derived_from": "rmcp 3.1.2 ServerRequest::ElicitRequest",
+      "transports": [
+        "streamable-http",
+        "stdio"
+      ],
+      "na": {}
+    },
+    {
+      "protocol": "mcp",
+      "method": "initialize",
+      "originator": "client",
+      "kind": "request",
+      "derived_from": "rmcp 3.1.2 ClientRequest::InitializeRequest",
+      "transports": [
+        "streamable-http",
+        "stdio"
+      ],
+      "na": {}
+    },
+    {
+      "protocol": "mcp",
+      "method": "logging/setLevel",
+      "originator": "client",
+      "kind": "request",
+      "derived_from": "rmcp 3.1.2 ClientRequest::SetLevelRequest",
+      "transports": [
+        "streamable-http",
+        "stdio"
+      ],
+      "na": {}
+    },
+    {
+      "protocol": "mcp",
+      "method": "notifications/cancelled",
+      "originator": "client",
+      "kind": "notification",
+      "derived_from": "rmcp 3.1.2 ClientNotification::CancelledNotification",
+      "transports": [
+        "streamable-http",
+        "stdio"
+      ],
+      "na": {}
+    },
+    {
+      "protocol": "mcp",
+      "method": "notifications/cancelled",
+      "originator": "server",
+      "kind": "notification",
+      "derived_from": "rmcp 3.1.2 ServerNotification::CancelledNotification",
+      "transports": [
+        "streamable-http",
+        "stdio"
+      ],
+      "na": {}
+    },
+    {
+      "protocol": "mcp",
+      "method": "notifications/elicitation/response",
+      "originator": "client",
+      "kind": "notification",
+      "derived_from": "rmcp 3.1.2 const ElicitationResponseNotificationMethod (rmcp declares ElicitationResponseNotificationMethod but lists it in no ts_union!; SEP-1036 sends the elicitation response from client to server)",
+      "transports": [
+        "streamable-http",
+        "stdio"
+      ],
+      "na": {}
+    },
+    {
+      "protocol": "mcp",
+      "method": "notifications/initialized",
+      "originator": "client",
+      "kind": "notification",
+      "derived_from": "rmcp 3.1.2 ClientNotification::InitializedNotification",
+      "transports": [
+        "streamable-http",
+        "stdio"
+      ],
+      "na": {}
+    },
+    {
+      "protocol": "mcp",
+      "method": "notifications/message",
+      "originator": "server",
+      "kind": "notification",
+      "derived_from": "rmcp 3.1.2 ServerNotification::LoggingMessageNotification",
+      "transports": [
+        "streamable-http",
+        "stdio"
+      ],
+      "na": {}
+    },
+    {
+      "protocol": "mcp",
+      "method": "notifications/progress",
+      "originator": "client",
+      "kind": "notification",
+      "derived_from": "rmcp 3.1.2 ClientNotification::ProgressNotification",
+      "transports": [
+        "streamable-http",
+        "stdio"
+      ],
+      "na": {}
+    },
+    {
+      "protocol": "mcp",
+      "method": "notifications/progress",
+      "originator": "server",
+      "kind": "notification",
+      "derived_from": "rmcp 3.1.2 ServerNotification::ProgressNotification",
+      "transports": [
+        "streamable-http",
+        "stdio"
+      ],
+      "na": {}
+    },
+    {
+      "protocol": "mcp",
+      "method": "notifications/prompts/list_changed",
+      "originator": "server",
+      "kind": "notification",
+      "derived_from": "rmcp 3.1.2 ServerNotification::PromptListChangedNotification",
+      "transports": [
+        "streamable-http",
+        "stdio"
+      ],
+      "na": {}
+    },
+    {
+      "protocol": "mcp",
+      "method": "notifications/resources/list_changed",
+      "originator": "server",
+      "kind": "notification",
+      "derived_from": "rmcp 3.1.2 ServerNotification::ResourceListChangedNotification",
+      "transports": [
+        "streamable-http",
+        "stdio"
+      ],
+      "na": {}
+    },
+    {
+      "protocol": "mcp",
+      "method": "notifications/resources/updated",
+      "originator": "server",
+      "kind": "notification",
+      "derived_from": "rmcp 3.1.2 ServerNotification::ResourceUpdatedNotification",
+      "transports": [
+        "streamable-http",
+        "stdio"
+      ],
+      "na": {}
+    },
+    {
+      "protocol": "mcp",
+      "method": "notifications/roots/list_changed",
+      "originator": "client",
+      "kind": "notification",
+      "derived_from": "rmcp 3.1.2 ClientNotification::RootsListChangedNotification",
+      "transports": [
+        "streamable-http",
+        "stdio"
+      ],
+      "na": {}
+    },
+    {
+      "protocol": "mcp",
+      "method": "notifications/subscriptions/acknowledged",
+      "originator": "server",
+      "kind": "notification",
+      "derived_from": "rmcp 3.1.2 ServerNotification::SubscriptionsAcknowledgedNotification",
+      "transports": [
+        "streamable-http",
+        "stdio"
+      ],
+      "na": {}
+    },
+    {
+      "protocol": "mcp",
+      "method": "notifications/tasks",
+      "originator": "server",
+      "kind": "notification",
+      "derived_from": "rmcp 3.1.2 ServerNotification::TaskStatusNotification",
+      "transports": [
+        "streamable-http",
+        "stdio"
+      ],
+      "na": {}
+    },
+    {
+      "protocol": "mcp",
+      "method": "notifications/tools/list_changed",
+      "originator": "server",
+      "kind": "notification",
+      "derived_from": "rmcp 3.1.2 ServerNotification::ToolListChangedNotification",
+      "transports": [
+        "streamable-http",
+        "stdio"
+      ],
+      "na": {}
+    },
+    {
+      "protocol": "mcp",
+      "method": "ping",
+      "originator": "client",
+      "kind": "request",
+      "derived_from": "rmcp 3.1.2 ClientRequest::PingRequest",
+      "transports": [
+        "streamable-http",
+        "stdio"
+      ],
+      "na": {}
+    },
+    {
+      "protocol": "mcp",
+      "method": "ping",
+      "originator": "server",
+      "kind": "request",
+      "derived_from": "rmcp 3.1.2 ServerRequest::PingRequest",
+      "transports": [
+        "streamable-http",
+        "stdio"
+      ],
+      "na": {}
+    },
+    {
+      "protocol": "mcp",
+      "method": "prompts/get",
+      "originator": "client",
+      "kind": "request",
+      "derived_from": "rmcp 3.1.2 ClientRequest::GetPromptRequest",
+      "transports": [
+        "streamable-http",
+        "stdio"
+      ],
+      "na": {}
+    },
+    {
+      "protocol": "mcp",
+      "method": "prompts/list",
+      "originator": "client",
+      "kind": "request",
+      "derived_from": "rmcp 3.1.2 ClientRequest::ListPromptsRequest",
+      "transports": [
+        "streamable-http",
+        "stdio"
+      ],
+      "na": {}
+    },
+    {
+      "protocol": "mcp",
+      "method": "resources/list",
+      "originator": "client",
+      "kind": "request",
+      "derived_from": "rmcp 3.1.2 ClientRequest::ListResourcesRequest",
+      "transports": [
+        "streamable-http",
+        "stdio"
+      ],
+      "na": {}
+    },
+    {
+      "protocol": "mcp",
+      "method": "resources/read",
+      "originator": "client",
+      "kind": "request",
+      "derived_from": "rmcp 3.1.2 ClientRequest::ReadResourceRequest",
+      "transports": [
+        "streamable-http",
+        "stdio"
+      ],
+      "na": {}
+    },
+    {
+      "protocol": "mcp",
+      "method": "resources/subscribe",
+      "originator": "client",
+      "kind": "request",
+      "derived_from": "rmcp 3.1.2 ClientRequest::SubscribeRequest",
+      "transports": [
+        "streamable-http",
+        "stdio"
+      ],
+      "na": {}
+    },
+    {
+      "protocol": "mcp",
+      "method": "resources/templates/list",
+      "originator": "client",
+      "kind": "request",
+      "derived_from": "rmcp 3.1.2 ClientRequest::ListResourceTemplatesRequest",
+      "transports": [
+        "streamable-http",
+        "stdio"
+      ],
+      "na": {}
+    },
+    {
+      "protocol": "mcp",
+      "method": "resources/unsubscribe",
+      "originator": "client",
+      "kind": "request",
+      "derived_from": "rmcp 3.1.2 ClientRequest::UnsubscribeRequest",
+      "transports": [
+        "streamable-http",
+        "stdio"
+      ],
+      "na": {}
+    },
+    {
+      "protocol": "mcp",
+      "method": "roots/list",
+      "originator": "server",
+      "kind": "request",
+      "derived_from": "rmcp 3.1.2 ServerRequest::ListRootsRequest",
+      "transports": [
+        "streamable-http",
+        "stdio"
+      ],
+      "na": {}
+    },
+    {
+      "protocol": "mcp",
+      "method": "sampling/createMessage",
+      "originator": "server",
+      "kind": "request",
+      "derived_from": "rmcp 3.1.2 ServerRequest::CreateMessageRequest",
+      "transports": [
+        "streamable-http",
+        "stdio"
+      ],
+      "na": {}
+    },
+    {
+      "protocol": "mcp",
+      "method": "server/discover",
+      "originator": "client",
+      "kind": "request",
+      "derived_from": "rmcp 3.1.2 ClientRequest::DiscoverRequest",
+      "transports": [
+        "streamable-http",
+        "stdio"
+      ],
+      "na": {}
+    },
+    {
+      "protocol": "mcp",
+      "method": "subscriptions/listen",
+      "originator": "client",
+      "kind": "request",
+      "derived_from": "rmcp 3.1.2 ClientRequest::SubscriptionsListenRequest",
+      "transports": [
+        "streamable-http",
+        "stdio"
+      ],
+      "na": {}
+    },
+    {
+      "protocol": "mcp",
+      "method": "tasks/cancel",
+      "originator": "client",
+      "kind": "request",
+      "derived_from": "rmcp 3.1.2 ClientRequest::CancelTaskRequest",
+      "transports": [
+        "streamable-http",
+        "stdio"
+      ],
+      "na": {}
+    },
+    {
+      "protocol": "mcp",
+      "method": "tasks/get",
+      "originator": "client",
+      "kind": "request",
+      "derived_from": "rmcp 3.1.2 ClientRequest::GetTaskRequest",
+      "transports": [
+        "streamable-http",
+        "stdio"
+      ],
+      "na": {}
+    },
+    {
+      "protocol": "mcp",
+      "method": "tasks/update",
+      "originator": "client",
+      "kind": "request",
+      "derived_from": "rmcp 3.1.2 ClientRequest::UpdateTaskRequest",
+      "transports": [
+        "streamable-http",
+        "stdio"
+      ],
+      "na": {}
+    },
+    {
+      "protocol": "mcp",
+      "method": "tools/call",
+      "originator": "client",
+      "kind": "request",
+      "derived_from": "rmcp 3.1.2 ClientRequest::CallToolRequest",
+      "transports": [
+        "streamable-http",
+        "stdio"
+      ],
+      "na": {}
+    },
+    {
+      "protocol": "mcp",
+      "method": "tools/list",
+      "originator": "client",
+      "kind": "request",
+      "derived_from": "rmcp 3.1.2 ClientRequest::ListToolsRequest",
+      "transports": [
+        "streamable-http",
+        "stdio"
+      ],
+      "na": {}
+    },
+    {
+      "protocol": "mcp",
+      "method": "GET /mcp (open SSE stream)",
+      "originator": "client",
+      "kind": "http-verb",
+      "derived_from": "not derivable: Opening the server-to-client SSE stream, and resuming it with Last-Event-ID, is a streamable-HTTP transport obligation with no JSON-RPC method name, so an rmcp-model-only derivation cannot see it. Without it NO server-originated request or notification can reach the client over HTTP.",
+      "exercised_by": [
+        "mcp-conformance (official) server-sse-multiple-streams",
+        "mcp-conformance (official) server-stateless"
+      ],
+      "transports": [
+        "streamable-http",
+        "stdio"
+      ],
+      "na": {
+        "stdio": "stdio has no session envelope and no second channel: the stream IS the process's stdout, opened once at spawn."
+      }
+    },
+    {
+      "protocol": "mcp",
+      "method": "DELETE /mcp (terminate session)",
+      "originator": "client",
+      "kind": "http-verb",
+      "derived_from": "not derivable: Explicit session termination is a streamable-HTTP verb, not a JSON-RPC method. It is the only way a client can tell a gateway to drop server-side state it is being billed for.",
+      "exercised_by": [
+        "mcp-conformance (official) server-stateless",
+        "mcp-conformance (in-house battery) SEAM session clauses"
+      ],
+      "transports": [
+        "streamable-http",
+        "stdio"
+      ],
+      "na": {
+        "stdio": "A stdio session ends when the process does; there is no session id to delete."
+      }
+    }
+  ],
+  "cells": [
+    {
+      "id": "mcp|stdio|client|client|DELETE /mcp (terminate session)",
+      "protocol": "mcp",
+      "method": "DELETE /mcp (terminate session)",
+      "originator": "client",
+      "role": "client",
+      "transport": "stdio",
+      "obligation": "issue",
+      "na_reason": "A stdio session ends when the process does; there is no session id to delete."
+    },
+    {
+      "id": "mcp|stdio|client|client|GET /mcp (open SSE stream)",
+      "protocol": "mcp",
+      "method": "GET /mcp (open SSE stream)",
+      "originator": "client",
+      "role": "client",
+      "transport": "stdio",
+      "obligation": "issue",
+      "na_reason": "stdio has no session envelope and no second channel: the stream IS the process's stdout, opened once at spawn."
+    },
+    {
+      "id": "mcp|stdio|client|client|completion/complete",
+      "protocol": "mcp",
+      "method": "completion/complete",
+      "originator": "client",
+      "role": "client",
+      "transport": "stdio",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|stdio|client|client|initialize",
+      "protocol": "mcp",
+      "method": "initialize",
+      "originator": "client",
+      "role": "client",
+      "transport": "stdio",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|stdio|client|client|logging/setLevel",
+      "protocol": "mcp",
+      "method": "logging/setLevel",
+      "originator": "client",
+      "role": "client",
+      "transport": "stdio",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|stdio|client|client|notifications/cancelled",
+      "protocol": "mcp",
+      "method": "notifications/cancelled",
+      "originator": "client",
+      "role": "client",
+      "transport": "stdio",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|stdio|client|client|notifications/elicitation/response",
+      "protocol": "mcp",
+      "method": "notifications/elicitation/response",
+      "originator": "client",
+      "role": "client",
+      "transport": "stdio",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|stdio|client|client|notifications/initialized",
+      "protocol": "mcp",
+      "method": "notifications/initialized",
+      "originator": "client",
+      "role": "client",
+      "transport": "stdio",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|stdio|client|client|notifications/progress",
+      "protocol": "mcp",
+      "method": "notifications/progress",
+      "originator": "client",
+      "role": "client",
+      "transport": "stdio",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|stdio|client|client|notifications/roots/list_changed",
+      "protocol": "mcp",
+      "method": "notifications/roots/list_changed",
+      "originator": "client",
+      "role": "client",
+      "transport": "stdio",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|stdio|client|client|ping",
+      "protocol": "mcp",
+      "method": "ping",
+      "originator": "client",
+      "role": "client",
+      "transport": "stdio",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|stdio|client|client|prompts/get",
+      "protocol": "mcp",
+      "method": "prompts/get",
+      "originator": "client",
+      "role": "client",
+      "transport": "stdio",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|stdio|client|client|prompts/list",
+      "protocol": "mcp",
+      "method": "prompts/list",
+      "originator": "client",
+      "role": "client",
+      "transport": "stdio",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|stdio|client|client|resources/list",
+      "protocol": "mcp",
+      "method": "resources/list",
+      "originator": "client",
+      "role": "client",
+      "transport": "stdio",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|stdio|client|client|resources/read",
+      "protocol": "mcp",
+      "method": "resources/read",
+      "originator": "client",
+      "role": "client",
+      "transport": "stdio",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|stdio|client|client|resources/subscribe",
+      "protocol": "mcp",
+      "method": "resources/subscribe",
+      "originator": "client",
+      "role": "client",
+      "transport": "stdio",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|stdio|client|client|resources/templates/list",
+      "protocol": "mcp",
+      "method": "resources/templates/list",
+      "originator": "client",
+      "role": "client",
+      "transport": "stdio",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|stdio|client|client|resources/unsubscribe",
+      "protocol": "mcp",
+      "method": "resources/unsubscribe",
+      "originator": "client",
+      "role": "client",
+      "transport": "stdio",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|stdio|client|client|server/discover",
+      "protocol": "mcp",
+      "method": "server/discover",
+      "originator": "client",
+      "role": "client",
+      "transport": "stdio",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|stdio|client|client|subscriptions/listen",
+      "protocol": "mcp",
+      "method": "subscriptions/listen",
+      "originator": "client",
+      "role": "client",
+      "transport": "stdio",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|stdio|client|client|tasks/cancel",
+      "protocol": "mcp",
+      "method": "tasks/cancel",
+      "originator": "client",
+      "role": "client",
+      "transport": "stdio",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|stdio|client|client|tasks/get",
+      "protocol": "mcp",
+      "method": "tasks/get",
+      "originator": "client",
+      "role": "client",
+      "transport": "stdio",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|stdio|client|client|tasks/update",
+      "protocol": "mcp",
+      "method": "tasks/update",
+      "originator": "client",
+      "role": "client",
+      "transport": "stdio",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|stdio|client|client|tools/call",
+      "protocol": "mcp",
+      "method": "tools/call",
+      "originator": "client",
+      "role": "client",
+      "transport": "stdio",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|stdio|client|client|tools/list",
+      "protocol": "mcp",
+      "method": "tools/list",
+      "originator": "client",
+      "role": "client",
+      "transport": "stdio",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|stdio|client|server|elicitation/create",
+      "protocol": "mcp",
+      "method": "elicitation/create",
+      "originator": "server",
+      "role": "client",
+      "transport": "stdio",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|stdio|client|server|notifications/cancelled",
+      "protocol": "mcp",
+      "method": "notifications/cancelled",
+      "originator": "server",
+      "role": "client",
+      "transport": "stdio",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|stdio|client|server|notifications/message",
+      "protocol": "mcp",
+      "method": "notifications/message",
+      "originator": "server",
+      "role": "client",
+      "transport": "stdio",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|stdio|client|server|notifications/progress",
+      "protocol": "mcp",
+      "method": "notifications/progress",
+      "originator": "server",
+      "role": "client",
+      "transport": "stdio",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|stdio|client|server|notifications/prompts/list_changed",
+      "protocol": "mcp",
+      "method": "notifications/prompts/list_changed",
+      "originator": "server",
+      "role": "client",
+      "transport": "stdio",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|stdio|client|server|notifications/resources/list_changed",
+      "protocol": "mcp",
+      "method": "notifications/resources/list_changed",
+      "originator": "server",
+      "role": "client",
+      "transport": "stdio",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|stdio|client|server|notifications/resources/updated",
+      "protocol": "mcp",
+      "method": "notifications/resources/updated",
+      "originator": "server",
+      "role": "client",
+      "transport": "stdio",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|stdio|client|server|notifications/subscriptions/acknowledged",
+      "protocol": "mcp",
+      "method": "notifications/subscriptions/acknowledged",
+      "originator": "server",
+      "role": "client",
+      "transport": "stdio",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|stdio|client|server|notifications/tasks",
+      "protocol": "mcp",
+      "method": "notifications/tasks",
+      "originator": "server",
+      "role": "client",
+      "transport": "stdio",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|stdio|client|server|notifications/tools/list_changed",
+      "protocol": "mcp",
+      "method": "notifications/tools/list_changed",
+      "originator": "server",
+      "role": "client",
+      "transport": "stdio",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|stdio|client|server|ping",
+      "protocol": "mcp",
+      "method": "ping",
+      "originator": "server",
+      "role": "client",
+      "transport": "stdio",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|stdio|client|server|roots/list",
+      "protocol": "mcp",
+      "method": "roots/list",
+      "originator": "server",
+      "role": "client",
+      "transport": "stdio",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|stdio|client|server|sampling/createMessage",
+      "protocol": "mcp",
+      "method": "sampling/createMessage",
+      "originator": "server",
+      "role": "client",
+      "transport": "stdio",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|stdio|server|client|DELETE /mcp (terminate session)",
+      "protocol": "mcp",
+      "method": "DELETE /mcp (terminate session)",
+      "originator": "client",
+      "role": "server",
+      "transport": "stdio",
+      "obligation": "handle",
+      "na_reason": "A stdio session ends when the process does; there is no session id to delete."
+    },
+    {
+      "id": "mcp|stdio|server|client|GET /mcp (open SSE stream)",
+      "protocol": "mcp",
+      "method": "GET /mcp (open SSE stream)",
+      "originator": "client",
+      "role": "server",
+      "transport": "stdio",
+      "obligation": "handle",
+      "na_reason": "stdio has no session envelope and no second channel: the stream IS the process's stdout, opened once at spawn."
+    },
+    {
+      "id": "mcp|stdio|server|client|completion/complete",
+      "protocol": "mcp",
+      "method": "completion/complete",
+      "originator": "client",
+      "role": "server",
+      "transport": "stdio",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|stdio|server|client|initialize",
+      "protocol": "mcp",
+      "method": "initialize",
+      "originator": "client",
+      "role": "server",
+      "transport": "stdio",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|stdio|server|client|logging/setLevel",
+      "protocol": "mcp",
+      "method": "logging/setLevel",
+      "originator": "client",
+      "role": "server",
+      "transport": "stdio",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|stdio|server|client|notifications/cancelled",
+      "protocol": "mcp",
+      "method": "notifications/cancelled",
+      "originator": "client",
+      "role": "server",
+      "transport": "stdio",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|stdio|server|client|notifications/elicitation/response",
+      "protocol": "mcp",
+      "method": "notifications/elicitation/response",
+      "originator": "client",
+      "role": "server",
+      "transport": "stdio",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|stdio|server|client|notifications/initialized",
+      "protocol": "mcp",
+      "method": "notifications/initialized",
+      "originator": "client",
+      "role": "server",
+      "transport": "stdio",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|stdio|server|client|notifications/progress",
+      "protocol": "mcp",
+      "method": "notifications/progress",
+      "originator": "client",
+      "role": "server",
+      "transport": "stdio",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|stdio|server|client|notifications/roots/list_changed",
+      "protocol": "mcp",
+      "method": "notifications/roots/list_changed",
+      "originator": "client",
+      "role": "server",
+      "transport": "stdio",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|stdio|server|client|ping",
+      "protocol": "mcp",
+      "method": "ping",
+      "originator": "client",
+      "role": "server",
+      "transport": "stdio",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|stdio|server|client|prompts/get",
+      "protocol": "mcp",
+      "method": "prompts/get",
+      "originator": "client",
+      "role": "server",
+      "transport": "stdio",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|stdio|server|client|prompts/list",
+      "protocol": "mcp",
+      "method": "prompts/list",
+      "originator": "client",
+      "role": "server",
+      "transport": "stdio",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|stdio|server|client|resources/list",
+      "protocol": "mcp",
+      "method": "resources/list",
+      "originator": "client",
+      "role": "server",
+      "transport": "stdio",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|stdio|server|client|resources/read",
+      "protocol": "mcp",
+      "method": "resources/read",
+      "originator": "client",
+      "role": "server",
+      "transport": "stdio",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|stdio|server|client|resources/subscribe",
+      "protocol": "mcp",
+      "method": "resources/subscribe",
+      "originator": "client",
+      "role": "server",
+      "transport": "stdio",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|stdio|server|client|resources/templates/list",
+      "protocol": "mcp",
+      "method": "resources/templates/list",
+      "originator": "client",
+      "role": "server",
+      "transport": "stdio",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|stdio|server|client|resources/unsubscribe",
+      "protocol": "mcp",
+      "method": "resources/unsubscribe",
+      "originator": "client",
+      "role": "server",
+      "transport": "stdio",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|stdio|server|client|server/discover",
+      "protocol": "mcp",
+      "method": "server/discover",
+      "originator": "client",
+      "role": "server",
+      "transport": "stdio",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|stdio|server|client|subscriptions/listen",
+      "protocol": "mcp",
+      "method": "subscriptions/listen",
+      "originator": "client",
+      "role": "server",
+      "transport": "stdio",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|stdio|server|client|tasks/cancel",
+      "protocol": "mcp",
+      "method": "tasks/cancel",
+      "originator": "client",
+      "role": "server",
+      "transport": "stdio",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|stdio|server|client|tasks/get",
+      "protocol": "mcp",
+      "method": "tasks/get",
+      "originator": "client",
+      "role": "server",
+      "transport": "stdio",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|stdio|server|client|tasks/update",
+      "protocol": "mcp",
+      "method": "tasks/update",
+      "originator": "client",
+      "role": "server",
+      "transport": "stdio",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|stdio|server|client|tools/call",
+      "protocol": "mcp",
+      "method": "tools/call",
+      "originator": "client",
+      "role": "server",
+      "transport": "stdio",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|stdio|server|client|tools/list",
+      "protocol": "mcp",
+      "method": "tools/list",
+      "originator": "client",
+      "role": "server",
+      "transport": "stdio",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|stdio|server|server|elicitation/create",
+      "protocol": "mcp",
+      "method": "elicitation/create",
+      "originator": "server",
+      "role": "server",
+      "transport": "stdio",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|stdio|server|server|notifications/cancelled",
+      "protocol": "mcp",
+      "method": "notifications/cancelled",
+      "originator": "server",
+      "role": "server",
+      "transport": "stdio",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|stdio|server|server|notifications/message",
+      "protocol": "mcp",
+      "method": "notifications/message",
+      "originator": "server",
+      "role": "server",
+      "transport": "stdio",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|stdio|server|server|notifications/progress",
+      "protocol": "mcp",
+      "method": "notifications/progress",
+      "originator": "server",
+      "role": "server",
+      "transport": "stdio",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|stdio|server|server|notifications/prompts/list_changed",
+      "protocol": "mcp",
+      "method": "notifications/prompts/list_changed",
+      "originator": "server",
+      "role": "server",
+      "transport": "stdio",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|stdio|server|server|notifications/resources/list_changed",
+      "protocol": "mcp",
+      "method": "notifications/resources/list_changed",
+      "originator": "server",
+      "role": "server",
+      "transport": "stdio",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|stdio|server|server|notifications/resources/updated",
+      "protocol": "mcp",
+      "method": "notifications/resources/updated",
+      "originator": "server",
+      "role": "server",
+      "transport": "stdio",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|stdio|server|server|notifications/subscriptions/acknowledged",
+      "protocol": "mcp",
+      "method": "notifications/subscriptions/acknowledged",
+      "originator": "server",
+      "role": "server",
+      "transport": "stdio",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|stdio|server|server|notifications/tasks",
+      "protocol": "mcp",
+      "method": "notifications/tasks",
+      "originator": "server",
+      "role": "server",
+      "transport": "stdio",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|stdio|server|server|notifications/tools/list_changed",
+      "protocol": "mcp",
+      "method": "notifications/tools/list_changed",
+      "originator": "server",
+      "role": "server",
+      "transport": "stdio",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|stdio|server|server|ping",
+      "protocol": "mcp",
+      "method": "ping",
+      "originator": "server",
+      "role": "server",
+      "transport": "stdio",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|stdio|server|server|roots/list",
+      "protocol": "mcp",
+      "method": "roots/list",
+      "originator": "server",
+      "role": "server",
+      "transport": "stdio",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|stdio|server|server|sampling/createMessage",
+      "protocol": "mcp",
+      "method": "sampling/createMessage",
+      "originator": "server",
+      "role": "server",
+      "transport": "stdio",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|streamable-http|client|client|DELETE /mcp (terminate session)",
+      "protocol": "mcp",
+      "method": "DELETE /mcp (terminate session)",
+      "originator": "client",
+      "role": "client",
+      "transport": "streamable-http",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|streamable-http|client|client|GET /mcp (open SSE stream)",
+      "protocol": "mcp",
+      "method": "GET /mcp (open SSE stream)",
+      "originator": "client",
+      "role": "client",
+      "transport": "streamable-http",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|streamable-http|client|client|completion/complete",
+      "protocol": "mcp",
+      "method": "completion/complete",
+      "originator": "client",
+      "role": "client",
+      "transport": "streamable-http",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|streamable-http|client|client|initialize",
+      "protocol": "mcp",
+      "method": "initialize",
+      "originator": "client",
+      "role": "client",
+      "transport": "streamable-http",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|streamable-http|client|client|logging/setLevel",
+      "protocol": "mcp",
+      "method": "logging/setLevel",
+      "originator": "client",
+      "role": "client",
+      "transport": "streamable-http",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|streamable-http|client|client|notifications/cancelled",
+      "protocol": "mcp",
+      "method": "notifications/cancelled",
+      "originator": "client",
+      "role": "client",
+      "transport": "streamable-http",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|streamable-http|client|client|notifications/elicitation/response",
+      "protocol": "mcp",
+      "method": "notifications/elicitation/response",
+      "originator": "client",
+      "role": "client",
+      "transport": "streamable-http",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|streamable-http|client|client|notifications/initialized",
+      "protocol": "mcp",
+      "method": "notifications/initialized",
+      "originator": "client",
+      "role": "client",
+      "transport": "streamable-http",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|streamable-http|client|client|notifications/progress",
+      "protocol": "mcp",
+      "method": "notifications/progress",
+      "originator": "client",
+      "role": "client",
+      "transport": "streamable-http",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|streamable-http|client|client|notifications/roots/list_changed",
+      "protocol": "mcp",
+      "method": "notifications/roots/list_changed",
+      "originator": "client",
+      "role": "client",
+      "transport": "streamable-http",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|streamable-http|client|client|ping",
+      "protocol": "mcp",
+      "method": "ping",
+      "originator": "client",
+      "role": "client",
+      "transport": "streamable-http",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|streamable-http|client|client|prompts/get",
+      "protocol": "mcp",
+      "method": "prompts/get",
+      "originator": "client",
+      "role": "client",
+      "transport": "streamable-http",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|streamable-http|client|client|prompts/list",
+      "protocol": "mcp",
+      "method": "prompts/list",
+      "originator": "client",
+      "role": "client",
+      "transport": "streamable-http",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|streamable-http|client|client|resources/list",
+      "protocol": "mcp",
+      "method": "resources/list",
+      "originator": "client",
+      "role": "client",
+      "transport": "streamable-http",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|streamable-http|client|client|resources/read",
+      "protocol": "mcp",
+      "method": "resources/read",
+      "originator": "client",
+      "role": "client",
+      "transport": "streamable-http",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|streamable-http|client|client|resources/subscribe",
+      "protocol": "mcp",
+      "method": "resources/subscribe",
+      "originator": "client",
+      "role": "client",
+      "transport": "streamable-http",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|streamable-http|client|client|resources/templates/list",
+      "protocol": "mcp",
+      "method": "resources/templates/list",
+      "originator": "client",
+      "role": "client",
+      "transport": "streamable-http",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|streamable-http|client|client|resources/unsubscribe",
+      "protocol": "mcp",
+      "method": "resources/unsubscribe",
+      "originator": "client",
+      "role": "client",
+      "transport": "streamable-http",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|streamable-http|client|client|server/discover",
+      "protocol": "mcp",
+      "method": "server/discover",
+      "originator": "client",
+      "role": "client",
+      "transport": "streamable-http",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|streamable-http|client|client|subscriptions/listen",
+      "protocol": "mcp",
+      "method": "subscriptions/listen",
+      "originator": "client",
+      "role": "client",
+      "transport": "streamable-http",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|streamable-http|client|client|tasks/cancel",
+      "protocol": "mcp",
+      "method": "tasks/cancel",
+      "originator": "client",
+      "role": "client",
+      "transport": "streamable-http",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|streamable-http|client|client|tasks/get",
+      "protocol": "mcp",
+      "method": "tasks/get",
+      "originator": "client",
+      "role": "client",
+      "transport": "streamable-http",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|streamable-http|client|client|tasks/update",
+      "protocol": "mcp",
+      "method": "tasks/update",
+      "originator": "client",
+      "role": "client",
+      "transport": "streamable-http",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|streamable-http|client|client|tools/call",
+      "protocol": "mcp",
+      "method": "tools/call",
+      "originator": "client",
+      "role": "client",
+      "transport": "streamable-http",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|streamable-http|client|client|tools/list",
+      "protocol": "mcp",
+      "method": "tools/list",
+      "originator": "client",
+      "role": "client",
+      "transport": "streamable-http",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|streamable-http|client|server|elicitation/create",
+      "protocol": "mcp",
+      "method": "elicitation/create",
+      "originator": "server",
+      "role": "client",
+      "transport": "streamable-http",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|streamable-http|client|server|notifications/cancelled",
+      "protocol": "mcp",
+      "method": "notifications/cancelled",
+      "originator": "server",
+      "role": "client",
+      "transport": "streamable-http",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|streamable-http|client|server|notifications/message",
+      "protocol": "mcp",
+      "method": "notifications/message",
+      "originator": "server",
+      "role": "client",
+      "transport": "streamable-http",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|streamable-http|client|server|notifications/progress",
+      "protocol": "mcp",
+      "method": "notifications/progress",
+      "originator": "server",
+      "role": "client",
+      "transport": "streamable-http",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|streamable-http|client|server|notifications/prompts/list_changed",
+      "protocol": "mcp",
+      "method": "notifications/prompts/list_changed",
+      "originator": "server",
+      "role": "client",
+      "transport": "streamable-http",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|streamable-http|client|server|notifications/resources/list_changed",
+      "protocol": "mcp",
+      "method": "notifications/resources/list_changed",
+      "originator": "server",
+      "role": "client",
+      "transport": "streamable-http",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|streamable-http|client|server|notifications/resources/updated",
+      "protocol": "mcp",
+      "method": "notifications/resources/updated",
+      "originator": "server",
+      "role": "client",
+      "transport": "streamable-http",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|streamable-http|client|server|notifications/subscriptions/acknowledged",
+      "protocol": "mcp",
+      "method": "notifications/subscriptions/acknowledged",
+      "originator": "server",
+      "role": "client",
+      "transport": "streamable-http",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|streamable-http|client|server|notifications/tasks",
+      "protocol": "mcp",
+      "method": "notifications/tasks",
+      "originator": "server",
+      "role": "client",
+      "transport": "streamable-http",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|streamable-http|client|server|notifications/tools/list_changed",
+      "protocol": "mcp",
+      "method": "notifications/tools/list_changed",
+      "originator": "server",
+      "role": "client",
+      "transport": "streamable-http",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|streamable-http|client|server|ping",
+      "protocol": "mcp",
+      "method": "ping",
+      "originator": "server",
+      "role": "client",
+      "transport": "streamable-http",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|streamable-http|client|server|roots/list",
+      "protocol": "mcp",
+      "method": "roots/list",
+      "originator": "server",
+      "role": "client",
+      "transport": "streamable-http",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|streamable-http|client|server|sampling/createMessage",
+      "protocol": "mcp",
+      "method": "sampling/createMessage",
+      "originator": "server",
+      "role": "client",
+      "transport": "streamable-http",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|streamable-http|server|client|DELETE /mcp (terminate session)",
+      "protocol": "mcp",
+      "method": "DELETE /mcp (terminate session)",
+      "originator": "client",
+      "role": "server",
+      "transport": "streamable-http",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|streamable-http|server|client|GET /mcp (open SSE stream)",
+      "protocol": "mcp",
+      "method": "GET /mcp (open SSE stream)",
+      "originator": "client",
+      "role": "server",
+      "transport": "streamable-http",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|streamable-http|server|client|completion/complete",
+      "protocol": "mcp",
+      "method": "completion/complete",
+      "originator": "client",
+      "role": "server",
+      "transport": "streamable-http",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|streamable-http|server|client|initialize",
+      "protocol": "mcp",
+      "method": "initialize",
+      "originator": "client",
+      "role": "server",
+      "transport": "streamable-http",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|streamable-http|server|client|logging/setLevel",
+      "protocol": "mcp",
+      "method": "logging/setLevel",
+      "originator": "client",
+      "role": "server",
+      "transport": "streamable-http",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|streamable-http|server|client|notifications/cancelled",
+      "protocol": "mcp",
+      "method": "notifications/cancelled",
+      "originator": "client",
+      "role": "server",
+      "transport": "streamable-http",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|streamable-http|server|client|notifications/elicitation/response",
+      "protocol": "mcp",
+      "method": "notifications/elicitation/response",
+      "originator": "client",
+      "role": "server",
+      "transport": "streamable-http",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|streamable-http|server|client|notifications/initialized",
+      "protocol": "mcp",
+      "method": "notifications/initialized",
+      "originator": "client",
+      "role": "server",
+      "transport": "streamable-http",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|streamable-http|server|client|notifications/progress",
+      "protocol": "mcp",
+      "method": "notifications/progress",
+      "originator": "client",
+      "role": "server",
+      "transport": "streamable-http",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|streamable-http|server|client|notifications/roots/list_changed",
+      "protocol": "mcp",
+      "method": "notifications/roots/list_changed",
+      "originator": "client",
+      "role": "server",
+      "transport": "streamable-http",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|streamable-http|server|client|ping",
+      "protocol": "mcp",
+      "method": "ping",
+      "originator": "client",
+      "role": "server",
+      "transport": "streamable-http",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|streamable-http|server|client|prompts/get",
+      "protocol": "mcp",
+      "method": "prompts/get",
+      "originator": "client",
+      "role": "server",
+      "transport": "streamable-http",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|streamable-http|server|client|prompts/list",
+      "protocol": "mcp",
+      "method": "prompts/list",
+      "originator": "client",
+      "role": "server",
+      "transport": "streamable-http",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|streamable-http|server|client|resources/list",
+      "protocol": "mcp",
+      "method": "resources/list",
+      "originator": "client",
+      "role": "server",
+      "transport": "streamable-http",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|streamable-http|server|client|resources/read",
+      "protocol": "mcp",
+      "method": "resources/read",
+      "originator": "client",
+      "role": "server",
+      "transport": "streamable-http",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|streamable-http|server|client|resources/subscribe",
+      "protocol": "mcp",
+      "method": "resources/subscribe",
+      "originator": "client",
+      "role": "server",
+      "transport": "streamable-http",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|streamable-http|server|client|resources/templates/list",
+      "protocol": "mcp",
+      "method": "resources/templates/list",
+      "originator": "client",
+      "role": "server",
+      "transport": "streamable-http",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|streamable-http|server|client|resources/unsubscribe",
+      "protocol": "mcp",
+      "method": "resources/unsubscribe",
+      "originator": "client",
+      "role": "server",
+      "transport": "streamable-http",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|streamable-http|server|client|server/discover",
+      "protocol": "mcp",
+      "method": "server/discover",
+      "originator": "client",
+      "role": "server",
+      "transport": "streamable-http",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|streamable-http|server|client|subscriptions/listen",
+      "protocol": "mcp",
+      "method": "subscriptions/listen",
+      "originator": "client",
+      "role": "server",
+      "transport": "streamable-http",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|streamable-http|server|client|tasks/cancel",
+      "protocol": "mcp",
+      "method": "tasks/cancel",
+      "originator": "client",
+      "role": "server",
+      "transport": "streamable-http",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|streamable-http|server|client|tasks/get",
+      "protocol": "mcp",
+      "method": "tasks/get",
+      "originator": "client",
+      "role": "server",
+      "transport": "streamable-http",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|streamable-http|server|client|tasks/update",
+      "protocol": "mcp",
+      "method": "tasks/update",
+      "originator": "client",
+      "role": "server",
+      "transport": "streamable-http",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|streamable-http|server|client|tools/call",
+      "protocol": "mcp",
+      "method": "tools/call",
+      "originator": "client",
+      "role": "server",
+      "transport": "streamable-http",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|streamable-http|server|client|tools/list",
+      "protocol": "mcp",
+      "method": "tools/list",
+      "originator": "client",
+      "role": "server",
+      "transport": "streamable-http",
+      "obligation": "handle"
+    },
+    {
+      "id": "mcp|streamable-http|server|server|elicitation/create",
+      "protocol": "mcp",
+      "method": "elicitation/create",
+      "originator": "server",
+      "role": "server",
+      "transport": "streamable-http",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|streamable-http|server|server|notifications/cancelled",
+      "protocol": "mcp",
+      "method": "notifications/cancelled",
+      "originator": "server",
+      "role": "server",
+      "transport": "streamable-http",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|streamable-http|server|server|notifications/message",
+      "protocol": "mcp",
+      "method": "notifications/message",
+      "originator": "server",
+      "role": "server",
+      "transport": "streamable-http",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|streamable-http|server|server|notifications/progress",
+      "protocol": "mcp",
+      "method": "notifications/progress",
+      "originator": "server",
+      "role": "server",
+      "transport": "streamable-http",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|streamable-http|server|server|notifications/prompts/list_changed",
+      "protocol": "mcp",
+      "method": "notifications/prompts/list_changed",
+      "originator": "server",
+      "role": "server",
+      "transport": "streamable-http",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|streamable-http|server|server|notifications/resources/list_changed",
+      "protocol": "mcp",
+      "method": "notifications/resources/list_changed",
+      "originator": "server",
+      "role": "server",
+      "transport": "streamable-http",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|streamable-http|server|server|notifications/resources/updated",
+      "protocol": "mcp",
+      "method": "notifications/resources/updated",
+      "originator": "server",
+      "role": "server",
+      "transport": "streamable-http",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|streamable-http|server|server|notifications/subscriptions/acknowledged",
+      "protocol": "mcp",
+      "method": "notifications/subscriptions/acknowledged",
+      "originator": "server",
+      "role": "server",
+      "transport": "streamable-http",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|streamable-http|server|server|notifications/tasks",
+      "protocol": "mcp",
+      "method": "notifications/tasks",
+      "originator": "server",
+      "role": "server",
+      "transport": "streamable-http",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|streamable-http|server|server|notifications/tools/list_changed",
+      "protocol": "mcp",
+      "method": "notifications/tools/list_changed",
+      "originator": "server",
+      "role": "server",
+      "transport": "streamable-http",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|streamable-http|server|server|ping",
+      "protocol": "mcp",
+      "method": "ping",
+      "originator": "server",
+      "role": "server",
+      "transport": "streamable-http",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|streamable-http|server|server|roots/list",
+      "protocol": "mcp",
+      "method": "roots/list",
+      "originator": "server",
+      "role": "server",
+      "transport": "streamable-http",
+      "obligation": "issue"
+    },
+    {
+      "id": "mcp|streamable-http|server|server|sampling/createMessage",
+      "protocol": "mcp",
+      "method": "sampling/createMessage",
+      "originator": "server",
+      "role": "server",
+      "transport": "streamable-http",
+      "obligation": "issue"
+    }
+  ]
+}

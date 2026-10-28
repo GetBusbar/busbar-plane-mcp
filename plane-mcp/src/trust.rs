@@ -3,7 +3,7 @@
 
 //! THE TRUST SURFACE, PLANE SIDE: what a registered server was last seen to OFFER, judged against
 //! what the operator APPROVED in the `tools:` section, and the three admin answers that render it
-//! (`connect`, `changes`, `health`; ARCHITECT Q-L3B-VERBS). Pure: the section's registration and
+//! (`connect`, `changes`, `health`). Pure: the section's registration and
 //! the last sighting in, a state, a changes queue and the views out.
 //!
 //! * **The approval** is the registration as the operator wrote it: an authenticity root (a pin
@@ -13,7 +13,7 @@
 //! * **The observation** is a live `tools/list`, each tool re-hashed here from the definition the
 //!   upstream sent ([`tool_digest`]: name, description and input schema, length-framed, the schema in
 //!   canonical JSON), never a digest the upstream supplied.
-//! * **The verdicts are the kernel's** (ARCHITECT Q3): the plane sights the catalogue
+//! * **The verdicts are the kernel's**: the plane sights the catalogue
 //!   (`trust.sight`) and each tool (`trust.sight_item`), the kernel's Approve answers every call
 //!   (`trust.serves`), and these views read the kernel's trust state (`trust.state`). A failed
 //!   contact is the one plane fact a view renders on its own (`error`).
@@ -146,7 +146,7 @@ pub fn catalogue_hash(observation: &Observation) -> String {
 /// a failure: a declaratively approved server has legitimately never been reached.
 pub type Sighting = busbar_contract::abi::sdk::trust::Sighting<Observation>;
 
-/// ONE ITEM OF THE KERNEL'S TRUST STATE (`trust.state`, ARCHITECT Q3): the kernel owns every
+/// One item of the kernel's trust state (`trust.state`): the kernel owns every
 /// approval and every verdict; the plane's views read them, they derive none.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KernelItem {

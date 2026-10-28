@@ -1,4 +1,7 @@
 {
+  "credentials": [
+    "mcp-child-env-canary-5d1f0a7c93be"
+  ],
   "settings": {
     "fs": {
       "url": "https://mcp.example/fs/rpc?v=1",
@@ -22,6 +25,17 @@
             }
           }
         }
+      }
+    },
+    "child": {
+      "transport": "stdio",
+      "command": "/bin/cat",
+      "env": {
+        "LOG_LEVEL": "debug",
+        "API_KEY": "mcp-child-env-canary-5d1f0a7c93be"
+      },
+      "pin": {
+        "mechanism": "unpinned"
       }
     }
   },
@@ -59,6 +73,17 @@
               }
             }
           }
+        }
+      },
+      "child": {
+        "transport": "stdio",
+        "command": "/bin/cat",
+        "env": {
+          "LOG_LEVEL": "debug",
+          "API_KEY": "mcp-child-env-canary-5d1f0a7c93be"
+        },
+        "pin": {
+          "mechanism": "unpinned"
         }
       }
     },

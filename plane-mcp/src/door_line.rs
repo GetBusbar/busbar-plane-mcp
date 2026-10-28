@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE LINE CARRIER'S UNITS (ARCHITECT Q1a, round 4 Q-L3B-STDIO-SHAPE (B)): the host holds the
+//! The line carrier's units: the host holds the
 //! process's own stdin/stdout open as ONE carrier session and opens a unit per line; what a line
 //! MEANS is [`crate::line`]'s, and how a unit answers it is here. What the plane writes unsolicited
 //! (busbar's own asks of its caller, a subscription's changes and keepalives) it writes with the
@@ -10,7 +10,7 @@
 //!
 //! - A REQUEST goes on through the one dispatch under the fields its body implies; its answer is
 //!   one line.
-//! - An `input_required` answer — busbar's OWN ask, or an UPSTREAM's ask relayed (Law 11) — is
+//! - An `input_required` answer — busbar's OWN ask, or an UPSTREAM's ask relayed — is
 //!   LIVENED ([`liven`]): its first ask is emitted as busbar's own request (`busbar:<n>`), the unit
 //!   answers nothing, and the caller's answers are lines of their own: each answer but the round's
 //!   last emits the next ask; the last is the RETRY, the request as the caller sent it with the
@@ -18,7 +18,7 @@
 //!   error hands the caller the `input_required` result itself. The exceptions: a line whose carrier
 //!   session negotiated a SESSION revision (`2025-06-18`, `2025-11-25`) has its answer lowered into
 //!   that revision first, which turns an `input_required` result into the revision's error (it has
-//!   no such result, as predev lowered it), so there is nothing left to liven; a round past the
+//!   no such result), so there is nothing left to liven; a round past the
 //!   round cap, or past [`MAX_LIVE_ASKS_PER_SESSION`] live on its session, is handed on as it is.
 //! - A SUBSCRIPTION (`subscriptions/listen`) is answered with its acknowledgement and kept on the
 //!   session ([`listen`]): the tick ([`tick`]) steps it, emitting what changed, a `ping` when it has
@@ -229,7 +229,7 @@ fn read(plane: &McpDoor, session: u64, body: &[u8], unit: &mut LineUnit) -> Opti
     }
     let answer = match line::era(&value) {
         Era::Dispatch => None,
-        // THE CARRIER SESSION NOW SPEAKS `revision` (revision by negotiation, THE DESIGN section 2).
+        // THE CARRIER SESSION NOW SPEAKS `revision` (revision by negotiation).
         // The table is bounded and evicts nothing: a full one answers the stateless revision.
         Era::Opened(revision, answer) => Some(
             if plane.line_revisions.with_all(|m| {
@@ -271,9 +271,8 @@ fn read(plane: &McpDoor, session: u64, body: &[u8], unit: &mut LineUnit) -> Opti
 
 /// Whether a line that the one dispatch refused is a notification: a notification is never
 /// answered, refused or not.
-pub(super) fn is_notification(body: &[u8]) -> bool {
-    serde_json::from_slice::<Value>(body)
-        .is_ok_and(|v| v.get("method").is_some_and(Value::is_string) && v.get("id").is_none())
+pub(super) fn is_notification(v: &Value) -> bool {
+    v.get("method").is_some_and(Value::is_string) && v.get("id").is_none()
 }
 
 /// The next number busbar spells one of its own requests in.

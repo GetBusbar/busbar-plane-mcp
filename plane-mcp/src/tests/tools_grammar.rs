@@ -16,7 +16,7 @@
 //! custom `Deserialize` where the reserved keys, the section knobs and the value rules all live.
 
 use busbar_contract::abi::mechanism::call::AbiStr;
-use busbar_contract::abi::mechanism::door::SECTION_DECLARING;
+use busbar_contract::abi::mechanism::door::{SECTION_DECLARING, SECTION_SELECTS};
 use serde_json::{json, Value};
 
 use super::{namespaced, validate_published_names, ToolsCfg, SECTION, SUBJECT_NOUN};
@@ -487,7 +487,7 @@ fn spells(stated: AbiStr, word: &str) -> bool {
 }
 
 /// THE WORDS THE ROOT BATTERY READS OFF THE STATEMENT ARE THE GRAMMAR'S: the declaring section is
-/// `SECTION`, the owned one the endpoint block, the subject noun `SUBJECT_NOUN`; and the endpoint's
+/// `SECTION`, the owned one the endpoint block (which selects the plane), the subject noun `SUBJECT_NOUN`; and the endpoint's
 /// fixed mount and
 /// its RFC 9728 document are spelled from the endpoint block's name (so the root may build them from
 /// the section the Statement owns).
@@ -502,6 +502,11 @@ fn the_statement_names_the_grammars_section_noun_and_endpoint() {
         "the owned endpoint block"
     );
     assert_eq!(sections[1].flags & SECTION_DECLARING, 0);
+    assert_ne!(
+        sections[1].flags & SECTION_SELECTS,
+        0,
+        "the endpoint block selects the plane (Law 7)"
+    );
     assert!(spells(crate::door::TAIL.subject_noun, SUBJECT_NOUN));
     assert_eq!(
         crate::tool_claims::DEFAULT_MOUNT,
@@ -802,8 +807,34 @@ fn a_refused_url_without_userinfo_is_echoed_verbatim() {
 /// what a log line or a panic message renders.
 #[test]
 fn a_child_env_literal_is_not_printed_by_debug() {
-    let plain = super::ChildEnvValue::Plain(CANARY.to_string());
+    let plain = super::ChildEnvValue::Plain(
+        busbar_contract::abi::sdk::cred::Cred::take(&mut json!(CANARY)).expect("a string"),
+    );
     let shown = format!("{plain:?}");
     assert!(!shown.contains(CANARY), "{shown}");
     assert_eq!(shown, "Plain(<redacted>)");
+}
+
+/// A stdio child's `env:` literal is sealed as it is read (CHIP-DESIGN v4.1 change 12): the
+/// registration holds it as a `Cred`, so neither writing the registration back nor its `Debug`
+/// spells it, and the same literal read twice is still the same registration.
+#[test]
+fn a_child_env_literal_is_sealed_at_parse_and_never_written_back() {
+    let section = json!({
+        "s": {
+            "pin": { "mechanism": "unpinned" },
+            "transport": "stdio",
+            "command": ABS_PROGRAM,
+            "env": { "API_KEY": CANARY, "UPSTREAM": { "env": "BUSBAR_UPSTREAM_KEY" } }
+        }
+    });
+    let cfg = grammar(section.clone()).expect("a stdio registration with an env literal");
+    let def = &cfg.servers["s"];
+    let written = serde_json::to_string(def);
+    assert!(
+        written.as_deref().map_or(true, |w| !w.contains(CANARY)),
+        "an env literal was written back"
+    );
+    assert!(!format!("{def:?}").contains(CANARY));
+    assert_eq!(&grammar(section).expect("reads again").servers["s"], def);
 }

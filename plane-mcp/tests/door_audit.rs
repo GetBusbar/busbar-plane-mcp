@@ -47,8 +47,8 @@ use busbar_contract::abi::mechanism::ticket::{HostCtx, HostTables, Ticket};
 use busbar_contract::abi::plane::{
     slot, ArriveIn, ArriveOut, OnPieceIn, OnPieceOut, Ops, OutField, PlaneCancelIn, PlaneCancelOut,
     PlaneDriveIn, PlaneDriveOut, PlaneOpenIn, PlaneOpenOut, RecordWrite, ServeIn, ServeOut,
-    UnitCount, AUDIT_REJECTED, CANCEL_ABORTED, EMIT_DONE, EMIT_TO_FAR_END, FROM_CALLER,
-    FROM_FAR_END, FROM_KERNEL, PIECE_HAS_STATUS, PIECE_LAST, RECORD_AUDIT,
+    UnitCount, AUDIT_REJECTED, CANCEL_ABORTED, CANCEL_OK_PARTIAL, EMIT_DONE, EMIT_TO_FAR_END,
+    FROM_CALLER, FROM_FAR_END, FROM_KERNEL, PIECE_HAS_STATUS, PIECE_LAST, RECORD_AUDIT,
 };
 use busbar_contract::abi::transport::FrameSpan;
 use busbar_plane_mcp::door;
@@ -1700,10 +1700,12 @@ fn a_unit_cancelled_before_its_first_piece_is_freed() {
     );
 }
 
-/// A CANCEL IS ABORTED, as predev's door answered every cancel: before the far end answered and
-/// after it began its answer alike (the kernel bills an aborted unit nothing).
+/// A CANCEL SAYS HOW FAR THE UNIT GOT (owner billing rule R21: the ledger records what the dialect
+/// did): cut before the far end answered it is ABORTED (billed nothing); cut after the far end began
+/// its answer it is PARTIAL, so the units it reported bill when its answer was streamed, as the llm
+/// and decisions planes answer. RED before: both were ABORTED.
 #[test]
-fn a_cancel_is_aborted_before_and_after_the_far_end_answered() {
+fn a_cancel_after_the_far_end_answered_is_partial() {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
     *upstreams() = Some(Upstreams::default());
     let d = open();
@@ -1740,7 +1742,7 @@ fn a_cancel_is_aborted_before_and_after_the_far_end_answered() {
     d.piece(91, &first);
     assert_eq!(
         d.cancel(91),
-        (Outcome::Ready, CANCEL_ABORTED),
-        "cut after the far end answered: aborted, as predev answered it"
+        (Outcome::Ready, CANCEL_OK_PARTIAL),
+        "cut after the far end answered: partial"
     );
 }

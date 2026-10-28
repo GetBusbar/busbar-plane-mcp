@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE LINE CARRIER: one JSON-RPC message per line, each line its own request unit through the
-//! door (ARCHITECT round 4 Q-L3B-STDIO-SHAPE (B), Q1a): the carrier is the host's (it holds the
+//! door: the carrier is the host's (it holds the
 //! process's own stdin/stdout open as one session and opens a unit per line); every meaning a line
 //! has is here, on the plane side, and what the plane writes unsolicited it writes with the host's
 //! `session.emit` on that session.
@@ -20,13 +20,13 @@
 //!   issued as one request per ask, in order, each spelled `busbar:<n>`; the caller's answers become
 //!   `inputResponses`, and the RETRY is the unit of the caller's last answer, through the whole
 //!   door (its own admission; the seal, the round charge and the epoch checks run as they do when
-//!   an HTTP caller retries itself). An UPSTREAM's ask, relayed (Law 11), is livened the same way.
+//!   an HTTP caller retries itself). An upstream's ask, relayed, is livened the same way.
 //!   A live ask unanswered for [`ASK_TIMEOUT_NS`] is dropped and the caller handed the result
 //!   itself; a request is livened at most [`MAX_LIVE_ASK_ROUNDS`] times.
 //! - A SUBSCRIPTION is answered with its acknowledgement and kept on the session: what changes, a
 //!   keepalive and its end are emitted on the session, until the carrier ends.
 
-// The crate's only public item is `door`: the accessors and variants below were this module's public API; the tests hold them, the door does not reach them (BUSBAR-1.6.0.md l.3560).
+// The crate's only public item is `door`: the accessors and variants below were this module's public API; the tests hold them, the door does not reach them.
 #![cfg_attr(not(test), allow(dead_code))]
 
 use serde_json::{json, Map, Value};
@@ -81,7 +81,7 @@ pub fn initialize_result(id: &Value) -> Value {
 }
 
 /// The `initialize` answer to a client that asked for a SESSION revision this plane carries: that
-/// revision, by negotiation (THE DESIGN section 2, the mcp bullet; [`crate::revision::accept_offered`]).
+/// revision, by negotiation ([`crate::revision::accept_offered`]).
 /// The carrier session then speaks it: each following line is raised into the stateless shape and its
 /// answer lowered ([`crate::adapt`]).
 #[must_use]
