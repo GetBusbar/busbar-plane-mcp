@@ -1766,15 +1766,21 @@ mod both_ways {
             (i.units_buf, i.units_cap) = (units.as_mut_ptr(), units.len());
             let mut o: OnPieceOut = z();
             o.head = out_head();
-            let c = p.call(slot::ON_PIECE, &mut Frame::new(i, o));
-            assert_eq!(c.outcome, Outcome::Ready, "dropped-in {dropped_in}");
+            let mut f = Frame::new(i, o);
+            let c = p.call(slot::ON_PIECE, &mut f);
+            let said = format!(
+                "status={} reply={}",
+                f.out.reply_status,
+                String::from_utf8_lossy(&reply[..f.out.emitted as usize])
+            );
+            assert_eq!(c.outcome, Outcome::Ready, "dropped-in {dropped_in}: {said}");
             let lines = log
                 .0
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             assert!(
                 lines.iter().any(|l| l.contains("ungoverned chain")),
-                "dropped-in {dropped_in}: the diagnostic reaches the host log: {lines:?}"
+                "dropped-in {dropped_in}: the diagnostic reaches the host log: {lines:?} ({said})"
             );
         }
     }
