@@ -995,23 +995,20 @@ slot!(
         let line_dispatch = line_arrival.as_ref().map(|a| a.dispatch.clone());
         let line_silent = matches!(line_dispatch, Some(None));
         let line_body = line_dispatch.flatten();
-        // A line's or a continuation's own body implies the fields it is decided under.
-        let mirrored = line_body
-            .as_deref()
-            .or(task_body.as_deref())
-            .and_then(|b| serde_json::from_slice::<Value>(b).ok())
-            .map(|v| crate::codec::mirrored(&v))
-            .unwrap_or_default();
         let line_unit = line_arrival.map(|a| a.unit);
         // A line raised from its carrier session's negotiated revision is lowered back.
         if line_unit.as_ref().is_some_and(|u| u.raised) {
             session_unit = Some(door_sessions::SessionUnit::Line);
         }
-        let body: &[u8] = line_body
-            .as_deref()
-            .or(task_body.as_deref())
-            .or(session_body.as_deref())
-            .unwrap_or(body);
+        let own_body = line_body.as_deref().or(task_body.as_deref());
+        let body: &[u8] = own_body.or(session_body.as_deref()).unwrap_or(body);
+        // THE BODY IS PARSED ONCE: decided, framed, routed and kept from this one document.
+        let value = serde_json::from_slice::<Value>(body).ok();
+        // A line's or a continuation's own body implies the fields it is decided under.
+        let mirrored = match (own_body, value.as_ref()) {
+            (Some(_), Some(v)) => crate::codec::mirrored(v),
+            _ => Vec::new(),
+        };
         // A raised session message is decided under the fields its raised body implies, ahead of
         // the caller's own (which name its session revision).
         let field = |name: &str| {
@@ -1035,9 +1032,11 @@ slot!(
         } else if let Some(unit) = session_unit.as_ref().filter(|_| session_local) {
             door_sessions::disposition(unit)
         } else {
-            match crate::tool_arrival::decide(body, field) {
+            match crate::tool_arrival::decide(value.as_ref(), field) {
                 // A notification is never answered on the line, refused or not.
-                Disposition::Refused(_) if line_route && door_line::is_notification(body) => {
+                Disposition::Refused(_)
+                    if line_route && value.as_ref().is_some_and(door_line::is_notification) =>
+                {
                     Disposition::Notice {
                         method: String::new(),
                     }
@@ -1065,7 +1064,6 @@ slot!(
         out.set(|o| &o.op_class, op_class);
         out.set(|o| &o.principal_need, PRINCIPAL_REQUIRED);
         out.set(|o| &o.dialect, 0);
-        let value = serde_json::from_slice::<Value>(body).ok();
         // A line's answer is one line, and a session's is one document: never an event stream.
         let framing = match (&disposition, value.as_ref()) {
             (Disposition::Request { row, .. }, Some(v)) if !line_route && session_unit.is_none() => {
@@ -1155,7 +1153,7 @@ slot!(
             key: input.unit(),
             held,
             disposition,
-            params: value.and_then(|v| v.get("params").cloned()),
+            params: value.and_then(|mut v| v.get_mut("params").map(Value::take)),
             framing,
             param_fields,
             ticket: None,
@@ -3808,12 +3806,20 @@ slot!(
     /// `rewritten` (the body the kernel keeps and re-pushes from then on) and is the body projected.
     /// Any other request carries no invocation for a hook to read: REFUSED.
     Project, ProjectIn, ProjectOut, |instance, input, mut out| {
-        let body = input.body().bytes();
+        // THE BODY IS PARSED ONCE: rewritten in place, its params kept, its arguments projected.
+        let mut request = serde_json::from_slice::<Value>(input.body().bytes()).ok();
         let rewrite = input.rewrite().bytes();
-        let rewritten = (!rewrite.is_empty())
-            .then(|| crate::call::rewritten(body, rewrite))
-            .flatten();
-        let Some(invocation) = crate::call::invocation(rewritten.as_deref().unwrap_or(body)) else {
+        let rewritten = request
+            .as_mut()
+            .filter(|_| !rewrite.is_empty())
+            .and_then(|r| {
+                crate::call::rewritten(r, rewrite).and_then(|()| serde_json::to_vec(&*r).ok())
+            });
+        // The rewritten params, kept before the arguments are moved into the invocation.
+        let params = rewritten
+            .is_some()
+            .then(|| request.as_ref().and_then(|v| v.get("params").cloned()));
+        let Some(invocation) = request.and_then(crate::call::invocation) else {
             // ANY OTHER REQUEST carries no invocation for a hook to read, and names no entry its
             // hooks are attached to: an empty view (the served engine fired no hook on it), never a
             // refusal (a bound hook stage asks every routed unit).
@@ -3828,10 +3834,7 @@ slot!(
         };
         // AN APPLIED REWRITE IS THE UNIT'S REQUEST FROM NOW ON (`ProjectIn::unit`): the call the
         // door admits and relays is decided from the rewritten params, never the caller's.
-        if let (Some(rewritten), Some(plane)) = (rewritten.as_deref(), instance.get()) {
-            let params = serde_json::from_slice::<Value>(rewritten)
-                .ok()
-                .and_then(|v| v.get("params").cloned());
+        if let (Some(params), Some(plane)) = (params, instance.get()) {
             plane.units.with(&input.unit(), |unit| {
                 if let Some(unit) = unit {
                     unit.params = params;
@@ -3851,15 +3854,15 @@ slot!(
         let session = head(input.fields(), "x-session-id")
             .filter(|v| !v.is_empty())
             .map(str::to_string);
-        let projected = serde_json::to_vec(&serde_json::json!({
-            "tool": invocation.tool,
-            "arguments": invocation.arguments,
-        }))
-        .unwrap_or_default();
         let turns: Vec<(&str, String)> = busbar_contract::ir::facts::IrFacts::content(&invocation)
             .iter()
             .map(|item| (item.author(), item.screenable_text().into_owned()))
             .collect();
+        // The `{tool, arguments}` body, the invocation moved into it (never copied).
+        let mut projected = serde_json::Map::new();
+        projected.insert("tool".to_string(), Value::String(invocation.tool));
+        projected.insert("arguments".to_string(), invocation.arguments);
+        let projected = serde_json::to_vec(&projected).unwrap_or_default();
         let (mut arena, signals, mut messages) =
             (input.arena_buf(), input.signals_buf(), input.messages_buf());
         let pool = arena.span(entry.as_bytes());

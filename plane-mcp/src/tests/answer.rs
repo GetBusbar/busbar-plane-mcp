@@ -37,14 +37,13 @@ fn request(method: &str, params: Value) -> (Disposition, Value) {
         "io.modelcontextprotocol/clientCapabilities": {},
     });
     let body = json!({"jsonrpc": "2.0", "id": 9, "method": method, "params": params});
-    let bytes = serde_json::to_vec(&body).expect("bytes");
     let name = params
         .get("name")
         .or_else(|| params.get("uri"))
         .and_then(Value::as_str)
         .map(str::to_string);
     let method_owned = method.to_string();
-    let d = decide(&bytes, |f| match f {
+    let d = decide(Some(&body), |f| match f {
         "mcp-protocol-version" => Some(PROTOCOL_VERSION),
         "mcp-method" => Some(method_owned.as_str()),
         "mcp-name" => name.as_deref(),
@@ -143,7 +142,8 @@ fn a_local_refusal_answers_its_own_status() {
 /// A notification is acknowledged with no body; a refused arrival answers its refusal.
 #[test]
 fn a_notice_is_acknowledged_and_a_refusal_answered() {
-    let d = decide(br#"{"jsonrpc":"2.0","method":"notifications/x"}"#, |_| None);
+    let notice = json!({"jsonrpc": "2.0", "method": "notifications/x"});
+    let d = decide(Some(&notice), |_| None);
     let a = answer(&d, None, &catalogue(), &everyone, |_| false);
     assert_eq!(
         a,
@@ -152,7 +152,8 @@ fn a_notice_is_acknowledged_and_a_refusal_answered() {
             body: Vec::new()
         }
     );
-    let d = decide(b"not json", |_| None);
+    // A body that is not JSON parses to nothing.
+    let d = decide(None, |_| None);
     let a = answer(&d, None, &catalogue(), &everyone, |_| false);
     assert!(matches!(a, Answer::Here { status: 400, .. }));
     assert_eq!(body(&a)["error"]["code"], -32700);
