@@ -910,9 +910,10 @@ fn a_tasks_verb_is_gated_then_names_no_task_of_this_callers() {
 #[test]
 fn a_rewrite_replaces_the_arguments_by_the_invoke_contract() {
     let body = br#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"fs_read","arguments":{"path":"/secret"},"_meta":{"k":"v"}}}"#;
+    let request = || serde_json::from_slice::<Value>(body).unwrap();
     let args = |rewrite: serde_json::Value| {
-        rewritten(body, &serde_json::to_vec(&rewrite).unwrap()).map(|b| {
-            let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
+        let mut v = request();
+        rewritten(&mut v, &serde_json::to_vec(&rewrite).unwrap()).map(|()| {
             assert_eq!(v["params"]["_meta"], serde_json::json!({ "k": "v" }));
             assert_eq!(v["id"], 7);
             v["params"]["arguments"].clone()
@@ -951,16 +952,19 @@ fn a_rewrite_replaces_the_arguments_by_the_invoke_contract() {
         None
     );
     assert_eq!(args(serde_json::json!({ "tools": [] })), None);
-    assert_eq!(rewritten(body, b"not json"), None);
+    let mut untouched = request();
+    assert_eq!(rewritten(&mut untouched, b"not json"), None);
+    assert_eq!(untouched, request());
     // A request that is not a call is never rewritten.
-    let list = br#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#;
+    let mut list = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}});
     assert_eq!(
         rewritten(
-            list,
+            &mut list,
             br#"{"messages":[{"role":"user","content":{"path":"/x"}}]}"#
         ),
         None
     );
+    assert_eq!(list["params"], json!({}));
 }
 
 /// THE AUDIT ROW OF BUSBAR'S OWN ASK (SEAM-L(k)): an ask of the caller is `mcp.caller_ask` applied on

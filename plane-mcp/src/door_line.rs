@@ -271,9 +271,8 @@ fn read(plane: &McpDoor, session: u64, body: &[u8], unit: &mut LineUnit) -> Opti
 
 /// Whether a line that the one dispatch refused is a notification: a notification is never
 /// answered, refused or not.
-pub(super) fn is_notification(body: &[u8]) -> bool {
-    serde_json::from_slice::<Value>(body)
-        .is_ok_and(|v| v.get("method").is_some_and(Value::is_string) && v.get("id").is_none())
+pub(super) fn is_notification(v: &Value) -> bool {
+    v.get("method").is_some_and(Value::is_string) && v.get("id").is_none()
 }
 
 /// The next number busbar spells one of its own requests in.
