@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! WHAT ONE ARRIVAL IS, decided once and purely: the body and a reader over its head fields in; a
-//! [`Disposition`] out. The door's `arrive` states the disposition in the plane ABI's words; this module
-//! is the disposition itself, so it is tested without a door.
+//! WHAT ONE ARRIVAL IS, decided once and purely: the body as JSON (parsed once, by the door, which
+//! reads that one document on after) and a reader over its head fields in; a [`Disposition`] out.
+//! The door's `arrive` states the disposition in the plane ABI's words; this module is the
+//! disposition itself, so it is tested without a door.
 //!
 //! The order is the served engine's:
 //!
@@ -73,9 +74,10 @@ pub enum Disposition {
     Refused(Refusal),
 }
 
-/// DECIDE ONE ARRIVAL. `field` reads a request head field by its lower-case name.
-pub fn decide<'a>(body: &[u8], field: impl Fn(&str) -> Option<&'a str>) -> Disposition {
-    let Ok(value) = serde_json::from_slice::<Value>(body) else {
+/// DECIDE ONE ARRIVAL. `value` is the body as JSON (`None` = not JSON); `field` reads a request head
+/// field by its lower-case name.
+pub fn decide<'a>(value: Option<&Value>, field: impl Fn(&str) -> Option<&'a str>) -> Disposition {
+    let Some(value) = value else {
         return Disposition::Refused(Refusal {
             status: STATUS,
             id: None,
@@ -84,7 +86,7 @@ pub fn decide<'a>(body: &[u8], field: impl Fn(&str) -> Option<&'a str>) -> Dispo
             data: None,
         });
     };
-    let envelope = match busbar_contract::jsonrpc::read(&value) {
+    let envelope = match busbar_contract::jsonrpc::read(value) {
         Ok(envelope) => envelope,
         Err(invalid) => {
             return Disposition::Refused(Refusal {
@@ -102,7 +104,7 @@ pub fn decide<'a>(body: &[u8], field: impl Fn(&str) -> Option<&'a str>) -> Dispo
         }
         busbar_contract::jsonrpc::Envelope::Request { id, method } => (id, method),
     };
-    if let Err(refused) = check_request(&value, &method, field) {
+    if let Err(refused) = check_request(value, &method, field) {
         return Disposition::Refused(Refusal {
             status: STATUS,
             id: Some(id),

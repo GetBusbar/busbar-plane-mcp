@@ -150,7 +150,7 @@ fn push_raw_event(out: &mut String, data: &str) {
 /// One answer as an event stream: each of `frames`, then the answer, one `message` event each.
 /// `None` when `body` is not one JSON document (it goes out as it was).
 ///
-/// THE ANSWER IS ITS OWN BYTES (Law 11): never parsed and printed again, which would re-order its
+/// The answer is its own bytes: never parsed and printed again, which would re-order its
 /// members and re-spell its numbers. Each of its lines is one `data:` line, and a client joins them
 /// back with `\n`: a JSON document carries a line break only between its tokens.
 #[must_use]
@@ -220,7 +220,7 @@ impl Framing {
     /// two `notifications/message` records busbar writes about its own handling (what was
     /// dispatched, `debug`, and how it ended, `info`) at the caller's level, then the answer.
     ///
-    /// THE ANSWER IS ITS OWN BYTES (Law 11): never parsed and printed again, which would re-order
+    /// The answer is its own bytes: never parsed and printed again, which would re-order
     /// its members and re-spell its numbers. Each of its lines is one `data:` line, and a client
     /// joins them back with `\n`: a JSON document carries a line break only between its tokens.
     #[must_use]

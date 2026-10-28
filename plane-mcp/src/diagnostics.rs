@@ -15,7 +15,7 @@
 use busbar_contract::diagnostic::{Class, Diagnostic, Severity};
 
 /// An MCP `2024-11-05` event stream opened on the ungoverned chain: raised once per plane instance,
-/// on its first such stream (THE DESIGN, the mcp bullet: an ungoverned chain is unisolated and says
+/// on its first such stream (an ungoverned chain is unisolated and says
 /// so, with a per-instance boot diagnostic latched on the first legacy stream).
 pub const MCP_LEGACY_STREAM_UNGOVERNED: Diagnostic = Diagnostic {
     code: 7106,

@@ -50,7 +50,7 @@ pub enum McpPinMechanism {
     /// A signed tool manifest's operator-supplied, out-of-band issuer public key. It is a root (it
     /// carries key material, and makes the registration approvable), not a pin of the far end's
     /// key: the connector does not compare it with the server's certificate, and this build
-    /// verifies no MCP-native manifest signature under it, as predev did not.
+    /// verifies no MCP-native manifest signature under it.
     PinnedPubkey,
     /// The endpoint's certificate key, pinned: the host seals it into the registration's member
     /// route and the connector refuses, before a request byte is written, a connection whose
@@ -341,7 +341,7 @@ pub struct ResourceTemplateAllowCfg {
 }
 
 /// `tools.<server>.sampling_bounds`: the size bounds on a relayed `sampling/createMessage` ask
-/// (owner ruling Q22c); past any bound it is refused by name.
+/// ; past any bound it is refused by name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SamplingBoundsCfg {
@@ -564,11 +564,12 @@ impl ServerTransport {
 }
 
 /// ONE VALUE in a stdio child's environment: a literal, or a secret reference resolved at spawn.
-#[derive(Clone, PartialEq, Deserialize, Serialize)]
+/// A literal is a `Cred`, sealed as it is read: the plane holds no child secret as text.
+#[derive(Clone, PartialEq, Deserialize)]
 #[serde(untagged)]
 pub enum ChildEnvValue {
     /// A literal value; first, so a scalar is never read as a reference.
-    Plain(String),
+    Plain(busbar_contract::abi::sdk::cred::Cred),
     /// A secret reference (`{ env: K }` / `{ file: P }`), resolved by the built-in resolver at spawn.
     Secret(busbar_contract::secret_ref::SecretRef),
 }
@@ -576,7 +577,19 @@ pub enum ChildEnvValue {
 /// `Eq` asserted: `SecretRef` derives only `PartialEq`, and no field is a float.
 impl Eq for ChildEnvValue {}
 
-/// `Debug` by hand so a literal value never reaches a log line.
+/// A reference is written back as written; a sealed literal is not written back at all.
+impl Serialize for ChildEnvValue {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            ChildEnvValue::Plain(_) => Err(serde::ser::Error::custom(
+                "a stdio child's `env:` literal is sealed and is not written back",
+            )),
+            ChildEnvValue::Secret(r) => r.serialize(s),
+        }
+    }
+}
+
+/// `Debug` by hand: a literal has no bytes to show; a reference names where the value lives.
 impl std::fmt::Debug for ChildEnvValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

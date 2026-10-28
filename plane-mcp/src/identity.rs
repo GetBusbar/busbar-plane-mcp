@@ -5,7 +5,7 @@
 //! server id may not contain `_`, so the rendering splits one way and one `mcp_tool` grant names
 //! one tool.
 
-// The crate's only public item is `door`: the accessors and variants below were this module's public API; the tests hold them, the door does not reach them (BUSBAR-1.6.0.md l.3560).
+// The crate's only public item is `door`: the accessors and variants below were this module's public API; the tests hold them, the door does not reach them.
 #![cfg_attr(not(test), allow(dead_code))]
 
 use std::fmt;

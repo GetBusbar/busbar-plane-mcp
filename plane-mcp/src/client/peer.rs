@@ -10,7 +10,7 @@
 //! | a notification busbar knows | the effect in [`NotificationEffect`], then keep reading |
 //! | a notification busbar does not know | dropped, then keep reading, never adopted |
 //! | `ping` | answered, then keep reading |
-//! | a granted authority ask | relayed to busbar's caller, who answers it (Law 11) |
+//! | a granted authority ask | relayed to busbar's caller, who answers it |
 //! | an ungranted authority ask | refused (`ask_ungranted`), then keep reading |
 //! | a request busbar does not know | answered `-32601`, then keep reading |
 //!
@@ -179,7 +179,7 @@ fn request_of(method: &str) -> Option<ServerRequestVerb> {
 }
 
 /// THE REPLY BUSBAR WRITES BACK to a child's request: `ping`'s empty result, or an ungranted ask's
-/// refusal. `None` for a granted ask: it is the caller's to answer (Law 11). The grants are read
+/// refusal. `None` for a granted ask: it is the caller's to answer. The grants are read
 /// at the moment of the decision, so a revocation bites on the next message.
 pub fn answer(
     id: &serde_json::Value,

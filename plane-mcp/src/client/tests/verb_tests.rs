@@ -8,7 +8,7 @@
 //! level down: a column of the matrix whose contents are a property of its call sites drifts from
 //! the specification silently, because an absent verb and a considered-and-inapplicable verb look
 //! identical in source. The variants production constructs are compared against busbar's
-//! `qa/method-inventory.json` by `src/tests/method_inventory_tests.rs` (it reads busbar at the pin);
+//! `tests/data/method-inventory.json` by `src/tests/method_inventory_tests.rs`;
 //! this file holds the builder's own shape over [`UpstreamVerb::all`].
 
 use super::super::verb::UpstreamVerb;

@@ -23,7 +23,7 @@ use busbar_contract::abi::host::conn::connector::{
     Need, DIRECTION_OUTBOUND, EGRESS_OPERATOR_INFRASTRUCTURE, EGRESS_PROVIDER, KEEP_NAMED,
 };
 use busbar_contract::abi::mechanism::call::{AbiStr, Blob};
-use busbar_contract::abi::mechanism::door::{Section, SECTION_DECLARING};
+use busbar_contract::abi::mechanism::door::{Section, SECTION_DECLARING, SECTION_SELECTS};
 use busbar_contract::abi::plane::{
     AdminRoute, BillableClass, OpClass, PinMechanism, PlaneTail, RecordChain, RecordRetention,
     TrustKey, ANSWER_LAYOUT, CHAIN_DIGESTS_SCOPE, CHAIN_LENGTH_PREFIXED, INGRESS_REQUEST_RESPONSE,
@@ -52,7 +52,8 @@ pub const ENDPOINT_SECTION: &str = "mcp";
 pub const FEE_PER_REQUEST: &str = busbar_contract::plane::PER_REQUEST;
 
 /// THE SECTIONS THE PLANE'S STATEMENT DECLARES: `tools:`, which it owns and judges, and its endpoint
-/// block beside it.
+/// block beside it. The endpoint block also selects the plane: a document that states the
+/// MCP endpoint (`mcp:`) uses the plane, with or without a `tools:` section.
 /// The names are literals (the config-schema census reads a door-only plane's sections off this
 /// table); a test holds them equal to the grammar's `tools_config::SECTION` and [`ENDPOINT_SECTION`].
 pub const SECTIONS: &[Section] = &[
@@ -63,7 +64,7 @@ pub const SECTIONS: &[Section] = &[
     },
     Section {
         name: abi_str("mcp"),
-        flags: 0,
+        flags: SECTION_SELECTS,
         _reserved: 0,
     },
 ];
@@ -98,7 +99,7 @@ pub const KEEP_RESPONSE_HEADERS: &[AbiStr] = &[
 pub const NEED_UPSTREAM: u32 = 0;
 
 /// The index of [`NEEDS`]' second need: the `transport: stdio` registrations, each a PROGRAM the
-/// host keeps running (ARCHITECT round 5 Q-L3B-STDIO-UPSTREAM (A)).
+/// host keeps running.
 pub const NEED_PROGRAM: u32 = 1;
 
 /// The program need's response field the plane reads: the generation of the child a lease reached.
@@ -118,7 +119,7 @@ pub const NEEDS: &[Need] = &[
         n.direction = DIRECTION_OUTBOUND;
         n.egress_class = EGRESS_PROVIDER;
         n.transport = abi_str(CARRIER_HTTP);
-        // Each registered server is reached at its own `url` (ARCHITECT Q-L3B-ROUTES), as a
+        // Each registered server is reached at its own `url`, as a
         // member-target path: one member route per server.
         n.target_from = abi_str("settings.*.url");
         // busbar's client identity for it, which the connector presents when the server asks.
@@ -152,9 +153,9 @@ const BILLABLE_CLASSES: &[BillableClass] = &[
         class: abi_str(crate::tool_meta::CLASS_BYTES.as_str()),
         family: abi_str("byte"),
     },
-    // THE FEE UNIT is also a class (the tail check holds `fee_units ⊆ billable_classes`, ARCHITECT
-    // Q-L5-FEE (C)): reported `1` on an answer the caller is served with a success, so a unit whose
-    // caller is answered otherwise has its `per_request` refunded, as 1.5.5 refunded it.
+    // The fee unit is also a class (the tail check holds `fee_units ⊆ billable_classes`):
+    // reported `1` on an answer the caller is served with a success, so a unit whose caller is
+    // answered otherwise has its `per_request` refunded.
     BillableClass {
         class: abi_str(FEE_PER_REQUEST),
         // A count of 0 or 1.
@@ -200,7 +201,7 @@ const RECORD_CHAINS: &[RecordChain] = &[RecordChain {
 /// `mtls` pin the far end's KEY ([`MECHANISM_PEER_KEY`]): the host seals it into the registration's
 /// member route and the connector refuses a connection whose server presents another key.
 /// `pinned_pubkey` is a root whose key is a signed manifest's issuer key, kept for the plane and
-/// the kernel's judgement as predev kept it, never compared with the far end's key.
+/// the kernel's judgement, never compared with the far end's key.
 const PIN_MECHANISMS: &[PinMechanism] = &[
     PinMechanism {
         token: abi_str("pinned_pubkey"),
@@ -278,7 +279,7 @@ pub fn op_class_index(op: busbar_contract::ids::OpClassId) -> Option<u32> {
 
 /// The status of a verb the endpoint does not serve for the request as it came: a GET or DELETE
 /// that names no session (a GET naming no revision and accepting an event stream is the
-/// `2024-11-05` stream instead), THE DESIGN section 2, the mcp bullet.
+/// `2024-11-05` stream instead).
 pub const STATUS_METHOD_NOT_ALLOWED: u32 = 405;
 
 /// The body of a GET or DELETE the endpoint does not serve: what each revision opens instead.
@@ -345,8 +346,7 @@ const TAIL_VALUE: PlaneTail = {
         .with_record_chains(RECORD_CHAINS)
         .with_trust_keys(TRUST_KEYS)
         .with_admin_routes(ADMIN_ROUTES);
-    // THE GATE-FIRST HOOK ORDER (spec Part 3 section 12 "Hooks"; ARCHITECT ruling on the mcp
-    // fold): the served engine ran an entry's decision gates over the invocation BEFORE its
+    // The gate-first hook order: an entry's decision gates run over the invocation before its
     // rewrite chain (`tools.hooks` / `tools.<server>.hooks`), and the door's units keep that order.
     t.flags = busbar_contract::abi::plane::TAIL_HOOKS_GATED;
     t.ingress = INGRESS_REQUEST_RESPONSE | INGRESS_RESPONSE_STREAM;
@@ -364,15 +364,14 @@ const TAIL_VALUE: PlaneTail = {
     t.signing_kid_prefix = abi_str("busbar-mcp-ask-");
     t.cli_help = abi_str(crate::tool_meta::HELP_FLAGS);
     t.admin_openapi = Blob::json(ADMIN_OPENAPI.as_bytes());
-    // No stream ceiling (ARCHITECT STREAM-CEILING, 2026-10-07): predev's mcp engine put no bound on
-    // a stalled consumer (its event and subscribe streams were pull-based bodies, `session_serve.rs`,
-    // `subscribe.rs`), so the mcp plane states none and keeps that behaviour.
+    // No stream ceiling: nothing bounds a stalled consumer (the event and subscribe streams are
+    // pull-based), so the mcp plane states none.
     t.record_retentions = RECORD_RETENTIONS.as_ptr();
     t.record_retentions_len = RECORD_RETENTIONS.len();
     t
 };
 
-/// THE STATEMENT TAIL: the plane's static facts.
+/// The Statement tail: the plane's static facts.
 pub const TAIL: &PlaneTail = &TAIL_VALUE;
 
 /// EVERY ROUTE THE PLANE SERVES, in the order the engine mounts them: the discovery document, the
@@ -383,10 +382,10 @@ pub const ROUTES: &[ServedRoute] = &[
     route("GET", DEFAULT_MOUNT, CARRIER_HTTP, false),
     route("DELETE", DEFAULT_MOUNT, CARRIER_HTTP, false),
     route("POST", DEFAULT_MOUNT, CARRIER_SSE, false),
-    // THE TASK-RUN CLAIM (ARCHITECT round 5 Q-L3B-TASKS (b) → (A)): a task's continuation, nested
+    // The task-run claim: a task's continuation, nested
     // by the unit that created the task.
     route("POST", TASK_RUN_MOUNT, CARRIER_HTTP, false),
-    // THE LINE CARRIER (ARCHITECT Q1a, round 4 Q-L3B-STDIO-SHAPE (B)): the host holds the process's
+    // The line carrier: the host holds the process's
     // own stdin/stdout open as one carrier session and opens a unit per line.
     route("POST", DEFAULT_MOUNT, CARRIER_STDIO, false),
 ];
@@ -420,8 +419,7 @@ pub const ADMIN_AUDIT: &[&str] = &["connect", "", ""];
 /// under the mount): the served engine's text. Each verb's `200` names its typed body by `$ref`,
 /// and the neutral `components.schemas` key carries those bodies (`McpTrustView`, the
 /// `McpCapabilityView` it nests, `McpHealthView`) as data, since a door links no schema generator;
-/// the kernel's fold inserts them into the admin document's `#/components/schemas` (ARCHITECT
-/// Q2). They are the committed admin `openapi.json`'s entries verbatim, which a drift test holds.
+/// the kernel's fold inserts them into the admin document's `#/components/schemas`. They are the committed admin `openapi.json`'s entries verbatim, which a drift test holds.
 pub const ADMIN_OPENAPI: &str = r##"{"/tools/{name}/connect":{"post":{"summary":"Fetch a registered MCP server's LIVE tool list, hash it, and record the observation. Approves nothing: adopting what was seen is a separate operator act","security":[{"adminToken":[]}],"parameters":[{"name":"name","in":"path","required":true,"schema":{"type":"string"}}],"responses":{"200":{"description":"OK (the derived trust state and changes queue; a refresh that landed a quarantine is still a 200 — the drift is in the body)","content":{"application/json":{"schema":{"$ref":"#/components/schemas/McpTrustView"}}}}}}},"/tools/{name}/changes":{"get":{"summary":"The changes queue for one MCP server, derived from the LAST observation. Contacts nothing","security":[{"adminToken":[]}],"parameters":[{"name":"name","in":"path","required":true,"schema":{"type":"string"}}],"responses":{"200":{"description":"OK","content":{"application/json":{"schema":{"$ref":"#/components/schemas/McpTrustView"}}}}}}},"/tools/{name}/health":{"get":{"summary":"Whether one MCP server currently serves, and why not when it does not","security":[{"adminToken":[]}],"parameters":[{"name":"name","in":"path","required":true,"schema":{"type":"string"}}],"responses":{"200":{"description":"OK","content":{"application/json":{"schema":{"$ref":"#/components/schemas/McpHealthView"}}}}}}},"components":{"schemas":{"McpTrustView":{"description":"THE TRUST VIEW of one registered MCP server — `POST /tools/{name}/connect` and\n`GET /tools/{name}/changes` answer with this.","properties":{"added":{"description":"Offered now, never ruled on.","items":{"type":"string"},"type":"array"},"capabilities":{"description":"Every capability's standing status, in name order.","items":{"$ref":"#/components/schemas/McpCapabilityView"},"type":"array"},"changed":{"description":"Approved, but offered at a DIFFERENT digest. THIS IS THE RUG-PULL ROW.","items":{"type":"string"},"type":"array"},"failure":{"description":"Why the last contact failed, when it did.","type":["string","null"]},"name":{"type":"string"},"observed_tools":{"description":"How many tools the last successful observation carried.","format":"uint","minimum":0,"type":"integer"},"pin_changed":{"description":"The presented identity is not the locked one. Its own axis: adopting a new identity is a\ndifferent act from adopting new content.","type":"boolean"},"pin_mechanism":{"description":"The operator's word for the authenticity root. Never interpreted by the machine.","type":"string"},"removed":{"description":"Approved, and no longer offered.","items":{"type":"string"},"type":"array"},"state":{"description":"`pending`, `approved`, `quarantined`, `suspended` or `error`. DERIVED from the approval and\nthe last sighting on every read, so there is no stored state to go stale.","type":"string"}},"required":["name","state","pin_mechanism","pin_changed","added","changed","removed","observed_tools","failure","capabilities"],"type":"object"},"McpCapabilityView":{"description":"ONE CAPABILITY'S STANDING STATUS, the three-way answer a trust view has to render.\n\nThree and not two: `approved at a digest`, `rejected`, and `allowed but never ruled on`. The\nthird is `pending` and it is the one a queue exists to drain, so collapsing it into \"not\napproved\" would hide the operator's whole worklist.","properties":{"approved_digest":{"description":"The digest the operator approved, when there is one. A rejected or pending capability has\nnone, and reporting the last OBSERVED digest here would read as an approval.","type":["string","null"]},"status":{"description":"`approved`, `rejected` or `pending`.","type":"string"},"tool":{"description":"The bare tool name, as the upstream spells it.","type":"string"}},"required":["tool","status","approved_digest"],"type":"object"},"McpHealthView":{"description":"THE HEALTH VIEW — `GET /tools/{name}/health`. Deliberately smaller than the trust view: health\nanswers \"can busbar use this server right now, and if not why\", and a dashboard polling it should\nnot be re-rendering the whole changes queue to find out.","properties":{"contacted":{"description":"`false` until a refresh has ever landed. A server that has never been contacted is not\nunhealthy, and reporting it as such would page somebody for a declarative deployment.","type":"boolean"},"failure":{"type":["string","null"]},"name":{"type":"string"},"observed_tools":{"format":"uint","minimum":0,"type":"integer"},"serving":{"description":"Whether this server currently SERVES: `state == approved`. Named separately from `state`\nbecause it is the one bit a caller usually wants and deriving it from a word is how a client\nends up hard-coding a spelling.","type":"boolean"},"state":{"type":"string"}},"required":["name","state","serving","contacted","failure","observed_tools"],"type":"object"}}}}"##;
 
 /// The trust verbs the plane serves on the kernel's admin mount, relative to it: `(verb, target)`.
@@ -491,7 +489,7 @@ pub fn read_dealt_tools(settings: &[u8]) -> Result<ToolsCfg, String> {
 }
 
 /// THE SETTINGS `open` and `refresh` are handed: the section ([`read_tools_section`]) and the pools the
-/// kernel carries at its reserved `pools` key (ARCHITECT round 4 Q-L3B-SURFACES (h)). The operator's
+/// kernel carries at its reserved `pools` key. The operator's
 /// own document never reaches this reader (`validate` reads the section as written).
 ///
 /// # Errors
@@ -543,7 +541,7 @@ pub fn under_public_url(public_url: &str) -> (String, String) {
     )
 }
 
-/// THE ENDPOINT THE PLANE STATES ITS CLAIMS UNDER (ARCHITECT Q-L3B-AUD, predev's rule): its own
+/// THE ENDPOINT THE PLANE STATES ITS CLAIMS UNDER : its own
 /// `mcp:` block's canonical URI when the document writes one (`owned`, the other sections it owns,
 /// keyed by section name), else the deployment's public base URL; `None` when it states neither.
 /// The block is judged by its grammar ([`crate::endpoint::McpResource::from_cfg`]): the audience is
@@ -569,7 +567,7 @@ pub fn admitted_endpoint(
     }
 }
 
-/// THE PROTECTED-RESOURCE FACTS its `mcp:` block states (ARCHITECT Q-L3B-RFC9728): its
+/// The protected-resource facts its `mcp:` block states: its
 /// authorization servers and scopes, as the JSON object `PlaneSnapshot::resource_facts` carries, from
 /// which the kernel renders the RFC 9728 document; `None` when the document writes no block.
 ///

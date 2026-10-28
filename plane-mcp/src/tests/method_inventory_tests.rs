@@ -1,12 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE STDIO CLIENT LEG AGAINST THE GENERATED METHOD INVENTORY: busbar's `qa/method-inventory.json`
-//! (generated from rmcp's own model) at the pin this repo names, read from `BUSBAR_CHECKOUT` (a
-//! checkout of GetBusbar/busbar at `.busbar-ref`, which plugin-ci exports). Both tests moved here
-//! from `src/client/tests/{verb,peer}_tests.rs`, where they compiled the inventory in from busbar's
-//! tree; the plane's shipped source performs no input or output (tests/purity.rs), so the read is
-//! in this test module (moved in from `tests/` when the crate's only public item became `door`).
+//! THE STDIO CLIENT LEG AGAINST THE METHOD INVENTORY: `tests/data/method-inventory.json` (generated
+//! from rmcp's own model; it moved here from busbar's `qa/`).
 //!
 //! * `the_issued_set_is_what_production_constructs`: the client-originated methods busbar issues
 //!   are counted at their PRODUCTION construction sites in the shipped source (never from the
@@ -19,15 +15,9 @@
 use crate::client::peer::{classify, ServerMessage};
 use crate::client::verb::UpstreamVerb;
 
-/// busbar's `qa/method-inventory.json` at the pin. An unset variable is a failure, never a skip.
+/// The MCP method inventory.
 fn inventory() -> String {
-    let busbar = std::env::var_os("BUSBAR_CHECKOUT").expect(
-        "BUSBAR_CHECKOUT is unset: the inventory is busbar's qa/method-inventory.json at .busbar-ref \
-         (plugin-ci exports it)",
-    );
-    let path = std::path::PathBuf::from(busbar).join("qa/method-inventory.json");
-    std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("the inventory {} reads: {e}", path.display()))
+    include_str!("../../tests/data/method-inventory.json").to_string()
 }
 
 fn line(raw: &str) -> serde_json::Value {
@@ -169,7 +159,7 @@ fn the_issued_set_is_what_production_constructs() {
     assert!(
         invented.is_empty(),
         "busbar sends methods the generated matrix does not define: {invented:#?}\n\
-         Do not edit qa/method-inventory.json — it is generated from the SDKs and will come back."
+         The inventory is the specification's method set; a method it lacks is not owed."
     );
     let not_issued: std::collections::BTreeSet<String> =
         owed.difference(&issued).cloned().collect();
