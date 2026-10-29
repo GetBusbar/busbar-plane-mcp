@@ -23,7 +23,9 @@ def table(name):
     m = re.search(r"^\[" + re.escape(name) + r"\]\s*$(.*?)(?=^\[|\Z)", text, re.M | re.S)
     if not m:
         return {}
-    return dict(re.findall(r'^([A-Za-z0-9_-]+)\s*=\s*"((?:[^"\\]|\\.)*)"', m.group(1), re.M))
+    # read as busbar's row reader reads them (linked_gen.rs): one row per line, quotes trimmed
+    return {k: v.strip().strip('"') for k, v in
+            re.findall(r'^([A-Za-z0-9_-]+)\s*=\s*("[^\n#]*)', m.group(1), re.M)}
 
 def public_outside_tests(item_re):
     """Is an item matching item_re public and not gated to the crate's own tests?"""
@@ -57,7 +59,7 @@ for row in rows:
     if declares is None:
         continue
     m = re.fullmatch(re.escape(ident) + r"::(\w+)", declares)
-    inc = re.fullmatch(r'include_str!\(\\?"(.*?)\\?"\)', declares)
+    inc = re.fullmatch(r'include_str!\("([^"\\]*)"\)', declares)
     if m:
         if not public_outside_tests(r"^pub (const|static) " + m.group(1) + r"\b"):
             fails.append(f"linked-declares {row} = {declares!r}: the plane exports no `{m.group(1)}`")
