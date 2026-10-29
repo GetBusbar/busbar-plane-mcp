@@ -1392,11 +1392,18 @@ fn concurrent_mcp_callers_share_one_list_fetch() {
         "the second caller joined the fetch in flight instead of sending its own"
     );
     drop(held);
+    // This host's connector re-sends a pended exchange when it is resumed, so what is counted
+    // from here is what RESUMED: the one fetch in flight, and nothing from the call that joined it.
+    let before = lists_to(STATELESS_URL);
     for unit in [330, 331] {
         let sent = d.pump(unit, &Given::caller(ALICE, ST_CALL));
         assert!(sent.far, "unit {unit} is relayed: {}", sent.text());
     }
-    assert_eq!(lists_to(STATELESS_URL), 1, "one fetch served the burst");
+    assert_eq!(
+        lists_to(STATELESS_URL) - before,
+        1,
+        "one fetch served the burst: the call that joined it sent none"
+    );
 }
 
 // ── A-H1: the operator's `connect` ──────────────────────────────────────────────────────────────
