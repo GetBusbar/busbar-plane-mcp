@@ -95,6 +95,9 @@ impl Drop for ClockFails {
     }
 }
 
+/// How far the host's WALL clock has been set back, in nanoseconds (an operator correcting it, or a
+/// tampered clock): the monotonic clock never moves back.
+static WALL_SET_BACK_NS: AtomicU64 = AtomicU64::new(0);
 /// While set, every upstream's answer to `tools/list` is HELD (its read pends): a fetch stays in
 /// flight until the test releases it.
 static HOLD_LISTS: AtomicBool = AtomicBool::new(false);
@@ -124,7 +127,8 @@ extern "C" fn clock_now(_: HostCtx, input: *const c_void, out: *mut ServiceOut) 
     let mono = MONO.fetch_add(1_000_000_000, Ordering::SeqCst);
     // SAFETY: as above.
     unsafe {
-        (*i.reading).wall_ns = 1_800_000_000_000_000_000 + mono;
+        (*i.reading).wall_ns =
+            1_800_000_000_000_000_000 + mono - WALL_SET_BACK_NS.load(Ordering::SeqCst);
         (*i.reading).mono_ns = mono;
     }
     answer(out, Outcome::Ready, 0, 0)
@@ -1373,6 +1377,88 @@ fn a_failed_clock_read_fetches_the_tool_list_again() {
             "a fetch made while the clock failed is not stamped (at the epoch or otherwise)"
         );
     }
+}
+
+/// RED W10 (trust.md:87: "a clock that moved backwards ... is treated as stale, never as fresh"):
+/// a wall clock set back past the last fetch never makes that fetch fresh. Within `verify_ttl` of
+/// the last fetch the cached list is reused; once the clock reads EARLIER than that fetch, the next
+/// call fetches the list again.
+#[test]
+fn a_clock_that_went_backwards_fetches_the_tool_list_again() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open();
+    call_st(&d, 84);
+    assert_eq!(
+        lists_to(STATELESS_URL),
+        1,
+        "the first call fetched the list"
+    );
+    call_st(&d, 85);
+    assert_eq!(
+        lists_to(STATELESS_URL),
+        1,
+        "within verify_ttl the sighting is reused"
+    );
+    // Two hours back: every reading now lies before the last fetch's stamp.
+    WALL_SET_BACK_NS.store(2 * 3600 * 1_000_000_000, Ordering::SeqCst);
+    call_st(&d, 86);
+    WALL_SET_BACK_NS.store(0, Ordering::SeqCst);
+    assert_eq!(
+        lists_to(STATELESS_URL),
+        2,
+        "a clock that went backwards is stale, never fresh: the list is fetched again"
+    );
+}
+
+/// The stateless upstream's answer to a relayed call on its event stream, with its own
+/// `notifications/tools/list_changed` beside the result.
+const LIST_CHANGED_ANSWER: &[u8] = b"event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\"}\n\nevent: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{\"content\":[],\"resultType\":\"complete\"}}\n\n";
+
+/// `unit`'s relayed call answered on the event stream, with a `list_changed` beside it.
+fn answered_with_list_changed(d: &Door, unit: u64) {
+    let answered = d.piece(
+        unit,
+        &Given::far(
+            ALICE,
+            200,
+            vec![("content-type", "text/event-stream")],
+            LIST_CHANGED_ANSWER,
+        ),
+    );
+    assert_eq!(answered.status, 200, "{}", answered.text());
+}
+
+/// RED W10 (trust.md:93: "an accepted, rate-limited notification marks the server's snapshot
+/// stale so the next call re-verifies"): an upstream's `notifications/tools/list_changed` heard on
+/// the HTTP event stream beside a relayed call's answer marks its list stale, so the next call
+/// fetches it again within `verify_ttl`; its body is never read. RATE-LIMITED: a second one inside
+/// the rate limit's window (30 s per server) of the last one accepted marks nothing.
+#[test]
+fn a_list_changed_on_the_http_stream_marks_the_list_stale() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open();
+    call_st(&d, 320);
+    assert_eq!(
+        lists_to(STATELESS_URL),
+        1,
+        "the first call fetched the list"
+    );
+    answered_with_list_changed(&d, 320);
+    call_st(&d, 321);
+    assert_eq!(
+        lists_to(STATELESS_URL),
+        2,
+        "a list_changed on the HTTP stream marked the list stale: the next call fetched it again"
+    );
+    answered_with_list_changed(&d, 321);
+    call_st(&d, 322);
+    assert_eq!(
+        lists_to(STATELESS_URL),
+        2,
+        "a second list_changed inside the rate limit's window marks nothing"
+    );
 }
 
 /// The section with the stateless registration strict-live (`verify_ttl: 0s`): every call

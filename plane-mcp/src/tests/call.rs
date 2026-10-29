@@ -1474,6 +1474,46 @@ fn the_relayed_leg_seals_the_answers_the_first_call_went_out_with() {
     assert_eq!(own_answers(&plain), None);
 }
 
+/// RED W10 (website `mcp.md:141-144`: an unknown and an ungranted tool give "the same words"): the
+/// two answers are BYTE-IDENTICAL on the wire, status, message and `data` alike, whether the plane
+/// refuses the ungranted call itself or renders the kernel's grant denial ([`not_granted`]): a
+/// caller probing names learns only that there is nothing there for it. The per-call log keeps
+/// the two apart (`unknown_tool`, `not_granted`), where the operator reads them.
+#[test]
+fn an_unknown_and_an_ungranted_tool_are_byte_identical_on_the_wire() {
+    let id = json!(7);
+    let asked = params("fs_read_file", json!({}));
+    let (unknown, unknown_line) = refused(admit_call(
+        &Catalogue::build(1, &crate::tools_config::ToolsCfg::default()),
+        &id,
+        Some(&asked),
+        &no_header,
+        &everyone,
+        &mut proceed,
+    ));
+    let (ungranted, ungranted_line) = refused(admit_call(
+        &catalogue(),
+        &id,
+        Some(&asked),
+        &no_header,
+        &|kind: &str, _: &str| kind != crate::door::SCOPE_TOOL,
+        &mut proceed,
+    ));
+    let denied = not_granted(&id, "fs_read_file");
+    assert_eq!(unknown.status, ungranted.status);
+    assert_eq!(
+        String::from_utf8(unknown.body()).unwrap(),
+        String::from_utf8(ungranted.body()).unwrap(),
+        "an unknown and an ungranted tool read the same on the wire"
+    );
+    assert_eq!(
+        (denied.status, denied.body()),
+        (ungranted.status, ungranted.body())
+    );
+    assert_eq!(unknown_line.expect("logged").reason, "unknown_tool");
+    assert_eq!(ungranted_line.expect("logged").reason, "not_granted");
+}
+
 /// RED W7 (security.md: a redirect is a failure, never followed): a relayed call's far end that
 /// answers `302` is an upstream failure, whatever well-formed result rides it: the result is never
 /// served to the caller.
