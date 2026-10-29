@@ -34,7 +34,8 @@ use busbar_contract::abi::host::conn::connector::{
     REPLY_BODY, REPLY_END, REPLY_HEAD, REQUEST_BODY, REQUEST_HEAD, SERVICES as CONN_SERVICES,
 };
 use busbar_contract::abi::host::service::{
-    ClockNowIn, HostSlots, RandomFillIn, ServiceOut, SessionEmitIn, DISTRUST_NONE, ENTITLED,
+    ClockNowIn, HostSlots, RandomFillIn, ServiceOut, SessionEmitIn, TrustServesIn,
+    TrustSightItemIn, DISTRUST_CHANGED, DISTRUST_NONE, DISTRUST_UNKNOWN_ITEM, ENTITLED,
     SERVICES as HOST_SERVICES, TRUST_NEW,
 };
 use busbar_contract::abi::mechanism::call::{
@@ -154,11 +155,85 @@ extern "C" fn random_fill(_: HostCtx, input: *const c_void, out: *mut ServiceOut
     answer(out, Outcome::Ready, 0, i.len)
 }
 
-extern "C" fn serves(_: HostCtx, _: *const c_void, out: *mut ServiceOut) -> RawOutcome {
-    answer(out, Outcome::Ready, DISTRUST_NONE, 0)
+/// THE KERNEL'S TRUST BOOK, where a test stands one up (none: every tool serves, every sighting is
+/// new). It keeps what the kernel's keeps: each item's approved digest (the first one sighted) and
+/// its last sighted digest, each item sighted on its own call, as the kernel's `trust.sight_item`.
+#[derive(Default)]
+struct Book {
+    approved: HashMap<String, String>,
+    items: HashMap<String, String>,
+}
+
+static BOOK: Mutex<Option<Book>> = Mutex::new(None);
+
+fn book() -> MutexGuard<'static, Option<Book>> {
+    BOOK.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// A publish CAUGHT HALF WAY: the first item sighted at a digest other than its approved one tells
+/// the first channel once it has landed in the book, and the sighting returns only when the
+/// second channel releases it.
+type Halt = (std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>);
+static HALT: Mutex<Option<Halt>> = Mutex::new(None);
+
+/// `s` as the host reads it; absent or empty is none.
+fn abi_text(s: AbiStr) -> Option<String> {
+    if s.is_absent() {
+        return None;
+    }
+    // SAFETY: the SDK lends the bytes for the call.
+    let text = unsafe { s.as_str() }.ok()?;
+    (!text.is_empty()).then(|| text.to_string())
+}
+
+/// The kernel's Approve: an item serves at its approved digest, judged at the digest the plane
+/// states, else at the item's last sighting in the book.
+extern "C" fn serves(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
+    // SAFETY: the SDK hands a `TrustServesIn` over its own strings, live for the call.
+    let i = unsafe { input.cast::<TrustServesIn>().read() };
+    let verdict = match book().as_ref() {
+        None => DISTRUST_NONE,
+        Some(b) => {
+            let item = abi_text(i.item).unwrap_or_default();
+            let offered = abi_text(i.digest).or_else(|| b.items.get(&item).cloned());
+            match b.approved.get(&item) {
+                None => DISTRUST_UNKNOWN_ITEM,
+                Some(at) if Some(at) == offered.as_ref() => DISTRUST_NONE,
+                Some(_) => DISTRUST_CHANGED,
+            }
+        }
+    };
+    answer(out, Outcome::Ready, verdict, 0)
 }
 
 extern "C" fn sighted(_: HostCtx, _: *const c_void, out: *mut ServiceOut) -> RawOutcome {
+    answer(out, Outcome::Ready, TRUST_NEW, 0)
+}
+
+/// One item's sighting, landed in the book on its own (the first approves it).
+extern "C" fn sighted_item(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
+    // SAFETY: the SDK hands a `TrustSightItemIn` over its own strings, live for the call.
+    let i = unsafe { input.cast::<TrustSightItemIn>().read() };
+    let moved = book().as_mut().is_some_and(|b| {
+        let item = abi_text(i.item).unwrap_or_default();
+        let digest = abi_text(i.digest).unwrap_or_default();
+        let approved = b
+            .approved
+            .entry(item.clone())
+            .or_insert_with(|| digest.clone());
+        let moved = *approved != digest;
+        b.items.insert(item, digest);
+        moved
+    });
+    if moved {
+        let halt = HALT.lock().unwrap_or_else(PoisonError::into_inner).take();
+        if let Some((landed, release)) = halt {
+            landed
+                .send(())
+                .expect("the test waits on the half-way publish");
+            release.recv().expect("the test releases the publish");
+        }
+    }
     answer(out, Outcome::Ready, TRUST_NEW, 0)
 }
 
@@ -204,7 +279,7 @@ static HOST_SLOTS: HostSlots = HostSlots {
     records_secret: None,
     disk_append: None,
     snapshot_read: None,
-    trust_sight_item: Some(sighted),
+    trust_sight_item: Some(sighted_item),
     trust_serves: Some(serves),
     trust_decide: None,
     trust_state: None,
@@ -410,6 +485,12 @@ const REDIRECT_URL: &str = "https://up.example/moved";
 /// Where the redirecting upstream points.
 const ELSEWHERE_URL: &str = "https://elsewhere.example/rpc";
 
+/// A stateless upstream serving two tools, both described by the list's generation.
+const TWO_URL: &str = "https://up.example/two";
+
+/// The generation of the two-tool upstream's list: moving it changes both tools' digests.
+static TWO_GENERATION: AtomicU64 = AtomicU64::new(1);
+
 /// What an upstream answers one request.
 fn upstream_answer(url: &str, fields: &[(String, String)], body: &Value) -> Reply {
     if url.starts_with(DOWN_URL) {
@@ -424,6 +505,17 @@ fn upstream_answer(url: &str, fields: &[(String, String)], body: &Value) -> Repl
     }
     let id = body.get("id").cloned().unwrap_or(Value::Null);
     let method = body.get("method").and_then(Value::as_str).unwrap_or("");
+    if url.starts_with(TWO_URL) {
+        let said = format!("generation {}", TWO_GENERATION.load(Ordering::SeqCst));
+        let tools = json!({"tools": [
+            {"name": "read_file", "description": said, "inputSchema": {"type": "object"}},
+            {"name": "write_file", "description": said, "inputSchema": {"type": "object"}},
+        ]});
+        return match method {
+            "tools/list" => (200, json_head(), rpc_result(&id, tools)),
+            _ => (404, Vec::new(), b"no such method".to_vec()),
+        };
+    }
     let tools = json!({"tools": [{"name": "read_file", "inputSchema": {"type": "object"}}]});
     if url.starts_with(STATELESS_URL) {
         return match method {
@@ -1509,6 +1601,100 @@ fn concurrent_mcp_callers_share_one_list_fetch() {
         lists_to(STATELESS_URL) - before,
         1,
         "one fetch served the burst: the call that joined it sent none"
+    );
+}
+
+// ── W11: a re-fetched tool list is published as one unit ──────────────────────────────────────
+
+/// One registration whose upstream serves two tools.
+const TWO_SECTION: &str = r#"{
+    "tw": {"url": "https://up.example/two", "pin": {"mechanism": "unpinned"}, "verify_ttl": "1h", "tools_allow": {"read_file": {}, "write_file": {}}}
+}"#;
+
+/// The trust book stood up for as long as it is held; dropped, every tool serves again.
+struct BookOn;
+
+impl BookOn {
+    fn on() -> Self {
+        *book() = Some(Book::default());
+        BookOn
+    }
+}
+
+impl Drop for BookOn {
+    fn drop(&mut self) {
+        *book() = None;
+        *HALT.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        TWO_GENERATION.store(1, Ordering::SeqCst);
+    }
+}
+
+/// The door's instance, handed to the thread that publishes beside the reader.
+struct Shared(*mut c_void);
+
+// SAFETY: the door's instance is built to be driven from any thread; the test only moves it.
+unsafe impl Send for Shared {}
+
+/// The tools a `tools/list` on `unit` lists to ALICE.
+fn listed(d: &Door, unit: u64) -> std::collections::BTreeSet<String> {
+    assert_eq!(
+        d.arrive(unit, "POST", "/mcp", FILLER, FILLER_FIELDS)
+            .outcome,
+        Outcome::Ready
+    );
+    let body = d.pump(unit, &Given::caller(ALICE, FILLER)).json();
+    body["result"]["tools"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a tool list: {body}"))
+        .iter()
+        .filter_map(|t| t["name"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// RED W11 (trust.md:51-54: a re-fetched list is "published under an atomic generation bump"):
+/// A READER BESIDE A RE-FETCH JUDGES ONE PUBLISHED LIST. The operator's `connect` re-fetches a
+/// server whose two tools both changed, and is caught half way through landing the new list (one
+/// tool's new digest is in the kernel's book, the other's is not yet). A `tools/list` read then
+/// judges every tool against the one list published before it, never a mix of an old tool and a
+/// new one; once the publish completes, the new list is judged whole.
+#[test]
+fn a_reader_beside_a_re_fetch_judges_one_published_list_never_a_mix() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let _book = BookOn::on();
+    let d = open_with(TWO_SECTION);
+    let both: std::collections::BTreeSet<String> =
+        ["tw_read_file", "tw_write_file"].map(String::from).into();
+
+    // Generation 1, published and approved: both tools serve.
+    assert_eq!(view_of(&d.connect(400, "tw")), (Value::Null, json!(2)));
+    assert_eq!(listed(&d, 401), both, "generation 1 serves whole");
+
+    // Generation 2 changes both tools; its publish is caught after its first tool landed.
+    TWO_GENERATION.store(2, Ordering::SeqCst);
+    let (landed, half_way) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    *HALT.lock().unwrap_or_else(PoisonError::into_inner) = Some((landed, released));
+    let shared = Shared(d.instance);
+    let publisher = std::thread::spawn(move || {
+        let shared = shared;
+        let d = Door { instance: shared.0 };
+        d.connect(402, "tw").status
+    });
+    half_way
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("the re-fetch reached the book and stopped half way");
+    let during = listed(&d, 403);
+    release.send(()).expect("the publisher waits");
+    assert_eq!(publisher.join().expect("the publisher ran"), 200);
+    assert!(
+        during == both || during.is_empty(),
+        "a reader beside the publish judged ONE generation (both tools, or neither), never a mix \
+         of the old list and the new: listed {during:?}"
+    );
+    assert!(
+        listed(&d, 404).is_empty(),
+        "generation 2, published, is judged whole: both tools changed"
     );
 }
 
