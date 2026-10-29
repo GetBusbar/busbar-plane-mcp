@@ -1912,7 +1912,7 @@ mod both_ways {
 
     /// THE PLANE'S DIAGNOSTIC REACHES THE HOST'S LOG, DROPPED IN AS LINKED (owner ruling
     /// 2026-10-27): the first `2024-11-05` event stream an ungoverned caller opens raises the
-    /// plane's declared diagnostic (`BUSBAR-7106`) in the answer's envelope, which reaches the host's
+    /// plane's declared diagnostic (`BUSBAR-7108`) in the answer's envelope, which reaches the host's
     /// sink, the one that writes the plugin's own log file, from the dropped-in image as from the
     /// linked door.
     #[test]
