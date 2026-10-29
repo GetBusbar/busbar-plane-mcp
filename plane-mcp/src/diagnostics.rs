@@ -18,7 +18,7 @@ use busbar_contract::diagnostic::{Class, Diagnostic, Severity};
 /// on its first such stream (an ungoverned chain is unisolated and says
 /// so, with a per-instance boot diagnostic latched on the first legacy stream).
 pub const MCP_LEGACY_STREAM_UNGOVERNED: Diagnostic = Diagnostic {
-    code: 7106,
+    code: 7108,
     class: Class::Plane,
     slug: "mcp-legacy-stream-ungoverned",
     title: "MCP 2024-11-05 event stream opened on the ungoverned chain (sessions unisolated)",
