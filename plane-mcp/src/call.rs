@@ -1216,6 +1216,16 @@ pub fn settle_call_as(
     round: u32,
     sent_id: u64,
 ) -> Settled {
+    // A REDIRECT IS A FAILURE, NEVER FOLLOWED: whatever body rides a 3xx is not read.
+    if (300..400).contains(&status) {
+        return upstream_failed(
+            admitted,
+            &format!(
+                "MCP upstream answered HTTP {status}, a redirect; busbar never follows one, and \
+                 nothing it carried is read"
+            ),
+        );
+    }
     let body = answer_body(raw, sse);
     match wire::parse_response(&body, sent_id) {
         RpcOutcome::Result(value) => completed(admitted, &value, &body),
