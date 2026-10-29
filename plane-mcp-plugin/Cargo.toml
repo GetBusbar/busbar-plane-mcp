@@ -28,7 +28,8 @@ busbar-contract = { workspace = true }
 # dev-only, never in the shipped artifact. `conformance` is busbar's published suite
 # (`tests/conformance.rs`, `conformance_suite!`); `tests/door_witness.rs` is the door witness that
 # moved here with the crate from busbar's crates/busbar-plane-mcp (its `tests/conformance.rs`).
-busbar-plugin-loader = { workspace = true, features = ["conformance"] }
+busbar-plugin-loader = { workspace = true }
+busbar-test-kit = { workspace = true }
 # The door witness reads the plane's answers as JSON documents.
 serde_json = { workspace = true }
 # The SHARED HOST-SERVICES DOUBLE (`services-double`, dev-only): the door witness binds a clock on
