@@ -4,7 +4,7 @@
   },
   "diagnostics": [
     {
-      "code": 7106,
+      "code": 7108,
       "slug": "mcp-legacy-stream-ungoverned",
       "title": "MCP 2024-11-05 event stream opened on the ungoverned chain (sessions unisolated)",
       "severity": "actionable",

@@ -598,7 +598,7 @@ mod both_ways {
     /// (`conformance::cdylib_of`). A missing artifact is a failure, never a skip: this test IS the
     /// dropped-in door's proof.
     fn dropped(d: &Dispatcher) -> Plugin<Plane> {
-        let path = busbar_plugin_loader::conformance::cdylib_of("busbar_plane_mcp_plugin");
+        let path = busbar_test_kit::conformance::cdylib_of("busbar_plane_mcp_plugin");
         let stated = LinkedRow::of_loaded(crate::loaded_door())
             .expect("the door renders its Statement")
             .statement;
@@ -1913,7 +1913,7 @@ mod both_ways {
 
     /// THE PLANE'S DIAGNOSTIC REACHES THE HOST'S LOG, DROPPED IN AS LINKED (owner ruling
     /// 2026-10-27): the first `2024-11-05` event stream an ungoverned caller opens raises the
-    /// plane's declared diagnostic (`BUSBAR-7106`) in the answer's envelope, which reaches the host's
+    /// plane's declared diagnostic (`BUSBAR-7108`) in the answer's envelope, which reaches the host's
     /// sink, the one that writes the plugin's own log file, from the dropped-in image as from the
     /// linked door.
     #[test]
@@ -1930,7 +1930,7 @@ mod both_ways {
                 ..bind(&d)
             };
             let p: Plugin<Plane> = if dropped_in {
-                let path = busbar_plugin_loader::conformance::cdylib_of("busbar_plane_mcp_plugin");
+                let path = busbar_test_kit::conformance::cdylib_of("busbar_plane_mcp_plugin");
                 let stated = LinkedRow::of_loaded(crate::loaded_door())
                     .expect("the door renders its Statement")
                     .statement;

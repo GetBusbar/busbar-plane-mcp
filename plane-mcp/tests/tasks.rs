@@ -454,6 +454,8 @@ static HOST_SLOTS: HostSlots = HostSlots {
     auth_call: None,
     unit_hand_in: None,
     unit_refuse: None,
+    ticket_mint: None,
+    ticket_take: None,
 };
 
 // ── the upstreams behind the connector ──────────────────────────────────────────────────────────
