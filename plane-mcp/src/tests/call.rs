@@ -1513,3 +1513,30 @@ fn an_unknown_and_an_ungranted_tool_are_byte_identical_on_the_wire() {
     assert_eq!(unknown_line.expect("logged").reason, "unknown_tool");
     assert_eq!(ungranted_line.expect("logged").reason, "not_granted");
 }
+
+/// RED W7 (security.md: a redirect is a failure, never followed): a relayed call's far end that
+/// answers `302` is an upstream failure, whatever well-formed result rides it: the result is never
+/// served to the caller.
+#[test]
+fn a_302_from_the_upstream_is_a_failure_not_a_result() {
+    let section = section();
+    let far = r#"{"jsonrpc":"2.0","id":0,"result":{"content":[{"type":"text","text":"from the redirect"}]}}"#;
+    let (_, body, line) = answer_of(settle_call(
+        &admitted(),
+        section.servers.get("fs"),
+        302,
+        far.as_bytes(),
+        false,
+        0,
+    ));
+    assert_eq!(
+        body["result"]["isError"],
+        json!(true),
+        "an upstream failure: {body}"
+    );
+    assert!(
+        !body.to_string().contains("from the redirect"),
+        "nothing the redirect carried is served: {body}"
+    );
+    assert_eq!(line.reason, vocab::REASON_UPSTREAM_FAILED, "{line:?}");
+}
