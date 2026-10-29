@@ -1740,6 +1740,12 @@ pub(super) fn fetch_in(
     super::door_legacy::recount(plane, &negotiating.key, negotiating.dropped);
     *slot = None;
     Poll::Ready(match done {
+        // A REDIRECT IS A FAILURE, NEVER FOLLOWED (security.md: the destination is the operator's
+        // `url:`, and nothing an upstream says may move it): whatever body rides a 3xx is not read.
+        Negotiated::Answer(status, ..) if (300..400).contains(&status) => Err(format!(
+            "the upstream answered HTTP {status}, a redirect; busbar never follows one, and \
+             nothing it carried is read"
+        )),
         Negotiated::Answer(status, raw, sse, sent) => {
             let body = if sse {
                 crate::call::last_sse_data(&raw)
