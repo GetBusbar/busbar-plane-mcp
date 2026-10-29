@@ -49,7 +49,7 @@ pub(super) const UNGOVERNED_LEGACY_STREAM: u32 = 0;
 
 /// The names of the Statement's diagnostic ids, in index order: each the `BUSBAR-NNNN` banner of
 /// the catalog code it raises (`declares.json`), so the host's log resolves its entry.
-pub(super) const DIAG_NAMES: &[&str] = &["BUSBAR-7106"];
+pub(super) const DIAG_NAMES: &[&str] = &["BUSBAR-7108"];
 
 /// The Statement's diagnostic ids, in index order ([`DIAG_NAMES`]).
 pub(super) const DIAG_IDS: &[busbar_contract::abi::mechanism::call::AbiStr] =
