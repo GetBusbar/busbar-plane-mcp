@@ -838,3 +838,82 @@ fn a_child_env_literal_is_sealed_at_parse_and_never_written_back() {
     assert!(!format!("{def:?}").contains(CANARY));
     assert_eq!(&grammar(section).expect("reads again").servers["s"], def);
 }
+
+/// One network registration `fs`, stating the RFC 8693 exchange (`token_exchange:` with its
+/// `aud:`) when `exchanged`.
+fn registration(exchanged: bool) -> Value {
+    let mut fs = json!({
+        "url": "https://tools.internal/fs",
+        "pin": { "mechanism": "cert_spki", "key": "sha256/PIN==" },
+        "tools_allow": { "read_file": {} }
+    });
+    if exchanged {
+        fs["aud"] = json!("https://tools.internal");
+        fs["token_exchange"] = json!({
+            "token_url": "https://as.internal/token",
+            "subject_token": { "env": "BUSBAR_FS_SUBJECT" }
+        });
+    }
+    fs
+}
+
+/// The sentence every refusal of a forwarded caller credential carries: what it would forward and
+/// the two modes that forward nothing of the caller's.
+fn assert_explained(err: &str, server: &str) {
+    for word in [
+        format!("`tools.{server}`"),
+        "busbar credential".to_string(),
+        "`token_exchange:`".to_string(),
+        "`own`".to_string(),
+    ] {
+        assert!(err.contains(&word), "the refusal names {word}: {err}");
+    }
+}
+
+/// THE SECTION DEFAULT NEVER SILENTLY OVERRIDES AN EXCHANGE (website `mcp.md:501-505`): a
+/// section-level `upstream_credentials: passthrough` beside a registration that states
+/// `token_exchange:` used to validate, and the registration was then bound to passthrough with its
+/// exchange dropped. It is refused, naming the registration whose exchange it would have dropped,
+/// in the grammar and in the door's own `validate`; and the Statement tail carries the sentence the
+/// kernel refuses the section default in, so the refusal holds where the kernel reads the key.
+#[test]
+fn a_section_passthrough_default_refuses_a_token_exchange_registration() {
+    let section = json!({ "upstream_credentials": "passthrough", "fs": registration(true) });
+    let err = grammar(section.clone()).expect_err("the exchange is never silently dropped");
+    assert_explained(&err, "fs");
+    assert!(err.contains("token_exchange"), "{err}");
+    let err = door_validate(&section).expect_err("the door's validate refuses it too");
+    assert_explained(&err, "fs");
+
+    // A section default with no exchange beside it is refused all the same: it would lend the
+    // caller's busbar credential to every registration that does not spell its own mode.
+    let err = grammar(json!({ "upstream_credentials": "passthrough", "fs": registration(false) }))
+        .expect_err("a section passthrough default is refused");
+    assert_explained(&err, "fs");
+
+    let tail = crate::door::TAIL.caller_credential_refusal;
+    assert!(
+        !tail.ptr().is_null() && !tail.is_empty(),
+        "the tail states the sentence the kernel refuses a section passthrough default in"
+    );
+
+    // `own` beside an exchange is the exchange.
+    grammar(json!({ "upstream_credentials": "own", "fs": registration(true) }))
+        .expect("an exchange under the `own` default is accepted");
+}
+
+/// A REGISTRATION'S OWN `passthrough` IS REFUSED, alone or beside its own `token_exchange:`, naming
+/// the registration and the alternatives: it would present the caller's busbar credential to that
+/// server.
+#[test]
+fn a_registrations_own_passthrough_is_refused_alone_and_beside_an_exchange() {
+    for exchanged in [false, true] {
+        let mut fs = registration(exchanged);
+        fs["upstream_credentials"] = json!("passthrough");
+        let err = grammar(json!({ "fs": fs })).expect_err("passthrough is refused");
+        assert_explained(&err, "fs");
+        if exchanged {
+            assert!(err.contains("token_exchange"), "{err}");
+        }
+    }
+}
