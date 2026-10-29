@@ -191,3 +191,39 @@ fn the_declared_codes_are_exactly_the_raised_codes() {
         "a retired code is declared"
     );
 }
+
+/// NO DECLARED CODE IS ONE THE CORE'S CATALOGUE HOLDS: the core at `.busbar-ref`
+/// (`BUSBAR_CHECKOUT`, `crates/busbar-kernel/src/diagnostics/catalog.toml`) refuses a plane that
+/// declares a code its catalogue already holds ("plugin 'busbar-plane-mcp' declares BUSBAR-NNNN:
+/// the catalogue already holds that code"), linked or dropped in, so a collision is a busbar that
+/// does not boot. An unset variable is a failure, never a skip.
+#[test]
+fn no_declared_code_is_one_the_core_catalogue_holds() {
+    let busbar = std::env::var_os("BUSBAR_CHECKOUT").expect(
+        "BUSBAR_CHECKOUT is unset: the core catalogue is busbar's at .busbar-ref (plugin-ci exports it)",
+    );
+    let path =
+        std::path::PathBuf::from(busbar).join("crates/busbar-kernel/src/diagnostics/catalog.toml");
+    let catalog = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("the core catalogue at {}: {e}", path.display()));
+    let held: std::collections::BTreeSet<u16> = catalog
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("code"))
+        .filter_map(|rest| rest.trim().strip_prefix('='))
+        .filter_map(|n| n.trim().parse().ok())
+        .collect();
+    assert!(
+        !held.is_empty(),
+        "no `code = N` row read from {}",
+        path.display()
+    );
+    for d in DIAGNOSTICS {
+        assert!(
+            !held.contains(&d.code),
+            "BUSBAR-{:04} ({}) is a code the core catalogue at {} already holds",
+            d.code,
+            d.slug,
+            path.display()
+        );
+    }
+}

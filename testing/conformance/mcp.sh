@@ -88,13 +88,22 @@ leg battery-control  bash scripts/mcp-conformance.sh --battery-control
 leg negative-control bash testing/mcp-conformance/scripts/negative-control.sh
 
 # The subject: busbar at the pin, this checkout's plane patched in, default features (plane-mcp is one).
+# compose.sh names the package; compose-selftest.sh holds its rows to this plane before the build.
 bin=""
 if [ -n "${CARGO_TARGET_DIR:-}" ]; then export CARGO_TARGET_DIR; fi
-say "== build subject (busbar at ${BUSBAR_PIN:-?} with this plane)"
-if ( cd "$BUSBAR_CHECKOUT" && cargo build --release -p busbar \
-      --config "patch.\"https://github.com/GetBusbar/busbar-plane-mcp\".busbar-plane-mcp.path=\"$here/plane-mcp\"" ) \
+stage="$out/subject-src"
+say "== compose subject (busbar at ${BUSBAR_PIN:-?} with this plane)"
+if ! bash scripts/mcp-subject/compose-selftest.sh "$BUSBAR_CHECKOUT" "$stage" >"$out/subject-compose.log" 2>&1; then
+  cat "$out/subject-compose.log" >&2
+  verdict fail "the subject's composition does not link this plane (subject-compose.log); legs failed before:${failed:- none}"
+  exit 1
+fi
+manifest="$(bash scripts/mcp-subject/compose.sh "$BUSBAR_CHECKOUT" "$here/plane-mcp" "$stage")"
+say "== build subject ($manifest)"
+if cargo build --release --manifest-path "$manifest" --bin busbar \
+      --config "patch.\"https://github.com/GetBusbar/busbar-plane-mcp\".busbar-plane-mcp.path=\"$here/plane-mcp\"" \
       >"$out/subject-build.log" 2>&1; then
-  bin="${CARGO_TARGET_DIR:-$BUSBAR_CHECKOUT/target}/release/busbar"
+  bin="${CARGO_TARGET_DIR:-$(dirname "$manifest")/target}/release/busbar"
   [ -x "$bin" ] || { say "built binary missing at $bin"; bin=""; }
 fi
 if [ -z "$bin" ]; then
