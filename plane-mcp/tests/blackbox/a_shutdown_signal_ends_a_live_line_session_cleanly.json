@@ -13,7 +13,7 @@
     ]
   },
   "files": {
-    "providers.yaml": "mock:\n  protocol: anthropic\n  base_url: \"http://127.0.0.1:9\"\n  api_key_env: MOCK_KEY\n",
+    "providers.yaml": "mock:\n  protocol: anthropic\n  base_url: \"http://127.0.0.1:9\"\n",
     "config.yaml": "listen: \"127.0.0.1:0\"\nadmin_listen: \"127.0.0.1:0\"\nadvanced:\n  allow_destinations: [\"127.0.0.1\"]\nstore: {module: memory}\nproviders:\n  mock:\n    api_key: { env: MOCK_KEY }\nmodels:\n  test-model:\n    provider: mock\nmcp:\n  canonical_uri: \"http://127.0.0.1:18080/mcp\"\n  authorization_servers: [\"https://login.example.com\"]\nplugins:\n  enabled: true\n  dir: '{plugins_dir}'\n  trust:\n    allow_unsigned: true\nidentity-providers:\n  idp:\n    module: e2e-idp-module\n    settings:\n{issuer_settings:6:http://127.0.0.1:18080/mcp}auth:\n  chain: [idp]\n  signing_key: { env: BUSBAR_SIGNING_KEY }\n  role_bindings:\n    idp:\n      tester: {}\n"
   },
   "vars": {
