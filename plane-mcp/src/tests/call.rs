@@ -1473,3 +1473,30 @@ fn the_relayed_leg_seals_the_answers_the_first_call_went_out_with() {
     ));
     assert_eq!(own_answers(&plain), None);
 }
+
+/// RED W7 (security.md: a redirect is a failure, never followed): a relayed call's far end that
+/// answers `302` is an upstream failure, whatever well-formed result rides it: the result is never
+/// served to the caller.
+#[test]
+fn a_302_from_the_upstream_is_a_failure_not_a_result() {
+    let section = section();
+    let far = r#"{"jsonrpc":"2.0","id":0,"result":{"content":[{"type":"text","text":"from the redirect"}]}}"#;
+    let (_, body, line) = answer_of(settle_call(
+        &admitted(),
+        section.servers.get("fs"),
+        302,
+        far.as_bytes(),
+        false,
+        0,
+    ));
+    assert_eq!(
+        body["result"]["isError"],
+        json!(true),
+        "an upstream failure: {body}"
+    );
+    assert!(
+        !body.to_string().contains("from the redirect"),
+        "nothing the redirect carried is served: {body}"
+    );
+    assert_eq!(line.reason, vocab::REASON_UPSTREAM_FAILED, "{line:?}");
+}

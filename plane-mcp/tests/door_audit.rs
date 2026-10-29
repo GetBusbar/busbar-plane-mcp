@@ -397,10 +397,24 @@ fn on_stream(session: &str, f: impl FnOnce(&mut Sse)) {
 /// The upstream that is down: every request is answered `503`.
 const DOWN_URL: &str = "https://up.example/down";
 
+/// An upstream that answers every request with a `302` to another origin, carrying a body that is
+/// otherwise a well-formed tool list.
+const REDIRECT_URL: &str = "https://up.example/moved";
+
+/// Where the redirecting upstream points.
+const ELSEWHERE_URL: &str = "https://elsewhere.example/rpc";
+
 /// What an upstream answers one request.
 fn upstream_answer(url: &str, fields: &[(String, String)], body: &Value) -> Reply {
     if url.starts_with(DOWN_URL) {
         return (503, Vec::new(), b"down".to_vec());
+    }
+    if url.starts_with(REDIRECT_URL) {
+        let id = body.get("id").cloned().unwrap_or(Value::Null);
+        let tools = json!({"tools": [{"name": "read_file", "inputSchema": {"type": "object"}}]});
+        let mut head = json_head();
+        head.push(("location".to_string(), ELSEWHERE_URL.to_string()));
+        return (302, head, rpc_result(&id, tools));
     }
     let id = body.get("id").cloned().unwrap_or(Value::Null);
     let method = body.get("method").and_then(Value::as_str).unwrap_or("");
@@ -1493,6 +1507,40 @@ fn a_failed_connect_never_holds_back_the_next_calls_fetch() {
     assert!(
         after > before,
         "the call fetched the list again: {before} requests before, {after} after"
+    );
+}
+
+/// The section with one registration whose upstream redirects.
+const REDIRECT_SECTION: &str = r#"{
+    "rd": {"url": "https://up.example/moved", "pin": {"mechanism": "unpinned"}, "verify_ttl": "1h", "tools_allow": {"read_file": {}}}
+}"#;
+
+/// RED W7 (security.md:171,177,306,308: a redirect is a failure, never followed): an upstream that
+/// answers the operator's `connect` with a `302` is REFUSED, whatever body rides it: nothing is
+/// sighted from it (no tool observed, the failure names the redirect), and the location it points
+/// at is never contacted.
+#[test]
+fn a_302_on_connect_is_refused() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open_with(REDIRECT_SECTION);
+    let served = d.connect(95, "rd");
+    let (failure, observed) = view_of(&served);
+    let failure = failure
+        .as_str()
+        .unwrap_or_else(|| panic!("a 302 is a failure, not a sighting (observed {observed})"));
+    assert!(
+        failure.contains("302"),
+        "the failure names the redirect: {failure}"
+    );
+    assert!(
+        !observed.as_u64().is_some_and(|n| n > 0),
+        "nothing is observed from a redirect: {observed}"
+    );
+    assert_eq!(
+        requests_to(ELSEWHERE_URL),
+        0,
+        "the redirect is never followed"
     );
 }
 
