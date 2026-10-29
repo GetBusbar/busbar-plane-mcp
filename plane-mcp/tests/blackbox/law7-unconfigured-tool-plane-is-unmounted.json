@@ -19,7 +19,7 @@
   "_comment": "Law 7 (core loads a plugin iff its configuration section is present): with no `mcp:` or `tools:` section, every tool admin path answers as an unmounted path does, the overlay list names no tool section, and the tool door falls to the catch-all rather than answering as a plane door.",
   "files": {
     "config.yaml": "listen: \"127.0.0.1:{data_port}\"\nadmin_listen: \"127.0.0.1:{admin_port}\"\nadvanced:\n  allow_destinations: [\"127.0.0.1\"]\nstore: {module: memory}\npublic_url: \"http://127.0.0.1:{data_port}\"\nidentity-providers:\n  admin-tokens:\n    module: admin-tokens\n    token: { env: BUSBAR_ADMIN_TOKEN }\nauth:\n  chain: [keys]\n  signing_key: { file: \"{signing_key_file}\" }\n  admin_auth: [admin-tokens]\nproviders:\n  mock:\n    api_key: { env: MOCK_KEY }\nmodels:\n  test-model:\n    provider: mock\n",
-    "providers.yaml": "mock:\n  protocol: anthropic\n  base_url: \"http://127.0.0.1:9\"\n  api_key_env: MOCK_KEY\n"
+    "providers.yaml": "mock:\n  protocol: anthropic\n  base_url: \"http://127.0.0.1:9\"\n"
   },
   "steps": [
     {
