@@ -31,6 +31,7 @@ use busbar_contract::abi::plane::{
     TRUST_PRIVATE_REACH, TRUST_REVERIFY_TTL,
 };
 use busbar_contract::abi::sdk::door::abi_str;
+use busbar_contract::abi::sdk::plane::dealt_section;
 use busbar_contract::abi::sdk::publish::{
     admin_route, class_index, record_retention, AdminRouteSpec, ServedRoute, SnapshotSpec,
 };
@@ -473,15 +474,8 @@ pub struct ToolPool {
 ///
 /// A blob that is not a JSON object, or the `tools:` section's first broken rule.
 pub fn read_dealt_tools(settings: &[u8]) -> Result<ToolsCfg, String> {
-    if settings.is_empty() {
-        return Ok(ToolsCfg::default());
-    }
-    let value: serde_json::Value = serde_json::from_slice(settings).map_err(|e| e.to_string())?;
-    let serde_json::Value::Object(mut verbs) = value else {
-        return Err("the dealt settings are not a map of the plane's sections".to_string());
-    };
-    match verbs.remove(crate::tools_config::SECTION) {
-        None | Some(serde_json::Value::Null) => Ok(ToolsCfg::default()),
+    match dealt_section(settings, crate::tools_config::SECTION)? {
+        None => Ok(ToolsCfg::default()),
         Some(section) => {
             read_tools_section(&serde_json::to_vec(&section).map_err(|e| e.to_string())?)
         }

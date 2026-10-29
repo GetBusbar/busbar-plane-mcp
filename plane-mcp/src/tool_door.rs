@@ -5,7 +5,7 @@
 //! surface. [`door`] is the LINKED door; the same function is the DROPPED door once a `cdylib`
 //! exports it (`busbar_contract::export_door!`), so the two cannot answer differently.
 //!
-//! The lifecycle is this plane's own:
+//! The lifecycle is the SDK's plane lifecycle ([`PlaneLife`]) over this plane's answers:
 //!
 //! * `validate` reads the settings blob as the `tools:` section ([`door::read_tools_section`]) and
 //!   refuses in the grammar's words;
@@ -37,24 +37,23 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use busbar_contract::abi::mechanism::call::{InHead, OutHead, Outcome};
+use busbar_contract::abi::mechanism::call::{OutHead, Outcome};
 use busbar_contract::abi::mechanism::door::Statement;
-use busbar_contract::abi::mechanism::lifecycle::{
-    GenIn, RefreshIn, ReleaseIn, TickIn, TickOut, ValidateIn,
-};
+use busbar_contract::abi::mechanism::lifecycle::{GenIn, TickIn, TickOut};
 use busbar_contract::abi::mechanism::ticket::{CompletionHandle, Ticket};
 use busbar_contract::abi::plane::{
     ArriveIn, ArriveOut, OnPieceIn, OnPieceOut, OutField, PlaneCancelIn, PlaneCancelOut,
-    PlaneDriveIn, PlaneDriveOut, PlaneOpenIn, PlaneOpenOut, PlaneRefreshOut, PlaneSnapshot,
-    ProjectIn, ProjectOut, RecordWrite, RefusalIn, RefusalOut, ServeIn, ServeOut, UnitCount,
-    AUDIT_APPLIED, AUDIT_REJECTED, CANCEL_ABORTED, CANCEL_OK_PARTIAL, EMIT_DONE, EMIT_TO_FAR_END,
-    FROM_CALLER, FROM_FAR_END, FROM_KERNEL, PIECE_HAS_STATUS, PIECE_LAST, PRINCIPAL_REQUIRED,
-    RECORD_AUDIT, RECORD_PUT, REFUSAL_ARRIVE, REFUSAL_GATE, REFUSAL_KERNEL, ROUTE_DIRECT,
-    ROUTE_POOL, UNITS_REPORTED, VERDICT_RETRY,
+    PlaneDriveIn, PlaneDriveOut, PlaneOpenIn, PlaneSnapshot, ProjectIn, ProjectOut, RecordWrite,
+    RefusalIn, RefusalOut, ServeIn, ServeOut, UnitCount, AUDIT_APPLIED, AUDIT_REJECTED,
+    CANCEL_ABORTED, CANCEL_OK_PARTIAL, EMIT_DONE, EMIT_TO_FAR_END, FROM_CALLER, FROM_FAR_END,
+    FROM_KERNEL, PIECE_HAS_STATUS, PIECE_LAST, PRINCIPAL_REQUIRED, RECORD_AUDIT, RECORD_PUT,
+    REFUSAL_ARRIVE, REFUSAL_GATE, REFUSAL_KERNEL, ROUTE_DIRECT, ROUTE_POOL, UNITS_REPORTED,
+    VERDICT_RETRY,
 };
 use busbar_contract::abi::sdk::door::statement;
 use busbar_contract::abi::sdk::exchange::{REPLY_MAX, REPLY_OVER_BOUND};
 use busbar_contract::abi::sdk::life::Refusal;
+use busbar_contract::abi::sdk::plane_life::{Opened, PlaneLife, Published};
 use busbar_contract::abi::sdk::publish::{Generations, Keyed};
 use busbar_contract::abi::sdk::services::ServiceError;
 use busbar_contract::abi::sdk::{
@@ -264,41 +263,35 @@ macro_rules! slot {
     };
 }
 
-slot!(
-    /// `validate`: the settings read as the section, or refused in the grammar's words.
-    Validate, ValidateIn, OutHead, |_, input, mut out| {
-        match door::read_dealt_tools(input.settings().bytes()) {
-            Ok(_) => Outcome::Ready,
-            Err(text) => out.fail(Refusal::refused(text)),
-        }
-    }
-);
+/// THE LIFECYCLE over the SDK's [`PlaneLife`] (`lifecycle: plane_life(McpDoor)`): `validate`,
+/// `open`, `refresh` and `published` are this plane's; `retire`, `release` and `close` are the SDK's
+/// (a generation's snapshot and what it held are dropped; nothing is held under a lease); `tick`,
+/// `drive` and `cancel` are this plane's own.
+impl PlaneLife for McpDoor {
+    type Held = Held;
 
-slot!(
+    fn generations(&self) -> &Generations<PlaneSnapshot, Held> {
+        &self.generations
+    }
+
+    /// `validate`: the settings read as the section, or refused in the grammar's words.
+    fn validate(settings: &[u8]) -> Result<(), Refusal> {
+        door::read_dealt_tools(settings)
+            .map(|_| ())
+            .map_err(Refusal::refused)
+    }
+
     /// `open`: the instance over the section, the public base URL and the host services, and the
     /// first generation's snapshot.
-    Open, PlaneOpenIn, PlaneOpenOut, |instance, input, mut out| {
-        let (cfg, pools) = match door::read_open(input.open().settings().bytes()) {
-            Ok(opened) => opened,
-            Err(text) => return out.fail(Refusal::refused(text)),
-        };
+    fn open(input: &Lent<'_, PlaneOpenIn>) -> Result<Opened<Self>, Refusal> {
+        let (cfg, pools) =
+            door::read_open(input.open().settings().bytes()).map_err(Refusal::refused)?;
         let generation = input.open().generation();
         let owned = input.owned().bytes();
-        let admitted = match door::admitted_endpoint(
-            input.public_url().stated().as_deref(),
-            owned,
-        ) {
-            Ok(admitted) => admitted,
-            Err(text) => return out.fail(Refusal::refused(text)),
-        };
-        let facts = match door::resource_facts(owned) {
-            Ok(facts) => facts,
-            Err(text) => return out.fail(Refusal::refused(text)),
-        };
-        let origins = match door::allowed_origins(owned) {
-            Ok(origins) => origins,
-            Err(text) => return out.fail(Refusal::refused(text)),
-        };
+        let admitted = door::admitted_endpoint(input.public_url().stated().as_deref(), owned)
+            .map_err(Refusal::refused)?;
+        let facts = door::resource_facts(owned).map_err(Refusal::refused)?;
+        let origins = door::allowed_origins(owned).map_err(Refusal::refused)?;
         let open = input.field(|i| &i.open);
         let host = open.host();
         let plane = McpDoor {
@@ -325,50 +318,37 @@ slot!(
             pools,
             ..Held::of(generation, cfg)
         };
-        out.publish_with(|o| &o.snapshot, &plane.generations, generation, &spec, held);
-        instance.open(plane);
-        Outcome::Ready
+        Ok(Opened {
+            plane,
+            first: Published { spec, held },
+        })
     }
-);
 
-slot!(
     /// `refresh`: the new section judged, and the next generation's snapshot over the same public base
     /// URL.
-    Refresh, RefreshIn, PlaneRefreshOut, |instance, input, mut out| {
-        let Some(plane) = instance.get() else {
-            return Outcome::Failed;
-        };
-        let (cfg, pools) = match door::read_open(input.settings().bytes()) {
-            Ok(opened) => opened,
-            Err(text) => return out.fail(Refusal::refused(text)),
-        };
-        let generation = input.generation();
-        let spec = door::snapshot_spec_with(plane.admitted.clone(), plane.facts.clone());
+    fn refresh(&self, settings: &[u8], generation: u64) -> Result<Published<Held>, Refusal> {
+        let (cfg, pools) = door::read_open(settings).map_err(Refusal::refused)?;
+        let spec = door::snapshot_spec_with(self.admitted.clone(), self.facts.clone());
         let held = Held {
             pools,
             ..Held::of(generation, cfg)
         };
-        out.publish_with(|o| &o.snapshot, &plane.generations, generation, &spec, held);
-        // A subscription held as a session compares what its caller can see on the move.
-        door_listen::wake_all(plane);
-        Outcome::Ready
+        Ok(Published { spec, held })
     }
-);
 
-slot!(
-    /// `retire`: the generation's snapshot is dropped.
-    Retire, GenIn, OutHead, |instance, input, _| {
-        if let Some(plane) = instance.get() {
-            plane.generations.retire(input.generation());
-        }
-        Outcome::Ready
+    /// A generation was published: a subscription held as a session compares what its caller can
+    /// see on the move. At `open` nothing is held yet, so it wakes nothing.
+    fn published(&self, _generation: u64) {
+        door_listen::wake_all(self);
     }
-);
 
-slot!(
     /// `tick`: the clock of the subscriptions held as sessions ([`door_listen::tick`]), every
     /// [`door_listen::POLL_NS`].
-    Tick, TickIn, TickOut, |instance, input, mut out| {
+    fn tick(
+        instance: Instance<'_, Self>,
+        input: Lent<'_, TickIn>,
+        mut out: Out<'_, TickOut>,
+    ) -> Outcome {
         let given = input;
         let next = instance.get().map_or(0, |plane| {
             door_line::tick(plane, given.head().ticket(), given.now_ns());
@@ -379,11 +359,13 @@ slot!(
         out.set(|o| &o.next_tick_ns, next);
         Outcome::Ready
     }
-);
 
-slot!(
     /// `drive`: the subscriptions held as sessions whose step is due ([`door_listen::drive`]).
-    Drive, PlaneDriveIn, PlaneDriveOut, |instance, input, mut out| {
+    fn drive(
+        instance: Instance<'_, Self>,
+        input: Lent<'_, PlaneDriveIn>,
+        mut out: Out<'_, PlaneDriveOut>,
+    ) -> Outcome {
         match instance.get() {
             Some(plane) => {
                 // The held 2024-11-05 streams are read on this ticket first: what they hand on
@@ -394,14 +376,16 @@ slot!(
             None => Outcome::Ready,
         }
     }
-);
 
-slot!(
     /// `cancel`: the cancelled unit's state is dropped, found by its ticket or, cancelled before any
     /// piece reached it, by the unit the host names. Answered `CANCEL_OK_PARTIAL` when the far end
     /// had begun its answer, so the units it reported bill when its answer was streamed (the
     /// ledger records what the dialect did), else `CANCEL_ABORTED`.
-    Cancel, PlaneCancelIn, PlaneCancelOut, |instance, input, mut out| {
+    fn cancel(
+        instance: Instance<'_, Self>,
+        input: Lent<'_, PlaneCancelIn>,
+        mut out: Out<'_, PlaneCancelOut>,
+    ) -> Outcome {
         let mut stopped = Vec::new();
         let mut answered = false;
         if let Some(plane) = instance.get() {
@@ -429,7 +413,10 @@ slot!(
         // host's buffers cannot hold are a FAULT the host is told of, never dropped unsaid.
         let (mut records, mut arena) = (input.records_buf(), input.arena_buf());
         for id in &stopped {
-            records.push(audit_write(&mut arena, &crate::call::AuditRow::task_cancel(id)));
+            records.push(audit_write(
+                &mut arena,
+                &crate::call::AuditRow::task_cancel(id),
+            ));
         }
         if !(records.fits() && arena.fits()) {
             return Outcome::Fault;
@@ -440,21 +427,15 @@ slot!(
         out.set(|o| &o.arena_written, aw as u64);
         out.set(
             |o| &o.cancel.disposition,
-            if answered { CANCEL_OK_PARTIAL } else { CANCEL_ABORTED },
+            if answered {
+                CANCEL_OK_PARTIAL
+            } else {
+                CANCEL_ABORTED
+            },
         );
         Outcome::Ready
     }
-);
-
-slot!(
-    /// `release`: this plane answers under no lease.
-    Release, ReleaseIn, OutHead, |_, _, _| { Outcome::Ready }
-);
-
-slot!(
-    /// `close`: the SDK drops the instance and every snapshot it still holds.
-    Close, InHead, OutHead, |_, _, _| { Outcome::Ready }
-);
+}
 
 // ── the request path ──────────────────────────────────────────────────────────────────────────
 
@@ -3906,11 +3887,7 @@ slot!(
 busbar_contract::plugin_door! {
     ops: busbar_contract::abi::plane::Ops,
     statement: STATEMENT,
-    lifecycle: {
-        validate: Safe<Validate>, open: Safe<Open>, refresh: Safe<Refresh>, retire: Safe<Retire>,
-        tick: Safe<Tick>, drive: Safe<Drive>, cancel: Safe<Cancel>, release: Safe<Release>,
-        close: Safe<Close>,
-    },
+    lifecycle: plane_life(McpDoor),
     kind_ops: {
         arrive: Safe<Arrive>, on_piece: Safe<OnPiece>, refusal: Safe<RefusalSlot>,
         serve: Safe<Serve>, hydrate: Safe<Inert>, start: Safe<Inert>, project: Safe<Project>,
