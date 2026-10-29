@@ -7,7 +7,7 @@
 //! builders: the request bound for the member is `call::outbound`'s, the settled answers are
 //! `call::settle_call`'s, the call record is `record::call_suffix`'s. Those builders are this crate's,
 //! so the comparison lives here; the door is driven through the loader's own frames
-//! (`busbar_plugin_loader::conformance::{input, output}`), so this module needs no raw ABI call.
+//! (`busbar_test_kit::conformance::{input, output}`), so this module needs no raw ABI call.
 
 use std::sync::Arc;
 
@@ -19,12 +19,12 @@ use busbar_contract::abi::plane::{
 };
 use busbar_contract::abi::sdk::door::abi_str;
 use busbar_contract::services::{Caller, Stored, UNSERVED};
-use busbar_plugin_loader::conformance::{input, output};
 use busbar_plugin_loader::dispatch::kinds::plane::{OwnedSnapshot, Plane};
 use busbar_plugin_loader::dispatch::{
     in_head, load_linked, out_head, Bind, DispatchConfig, Dispatcher, Frame, LinkedRow, NoSink,
     Plugin,
 };
+use busbar_test_kit::conformance::{input, output};
 use serde_json::{json, Value};
 
 use crate::codec::{H_MCP_METHOD, H_MCP_NAME, H_PROTOCOL_VERSION, PROTOCOL_VERSION};
