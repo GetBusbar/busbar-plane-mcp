@@ -91,10 +91,10 @@ leg negative-control bash testing/mcp-conformance/scripts/negative-control.sh
 bin=""
 if [ -n "${CARGO_TARGET_DIR:-}" ]; then export CARGO_TARGET_DIR; fi
 say "== build subject (busbar at ${BUSBAR_PIN:-?} with this plane)"
-if ( cd "$BUSBAR_CHECKOUT" && cargo build --release -p busbar \
+if ( cd "$BUSBAR_CHECKOUT" && cargo build --release --manifest-path dist/default/Cargo.toml --bin busbar \
       --config "patch.\"https://github.com/GetBusbar/busbar-plane-mcp\".busbar-plane-mcp.path=\"$here/plane-mcp\"" ) \
       >"$out/subject-build.log" 2>&1; then
-  bin="${CARGO_TARGET_DIR:-$BUSBAR_CHECKOUT/target}/release/busbar"
+  bin="${CARGO_TARGET_DIR:-$BUSBAR_CHECKOUT/dist/default/target}/release/busbar"
   [ -x "$bin" ] || { say "built binary missing at $bin"; bin=""; }
 fi
 if [ -z "$bin" ]; then
