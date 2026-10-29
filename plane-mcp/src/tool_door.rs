@@ -186,6 +186,12 @@ pub struct McpDoor {
     /// monotonic clock, ms): what the notifications' rate limit is read against
     /// ([`door_sessions::list_changed`]).
     list_noticed: Keyed<String, u64>,
+    /// THE TOOL-LIST FETCH IN FLIGHT per server (single-flight): the one call fetching it, until
+    /// when its lease holds, and the calls waiting on it.
+    list_fetch: Keyed<String, ListFetch>,
+    /// How many of each server's verify-on-call fetches have landed: a call that joined a fetch
+    /// goes on once this moves past the count it joined at.
+    list_landed: Keyed<String, u64>,
     /// The host's wake (`HostTables::wake`): a task's continuation and a held subscription are woken
     /// through it when what they wait for moves.
     wake: Option<busbar_contract::abi::sdk::StaticWake>,
@@ -496,6 +502,17 @@ fn roots_epoch(plane: &McpDoor, principal: &str) -> u64 {
     let shared = plane.roots_shared.get(&()).unwrap_or(0);
     own.wrapping_add(shared.wrapping_shl(32))
 }
+/// ONE SERVER'S TOOL-LIST FETCH IN FLIGHT (single-flight, `docs/mcp.md`: concurrent callers share
+/// one fetch): the unit making it, the monotonic time its lease lapses (the fetch is bounded by the
+/// server's `timeout:`, so a lease past it belongs to a fetch that will never land and the next
+/// call takes it over), and the tickets of the calls waiting on it, woken when it lands.
+#[derive(Debug, Clone)]
+struct ListFetch {
+    owner: u64,
+    until_ms: u64,
+    waiters: Vec<Ticket>,
+}
+
 /// One unit's state, from its arrival to its end.
 struct CallUnit {
     /// The unit's own key, as the kernel minted it.
@@ -531,6 +548,10 @@ struct CallUnit {
     claim: Option<(String, u32, u64)>,
     /// Verify-on-call's sighting, kept while the kernel's trust book stamps it.
     verified: Option<crate::trust::Sighting>,
+    /// THE FETCH THIS CALL JOINED (single-flight): the server's landed-fetch count when it found
+    /// another call's `tools/list` of the same server in flight and waited on it instead of
+    /// sending its own ([`ListFetch`]).
+    joined_fetch: Option<u64>,
     /// The door's own exchange with a stdio member's child, while it pends ([`door_program`]).
     program: Option<(door_program::Purpose, crate::tool_program::ProgramExchange)>,
     /// The attempt whose stdio member the door greeted ([`door_program::ready`]).
@@ -1167,6 +1188,7 @@ slot!(
             pending: None,
             claim: None,
             verified: None,
+            joined_fetch: None,
             program: None,
             readied: None,
             task: task_run.map(|(reference, params, _, retry)| {
@@ -1464,6 +1486,49 @@ fn verify_on_call(
             if fresh {
                 return Looked::Fresh;
             }
+            // SINGLE-FLIGHT: a call that finds this server's fetch already in flight waits on it
+            // and goes on with what it landed, even strict-live; it never sends its own.
+            let key = server.to_string();
+            let landed_count = plane.list_landed.get(&key).unwrap_or(0);
+            if unit
+                .joined_fetch
+                .is_some_and(|joined| landed_count > joined)
+            {
+                unit.joined_fetch = None;
+                return Looked::Fresh;
+            }
+            let mono =
+                clock(Some(services), ticket, &mut unit.issued).map(|r| r.mono_ns / 1_000_000);
+            let me = unit.key;
+            let joined = plane.list_fetch.with(&key, |lease| match lease {
+                Some(lease)
+                    if lease.owner != me && mono.is_some_and(|now| now < lease.until_ms) =>
+                {
+                    if !lease.waiters.contains(&ticket) {
+                        lease.waiters.push(ticket);
+                    }
+                    true
+                }
+                _ => false,
+            });
+            if joined {
+                unit.joined_fetch.get_or_insert(landed_count);
+                return Looked::Pending;
+            }
+            if plane
+                .list_fetch
+                .get(&key)
+                .is_none_or(|lease| lease.owner != me)
+            {
+                plane.list_fetch.insert(
+                    key,
+                    ListFetch {
+                        owner: me,
+                        until_ms: mono.unwrap_or(0).saturating_add(def.timeout_ms()),
+                        waiters: Vec::new(),
+                    },
+                );
+            }
             let base = VERIFY_SEQ.saturating_add(unit.attempt.saturating_mul(ROUND_SEQ_SPAN));
             if program {
                 let std::task::Poll::Ready(answer) =
@@ -1524,7 +1589,28 @@ fn verify_on_call(
             plane.checked.remove(&server.to_string());
         }
     }
+    landed_fetch(plane, server, unit.key);
     Looked::Fresh
+}
+
+/// THE FETCH `owner` MADE OF `server` LANDED (or failed, which the calls waiting on it read the
+/// same way: the sighting is what they judge): its lease is released, the landed count moves, and
+/// every call that joined it is woken to go on with it.
+fn landed_fetch(plane: &McpDoor, server: &str, owner: u64) {
+    let key = server.to_string();
+    let waiters = plane.list_fetch.with(&key, |lease| match lease {
+        Some(lease) if lease.owner == owner => Some(std::mem::take(&mut lease.waiters)),
+        _ => None,
+    });
+    let Some(waiters) = waiters else {
+        return;
+    };
+    plane.list_fetch.remove(&key);
+    let count = plane.list_landed.get(&key).unwrap_or(0).saturating_add(1);
+    plane.list_landed.insert(key, count);
+    if let Some(wake) = plane.wake {
+        waiters.iter().for_each(|t| wake.wake(*t));
+    }
 }
 
 /// THE SIGHTING ON THE KERNEL'S TRUST BOOK (`trust.sight` of the observed catalogue, or

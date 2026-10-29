@@ -47,9 +47,28 @@ pub const REASON_TOOL_ARGUMENT_REFUSED: &str = "tool_argument_refused";
 
 /// THE CEILING ON `params.name`, IN BYTES, checked before the per-call log opens: the name is
 /// written verbatim into a durable, hash-chained record the instant any terminal fires, so an
-/// oversized one is refused with no log line at all. Refused outright, never truncated: a truncated
-/// name is a different tool.
+/// oversized one is refused, and its log line and audit row hold only a bounded rendering of it
+/// ([`bounded_name`]). Refused outright, never truncated into a call: a truncated name is a
+/// different tool.
 pub const MAX_TOOL_NAME_BYTES: usize = 256;
+
+/// The call-log and audit reason of a call whose `params.name` is past [`MAX_TOOL_NAME_BYTES`].
+pub const REASON_TOOL_NAME_TOO_LONG: &str = "tool_name_too_long";
+
+/// How many bytes of an oversized name its log line and audit row keep.
+const OVERSIZED_NAME_PREFIX_BYTES: usize = 64;
+
+/// AN OVERSIZED NAME AS THE LOG AND THE AUDIT HOLD IT: its first
+/// [`OVERSIZED_NAME_PREFIX_BYTES`] (cut at a character boundary) and its length, a rendering no
+/// real tool name spells (`…` and the byte count), so the refusal is on the record without the
+/// record holding what the ceiling exists to keep out of it.
+fn bounded_name(name: &str) -> String {
+    let mut end = OVERSIZED_NAME_PREFIX_BYTES.min(name.len());
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…[{} bytes]", &name[..end], name.len())
+}
 
 /// The status of a successful answer.
 const STATUS_OK: u32 = 200;
@@ -518,14 +537,16 @@ pub fn admit_trusted(
                 CODE_INVALID_PARAMS,
                 format!(
                     "`params.name` is {} bytes, longer than the {MAX_TOOL_NAME_BYTES} this \
-                     deployment retains for a tool name. Refused before it reached the per-call \
-                     log: a name this long would be written verbatim into a durable, hash-chained \
-                     record.",
+                     deployment retains for a tool name. Refused; the per-call log and the audit \
+                     record a bounded rendering of it, never the name itself.",
                     name.len()
                 ),
                 None,
             ),
-            None,
+            Some(CallLine::asked(
+                &bounded_name(name),
+                REASON_TOOL_NAME_TOO_LONG,
+            )),
         );
     }
     let mut arguments = params
