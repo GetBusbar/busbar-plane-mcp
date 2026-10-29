@@ -619,6 +619,68 @@ pub(crate) fn url_for_display(url: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
+/// THE REFUSAL OF `upstream_credentials: passthrough` ON THIS PLANE, as the section default (the
+/// Statement tail's `caller_credential_refusal`: the kernel reads that reserved key and emits this
+/// sentence verbatim).
+///
+/// `passthrough` lends the caller's VERIFIED front-door credential (the one the auth gate took
+/// from the caller: their busbar virtual key, or a token whose audience is busbar) to the
+/// registration's outbound auth call, presented as its bearer. That credential authenticates the
+/// caller TO busbar; handed to an MCP server it is a working busbar credential in a third party's
+/// hands, which is the token-passthrough pattern the MCP authorization spec forbids. The word stays
+/// reserved (the vocabulary is the same on every plane); the value is refused, never accepted and
+/// quietly turned into something else.
+pub const REFUSE_PASSTHROUGH_SECTION: &str =
+    "`tools.upstream_credentials: passthrough` is refused: it would present each caller's own \
+     busbar credential (the virtual key or busbar-audience token they authenticated to busbar \
+     with) to every MCP server that does not spell its own mode, and a caller's busbar credential \
+     never travels upstream. Use `token_exchange:` on a registration (busbar exchanges its own \
+     subject token for a down-scoped token bound to that server's `aud:`), or `own` (the default: \
+     busbar presents no caller credential).";
+
+/// The refusal of a registration's own `passthrough` (at `at`), naming the exchange it sits
+/// beside when it states one.
+fn refuse_passthrough(at: &str, exchanged: bool) -> String {
+    let beside = if exchanged {
+        " It also contradicts this registration's `token_exchange:`, which mints busbar's own \
+         down-scoped credential: the two are never combined, and neither is silently dropped."
+    } else {
+        ""
+    };
+    format!(
+        "{at}: `upstream_credentials: passthrough` is refused: it would present the caller's own \
+         busbar credential (the virtual key or busbar-audience token they authenticated to busbar \
+         with) to this MCP server, and a caller's busbar credential never travels upstream.{beside} \
+         Use `token_exchange:` (busbar exchanges its own subject token for a down-scoped token \
+         bound to this server's `aud:`), or `own` (the default: busbar presents no caller \
+         credential)."
+    )
+}
+
+/// The refusal of a section-level `passthrough` default, naming every registration it would lend
+/// the caller's credential to, and every `token_exchange:` it would have overridden.
+fn refuse_section_passthrough(lent: &[&str], exchanging: &[&str]) -> String {
+    let named = |names: &[&str]| {
+        names
+            .iter()
+            .map(|n| format!("`tools.{n}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut text = REFUSE_PASSTHROUGH_SECTION.to_string();
+    if !lent.is_empty() {
+        text.push_str(&format!(" It would apply to {}.", named(lent)));
+    }
+    if !exchanging.is_empty() {
+        text.push_str(&format!(
+            " It would also override the `token_exchange:` of {}: a section default never \
+             silently drops a registration's exchange.",
+            named(exchanging)
+        ));
+    }
+    text
+}
+
 /// The top-level `tools:` map, carrying the two `RESERVED_SECTION_KEYS`
 /// alongside the servers.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -654,6 +716,28 @@ impl<'de> Deserialize<'de> for ToolsCfg {
             SUBJECT_NOUN,
             validate_server,
         )?;
+
+        // A section default applies to every registration that does not spell its own mode: it
+        // would lend the caller's credential to each of them, and silently override the exchange
+        // of any that states `token_exchange:`.
+        if section.upstream_credentials == Some(UpstreamCreds::Passthrough) {
+            let exchanging: Vec<&str> = section
+                .entries
+                .iter()
+                .filter(|(_, d)| d.token_exchange.is_some() && d.upstream_credentials.is_none())
+                .map(|(n, _)| n.as_str())
+                .collect();
+            let lent: Vec<&str> = section
+                .entries
+                .iter()
+                .filter(|(_, d)| d.upstream_credentials.is_none())
+                .map(|(n, _)| n.as_str())
+                .collect();
+            return Err(serde::de::Error::custom(refuse_section_passthrough(
+                &lent,
+                &exchanging,
+            )));
+        }
 
         Ok(ToolsCfg {
             all_server_hooks: section.hooks,
@@ -863,7 +947,12 @@ pub fn validate_server(name: &str, def: &McpServerDefCfg) -> Result<(), String> 
     def.sampling_bounds.validate(&at)?;
     validate_client_identity(&at, def)?;
 
-    // The pin, `verify_ttl:` and `timeout:` are the kernel's keys, judged before this validator.
+    // THE CALLER'S BUSBAR CREDENTIAL NEVER TRAVELS UPSTREAM ([`REFUSE_PASSTHROUGH_SECTION`]).
+    if def.upstream_credentials == Some(UpstreamCreds::Passthrough) {
+        return Err(refuse_passthrough(&at, def.token_exchange.is_some()));
+    }
+
+    // The pin,`verify_ttl:` and `timeout:` are the kernel's keys, judged before this validator.
 
     // THE DEADLINE (`timeout:`) is not judged here either: it is the kernel's reserved per-entry key
     // (`busbar_contract::section::ENTRY_TIMEOUT_KEY`), judged by the kernel before the section
@@ -961,14 +1050,6 @@ pub fn validate_server(name: &str, def: &McpServerDefCfg) -> Result<(), String> 
                  token); plaintext http is permitted only on a registration that also sets \
                  `allow_private: true`. Got `{}`.",
                 url_for_display(&tx.token_url)
-            ));
-        }
-        // An exchange mints busbar's credential; `passthrough` says the caller supplies one.
-        if matches!(def.upstream_credentials, Some(UpstreamCreds::Passthrough)) {
-            return Err(format!(
-                "{at}: `token_exchange:` mints BUSBAR's own down-scoped credential, and \
-                 `upstream_credentials: passthrough` says the CALLER supplies one. Set one or the \
-                 other."
             ));
         }
         // RFC 8707 is required on an exchange, so the token is audience-bound.
