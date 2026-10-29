@@ -533,9 +533,12 @@ pub fn admit_trusted(
         .cloned()
         .unwrap_or_else(|| json!({}));
     let sent_digest = crate::ask::digest_arguments(&arguments);
+    // AN UNKNOWN NAME READS EXACTLY AS AN UNGRANTED ONE ON THE WIRE ([`not_granted`]): one status,
+    // one sentence, one `data.reason`, so probing names tells a caller nothing about what exists.
+    // The per-call log keeps the true reason, for the operator.
     let Some(entry) = catalogue.tool(name) else {
         return Admission::Refused(
-            catalogue_refusal(STATUS_NOT_FOUND, id, not_exposed(name), REASON_UNKNOWN_TOOL),
+            not_granted(id, name),
             Some(CallLine::asked(name, REASON_UNKNOWN_TOOL)),
         );
     };

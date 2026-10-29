@@ -182,6 +182,10 @@ pub struct McpDoor {
     /// When each registered server's tool list was last fetched (Unix ms, the kernel's clock): what
     /// verify-on-call reads its `verify_ttl` against.
     checked: Keyed<String, u64>,
+    /// When each server's last ACCEPTED `list_changed` marked its list stale (the kernel's
+    /// monotonic clock, ms): what the notifications' rate limit is read against
+    /// ([`door_sessions::list_changed`]).
+    list_noticed: Keyed<String, u64>,
     /// The host's wake (`HostTables::wake`): a task's continuation and a held subscription are woken
     /// through it when what they wait for moves.
     wake: Option<busbar_contract::abi::sdk::StaticWake>,
@@ -1454,7 +1458,8 @@ fn verify_on_call(
                 plane
                     .checked
                     .get(&server.to_string())
-                    .is_some_and(|at| ttl_ms > 0 && now_ms.saturating_sub(at) < ttl_ms)
+                    // A clock that reads earlier than the fetch went backwards: stale, never fresh.
+                    .is_some_and(|at| ttl_ms > 0 && now_ms >= at && now_ms - at < ttl_ms)
             });
             if fresh {
                 return Looked::Fresh;
@@ -3064,11 +3069,15 @@ slot!(
                         let now = in_session.as_ref().and_then(|_| {
                             wall_ms(plane.services, ticket, &mut unit.issued)
                         });
+                        // The rate limit on its `list_changed` reads the monotonic clock.
+                        let mono = clock(plane.services, ticket, &mut unit.issued)
+                            .map(|r| r.mono_ns / 1_000_000);
                         door_sessions::heard(
                             plane,
                             &server,
                             &relay.far,
                             in_session.as_deref().zip(now).map(|(s, now)| (s, &owner, now)),
+                            mono,
                         );
                     }
                     let Settled::Answer { status, body, line } = settled else {
