@@ -758,7 +758,7 @@ fn opens(section: &str) -> Option<Door> {
             std::ptr::from_mut(&mut o).cast(),
         )
     };
-    (ret.outcome() == Outcome::Ready).then(|| Door {
+    (ret.outcome() == Outcome::Ready).then_some(Door {
         instance: o.open.instance,
     })
 }

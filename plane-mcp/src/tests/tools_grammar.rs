@@ -893,7 +893,7 @@ fn a_section_passthrough_default_refuses_a_token_exchange_registration() {
 
     let tail = crate::door::TAIL.caller_credential_refusal;
     assert!(
-        !tail.ptr().is_null() && tail.len() > 0,
+        !tail.ptr().is_null() && !tail.is_empty(),
         "the tail states the sentence the kernel refuses a section passthrough default in"
     );
 
