@@ -95,6 +95,26 @@ impl Drop for ClockFails {
     }
 }
 
+/// While set, every upstream's answer to `tools/list` is HELD (its read pends): a fetch stays in
+/// flight until the test releases it.
+static HOLD_LISTS: AtomicBool = AtomicBool::new(false);
+
+/// The tool lists held for as long as it is.
+struct HoldLists;
+
+impl HoldLists {
+    fn on() -> Self {
+        HOLD_LISTS.store(true, Ordering::SeqCst);
+        HoldLists
+    }
+}
+
+impl Drop for HoldLists {
+    fn drop(&mut self) {
+        HOLD_LISTS.store(false, Ordering::SeqCst);
+    }
+}
+
 extern "C" fn clock_now(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
     if CLOCK_FAILS.load(Ordering::SeqCst) {
         return answer(out, Outcome::Failed, 0, 0);
@@ -567,6 +587,12 @@ extern "C" fn read_reply(_: HostCtx, input: *const c_void, out: *mut ServiceOut)
     let Some((status, head, body)) = wire.reply.clone() else {
         return answer(out, Outcome::Failed, 0, 0);
     };
+    // A HELD tool list: its answer waits until the test lets it go.
+    let lists = serde_json::from_slice::<Value>(&wire.body)
+        .is_ok_and(|b| b["method"] == json!("tools/list"));
+    if lists && HOLD_LISTS.load(Ordering::SeqCst) {
+        return answer(out, Outcome::Pending, 0, 0);
+    }
     let (piece, n) = match wire.step {
         0 => {
             let block: String = head.iter().map(|(n, v)| format!("{n}: {v}\r\n")).collect();
@@ -1329,6 +1355,48 @@ fn a_failed_clock_read_fetches_the_tool_list_again() {
             "a fetch made while the clock failed is not stamped (at the epoch or otherwise)"
         );
     }
+}
+
+/// The section with the stateless registration strict-live (`verify_ttl: 0s`): every call
+/// re-verifies, and a burst still shares one fetch.
+const STRICT_SECTION: &str = r#"{
+    "st": {"url": "https://up.example/st", "pin": {"mechanism": "unpinned"}, "verify_ttl": "0s", "tools_allow": {"read_file": {}}}
+}"#;
+
+/// RED W11 (website `mcp.md:147,466` and trust.md:140: concurrent callers share one fetch; `0`
+/// still coalesces bursts): two calls that find the same server stale while ITS FETCH IS IN FLIGHT
+/// share that one fetch. The second never sends its own `tools/list`; both calls go on once the
+/// first fetch lands, even strict-live.
+#[test]
+fn concurrent_mcp_callers_share_one_list_fetch() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open_with(STRICT_SECTION);
+    let held = HoldLists::on();
+    for unit in [330, 331] {
+        assert_eq!(
+            d.arrive(unit, "POST", "/mcp", ST_CALL, ST_FIELDS).outcome,
+            Outcome::Ready
+        );
+        d.piece(unit, &Given::attempt(ALICE, "st"));
+        let waiting = d.piece(unit, &Given::caller(ALICE, ST_CALL));
+        assert_eq!(
+            waiting.outcome,
+            Some(Outcome::Pending),
+            "unit {unit} waits on the fetch in flight"
+        );
+    }
+    assert_eq!(
+        lists_to(STATELESS_URL),
+        1,
+        "the second caller joined the fetch in flight instead of sending its own"
+    );
+    drop(held);
+    for unit in [330, 331] {
+        let sent = d.pump(unit, &Given::caller(ALICE, ST_CALL));
+        assert!(sent.far, "unit {unit} is relayed: {}", sent.text());
+    }
+    assert_eq!(lists_to(STATELESS_URL), 1, "one fetch served the burst");
 }
 
 // ── A-H1: the operator's `connect` ──────────────────────────────────────────────────────────────
