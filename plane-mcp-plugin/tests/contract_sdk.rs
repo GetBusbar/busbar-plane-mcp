@@ -59,9 +59,13 @@ fn contract_sdk(file: &str) -> String {
 
 #[test]
 fn the_images_sdk_forgets_without_the_shared_lock_when_nothing_is_parked() {
+    // The parked table is lock-free slots claimed by compare-and-swap on the ticket (busbar
+    // d2b31edb7e, which replaced the `parked_len` fast path): a ticket with nothing parked is
+    // found absent by atomic loads alone and takes no lock.
     let safe = contract_sdk("safe.rs");
     assert!(
-        safe.contains("parked_len: AtomicUsize"),
+        safe.contains("slots claimed by compare-and-swap on the ticket")
+            && safe.contains("Nothing parked on `ticket` takes no lock at all."),
         "the image's contract SDK takes the parked-table mutex every worker shares on every entry: \
          its busbar pin predates the fast path the linked door has"
     );

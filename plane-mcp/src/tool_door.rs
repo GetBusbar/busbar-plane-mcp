@@ -5,7 +5,7 @@
 //! surface. [`door`] is the LINKED door; the same function is the DROPPED door once a `cdylib`
 //! exports it (`busbar_contract::export_door!`), so the two cannot answer differently.
 //!
-//! The lifecycle is this plane's own:
+//! The lifecycle is the SDK's plane lifecycle ([`PlaneLife`]) over this plane's answers:
 //!
 //! * `validate` reads the settings blob as the `tools:` section ([`door::read_tools_section`]) and
 //!   refuses in the grammar's words;
@@ -37,24 +37,23 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use busbar_contract::abi::mechanism::call::{InHead, OutHead, Outcome};
+use busbar_contract::abi::mechanism::call::{OutHead, Outcome};
 use busbar_contract::abi::mechanism::door::Statement;
-use busbar_contract::abi::mechanism::lifecycle::{
-    GenIn, RefreshIn, ReleaseIn, TickIn, TickOut, ValidateIn,
-};
+use busbar_contract::abi::mechanism::lifecycle::{GenIn, TickIn, TickOut};
 use busbar_contract::abi::mechanism::ticket::{CompletionHandle, Ticket};
 use busbar_contract::abi::plane::{
     ArriveIn, ArriveOut, OnPieceIn, OnPieceOut, OutField, PlaneCancelIn, PlaneCancelOut,
-    PlaneDriveIn, PlaneDriveOut, PlaneOpenIn, PlaneOpenOut, PlaneRefreshOut, PlaneSnapshot,
-    ProjectIn, ProjectOut, RecordWrite, RefusalIn, RefusalOut, ServeIn, ServeOut, UnitCount,
-    AUDIT_APPLIED, AUDIT_REJECTED, CANCEL_ABORTED, CANCEL_OK_PARTIAL, EMIT_DONE, EMIT_TO_FAR_END,
-    FROM_CALLER, FROM_FAR_END, FROM_KERNEL, PIECE_HAS_STATUS, PIECE_LAST, PRINCIPAL_REQUIRED,
-    RECORD_AUDIT, RECORD_PUT, REFUSAL_ARRIVE, REFUSAL_GATE, REFUSAL_KERNEL, ROUTE_DIRECT,
-    ROUTE_POOL, UNITS_REPORTED, VERDICT_RETRY,
+    PlaneDriveIn, PlaneDriveOut, PlaneOpenIn, PlaneSnapshot, ProjectIn, ProjectOut, RecordWrite,
+    RefusalIn, RefusalOut, ServeIn, ServeOut, UnitCount, AUDIT_APPLIED, AUDIT_REJECTED,
+    CANCEL_ABORTED, CANCEL_OK_PARTIAL, EMIT_DONE, EMIT_TO_FAR_END, FROM_CALLER, FROM_FAR_END,
+    FROM_KERNEL, PIECE_HAS_STATUS, PIECE_LAST, PRINCIPAL_REQUIRED, RECORD_AUDIT, RECORD_PUT,
+    REFUSAL_ARRIVE, REFUSAL_GATE, REFUSAL_KERNEL, ROUTE_DIRECT, ROUTE_POOL, UNITS_REPORTED,
+    VERDICT_RETRY,
 };
 use busbar_contract::abi::sdk::door::statement;
 use busbar_contract::abi::sdk::exchange::{REPLY_MAX, REPLY_OVER_BOUND};
 use busbar_contract::abi::sdk::life::Refusal;
+use busbar_contract::abi::sdk::plane_life::{Opened, PlaneLife, Published};
 use busbar_contract::abi::sdk::publish::{Generations, Keyed};
 use busbar_contract::abi::sdk::services::ServiceError;
 use busbar_contract::abi::sdk::{
@@ -182,6 +181,12 @@ pub struct McpDoor {
     /// When each registered server's tool list was last fetched (Unix ms, the kernel's clock): what
     /// verify-on-call reads its `verify_ttl` against.
     checked: Keyed<String, u64>,
+    /// THE TOOL-LIST FETCH IN FLIGHT per server (single-flight): the one call fetching it, until
+    /// when its lease holds, and the calls waiting on it.
+    list_fetch: Keyed<String, ListFetch>,
+    /// How many of each server's verify-on-call fetches have landed: a call that joined a fetch
+    /// goes on once this moves past the count it joined at.
+    list_landed: Keyed<String, u64>,
     /// The host's wake (`HostTables::wake`): a task's continuation and a held subscription are woken
     /// through it when what they wait for moves.
     wake: Option<busbar_contract::abi::sdk::StaticWake>,
@@ -264,41 +269,35 @@ macro_rules! slot {
     };
 }
 
-slot!(
-    /// `validate`: the settings read as the section, or refused in the grammar's words.
-    Validate, ValidateIn, OutHead, |_, input, mut out| {
-        match door::read_dealt_tools(input.settings().bytes()) {
-            Ok(_) => Outcome::Ready,
-            Err(text) => out.fail(Refusal::refused(text)),
-        }
-    }
-);
+/// THE LIFECYCLE over the SDK's [`PlaneLife`] (`lifecycle: plane_life(McpDoor)`): `validate`,
+/// `open`, `refresh` and `published` are this plane's; `retire`, `release` and `close` are the SDK's
+/// (a generation's snapshot and what it held are dropped; nothing is held under a lease); `tick`,
+/// `drive` and `cancel` are this plane's own.
+impl PlaneLife for McpDoor {
+    type Held = Held;
 
-slot!(
+    fn generations(&self) -> &Generations<PlaneSnapshot, Held> {
+        &self.generations
+    }
+
+    /// `validate`: the settings read as the section, or refused in the grammar's words.
+    fn validate(settings: &[u8]) -> Result<(), Refusal> {
+        door::read_dealt_tools(settings)
+            .map(|_| ())
+            .map_err(Refusal::refused)
+    }
+
     /// `open`: the instance over the section, the public base URL and the host services, and the
     /// first generation's snapshot.
-    Open, PlaneOpenIn, PlaneOpenOut, |instance, input, mut out| {
-        let (cfg, pools) = match door::read_open(input.open().settings().bytes()) {
-            Ok(opened) => opened,
-            Err(text) => return out.fail(Refusal::refused(text)),
-        };
+    fn open(input: &Lent<'_, PlaneOpenIn>) -> Result<Opened<Self>, Refusal> {
+        let (cfg, pools) =
+            door::read_open(input.open().settings().bytes()).map_err(Refusal::refused)?;
         let generation = input.open().generation();
         let owned = input.owned().bytes();
-        let admitted = match door::admitted_endpoint(
-            input.public_url().stated().as_deref(),
-            owned,
-        ) {
-            Ok(admitted) => admitted,
-            Err(text) => return out.fail(Refusal::refused(text)),
-        };
-        let facts = match door::resource_facts(owned) {
-            Ok(facts) => facts,
-            Err(text) => return out.fail(Refusal::refused(text)),
-        };
-        let origins = match door::allowed_origins(owned) {
-            Ok(origins) => origins,
-            Err(text) => return out.fail(Refusal::refused(text)),
-        };
+        let admitted = door::admitted_endpoint(input.public_url().stated().as_deref(), owned)
+            .map_err(Refusal::refused)?;
+        let facts = door::resource_facts(owned).map_err(Refusal::refused)?;
+        let origins = door::allowed_origins(owned).map_err(Refusal::refused)?;
         let open = input.field(|i| &i.open);
         let host = open.host();
         let plane = McpDoor {
@@ -325,50 +324,37 @@ slot!(
             pools,
             ..Held::of(generation, cfg)
         };
-        out.publish_with(|o| &o.snapshot, &plane.generations, generation, &spec, held);
-        instance.open(plane);
-        Outcome::Ready
+        Ok(Opened {
+            plane,
+            first: Published { spec, held },
+        })
     }
-);
 
-slot!(
     /// `refresh`: the new section judged, and the next generation's snapshot over the same public base
     /// URL.
-    Refresh, RefreshIn, PlaneRefreshOut, |instance, input, mut out| {
-        let Some(plane) = instance.get() else {
-            return Outcome::Failed;
-        };
-        let (cfg, pools) = match door::read_open(input.settings().bytes()) {
-            Ok(opened) => opened,
-            Err(text) => return out.fail(Refusal::refused(text)),
-        };
-        let generation = input.generation();
-        let spec = door::snapshot_spec_with(plane.admitted.clone(), plane.facts.clone());
+    fn refresh(&self, settings: &[u8], generation: u64) -> Result<Published<Held>, Refusal> {
+        let (cfg, pools) = door::read_open(settings).map_err(Refusal::refused)?;
+        let spec = door::snapshot_spec_with(self.admitted.clone(), self.facts.clone());
         let held = Held {
             pools,
             ..Held::of(generation, cfg)
         };
-        out.publish_with(|o| &o.snapshot, &plane.generations, generation, &spec, held);
-        // A subscription held as a session compares what its caller can see on the move.
-        door_listen::wake_all(plane);
-        Outcome::Ready
+        Ok(Published { spec, held })
     }
-);
 
-slot!(
-    /// `retire`: the generation's snapshot is dropped.
-    Retire, GenIn, OutHead, |instance, input, _| {
-        if let Some(plane) = instance.get() {
-            plane.generations.retire(input.generation());
-        }
-        Outcome::Ready
+    /// A generation was published: a subscription held as a session compares what its caller can
+    /// see on the move. At `open` nothing is held yet, so it wakes nothing.
+    fn published(&self, _generation: u64) {
+        door_listen::wake_all(self);
     }
-);
 
-slot!(
     /// `tick`: the clock of the subscriptions held as sessions ([`door_listen::tick`]), every
     /// [`door_listen::POLL_NS`].
-    Tick, TickIn, TickOut, |instance, input, mut out| {
+    fn tick(
+        instance: Instance<'_, Self>,
+        input: Lent<'_, TickIn>,
+        mut out: Out<'_, TickOut>,
+    ) -> Outcome {
         let given = input;
         let next = instance.get().map_or(0, |plane| {
             door_line::tick(plane, given.head().ticket(), given.now_ns());
@@ -379,11 +365,13 @@ slot!(
         out.set(|o| &o.next_tick_ns, next);
         Outcome::Ready
     }
-);
 
-slot!(
     /// `drive`: the subscriptions held as sessions whose step is due ([`door_listen::drive`]).
-    Drive, PlaneDriveIn, PlaneDriveOut, |instance, input, mut out| {
+    fn drive(
+        instance: Instance<'_, Self>,
+        input: Lent<'_, PlaneDriveIn>,
+        mut out: Out<'_, PlaneDriveOut>,
+    ) -> Outcome {
         match instance.get() {
             Some(plane) => {
                 // The held 2024-11-05 streams are read on this ticket first: what they hand on
@@ -394,14 +382,16 @@ slot!(
             None => Outcome::Ready,
         }
     }
-);
 
-slot!(
     /// `cancel`: the cancelled unit's state is dropped, found by its ticket or, cancelled before any
     /// piece reached it, by the unit the host names. Answered `CANCEL_OK_PARTIAL` when the far end
     /// had begun its answer, so the units it reported bill when its answer was streamed (the
     /// ledger records what the dialect did), else `CANCEL_ABORTED`.
-    Cancel, PlaneCancelIn, PlaneCancelOut, |instance, input, mut out| {
+    fn cancel(
+        instance: Instance<'_, Self>,
+        input: Lent<'_, PlaneCancelIn>,
+        mut out: Out<'_, PlaneCancelOut>,
+    ) -> Outcome {
         let mut stopped = Vec::new();
         let mut answered = false;
         if let Some(plane) = instance.get() {
@@ -429,7 +419,10 @@ slot!(
         // host's buffers cannot hold are a FAULT the host is told of, never dropped unsaid.
         let (mut records, mut arena) = (input.records_buf(), input.arena_buf());
         for id in &stopped {
-            records.push(audit_write(&mut arena, &crate::call::AuditRow::task_cancel(id)));
+            records.push(audit_write(
+                &mut arena,
+                &crate::call::AuditRow::task_cancel(id),
+            ));
         }
         if !(records.fits() && arena.fits()) {
             return Outcome::Fault;
@@ -440,21 +433,15 @@ slot!(
         out.set(|o| &o.arena_written, aw as u64);
         out.set(
             |o| &o.cancel.disposition,
-            if answered { CANCEL_OK_PARTIAL } else { CANCEL_ABORTED },
+            if answered {
+                CANCEL_OK_PARTIAL
+            } else {
+                CANCEL_ABORTED
+            },
         );
         Outcome::Ready
     }
-);
-
-slot!(
-    /// `release`: this plane answers under no lease.
-    Release, ReleaseIn, OutHead, |_, _, _| { Outcome::Ready }
-);
-
-slot!(
-    /// `close`: the SDK drops the instance and every snapshot it still holds.
-    Close, InHead, OutHead, |_, _, _| { Outcome::Ready }
-);
+}
 
 // ── the request path ──────────────────────────────────────────────────────────────────────────
 
@@ -492,6 +479,17 @@ fn roots_epoch(plane: &McpDoor, principal: &str) -> u64 {
     let shared = plane.roots_shared.get(&()).unwrap_or(0);
     own.wrapping_add(shared.wrapping_shl(32))
 }
+/// ONE SERVER'S TOOL-LIST FETCH IN FLIGHT (single-flight, `docs/mcp.md`: concurrent callers share
+/// one fetch): the unit making it, the monotonic time its lease lapses (the fetch is bounded by the
+/// server's `timeout:`, so a lease past it belongs to a fetch that will never land and the next
+/// call takes it over), and the tickets of the calls waiting on it, woken when it lands.
+#[derive(Debug, Clone)]
+struct ListFetch {
+    owner: u64,
+    until_ms: u64,
+    waiters: Vec<Ticket>,
+}
+
 /// One unit's state, from its arrival to its end.
 struct CallUnit {
     /// The unit's own key, as the kernel minted it.
@@ -527,6 +525,10 @@ struct CallUnit {
     claim: Option<(String, u32, u64)>,
     /// Verify-on-call's sighting, kept while the kernel's trust book stamps it.
     verified: Option<crate::trust::Sighting>,
+    /// THE FETCH THIS CALL JOINED (single-flight): the server's landed-fetch count when it found
+    /// another call's `tools/list` of the same server in flight and waited on it instead of
+    /// sending its own ([`ListFetch`]).
+    joined_fetch: Option<u64>,
     /// The door's own exchange with a stdio member's child, while it pends ([`door_program`]).
     program: Option<(door_program::Purpose, crate::tool_program::ProgramExchange)>,
     /// The attempt whose stdio member the door greeted ([`door_program::ready`]).
@@ -1163,6 +1165,7 @@ slot!(
             pending: None,
             claim: None,
             verified: None,
+            joined_fetch: None,
             program: None,
             readied: None,
             task: task_run.map(|(reference, params, _, retry)| {
@@ -1459,6 +1462,49 @@ fn verify_on_call(
             if fresh {
                 return Looked::Fresh;
             }
+            // SINGLE-FLIGHT: a call that finds this server's fetch already in flight waits on it
+            // and goes on with what it landed, even strict-live; it never sends its own.
+            let key = server.to_string();
+            let landed_count = plane.list_landed.get(&key).unwrap_or(0);
+            if unit
+                .joined_fetch
+                .is_some_and(|joined| landed_count > joined)
+            {
+                unit.joined_fetch = None;
+                return Looked::Fresh;
+            }
+            let mono =
+                clock(Some(services), ticket, &mut unit.issued).map(|r| r.mono_ns / 1_000_000);
+            let me = unit.key;
+            let joined = plane.list_fetch.with(&key, |lease| match lease {
+                Some(lease)
+                    if lease.owner != me && mono.is_some_and(|now| now < lease.until_ms) =>
+                {
+                    if !lease.waiters.contains(&ticket) {
+                        lease.waiters.push(ticket);
+                    }
+                    true
+                }
+                _ => false,
+            });
+            if joined {
+                unit.joined_fetch.get_or_insert(landed_count);
+                return Looked::Pending;
+            }
+            if plane
+                .list_fetch
+                .get(&key)
+                .is_none_or(|lease| lease.owner != me)
+            {
+                plane.list_fetch.insert(
+                    key,
+                    ListFetch {
+                        owner: me,
+                        until_ms: mono.unwrap_or(0).saturating_add(def.timeout_ms()),
+                        waiters: Vec::new(),
+                    },
+                );
+            }
             let base = VERIFY_SEQ.saturating_add(unit.attempt.saturating_mul(ROUND_SEQ_SPAN));
             if program {
                 let std::task::Poll::Ready(answer) =
@@ -1519,7 +1565,28 @@ fn verify_on_call(
             plane.checked.remove(&server.to_string());
         }
     }
+    landed_fetch(plane, server, unit.key);
     Looked::Fresh
+}
+
+/// THE FETCH `owner` MADE OF `server` LANDED (or failed, which the calls waiting on it read the
+/// same way: the sighting is what they judge): its lease is released, the landed count moves, and
+/// every call that joined it is woken to go on with it.
+fn landed_fetch(plane: &McpDoor, server: &str, owner: u64) {
+    let key = server.to_string();
+    let waiters = plane.list_fetch.with(&key, |lease| match lease {
+        Some(lease) if lease.owner == owner => Some(std::mem::take(&mut lease.waiters)),
+        _ => None,
+    });
+    let Some(waiters) = waiters else {
+        return;
+    };
+    plane.list_fetch.remove(&key);
+    let count = plane.list_landed.get(&key).unwrap_or(0).saturating_add(1);
+    plane.list_landed.insert(key, count);
+    if let Some(wake) = plane.wake {
+        waiters.iter().for_each(|t| wake.wake(*t));
+    }
 }
 
 /// THE SIGHTING ON THE KERNEL'S TRUST BOOK (`trust.sight` of the observed catalogue, or
@@ -3906,11 +3973,7 @@ slot!(
 busbar_contract::plugin_door! {
     ops: busbar_contract::abi::plane::Ops,
     statement: STATEMENT,
-    lifecycle: {
-        validate: Safe<Validate>, open: Safe<Open>, refresh: Safe<Refresh>, retire: Safe<Retire>,
-        tick: Safe<Tick>, drive: Safe<Drive>, cancel: Safe<Cancel>, release: Safe<Release>,
-        close: Safe<Close>,
-    },
+    lifecycle: plane_life(McpDoor),
     kind_ops: {
         arrive: Safe<Arrive>, on_piece: Safe<OnPiece>, refusal: Safe<RefusalSlot>,
         serve: Safe<Serve>, hydrate: Safe<Inert>, start: Safe<Inert>, project: Safe<Project>,
