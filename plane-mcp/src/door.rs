@@ -364,6 +364,9 @@ const TAIL_VALUE: PlaneTail = {
     t.signing_domain = abi_str("mcp/ask-state/v1");
     t.signing_kid_prefix = abi_str("busbar-mcp-ask-");
     t.cli_help = abi_str(crate::tool_meta::HELP_FLAGS);
+    // The section's `upstream_credentials:` default is the kernel's key, stripped before the
+    // section reaches this plane: the kernel refuses `passthrough` there in these words.
+    t.caller_credential_refusal = abi_str(crate::tools_config::REFUSE_PASSTHROUGH_SECTION);
     t.admin_openapi = Blob::json(ADMIN_OPENAPI.as_bytes());
     // No stream ceiling: nothing bounds a stalled consumer (the event and subscribe streams are
     // pull-based), so the mcp plane states none.
