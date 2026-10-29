@@ -171,9 +171,11 @@ pub struct McpDoor {
     roots_shared: Keyed<(), u64>,
     /// The host tables `open` handed it: the connector a `connect` reaches its server through.
     host: Option<busbar_contract::abi::sdk::conn::StaticHost>,
-    /// Each registered server's last sighting (`connect`): what the trust views and the dispatch
-    /// gate judge against the section's approval.
-    sightings: Keyed<String, crate::trust::Sighting>,
+    /// Each registered server's PUBLISHED TOOL LIST ([`PublishedList`]): its last sighting
+    /// (verify-on-call's re-fetch, or `connect`), under its generation. What the trust views and the
+    /// dispatch gate judge against the section's approval; replaced whole, in one swap
+    /// ([`publish`]).
+    sightings: Keyed<String, PublishedList>,
     /// THE LOCAL HALF OF THE SPENT-APPROVAL LEDGER: each nonce this instance redeemed, until the
     /// state it records lapses. Consulted before the host's one-time claim, so a node refuses its
     /// own replay without a round trip, and the whole gate where the host binds no store.
@@ -1406,6 +1408,41 @@ impl crate::ask::Seal for DoorSeal<'_> {
     }
 }
 
+/// ONE SERVER'S PUBLISHED TOOL LIST: the sighting a re-fetch landed, under the generation its
+/// publish bumped to. It is replaced whole, in one swap ([`publish`]), and a reader takes one copy
+/// and judges every tool it reads against that copy's digests ([`trust_of`]): never a mix of two
+/// lists, and never a list half landed on the kernel's trust book.
+#[derive(Debug, Clone, Default)]
+struct PublishedList {
+    /// Moved by one on every publish of the server's list; `0` = never published.
+    generation: u64,
+    sighting: crate::trust::Sighting,
+}
+
+/// PUBLISH `sighting` as `server`'s tool list, under its next generation, in ONE swap: a reader
+/// holds either the list before it or this one, whole. Answers the generation published.
+fn publish(plane: &McpDoor, server: &str, sighting: crate::trust::Sighting) -> u64 {
+    plane.sightings.with_all(|lists| {
+        let generation = lists
+            .get(server)
+            .map_or(0, |list| list.generation)
+            .saturating_add(1);
+        lists.insert(
+            server.to_string(),
+            PublishedList {
+                generation,
+                sighting,
+            },
+        );
+        generation
+    })
+}
+
+/// `server`'s published tool list, as one copy.
+fn published(plane: &McpDoor, server: &str) -> PublishedList {
+    plane.sightings.get(&server.to_string()).unwrap_or_default()
+}
+
 /// The answer to the caller's body: from what the plane holds, or the relayed call admitted.
 /// What verify-on-call came to.
 enum Looked {
@@ -1561,7 +1598,7 @@ fn verify_on_call(
     // unreachable server is fetched again on its next call, and a failed
     // clock read stamps nothing.
     let landed = matches!(sighting, Sighting::Seen(_));
-    plane.sightings.insert(server.to_string(), sighting);
+    publish(plane, server, sighting);
     match now_ms {
         Some(now_ms) if landed => {
             plane.checked.insert(server.to_string(), now_ms);
@@ -1676,25 +1713,41 @@ fn kernel_items(plane: &McpDoor, ticket: Ticket, server: &str) -> Vec<crate::tru
 }
 
 /// The kernel's Approve on one tool, as the route leg asks it: `trust.serves` over the tool's registration (the counterparty) and its trust key
-/// (the tool as `tools_allow` names it, the upstream's own spelling), at its last sighting. The door
-/// judges nothing: the one fact it renders on its own is that its last re-fetch could not reach
-/// the server (the call then fails as an upstream failure). A host that answers no trust service
-/// serves nothing (fail closed).
+/// (the tool as `tools_allow` names it, the upstream's own spelling), at the digest `list` (the
+/// server's published list, one copy the caller took) offers it at. The door judges nothing: the
+/// one fact it renders on its own is that its last re-fetch could not reach the server (the call
+/// then fails as an upstream failure). A host that answers no trust service serves nothing (fail
+/// closed).
+///
+/// THE DIGEST IS THE PUBLISHED LIST'S, never the kernel book's last per-tool sighting: a re-fetch
+/// lands its tools on the book one by one before it publishes, so the book alone can hold one tool
+/// of the new list beside another of the old. A tool the published list does not offer is not
+/// served from an older list's sighting: it is no tool the server offers now. A server never
+/// sighted is judged at the book's own word.
 fn trust_of(
     plane: &McpDoor,
     ticket: Ticket,
     issued: &mut u32,
     entry: &crate::catalogue::ToolEntry,
+    list: &PublishedList,
 ) -> crate::call::Trust {
     use crate::call::Trust;
-    if let Some(crate::trust::Sighting::Failed(reason)) = plane.sightings.get(&entry.server) {
-        return Trust::Unreached(reason);
-    }
+    use crate::trust::Sighting;
+    let digest = match &list.sighting {
+        Sighting::Failed(reason) => return Trust::Unreached(reason.clone()),
+        Sighting::Seen(observed) => match observed.capabilities.get(&entry.tool) {
+            Some(digest) => Some(digest.as_str()),
+            None => {
+                return Trust::Verdict(busbar_contract::abi::host::service::DISTRUST_UNKNOWN_ITEM)
+            }
+        },
+        Sighting::Never => None,
+    };
     let Some(services) = plane.services else {
         return Trust::Verdict(busbar_contract::abi::host::service::DISTRUST_UNKNOWN);
     };
     let handle = door_tasks::handle(ticket, issued, &mut None);
-    match services.trust_serves(handle, &entry.server, Some(&entry.tool), None) {
+    match services.trust_serves(handle, &entry.server, Some(&entry.tool), digest) {
         Ok(code) => Trust::Verdict(code),
         // A book that does not answer serves nothing (fail closed).
         Err(_) => Trust::Verdict(busbar_contract::abi::host::service::DISTRUST_UNKNOWN),
@@ -1892,10 +1945,20 @@ fn answer_body(
     }
     // The kernel's Approve, asked on the route leg after the re-fetch: the called
     // tool's verdict, and on a listing every granted tool's, each its own `trust.serves`.
+    // Each server's published list is read ONCE for the answer: every tool of it is judged
+    // against that one copy, whatever a re-fetch beside it publishes meanwhile.
+    let mut lists: BTreeMap<String, PublishedList> = BTreeMap::new();
+    let mut list_of = |server: &str| {
+        lists
+            .entry(server.to_string())
+            .or_insert_with(|| published(plane, server))
+            .clone()
+    };
     let verdict = called.map(|entry| {
+        let list = list_of(&entry.server);
         (
             entry.namespaced.clone(),
-            trust_of(plane, ticket, &mut unit.issued, entry),
+            trust_of(plane, ticket, &mut unit.issued, entry, &list),
         )
     });
     use busbar_contract::abi::host::service::{DISTRUST_CHANGED, DISTRUST_QUARANTINED};
@@ -1914,11 +1977,9 @@ fn answer_body(
             // than the one approved (the rug-pull) — judged changed only against a sighting: one its
             // server was never seen to offer is listed. A tool waiting on the operator stays listed,
             // so the caller can see what exists (a call is refused on its own verdict).
-            let sighted = matches!(
-                plane.sightings.get(&entry.server),
-                Some(crate::trust::Sighting::Seen(_))
-            );
-            let hides = match trust_of(plane, ticket, &mut unit.issued, entry) {
+            let list = list_of(&entry.server);
+            let sighted = matches!(list.sighting, crate::trust::Sighting::Seen(_));
+            let hides = match trust_of(plane, ticket, &mut unit.issued, entry, &list) {
                 crate::call::Trust::Verdict(DISTRUST_QUARANTINED) => true,
                 crate::call::Trust::Verdict(DISTRUST_CHANGED) => sighted,
                 _ => false,
@@ -3758,7 +3819,7 @@ slot!(
             return out.answer(&input, not_found, &[(CONTENT_TYPE, "text/plain")], b"", 0);
         };
         if verb != "connect" {
-            let last = plane.sightings.get(name).unwrap_or_default();
+            let last = published(plane, name).sighting;
             let items = kernel_items(plane, instance.ticket(), name);
             let view = if verb == "changes" {
                 crate::trust::trust_view(name, &def, &last, &items)
@@ -3842,7 +3903,7 @@ slot!(
                 return Outcome::Pending;
             }
         }
-        plane.sightings.insert(name.clone(), sighting.clone());
+        publish(plane, name, sighting.clone());
         // THE FRESHNESS CLOCK records that the operator's connect SAW the list: a call within
         // `verify_ttl` of it reuses this sighting rather than fetching the list again. A contact
         // that failed stamps nothing: the next call fetches again, never
