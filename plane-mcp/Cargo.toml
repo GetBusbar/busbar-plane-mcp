@@ -72,7 +72,7 @@ url = { workspace = true }
 # The TEST-ONLY seal (#65). `busbar_contract::plugin::TestKernelSeal` is the one blessed
 # fixture implementor of the SEALED `KernelSeal` trait; this crate's test harnesses used to
 # forge their own. Dev-only and feature-gated, so it is absent from every release build.
-busbar-contract = { workspace = true, features = ["test-seal", "alloc-counter"] }
+busbar-contract = { workspace = true, features = ["test-seal"] }
 # THE LOADER, TEST-ONLY: `src/tests/relayed_call_tests.rs` admits the linked door through the one
 # loader, as busbar does, and drives it with the loader's own frames (`conformance::{input,
 # output}`), so the door's transcript is held to the crate's builders with no raw ABI call.
