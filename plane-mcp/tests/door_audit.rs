@@ -769,6 +769,11 @@ const DRIVER: Ticket = Ticket {
 static TICKS: AtomicU64 = AtomicU64::new(1);
 
 fn open_with(section: &str) -> Door {
+    opens(section).expect("the door opens")
+}
+
+/// The door over `section`, or `None` when its `open` refuses the section.
+fn opens(section: &str) -> Option<Door> {
     let mut i: PlaneOpenIn = z();
     i.open = OpenIn {
         head: head::<PlaneOpenIn>(life::OPEN, Ticket::NONE),
@@ -793,10 +798,9 @@ fn open_with(section: &str) -> Door {
             std::ptr::from_mut(&mut o).cast(),
         )
     };
-    assert_eq!(ret.outcome(), Outcome::Ready, "the door opens");
-    Door {
+    (ret.outcome() == Outcome::Ready).then_some(Door {
         instance: o.open.instance,
-    }
+    })
 }
 
 /// What `arrive` answered: its outcome and, refused, the status the refusal wears.
@@ -1868,4 +1872,130 @@ fn a_cancel_after_the_far_end_answered_is_partial() {
         (Outcome::Ready, CANCEL_OK_PARTIAL),
         "cut after the far end answered: partial"
     );
+}
+
+// ── item 5: the caller's busbar credential never travels upstream ───────────────────────────────
+
+/// The credential the caller authenticated to busbar with (its virtual key, or a busbar-audience
+/// token), as it rides the caller's request head.
+const CALLER_SECRET: &str = "bb-vk-callers-own-busbar-key-5e1d7c";
+
+/// The `st` registration (the stateless upstream), with `extra` merged into it, inside a section
+/// with `default` merged in at the section level.
+fn st_section(default: Value, extra: Value) -> String {
+    let mut st = json!({
+        "url": STATELESS_URL,
+        "pin": {"mechanism": "unpinned"},
+        "verify_ttl": "1h",
+        "tools_allow": {"read_file": {}},
+    });
+    for (k, v) in extra.as_object().into_iter().flatten() {
+        st[k] = v.clone();
+    }
+    let mut section = json!({ "st": st });
+    for (k, v) in default.as_object().into_iter().flatten() {
+        section[k] = v.clone();
+    }
+    section.to_string()
+}
+
+/// The `token_exchange:` block (and the `aud:` an exchange requires) of a registration.
+fn exchanged() -> Value {
+    json!({
+        "aud": "https://up.example",
+        "token_exchange": {
+            "token_url": "https://as.example/token",
+            "subject_token": {"env": "BUSBAR_ST_SUBJECT"},
+        },
+    })
+}
+
+/// RED item 5 (website `mcp.astro:497-531`, "the caller's own Busbar credential never travels
+/// upstream, in any credential mode"): IN EVERY CREDENTIAL MODE, the bytes of the caller's busbar
+/// credential appear in no request any upstream receives: not in the relayed call's head or body,
+/// not in the verify-on-call fetch's. A mode that would lend it (`passthrough`, per registration or
+/// as the section default, alone or beside `token_exchange:`) is refused when the door opens, so no
+/// such server is ever reached.
+#[test]
+fn the_callers_credential_never_reaches_the_upstream_in_any_mode() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    let bearer = format!("Bearer {CALLER_SECRET}");
+    let served = [
+        ("no mode written", st_section(json!({}), json!({}))),
+        (
+            "`own` as the section default",
+            st_section(json!({"upstream_credentials": "own"}), json!({})),
+        ),
+        (
+            "`own` on the registration",
+            st_section(json!({}), json!({"upstream_credentials": "own"})),
+        ),
+        ("`token_exchange:`", st_section(json!({}), exchanged())),
+    ];
+    for (unit, (mode, section)) in (70_u64..).zip(served) {
+        *upstreams() = Some(Upstreams::default());
+        let d = opens(&section).unwrap_or_else(|| panic!("{mode}: the door opens"));
+        let mut fields = ST_FIELDS.to_vec();
+        fields.push(("authorization", bearer.as_str()));
+        assert_eq!(
+            d.arrive(unit, "POST", "/mcp", ST_CALL, &fields).outcome,
+            Outcome::Ready,
+            "{mode}"
+        );
+        d.piece(unit, &Given::attempt(ALICE, "st"));
+        let caller = Given {
+            head: vec![("authorization", bearer.as_str())],
+            ..Given::caller(ALICE, ST_CALL)
+        };
+        let sent = d.pump(unit, &caller);
+        assert!(sent.far, "{mode}: the call is relayed: {}", sent.text());
+        assert!(
+            lists_to(STATELESS_URL) >= 1,
+            "{mode}: the verify-on-call fetch reached the upstream"
+        );
+        let relayed = format!("{} {:?} {}", sent.request, sent.fields, sent.text());
+        assert!(
+            !relayed.contains(CALLER_SECRET),
+            "{mode}: the relayed call carries the caller's busbar credential: {relayed}"
+        );
+        for heard in seen() {
+            let wire = format!("{:?} {}", heard.fields, heard.body);
+            assert!(
+                !wire.contains(CALLER_SECRET),
+                "{mode}: {} heard the caller's busbar credential: {wire}",
+                heard.url
+            );
+        }
+    }
+
+    let lending = [
+        (
+            "`passthrough` on the registration",
+            st_section(json!({}), json!({"upstream_credentials": "passthrough"})),
+        ),
+        (
+            "`passthrough` as the section default",
+            st_section(json!({"upstream_credentials": "passthrough"}), json!({})),
+        ),
+        (
+            "a `passthrough` section default over a `token_exchange:` registration",
+            st_section(json!({"upstream_credentials": "passthrough"}), exchanged()),
+        ),
+        (
+            "`passthrough` beside the registration's own `token_exchange:`",
+            {
+                let mut both = exchanged();
+                both["upstream_credentials"] = json!("passthrough");
+                st_section(json!({}), both)
+            },
+        ),
+    ];
+    for (mode, section) in lending {
+        *upstreams() = Some(Upstreams::default());
+        assert!(
+            opens(&section).is_none(),
+            "{mode}: a mode that lends the caller's busbar credential upstream is refused"
+        );
+        assert!(seen().is_empty(), "{mode}: no upstream was reached");
+    }
 }
