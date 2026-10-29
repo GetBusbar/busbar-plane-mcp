@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # THE SUBJECT'S COMPOSITION, HELD BEFORE IT IS BUILT: the package compose.sh names must link this
-# plane, and every row naming the plane must name an item this plane exports. A drift between the
+# plane, every row naming the plane must name an item this plane exports, and no diagnostic code the
+# plane declares may be one the pinned host's catalogue already holds (the root refuses to boot
+# over it: "plugin 'busbar-plane-mcp' declares BUSBAR-NNNN: the catalogue already holds that code").
+# A drift between the
 # pinned busbar's rows and this plane's door is then a precise red in seconds, not an E0433 at the
 # end of a fat-LTO release build.
 #
@@ -10,9 +13,9 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 checkout="${1:-${BUSBAR_CHECKOUT:?busbar checkout}}"
 stage="${2:-$(mktemp -d)}"
 manifest="$(bash "$here/scripts/mcp-subject/compose.sh" "$checkout" "$here/plane-mcp" "$stage")"
-"${PYTHON:-python3}" -I - "$manifest" "$here/plane-mcp" <<'PY'
-import os, re, sys
-manifest, plane = sys.argv[1:3]
+"${PYTHON:-python3}" -I - "$manifest" "$here/plane-mcp" "$checkout" <<'PY'
+import json, os, re, sys
+manifest, plane, checkout = sys.argv[1:4]
 krate, ident = "busbar-plane-mcp", "busbar_plane_mcp"
 text = open(manifest).read()
 lib = open(os.path.join(plane, "src", "lib.rs")).read()
@@ -68,6 +71,16 @@ for row in rows:
             fails.append(f"linked-declares {row} = {declares!r}: no such file")
     else:
         fails.append(f"linked-declares {row} = {declares!r}: neither a plane item nor an include_str!")
+catalog = os.path.join(checkout, "crates", "busbar-kernel", "src", "diagnostics", "catalog.toml")
+if not os.path.isfile(catalog):
+    fails.append(f"{catalog}: the pinned host's diagnostics catalogue is missing")
+else:
+    held = {int(c) for c in re.findall(r"^code\s*=\s*(\d+)\s*$", open(catalog).read(), re.M)}
+    declared = json.load(open(os.path.join(plane, "declares.json"))).get("diagnostics", [])
+    for d in declared:
+        if d["code"] in held:
+            fails.append(f"declares.json: BUSBAR-{d['code']:04d} ({d['slug']}) is a code the pinned "
+                         f"host's catalogue already holds ({catalog}); the subject refuses to boot")
 if not rows and not fails:
     fails.append(f"{manifest}: no [package.metadata.busbar.linked] row names {krate}")
 for f in fails:
