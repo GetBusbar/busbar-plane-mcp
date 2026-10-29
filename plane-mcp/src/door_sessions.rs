@@ -777,14 +777,39 @@ pub(super) fn announce(plane: &McpDoor, server: &str, uri: &str) {
     door_listen::announced(plane, server, uri);
 }
 
+/// THE RATE LIMIT on an upstream's list-changed notifications: at most one is accepted per server
+/// in this window (monotonic ms). Its timing is all busbar reads of it, and an accepted one only
+/// makes the next call re-fetch, so the window bounds how often an upstream can make busbar fetch.
+pub const LIST_CHANGED_MIN_INTERVAL_MS: u64 = 30_000;
+
+/// AN UPSTREAM SAID ITS LISTS CHANGED (`notifications/{tools,prompts,resources}/list_changed`):
+/// accepted under [`LIST_CHANGED_MIN_INTERVAL_MS`], it marks `server`'s list stale, so the next
+/// call re-verifies against the authoritative `tools/list`. The body is never read; nothing is
+/// installed, approved or promoted. A clock that cannot be read never suppresses one: stale is the
+/// safe direction.
+pub(super) fn list_changed(plane: &McpDoor, server: &str, now_ms: Option<u64>) {
+    let key = server.to_string();
+    if let (Some(now), Some(last)) = (now_ms, plane.list_noticed.get(&key)) {
+        if now >= last && now - last < LIST_CHANGED_MIN_INTERVAL_MS {
+            return;
+        }
+    }
+    if let Some(now) = now_ms {
+        plane.list_noticed.insert(key.clone(), now);
+    }
+    plane.checked.remove(&key);
+}
+
 /// WHAT AN UPSTREAM SAID ON ITS EVENT STREAM beside a relayed call's answer: its resource updates
-/// are announced to every watching session, and, for a caller in a session, its log records past
-/// the session's floor are delivered on that session's stream.
+/// are announced to every watching session, its list-changed notifications mark its list stale
+/// ([`list_changed`], at `mono_ms`), and, for a caller in a session, its log records past the
+/// session's floor are delivered on that session's stream.
 pub(super) fn heard(
     plane: &McpDoor,
     server: &str,
     raw: &[u8],
     session: Option<(&str, &Owner, u64)>,
+    mono_ms: Option<u64>,
 ) {
     for line in String::from_utf8_lossy(raw).lines() {
         let Some(data) = line.strip_prefix("data:") else {
@@ -799,6 +824,11 @@ pub(super) fn heard(
                     announce(plane, server, uri);
                 }
             }
+            Some(
+                "notifications/tools/list_changed"
+                | "notifications/prompts/list_changed"
+                | "notifications/resources/list_changed",
+            ) => list_changed(plane, server, mono_ms),
             Some("notifications/message") => {
                 let Some((id, owner, now)) = session else {
                     continue;
@@ -1740,6 +1770,12 @@ pub(super) fn fetch_in(
     super::door_legacy::recount(plane, &negotiating.key, negotiating.dropped);
     *slot = None;
     Poll::Ready(match done {
+        // A REDIRECT IS A FAILURE, NEVER FOLLOWED (security.md: the destination is the operator's
+        // `url:`, and nothing an upstream says may move it): whatever body rides a 3xx is not read.
+        Negotiated::Answer(status, ..) if (300..400).contains(&status) => Err(format!(
+            "the upstream answered HTTP {status}, a redirect; busbar never follows one, and \
+             nothing it carried is read"
+        )),
         Negotiated::Answer(status, raw, sse, sent) => {
             let body = if sse {
                 crate::call::last_sse_data(&raw)

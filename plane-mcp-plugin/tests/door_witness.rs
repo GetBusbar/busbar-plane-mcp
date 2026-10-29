@@ -598,7 +598,7 @@ mod both_ways {
     /// (`conformance::cdylib_of`). A missing artifact is a failure, never a skip: this test IS the
     /// dropped-in door's proof.
     fn dropped(d: &Dispatcher) -> Plugin<Plane> {
-        let path = busbar_plugin_loader::conformance::cdylib_of("busbar_plane_mcp_plugin");
+        let path = busbar_test_kit::conformance::cdylib_of("busbar_plane_mcp_plugin");
         let stated = LinkedRow::of_loaded(crate::loaded_door())
             .expect("the door renders its Statement")
             .statement;
@@ -745,13 +745,14 @@ mod both_ways {
         );
 
         // A call naming a tool the section does not approve is the catalogue's refusal, written
-        // here; a far end's piece for a unit the plane answered itself is declined.
+        // here, in the words an ungranted tool gets (the wire says nothing of what exists); a far
+        // end's piece for a unit the plane answered itself is declined.
         assert_eq!(step(&t, "arrive tools/call").outcome, Outcome::Ready);
         let c = step(&t, "answer tools/call");
         assert_eq!((c.outcome, c.status), (Outcome::Ready, 404));
         assert_eq!(
             document(&c.reply)["error"]["data"]["reason"],
-            json!("unknown_tool")
+            json!("not_granted")
         );
         assert_eq!(step(&t, "far end").outcome, Outcome::Refused);
 
@@ -1929,7 +1930,7 @@ mod both_ways {
                 ..bind(&d)
             };
             let p: Plugin<Plane> = if dropped_in {
-                let path = busbar_plugin_loader::conformance::cdylib_of("busbar_plane_mcp_plugin");
+                let path = busbar_test_kit::conformance::cdylib_of("busbar_plane_mcp_plugin");
                 let stated = LinkedRow::of_loaded(crate::loaded_door())
                     .expect("the door renders its Statement")
                     .statement;

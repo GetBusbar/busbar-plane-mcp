@@ -2,8 +2,8 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The plane's vocabulary against the conformance battery: its method names, error code table,
-//! metadata keys and revision, read from the battery's own sources at the pin (`BUSBAR_CHECKOUT`, a
-//! checkout of GetBusbar/busbar at `.busbar-ref`, which plugin-ci exports), so a battery that starts
+//! metadata keys and revision, read from the battery's own sources (this repo's
+//! `testing/mcp-conformance`, moved here from busbar by busbar 7f43d8a777), so a battery that starts
 //! sending something new fails HERE rather than in a run someone has to interpret.
 //!
 //! Moved in from the plugin crate's `tests/door_witness.rs` when this crate's only public item
@@ -12,14 +12,11 @@
 use crate::{codec, tool_ops as ops};
 use std::path::PathBuf;
 
-/// The battery's own source tree: busbar's `testing/mcp-conformance` at the pin (`BUSBAR_CHECKOUT`).
-/// An unset variable is a failure, never a skip: these tests read the battery or prove nothing.
+/// The battery's own source tree: this repo's `testing/mcp-conformance` (busbar at the pin no
+/// longer carries it). A missing directory is a failure, never a skip: each reader below panics on
+/// a battery file it cannot read.
 fn battery() -> PathBuf {
-    let busbar = std::env::var_os("BUSBAR_CHECKOUT").expect(
-        "BUSBAR_CHECKOUT is unset: the battery is busbar's testing/mcp-conformance at .busbar-ref \
-         (plugin-ci exports it)",
-    );
-    PathBuf::from(busbar).join("testing/mcp-conformance")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../testing/mcp-conformance")
 }
 
 /// Every method name the battery's suites and fake peers name.

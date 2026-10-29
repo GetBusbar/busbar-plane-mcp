@@ -131,8 +131,12 @@ fn a_call_with_no_name_is_malformed_and_logged_with_no_tool() {
     );
 }
 
+/// RED W11 (website `mcp.md:161,432`: the audit records every check, refusals included): a name
+/// past the ceiling is refused, AND the refusal is logged and audited (rejected), under a BOUNDED
+/// rendering of the name (a prefix and its byte length, which no real tool name can spell), never
+/// the name verbatim.
 #[test]
-fn a_name_past_the_ceiling_is_refused_before_the_log_opens() {
+fn an_oversized_name_refusal_is_audited_under_a_bounded_name() {
     let long = "x".repeat(MAX_TOOL_NAME_BYTES + 1);
     let (r, line) = refused(admit_call(
         &catalogue(),
@@ -144,7 +148,21 @@ fn a_name_past_the_ceiling_is_refused_before_the_log_opens() {
     ));
     assert_eq!(r.status, 400);
     assert!(r.message.starts_with("`params.name` is 257 bytes"));
-    assert_eq!(line, None, "no log line holds the oversized name");
+    let line = line.expect("the refusal is logged");
+    assert_eq!(line.reason, "tool_name_too_long");
+    assert_eq!(line.outcome, "refused");
+    assert!(
+        line.tool.len() < MAX_TOOL_NAME_BYTES && line.tool.contains("257 bytes"),
+        "the log holds a bounded rendering of the name: {}",
+        line.tool
+    );
+    let audit = line.audit.expect("the refusal is audited");
+    assert!(!audit.applied, "rejected");
+    assert!(
+        audit.resource.contains("257 bytes") && audit.resource.len() < MAX_TOOL_NAME_BYTES,
+        "the audit row names the bounded rendering: {}",
+        audit.resource
+    );
 }
 
 #[test]
@@ -1454,4 +1472,71 @@ fn the_relayed_leg_seals_the_answers_the_first_call_went_out_with() {
         &mut proceed,
     ));
     assert_eq!(own_answers(&plain), None);
+}
+
+/// RED W10 (website `mcp.md:141-144`: an unknown and an ungranted tool give "the same words"): the
+/// two answers are BYTE-IDENTICAL on the wire, status, message and `data` alike, whether the plane
+/// refuses the ungranted call itself or renders the kernel's grant denial ([`not_granted`]): a
+/// caller probing names learns only that there is nothing there for it. The per-call log keeps
+/// the two apart (`unknown_tool`, `not_granted`), where the operator reads them.
+#[test]
+fn an_unknown_and_an_ungranted_tool_are_byte_identical_on_the_wire() {
+    let id = json!(7);
+    let asked = params("fs_read_file", json!({}));
+    let (unknown, unknown_line) = refused(admit_call(
+        &Catalogue::build(1, &crate::tools_config::ToolsCfg::default()),
+        &id,
+        Some(&asked),
+        &no_header,
+        &everyone,
+        &mut proceed,
+    ));
+    let (ungranted, ungranted_line) = refused(admit_call(
+        &catalogue(),
+        &id,
+        Some(&asked),
+        &no_header,
+        &|kind: &str, _: &str| kind != crate::door::SCOPE_TOOL,
+        &mut proceed,
+    ));
+    let denied = not_granted(&id, "fs_read_file");
+    assert_eq!(unknown.status, ungranted.status);
+    assert_eq!(
+        String::from_utf8(unknown.body()).unwrap(),
+        String::from_utf8(ungranted.body()).unwrap(),
+        "an unknown and an ungranted tool read the same on the wire"
+    );
+    assert_eq!(
+        (denied.status, denied.body()),
+        (ungranted.status, ungranted.body())
+    );
+    assert_eq!(unknown_line.expect("logged").reason, "unknown_tool");
+    assert_eq!(ungranted_line.expect("logged").reason, "not_granted");
+}
+
+/// RED W7 (security.md: a redirect is a failure, never followed): a relayed call's far end that
+/// answers `302` is an upstream failure, whatever well-formed result rides it: the result is never
+/// served to the caller.
+#[test]
+fn a_302_from_the_upstream_is_a_failure_not_a_result() {
+    let section = section();
+    let far = r#"{"jsonrpc":"2.0","id":0,"result":{"content":[{"type":"text","text":"from the redirect"}]}}"#;
+    let (_, body, line) = answer_of(settle_call(
+        &admitted(),
+        section.servers.get("fs"),
+        302,
+        far.as_bytes(),
+        false,
+        0,
+    ));
+    assert_eq!(
+        body["result"]["isError"],
+        json!(true),
+        "an upstream failure: {body}"
+    );
+    assert!(
+        !body.to_string().contains("from the redirect"),
+        "nothing the redirect carried is served: {body}"
+    );
+    assert_eq!(line.reason, vocab::REASON_UPSTREAM_FAILED, "{line:?}");
 }

@@ -31,6 +31,7 @@ use busbar_contract::abi::plane::{
     TRUST_PRIVATE_REACH, TRUST_REVERIFY_TTL,
 };
 use busbar_contract::abi::sdk::door::abi_str;
+use busbar_contract::abi::sdk::plane::dealt_section;
 use busbar_contract::abi::sdk::publish::{
     admin_route, class_index, record_retention, AdminRouteSpec, ServedRoute, SnapshotSpec,
 };
@@ -363,6 +364,9 @@ const TAIL_VALUE: PlaneTail = {
     t.signing_domain = abi_str("mcp/ask-state/v1");
     t.signing_kid_prefix = abi_str("busbar-mcp-ask-");
     t.cli_help = abi_str(crate::tool_meta::HELP_FLAGS);
+    // The section's `upstream_credentials:` default is the kernel's key, stripped before the
+    // section reaches this plane: the kernel refuses `passthrough` there in these words.
+    t.caller_credential_refusal = abi_str(crate::tools_config::REFUSE_PASSTHROUGH_SECTION);
     t.admin_openapi = Blob::json(ADMIN_OPENAPI.as_bytes());
     // No stream ceiling: nothing bounds a stalled consumer (the event and subscribe streams are
     // pull-based), so the mcp plane states none.
@@ -473,15 +477,8 @@ pub struct ToolPool {
 ///
 /// A blob that is not a JSON object, or the `tools:` section's first broken rule.
 pub fn read_dealt_tools(settings: &[u8]) -> Result<ToolsCfg, String> {
-    if settings.is_empty() {
-        return Ok(ToolsCfg::default());
-    }
-    let value: serde_json::Value = serde_json::from_slice(settings).map_err(|e| e.to_string())?;
-    let serde_json::Value::Object(mut verbs) = value else {
-        return Err("the dealt settings are not a map of the plane's sections".to_string());
-    };
-    match verbs.remove(crate::tools_config::SECTION) {
-        None | Some(serde_json::Value::Null) => Ok(ToolsCfg::default()),
+    match dealt_section(settings, crate::tools_config::SECTION)? {
+        None => Ok(ToolsCfg::default()),
         Some(section) => {
             read_tools_section(&serde_json::to_vec(&section).map_err(|e| e.to_string())?)
         }

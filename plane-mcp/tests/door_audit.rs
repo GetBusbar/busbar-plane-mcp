@@ -95,6 +95,29 @@ impl Drop for ClockFails {
     }
 }
 
+/// How far the host's WALL clock has been set back, in nanoseconds (an operator correcting it, or a
+/// tampered clock): the monotonic clock never moves back.
+static WALL_SET_BACK_NS: AtomicU64 = AtomicU64::new(0);
+/// While set, every upstream's answer to `tools/list` is HELD (its read pends): a fetch stays in
+/// flight until the test releases it.
+static HOLD_LISTS: AtomicBool = AtomicBool::new(false);
+
+/// The tool lists held for as long as it is.
+struct HoldLists;
+
+impl HoldLists {
+    fn on() -> Self {
+        HOLD_LISTS.store(true, Ordering::SeqCst);
+        HoldLists
+    }
+}
+
+impl Drop for HoldLists {
+    fn drop(&mut self) {
+        HOLD_LISTS.store(false, Ordering::SeqCst);
+    }
+}
+
 extern "C" fn clock_now(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
     if CLOCK_FAILS.load(Ordering::SeqCst) {
         return answer(out, Outcome::Failed, 0, 0);
@@ -104,7 +127,8 @@ extern "C" fn clock_now(_: HostCtx, input: *const c_void, out: *mut ServiceOut) 
     let mono = MONO.fetch_add(1_000_000_000, Ordering::SeqCst);
     // SAFETY: as above.
     unsafe {
-        (*i.reading).wall_ns = 1_800_000_000_000_000_000 + mono;
+        (*i.reading).wall_ns =
+            1_800_000_000_000_000_000 + mono - WALL_SET_BACK_NS.load(Ordering::SeqCst);
         (*i.reading).mono_ns = mono;
     }
     answer(out, Outcome::Ready, 0, 0)
@@ -188,6 +212,8 @@ static HOST_SLOTS: HostSlots = HostSlots {
     auth_call: None,
     unit_hand_in: None,
     unit_refuse: None,
+    ticket_mint: None,
+    ticket_take: None,
 };
 
 // ── the upstreams behind the connector ──────────────────────────────────────────────────────────
@@ -377,10 +403,24 @@ fn on_stream(session: &str, f: impl FnOnce(&mut Sse)) {
 /// The upstream that is down: every request is answered `503`.
 const DOWN_URL: &str = "https://up.example/down";
 
+/// An upstream that answers every request with a `302` to another origin, carrying a body that is
+/// otherwise a well-formed tool list.
+const REDIRECT_URL: &str = "https://up.example/moved";
+
+/// Where the redirecting upstream points.
+const ELSEWHERE_URL: &str = "https://elsewhere.example/rpc";
+
 /// What an upstream answers one request.
 fn upstream_answer(url: &str, fields: &[(String, String)], body: &Value) -> Reply {
     if url.starts_with(DOWN_URL) {
         return (503, Vec::new(), b"down".to_vec());
+    }
+    if url.starts_with(REDIRECT_URL) {
+        let id = body.get("id").cloned().unwrap_or(Value::Null);
+        let tools = json!({"tools": [{"name": "read_file", "inputSchema": {"type": "object"}}]});
+        let mut head = json_head();
+        head.push(("location".to_string(), ELSEWHERE_URL.to_string()));
+        return (302, head, rpc_result(&id, tools));
     }
     let id = body.get("id").cloned().unwrap_or(Value::Null);
     let method = body.get("method").and_then(Value::as_str).unwrap_or("");
@@ -567,6 +607,12 @@ extern "C" fn read_reply(_: HostCtx, input: *const c_void, out: *mut ServiceOut)
     let Some((status, head, body)) = wire.reply.clone() else {
         return answer(out, Outcome::Failed, 0, 0);
     };
+    // A HELD tool list: its answer waits until the test lets it go.
+    let lists = serde_json::from_slice::<Value>(&wire.body)
+        .is_ok_and(|b| b["method"] == json!("tools/list"));
+    if lists && HOLD_LISTS.load(Ordering::SeqCst) {
+        return answer(out, Outcome::Pending, 0, 0);
+    }
     let (piece, n) = match wire.step {
         0 => {
             let block: String = head.iter().map(|(n, v)| format!("{n}: {v}\r\n")).collect();
@@ -729,6 +775,11 @@ const DRIVER: Ticket = Ticket {
 static TICKS: AtomicU64 = AtomicU64::new(1);
 
 fn open_with(section: &str) -> Door {
+    opens(section).expect("the door opens")
+}
+
+/// The door over `section`, or `None` when its `open` refuses the section.
+fn opens(section: &str) -> Option<Door> {
     let mut i: PlaneOpenIn = z();
     i.open = OpenIn {
         head: head::<PlaneOpenIn>(life::OPEN, Ticket::NONE),
@@ -753,10 +804,9 @@ fn open_with(section: &str) -> Door {
             std::ptr::from_mut(&mut o).cast(),
         )
     };
-    assert_eq!(ret.outcome(), Outcome::Ready, "the door opens");
-    Door {
+    (ret.outcome() == Outcome::Ready).then_some(Door {
         instance: o.open.instance,
-    }
+    })
 }
 
 /// What `arrive` answered: its outcome and, refused, the status the refusal wears.
@@ -1331,6 +1381,137 @@ fn a_failed_clock_read_fetches_the_tool_list_again() {
     }
 }
 
+/// RED W10 (trust.md:87: "a clock that moved backwards ... is treated as stale, never as fresh"):
+/// a wall clock set back past the last fetch never makes that fetch fresh. Within `verify_ttl` of
+/// the last fetch the cached list is reused; once the clock reads EARLIER than that fetch, the next
+/// call fetches the list again.
+#[test]
+fn a_clock_that_went_backwards_fetches_the_tool_list_again() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open();
+    call_st(&d, 84);
+    assert_eq!(
+        lists_to(STATELESS_URL),
+        1,
+        "the first call fetched the list"
+    );
+    call_st(&d, 85);
+    assert_eq!(
+        lists_to(STATELESS_URL),
+        1,
+        "within verify_ttl the sighting is reused"
+    );
+    // Two hours back: every reading now lies before the last fetch's stamp.
+    WALL_SET_BACK_NS.store(2 * 3600 * 1_000_000_000, Ordering::SeqCst);
+    call_st(&d, 86);
+    WALL_SET_BACK_NS.store(0, Ordering::SeqCst);
+    assert_eq!(
+        lists_to(STATELESS_URL),
+        2,
+        "a clock that went backwards is stale, never fresh: the list is fetched again"
+    );
+}
+
+/// The stateless upstream's answer to a relayed call on its event stream, with its own
+/// `notifications/tools/list_changed` beside the result.
+const LIST_CHANGED_ANSWER: &[u8] = b"event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\"}\n\nevent: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{\"content\":[],\"resultType\":\"complete\"}}\n\n";
+
+/// `unit`'s relayed call answered on the event stream, with a `list_changed` beside it.
+fn answered_with_list_changed(d: &Door, unit: u64) {
+    let answered = d.piece(
+        unit,
+        &Given::far(
+            ALICE,
+            200,
+            vec![("content-type", "text/event-stream")],
+            LIST_CHANGED_ANSWER,
+        ),
+    );
+    assert_eq!(answered.status, 200, "{}", answered.text());
+}
+
+/// RED W10 (trust.md:93: "an accepted, rate-limited notification marks the server's snapshot
+/// stale so the next call re-verifies"): an upstream's `notifications/tools/list_changed` heard on
+/// the HTTP event stream beside a relayed call's answer marks its list stale, so the next call
+/// fetches it again within `verify_ttl`; its body is never read. RATE-LIMITED: a second one inside
+/// the rate limit's window (30 s per server) of the last one accepted marks nothing.
+#[test]
+fn a_list_changed_on_the_http_stream_marks_the_list_stale() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open();
+    call_st(&d, 320);
+    assert_eq!(
+        lists_to(STATELESS_URL),
+        1,
+        "the first call fetched the list"
+    );
+    answered_with_list_changed(&d, 320);
+    call_st(&d, 321);
+    assert_eq!(
+        lists_to(STATELESS_URL),
+        2,
+        "a list_changed on the HTTP stream marked the list stale: the next call fetched it again"
+    );
+    answered_with_list_changed(&d, 321);
+    call_st(&d, 322);
+    assert_eq!(
+        lists_to(STATELESS_URL),
+        2,
+        "a second list_changed inside the rate limit's window marks nothing"
+    );
+}
+
+/// The section with the stateless registration strict-live (`verify_ttl: 0s`): every call
+/// re-verifies, and a burst still shares one fetch.
+const STRICT_SECTION: &str = r#"{
+    "st": {"url": "https://up.example/st", "pin": {"mechanism": "unpinned"}, "verify_ttl": "0s", "tools_allow": {"read_file": {}}}
+}"#;
+
+/// RED W11 (website `mcp.md:147,466` and trust.md:140: concurrent callers share one fetch; `0`
+/// still coalesces bursts): two calls that find the same server stale while ITS FETCH IS IN FLIGHT
+/// share that one fetch. The second never sends its own `tools/list`; both calls go on once the
+/// first fetch lands, even strict-live.
+#[test]
+fn concurrent_mcp_callers_share_one_list_fetch() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open_with(STRICT_SECTION);
+    let held = HoldLists::on();
+    for unit in [330, 331] {
+        assert_eq!(
+            d.arrive(unit, "POST", "/mcp", ST_CALL, ST_FIELDS).outcome,
+            Outcome::Ready
+        );
+        d.piece(unit, &Given::attempt(ALICE, "st"));
+        let waiting = d.piece(unit, &Given::caller(ALICE, ST_CALL));
+        assert_eq!(
+            waiting.outcome,
+            Some(Outcome::Pending),
+            "unit {unit} waits on the fetch in flight"
+        );
+    }
+    assert_eq!(
+        lists_to(STATELESS_URL),
+        1,
+        "the second caller joined the fetch in flight instead of sending its own"
+    );
+    drop(held);
+    // This host's connector re-sends a pended exchange when it is resumed, so what is counted
+    // from here is what RESUMED: the one fetch in flight, and nothing from the call that joined it.
+    let before = lists_to(STATELESS_URL);
+    for unit in [330, 331] {
+        let sent = d.pump(unit, &Given::caller(ALICE, ST_CALL));
+        assert!(sent.far, "unit {unit} is relayed: {}", sent.text());
+    }
+    assert_eq!(
+        lists_to(STATELESS_URL) - before,
+        1,
+        "one fetch served the burst: the call that joined it sent none"
+    );
+}
+
 // ── A-H1: the operator's `connect` ──────────────────────────────────────────────────────────────
 
 /// The trust view's `failure`, and how many tools the last sighting carried.
@@ -1418,6 +1599,40 @@ fn a_failed_connect_never_holds_back_the_next_calls_fetch() {
     assert!(
         after > before,
         "the call fetched the list again: {before} requests before, {after} after"
+    );
+}
+
+/// The section with one registration whose upstream redirects.
+const REDIRECT_SECTION: &str = r#"{
+    "rd": {"url": "https://up.example/moved", "pin": {"mechanism": "unpinned"}, "verify_ttl": "1h", "tools_allow": {"read_file": {}}}
+}"#;
+
+/// RED W7 (security.md:171,177,306,308: a redirect is a failure, never followed): an upstream that
+/// answers the operator's `connect` with a `302` is REFUSED, whatever body rides it: nothing is
+/// sighted from it (no tool observed, the failure names the redirect), and the location it points
+/// at is never contacted.
+#[test]
+fn a_302_on_connect_is_refused() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open_with(REDIRECT_SECTION);
+    let served = d.connect(95, "rd");
+    let (failure, observed) = view_of(&served);
+    let failure = failure
+        .as_str()
+        .unwrap_or_else(|| panic!("a 302 is a failure, not a sighting (observed {observed})"));
+    assert!(
+        failure.contains("302"),
+        "the failure names the redirect: {failure}"
+    );
+    assert!(
+        !observed.as_u64().is_some_and(|n| n > 0),
+        "nothing is observed from a redirect: {observed}"
+    );
+    assert_eq!(
+        requests_to(ELSEWHERE_URL),
+        0,
+        "the redirect is never followed"
     );
 }
 
@@ -1745,4 +1960,130 @@ fn a_cancel_after_the_far_end_answered_is_partial() {
         (Outcome::Ready, CANCEL_OK_PARTIAL),
         "cut after the far end answered: partial"
     );
+}
+
+// ── item 5: the caller's busbar credential never travels upstream ───────────────────────────────
+
+/// The credential the caller authenticated to busbar with (its virtual key, or a busbar-audience
+/// token), as it rides the caller's request head.
+const CALLER_SECRET: &str = "bb-vk-callers-own-busbar-key-5e1d7c";
+
+/// The `st` registration (the stateless upstream), with `extra` merged into it, inside a section
+/// with `default` merged in at the section level.
+fn st_section(default: Value, extra: Value) -> String {
+    let mut st = json!({
+        "url": STATELESS_URL,
+        "pin": {"mechanism": "unpinned"},
+        "verify_ttl": "1h",
+        "tools_allow": {"read_file": {}},
+    });
+    for (k, v) in extra.as_object().into_iter().flatten() {
+        st[k] = v.clone();
+    }
+    let mut section = json!({ "st": st });
+    for (k, v) in default.as_object().into_iter().flatten() {
+        section[k] = v.clone();
+    }
+    section.to_string()
+}
+
+/// The `token_exchange:` block (and the `aud:` an exchange requires) of a registration.
+fn exchanged() -> Value {
+    json!({
+        "aud": "https://up.example",
+        "token_exchange": {
+            "token_url": "https://as.example/token",
+            "subject_token": {"env": "BUSBAR_ST_SUBJECT"},
+        },
+    })
+}
+
+/// RED item 5 (website `mcp.astro:497-531`, "the caller's own Busbar credential never travels
+/// upstream, in any credential mode"): IN EVERY CREDENTIAL MODE, the bytes of the caller's busbar
+/// credential appear in no request any upstream receives: not in the relayed call's head or body,
+/// not in the verify-on-call fetch's. A mode that would lend it (`passthrough`, per registration or
+/// as the section default, alone or beside `token_exchange:`) is refused when the door opens, so no
+/// such server is ever reached.
+#[test]
+fn the_callers_credential_never_reaches_the_upstream_in_any_mode() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    let bearer = format!("Bearer {CALLER_SECRET}");
+    let served = [
+        ("no mode written", st_section(json!({}), json!({}))),
+        (
+            "`own` as the section default",
+            st_section(json!({"upstream_credentials": "own"}), json!({})),
+        ),
+        (
+            "`own` on the registration",
+            st_section(json!({}), json!({"upstream_credentials": "own"})),
+        ),
+        ("`token_exchange:`", st_section(json!({}), exchanged())),
+    ];
+    for (unit, (mode, section)) in (70_u64..).zip(served) {
+        *upstreams() = Some(Upstreams::default());
+        let d = opens(&section).unwrap_or_else(|| panic!("{mode}: the door opens"));
+        let mut fields = ST_FIELDS.to_vec();
+        fields.push(("authorization", bearer.as_str()));
+        assert_eq!(
+            d.arrive(unit, "POST", "/mcp", ST_CALL, &fields).outcome,
+            Outcome::Ready,
+            "{mode}"
+        );
+        d.piece(unit, &Given::attempt(ALICE, "st"));
+        let caller = Given {
+            head: vec![("authorization", bearer.as_str())],
+            ..Given::caller(ALICE, ST_CALL)
+        };
+        let sent = d.pump(unit, &caller);
+        assert!(sent.far, "{mode}: the call is relayed: {}", sent.text());
+        assert!(
+            lists_to(STATELESS_URL) >= 1,
+            "{mode}: the verify-on-call fetch reached the upstream"
+        );
+        let relayed = format!("{} {:?} {}", sent.request, sent.fields, sent.text());
+        assert!(
+            !relayed.contains(CALLER_SECRET),
+            "{mode}: the relayed call carries the caller's busbar credential: {relayed}"
+        );
+        for heard in seen() {
+            let wire = format!("{:?} {}", heard.fields, heard.body);
+            assert!(
+                !wire.contains(CALLER_SECRET),
+                "{mode}: {} heard the caller's busbar credential: {wire}",
+                heard.url
+            );
+        }
+    }
+
+    let lending = [
+        (
+            "`passthrough` on the registration",
+            st_section(json!({}), json!({"upstream_credentials": "passthrough"})),
+        ),
+        (
+            "`passthrough` as the section default",
+            st_section(json!({"upstream_credentials": "passthrough"}), json!({})),
+        ),
+        (
+            "a `passthrough` section default over a `token_exchange:` registration",
+            st_section(json!({"upstream_credentials": "passthrough"}), exchanged()),
+        ),
+        (
+            "`passthrough` beside the registration's own `token_exchange:`",
+            {
+                let mut both = exchanged();
+                both["upstream_credentials"] = json!("passthrough");
+                st_section(json!({}), both)
+            },
+        ),
+    ];
+    for (mode, section) in lending {
+        *upstreams() = Some(Upstreams::default());
+        assert!(
+            opens(&section).is_none(),
+            "{mode}: a mode that lends the caller's busbar credential upstream is refused"
+        );
+        assert!(seen().is_empty(), "{mode}: no upstream was reached");
+    }
 }

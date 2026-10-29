@@ -14,11 +14,11 @@ pub(crate) fn everyone(_: &str, _: &str) -> bool {
     true
 }
 
-/// The crate's one `#[global_allocator]`, every allocation gate's count: busbar-contract's
-/// test-only `alloc-counter` (a dev-dependency feature), so this crate holds no `unsafe`.
+/// The crate's one `#[global_allocator]`, every allocation gate's count: busbar-test-kit's
+/// `alloc_counter` (a dev-dependency), so this crate holds no `unsafe`.
 #[global_allocator]
-static A: busbar_contract::alloc_counter::Counting =
-    busbar_contract::alloc_counter::Counting::new();
+static A: busbar_test_kit::alloc_counter::Counting =
+    busbar_test_kit::alloc_counter::Counting::new();
 
 /// What reading a stdio child's message may allocate (`tests/alloc_gate.rs`).
 mod alloc_gate_tests;
