@@ -18,7 +18,7 @@ workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# THE LOGIC, same repo: its `plane_door::door` is the door this image exports. A busbar build that
+# THE LOGIC, same repo: its `door` is the door this image exports. A busbar build that
 # LINKS the plane names the logic crate, which exports no symbol.
 busbar-plane-mcp = { path = "../plane-mcp" }
 busbar-contract = { workspace = true }
