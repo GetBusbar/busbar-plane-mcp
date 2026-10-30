@@ -258,7 +258,7 @@
         "method": "POST",
         "path": "/api/v1/admin/trust/approve",
         "body": {
-          "key": "MCP/probe/ping"
+          "key": "mcp/probe/ping"
         },
         "json_eq": {
           "/state": "same"
