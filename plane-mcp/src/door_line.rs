@@ -482,12 +482,11 @@ fn lapse_asks(plane: &McpDoor, ticket: Ticket, now_ns: u64, seq: &mut u32) {
 /// Busbar's own `ping`, as one line: its answer is a line of the caller's, so a unit.
 fn ping(plane: &McpDoor) -> Vec<u8> {
     let n = next_ask(plane);
-    serde_json::to_vec(&serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": format!("{}{n}", line::ASK_ID_PREFIX),
-        "method": crate::adapt::METHOD_PING,
-    }))
-    .unwrap_or_default()
+    busbar_contract::jsonrpc::request_bytes(
+        &crate::codec::json(&format!("{}{n}", line::ASK_ID_PREFIX)),
+        crate::adapt::METHOD_PING,
+        None,
+    )
 }
 
 /// THE TICK, for the subscriptions kept on carrier sessions: each stepped over the live catalogue

@@ -20,6 +20,7 @@
 //! The `2024-11-05` event-stream framing lives here as values ([`frame`], [`endpoint_event`]);
 //! writing them to a connection is the caller's.
 
+use busbar_contract::spans::members;
 use serde_json::{Map, Value};
 
 use crate::codec::{META_CLIENT_CAPABILITIES, META_PROTOCOL_VERSION, PROTOCOL_VERSION};
@@ -247,13 +248,16 @@ pub fn lower_answer(answer: &[u8]) -> Option<Lowered> {
 /// `text` (one JSON-RPC answer) with every stateless-only member of its `result` cut out, with the
 /// one comma that joined it: `None` when `text` is not one object with an object `result`.
 fn splice_result(text: &str) -> Option<Vec<u8>> {
-    let (top, end) = object_members(text, 0)?;
-    if ws(text, end) != text.len() {
+    let top = members(text.as_bytes(), 0)?;
+    if !text
+        .get(top.close + 1..)?
+        .trim_start_matches([' ', '\t', '\n', '\r'])
+        .is_empty()
+    {
         return None;
     }
     // serde_json reads the last of two same-named members: so does the splice.
-    let result = top.iter().rev().find(|m| m.key == "result")?;
-    let (inner, _) = object_members(text, result.value_start)?;
+    let inner = members(text.as_bytes(), top.last("result")?.value_start)?.members;
     let removed: Vec<bool> = inner
         .iter()
         .map(|m| STATELESS_ONLY_MEMBERS.contains(&m.key.as_str()))
@@ -263,11 +267,11 @@ fn splice_result(text: &str) -> Option<Vec<u8>> {
     for (i, m) in inner.iter().enumerate().filter(|(i, _)| removed[*i]) {
         cuts.push(match last_kept {
             // A member before the last kept one goes with the comma after it.
-            Some(k) if i < k => (m.start, inner[i + 1].start),
+            Some(k) if i < k => (m.key_start, inner[i + 1].key_start),
             // A member after it goes with the comma before it.
-            Some(k) => (inner[k].end, m.end),
+            Some(k) => (inner[k].value_end, m.value_end),
             // Every member goes.
-            None => (inner[0].start, m.end),
+            None => (inner[0].key_start, m.value_end),
         });
     }
     cuts.sort_unstable();
@@ -281,60 +285,6 @@ fn splice_result(text: &str) -> Option<Vec<u8>> {
     }
     out.extend_from_slice(&text.as_bytes()[at..]);
     Some(out)
-}
-
-/// One member of a JSON object as its text holds it: its key, where the member starts (its key's
-/// opening quote), where its value starts, and where its value ends.
-struct Member {
-    key: String,
-    start: usize,
-    value_start: usize,
-    end: usize,
-}
-
-/// The first byte at or after `at` that is not JSON whitespace.
-fn ws(text: &str, at: usize) -> usize {
-    text.len() - text[at..].trim_start_matches([' ', '\t', '\n', '\r']).len()
-}
-
-/// The members of the JSON object that starts at (or after whitespace from) `at` in `text`, each
-/// value read and its extent taken, never written again, and the byte after the object's `}`.
-fn object_members(text: &str, at: usize) -> Option<(Vec<Member>, usize)> {
-    let mut at = ws(text, at);
-    if text.as_bytes().get(at) != Some(&b'{') {
-        return None;
-    }
-    at = ws(text, at + 1);
-    let mut members = Vec::new();
-    if text.as_bytes().get(at) == Some(&b'}') {
-        return Some((members, at + 1));
-    }
-    loop {
-        let start = at;
-        let mut keys = serde_json::Deserializer::from_str(&text[at..]).into_iter::<String>();
-        let key = keys.next()?.ok()?;
-        at = ws(text, at + keys.byte_offset());
-        if text.as_bytes().get(at) != Some(&b':') {
-            return None;
-        }
-        let value_start = ws(text, at + 1);
-        let mut values = serde_json::Deserializer::from_str(&text[value_start..])
-            .into_iter::<serde::de::IgnoredAny>();
-        values.next()?.ok()?;
-        let end = value_start + values.byte_offset();
-        members.push(Member {
-            key,
-            start,
-            value_start,
-            end,
-        });
-        at = ws(text, end);
-        match text.as_bytes().get(at)? {
-            b',' => at = ws(text, at + 1),
-            b'}' => return Some((members, at + 1)),
-            _ => return None,
-        }
-    }
 }
 
 /// Builds the `initialize` result from the stateless discovery document, for `revision`: only the

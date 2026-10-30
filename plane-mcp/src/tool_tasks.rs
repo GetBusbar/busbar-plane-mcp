@@ -949,8 +949,7 @@ pub fn task_result(id: &Value, mut created: Value) -> Vec<u8> {
     if let Some(obj) = created.as_object_mut() {
         obj.insert("resultType".into(), "task".into());
     }
-    serde_json::to_vec(&json!({ "jsonrpc": "2.0", "id": id, "result": created }))
-        .unwrap_or_default()
+    busbar_contract::jsonrpc::result_bytes(&crate::codec::json(id), &crate::codec::json(&created))
 }
 
 /// Unix milliseconds as an ISO-8601 UTC instant, `YYYY-MM-DDTHH:MM:SS.mmmZ`.

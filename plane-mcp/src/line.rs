@@ -295,13 +295,11 @@ impl LiveAsk {
     pub fn issue(&mut self, n: u64) -> Option<Vec<u8>> {
         let (key, method, params) = self.queued.pop()?;
         self.current = key;
-        let mut line = serde_json::to_vec(&json!({
-            "jsonrpc": "2.0",
-            "id": format!("{ASK_ID_PREFIX}{n}"),
-            "method": method,
-            "params": params,
-        }))
-        .unwrap_or_default();
+        let mut line = busbar_contract::jsonrpc::request_bytes(
+            &crate::codec::json(&format!("{ASK_ID_PREFIX}{n}")),
+            &method,
+            Some(&crate::codec::json(&params)),
+        );
         line.push(b'\n');
         Some(line)
     }

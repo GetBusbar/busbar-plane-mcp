@@ -16,9 +16,11 @@ fn call() -> OutboundRequest {
         URL,
         "tools/call",
         Some("echo"),
-        json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{
+        crate::codec::json(
+            &json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{
             "name":"echo","arguments":{},
             "_meta":{META_PROTOCOL_VERSION:"2026-07-28",META_CLIENT_CAPABILITIES:{}}}}),
+        ),
         Some("tok"),
     )
 }
