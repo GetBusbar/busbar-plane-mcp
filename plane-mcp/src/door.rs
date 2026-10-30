@@ -440,17 +440,29 @@ pub const ADMIN_ROUTES: &[AdminRoute] = &[
     admin_route(ADMIN_VERBS[2], 0, ADMIN_AUDIT[2]),
 ];
 
-/// `validate` and `open`: the settings blob read as the `tools:` section. An empty blob is the
-/// empty section. The error is the grammar's own sentence.
+/// The bare `tools:` section, as bytes (what the tests state a section as): read as `validate`,
+/// `open` and `refresh` read it ([`read_tools_value`]). An empty blob is the empty section.
 ///
 /// # Errors
 ///
 /// The first rule the section breaks, in the grammar's words.
+#[cfg(test)]
 pub fn read_tools_section(settings: &[u8]) -> Result<ToolsCfg, String> {
     if settings.is_empty() {
         return Ok(ToolsCfg::default());
     }
-    let cfg = serde_json::from_slice::<ToolsCfg>(settings).map_err(|e| e.to_string())?;
+    read_tools_value(serde_json::from_slice(settings).map_err(|e| e.to_string())?)
+}
+
+/// The `tools:` section read from the value the host built. serde's words are read from a value
+/// (as the SDK's `settings_as` reads them), so they name no line or column of a blob the operator
+/// never wrote: core's refusal names the operator's own position after them.
+///
+/// # Errors
+///
+/// The first rule the section breaks, in the grammar's words.
+fn read_tools_value(section: serde_json::Value) -> Result<ToolsCfg, String> {
+    let cfg = serde_json::from_value::<ToolsCfg>(section).map_err(|e| e.to_string())?;
     // The published names are judged over the whole section, as the kernel judges the effective
     // registry (file and overlay): two servers publishing one name refuse it.
     crate::tools_config::validate_published_names(&cfg)?;
@@ -479,13 +491,11 @@ pub struct ToolPool {
 pub fn read_dealt_tools(settings: &[u8]) -> Result<ToolsCfg, String> {
     match dealt_section(settings, crate::tools_config::SECTION)? {
         None => Ok(ToolsCfg::default()),
-        Some(section) => {
-            read_tools_section(&serde_json::to_vec(&section).map_err(|e| e.to_string())?)
-        }
+        Some(section) => read_tools_value(section),
     }
 }
 
-/// THE SETTINGS `open` and `refresh` are handed: the section ([`read_tools_section`]) and the pools the
+/// THE SETTINGS `open` and `refresh` are handed: the section ([`read_tools_value`]) and the pools the
 /// kernel carries at its reserved `pools` key. The operator's
 /// own document never reaches this reader (`validate` reads the section as written).
 ///
@@ -523,8 +533,7 @@ pub fn read_open(
             );
         }
     }
-    let rest = serde_json::to_vec(&value).map_err(|e| e.to_string())?;
-    Ok((read_tools_section(&rest)?, pools))
+    Ok((read_tools_value(value)?, pools))
 }
 
 /// The audience and metadata document of an endpoint mounted under the deployment's public base

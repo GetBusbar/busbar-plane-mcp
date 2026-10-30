@@ -7,7 +7,7 @@
 //!
 //! The lifecycle is the SDK's plane lifecycle ([`PlaneLife`]) over this plane's answers:
 //!
-//! * `validate` reads the settings blob as the `tools:` section ([`door::read_tools_section`]) and
+//! * `validate` reads the settings blob as the `tools:` section ([`door::read_dealt_tools`]) and
 //!   refuses in the grammar's words;
 //! * `open` judges the same section, reads the deployment's public base URL, keeps the host
 //!   services it was handed and publishes the first generation's snapshot
