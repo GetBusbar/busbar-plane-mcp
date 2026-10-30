@@ -238,7 +238,7 @@ fn the_claims_are_stated_under_the_endpoint_block_else_the_public_base() {
 /// may).
 #[test]
 fn the_statement_version_is_the_crates() {
-    assert_eq!(crate::tool_door::VERSION, env!("CARGO_PKG_VERSION"));
+    assert_eq!(crate::plane_door::VERSION, env!("CARGO_PKG_VERSION"));
 }
 
 /// The tail states one operation class per method row's class, in their order, and each row's
@@ -328,7 +328,7 @@ fn the_admin_openapi_blob_states_every_body_its_verbs_name() {
 /// endpoint block beside it is judged as `open` judges it.
 #[test]
 fn validate_reads_the_dealt_blob_at_its_tools_section() {
-    use crate::door::read_dealt_tools;
+    use crate::statement::read_dealt_tools;
     let empty = crate::tools_config::ToolsCfg::default();
     assert_eq!(read_dealt_tools(b""), Ok(empty.clone()));
     assert_eq!(
@@ -354,7 +354,7 @@ fn validate_reads_the_dealt_blob_at_its_tools_section() {
 /// THE TASK-RUN ROUTE is a closed, exact route over the http carrier at its own path.
 #[test]
 fn the_task_run_route_is_closed_and_exact() {
-    let route = &ROUTES[crate::door::TASK_RUN_ROUTE];
+    let route = &ROUTES[crate::statement::TASK_RUN_ROUTE];
     assert_eq!(route.target, crate::tool_claims::TASK_RUN_MOUNT);
     assert_eq!(route.carrier, crate::tool_claims::CARRIER_HTTP);
     assert!(!route.open);
@@ -385,12 +385,13 @@ fn the_call_log_is_the_one_chain_the_host_keeps() {
 #[test]
 fn a_settings_refusal_names_no_position_in_the_host_built_blob() {
     for dealt in [&br#"{"tools":[1]}"#[..], br#"{"tools":"x"}"#] {
-        let refused = crate::door::read_dealt_tools(dealt).expect_err("a section that is no map");
+        let refused =
+            crate::statement::read_dealt_tools(dealt).expect_err("a section that is no map");
         assert!(refused.starts_with("invalid type: "), "{refused}");
         assert!(!refused.contains(" at line "), "validate: {refused}");
     }
     for section in [&b"[1]"[..], br#""x""#] {
-        let refused = crate::door::read_open(section).expect_err("a section that is no map");
+        let refused = crate::statement::read_open(section).expect_err("a section that is no map");
         assert!(refused.starts_with("invalid type: "), "{refused}");
         assert!(!refused.contains(" at line "), "open/refresh: {refused}");
         let refused = read_tools_section(section).expect_err("a section that is no map");
@@ -400,7 +401,7 @@ fn a_settings_refusal_names_no_position_in_the_host_built_blob() {
         );
     }
     let typo = br#"{"tools":{"fs":{"url":"https://fs.example/mcp","pin":{"mechanism":"unpinned"},"bogus":1}}}"#;
-    let refused = crate::door::read_dealt_tools(typo).expect_err("an unknown key is refused");
+    let refused = crate::statement::read_dealt_tools(typo).expect_err("an unknown key is refused");
     assert!(refused.starts_with("unknown field `bogus`"), "{refused}");
     assert!(!refused.contains(" at line "), "{refused}");
 }
@@ -410,7 +411,7 @@ fn a_settings_refusal_names_no_position_in_the_host_built_blob() {
 /// first, in the block's own words, and never answers READY there.
 #[test]
 fn validate_judges_a_dealt_endpoint_block_as_open_judges_it() {
-    use crate::door::{judge_endpoint_block, read_dealt_tools};
+    use crate::statement::{judge_endpoint_block, read_dealt_tools};
     for dealt in [
         &br#"{"mcp":{}}"#[..],
         br#"{"mcp":{"canonical_uri":"https://gw.example/elsewhere","authorization_servers":["https://l.example"]}}"#,

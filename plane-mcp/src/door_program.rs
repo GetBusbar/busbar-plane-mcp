@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The stdio servers' leg, in the door: a
-//! `transport: stdio` registration is a member of the program need ([`door::NEED_PROGRAM`]); the
+//! `transport: stdio` registration is a member of the program need ([`statement::NEED_PROGRAM`]); the
 //! host keeps one long-lived child per member, and every exchange the door has with it is
 //! correlated by id ([`crate::tool_program`]).
 //!
@@ -407,7 +407,7 @@ pub(super) fn ready(
     }
     let mut exchange = match unit.program.take() {
         Some((Purpose::Ready, parked)) => parked,
-        _ => ProgramExchange::new(member, door::NEED_PROGRAM, Vec::new(), true),
+        _ => ProgramExchange::new(member, statement::NEED_PROGRAM, Vec::new(), true),
     };
     let base = READY_SEQ.saturating_add(
         unit.attempt
@@ -506,8 +506,13 @@ fn list_exchange(
     id: u64,
 ) -> ProgramExchange {
     let request = crate::client::jsonrpc::tools_list("", id, None).body;
-    ProgramExchange::new(server, door::NEED_PROGRAM, vec![(request, Some(id))], true)
-        .timed(def.timeout_ms())
+    ProgramExchange::new(
+        server,
+        statement::NEED_PROGRAM,
+        vec![(request, Some(id))],
+        true,
+    )
+    .timed(def.timeout_ms())
 }
 
 /// What a far piece of a stdio member's answer came to.
@@ -586,7 +591,8 @@ fn owe(member: &str, relay: &mut ProgramRelay) {
         let owed: Vec<(Vec<u8>, Option<u64>)> =
             relay.corr.outbox.drain(..).map(|r| (r, None)).collect();
         relay.replying = Some(
-            ProgramExchange::new(member, door::NEED_PROGRAM, owed, false).only_on(relay.generation),
+            ProgramExchange::new(member, statement::NEED_PROGRAM, owed, false)
+                .only_on(relay.generation),
         );
         relay.replies += 1;
     }

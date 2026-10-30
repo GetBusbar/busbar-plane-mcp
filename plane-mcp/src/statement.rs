@@ -649,5 +649,5 @@ pub fn snapshot_spec_with(
 }
 
 #[cfg(test)]
-#[path = "tests/door.rs"]
+#[path = "tests/statement.rs"]
 mod tests;

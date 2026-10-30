@@ -111,7 +111,7 @@ fn capabilities() -> Value {
 fn server_info() -> Value {
     json!({
         "name": "busbar",
-        "version": crate::tool_door::VERSION,
+        "version": crate::plane_door::VERSION,
     })
 }
 

@@ -21,15 +21,15 @@ mod codec;
 /// hold the two equal, and the codes equal to the ones the door raises).
 #[cfg(test)]
 mod diagnostics;
-mod door;
 mod endpoint;
 mod framing;
 mod identity;
 /// The line carrier's meanings: one JSON-RPC message per line, each its own unit.
 mod line;
+mod plane_door;
+mod statement;
 mod tool_arrival;
 mod tool_claims;
-mod tool_door;
 mod tool_meta;
 mod tool_ops;
 /// The `transport: stdio` servers: one long-lived child per server, its messages correlated by id.
@@ -40,10 +40,10 @@ mod tool_tasks;
 mod tools_config;
 
 /// The door: this plugin's one public item.
-pub use tool_door::door;
+pub use plane_door::door;
 
 /// THE PLANE'S DECLARED METADATA (`declares.json`), as the tests read it: the one document the
-/// door's Statement carries under `EXT_DECLARES` ([`tool_door`]'s `EXTENSIONS`) and the release signs
+/// door's Statement carries under `EXT_DECLARES` ([`plane_door`]'s `EXTENSIONS`) and the release signs
 /// into a dropped-in plane's manifest. The codes its catalog holds are `diagnostics::DIAGNOSTICS`,
 /// the codes the door raises (the tests hold the three equal).
 #[cfg(test)]

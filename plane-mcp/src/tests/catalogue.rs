@@ -35,7 +35,7 @@ const SECTION: &[u8] = br#"{
 fn catalogue(generation: u64, section: &[u8]) -> Catalogue {
     Catalogue::build(
         generation,
-        &crate::door::read_tools_section(section).expect("the section reads"),
+        &crate::statement::read_tools_section(section).expect("the section reads"),
     )
 }
 

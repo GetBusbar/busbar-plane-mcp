@@ -21,7 +21,7 @@ use std::collections::BTreeMap;
 use serde_json::{json, Map, Value};
 
 use crate::codec::RESULT_TYPE_COMPLETE;
-use crate::door::{SCOPE, SCOPE_TOOL};
+use crate::statement::{SCOPE, SCOPE_TOOL};
 
 use crate::sanitize::normalise;
 use crate::tools_config::{namespaced, AskRoundCfg, PromptMessageCfg, TaskSupport, ToolsCfg};

@@ -7,16 +7,16 @@
 //! 3295-3370: fail closed).
 //!
 //! The door's ask decision and its relayed state's seal are driven here over the host they seal
-//! against (`tool_door::SealHost`), a plain Rust value: a clock that reads a given second, one whose
+//! against (`plane_door::SealHost`), a plain Rust value: a clock that reads a given second, one whose
 //! read fails and one that is not served (both read as no time, as the door's host services answer
 //! them), a signer whose signature is the data's digest, and a random fill of sevens. The door's own
-//! [`DoorSeal`](crate::tool_door::DoorSeal) is the same seam over the host's services.
+//! [`DoorSeal`](crate::plane_door::DoorSeal) is the same seam over the host's services.
 
 use serde_json::json;
 
 use crate::ask::{self as ask, AskDecision, AskRefusal, AskState, Rejected, UpstreamLeg};
-use crate::tool_door::{decide_ask, Held, SealHost, Site};
-use crate::{codec, door, tools_config};
+use crate::plane_door::{decide_ask, Held, SealHost, Site};
+use crate::{codec, statement, tools_config};
 use busbar_contract::abi::sdk::publish::Keyed;
 use serde_json::Value;
 
@@ -89,7 +89,7 @@ fn with_seal<R>(
 }
 
 fn held() -> Held {
-    let section = door::read_tools_section(
+    let section = statement::read_tools_section(
         br#"{"fs": {"url": "https://mcp.example/fs", "pin": {"mechanism": "unpinned"}}}"#,
     )
     .expect("the section reads");
@@ -230,7 +230,7 @@ fn relayed_under_failed_clock(ttl_secs: u64) -> crate::call::AskRefusal {
         roots_epoch: 0,
     };
     with_seal(&FAILS, &spent, |seal| {
-        crate::tool_door::seal_relayed(seal, "fs", bind, "d", leg, ttl_secs)
+        crate::plane_door::seal_relayed(seal, "fs", bind, "d", leg, ttl_secs)
     })
     .expect_err("a state is never sealed at a time that was not read")
 }
@@ -244,7 +244,7 @@ fn a_relayed_ask_under_a_failed_clock_is_refused_naming_the_clock() {
     assert!(
         refusal
             .to_string()
-            .contains(crate::tool_door::CLOCK_UNAVAILABLE),
+            .contains(crate::plane_door::CLOCK_UNAVAILABLE),
         "{refusal}"
     );
 }
@@ -257,7 +257,7 @@ fn a_task_relay_under_a_failed_clock_is_refused_naming_the_clock() {
     assert!(
         refusal
             .to_string()
-            .contains(crate::tool_door::CLOCK_UNAVAILABLE),
+            .contains(crate::plane_door::CLOCK_UNAVAILABLE),
         "{refusal}"
     );
 }
