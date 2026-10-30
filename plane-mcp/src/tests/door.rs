@@ -375,3 +375,32 @@ fn the_call_log_is_the_one_chain_the_host_keeps() {
     let kind = RECORD_KINDS[RECORD_CALL as usize];
     assert_eq!(text(kind), crate::tool_records::KIND_CALL);
 }
+
+/// B2: A SETTINGS REFUSAL NAMES NO POSITION IN THE HOST-BUILT BLOB. The plane reads its section
+/// from JSON the host built, never from text the operator wrote, so serde's words are read from a
+/// value (as the SDK's `settings_as` reads them) and name no `line`/`column`: core's refusal names
+/// the operator's own position after them. A `tools:` written as a list or a scalar is refused by
+/// serde_json's own reader, which is where a position was named: at validate (the dealt blob), and
+/// at open and refresh (the section and the pools beside it).
+#[test]
+fn a_settings_refusal_names_no_position_in_the_host_built_blob() {
+    for dealt in [&br#"{"tools":[1]}"#[..], br#"{"tools":"x"}"#] {
+        let refused = crate::door::read_dealt_tools(dealt).expect_err("a section that is no map");
+        assert!(refused.starts_with("invalid type: "), "{refused}");
+        assert!(!refused.contains(" at line "), "validate: {refused}");
+    }
+    for section in [&b"[1]"[..], br#""x""#] {
+        let refused = crate::door::read_open(section).expect_err("a section that is no map");
+        assert!(refused.starts_with("invalid type: "), "{refused}");
+        assert!(!refused.contains(" at line "), "open/refresh: {refused}");
+        let refused = read_tools_section(section).expect_err("a section that is no map");
+        assert!(
+            !refused.contains(" at line "),
+            "the section reader: {refused}"
+        );
+    }
+    let typo = br#"{"tools":{"fs":{"url":"https://fs.example/mcp","pin":{"mechanism":"unpinned"},"bogus":1}}}"#;
+    let refused = crate::door::read_dealt_tools(typo).expect_err("an unknown key is refused");
+    assert!(refused.starts_with("unknown field `bogus`"), "{refused}");
+    assert!(!refused.contains(" at line "), "{refused}");
+}
