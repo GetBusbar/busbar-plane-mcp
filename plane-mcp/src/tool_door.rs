@@ -39,7 +39,7 @@ use std::sync::Arc;
 
 use busbar_contract::abi::mechanism::call::{OutHead, Outcome};
 use busbar_contract::abi::mechanism::door::Statement;
-use busbar_contract::abi::mechanism::lifecycle::{GenIn, TickIn, TickOut};
+use busbar_contract::abi::mechanism::lifecycle::{GenIn, RefreshIn, TickIn, TickOut};
 use busbar_contract::abi::mechanism::ticket::{CompletionHandle, Ticket};
 use busbar_contract::abi::plane::{
     ArriveIn, ArriveOut, OnPieceIn, OnPieceOut, OutField, PlaneCancelIn, PlaneCancelOut,
@@ -84,11 +84,19 @@ pub(crate) const DIAG_NAMES: &[&str] = door_sessions::DIAG_NAMES;
 #[cfg(test)]
 pub(crate) const DIAG_IDS_LEN: usize = door_sessions::DIAG_IDS.len();
 
+/// At most 64 calls in flight on one instance, as the transport doors state it.
+pub const MAX_INFLIGHT: u32 = 64;
+
 /// THE STATEMENT: the plane's name and version, the settings sections it declares
 /// ([`door::SECTIONS`]), its outbound needs ([`door::NEEDS`]) and its tail ([`door::TAIL`]).
+///
+/// WHY ITS DIAGNOSTIC RIDES THE ABI CHANNEL (Statement diagnostic ids and `out.diag`), not
+/// `diag_warn!` as its sibling planes raise theirs: an ungoverned legacy stream
+/// (`MCP_LEGACY_STREAM_UNGOVERNED`, 7108) is a governance event, and the ABI channel is the only one
+/// that yields a host AUDIT row; a log line alone would let it pass unaudited (plane kind lead
+/// decision, 2026-10-30).
 pub const STATEMENT: Statement = {
-    // At most 64 calls in flight on one instance, as the transport doors state it.
-    let mut s = statement(crate::PLANE_KEY, VERSION, 64)
+    let mut s = statement(crate::PLANE_KEY, VERSION, MAX_INFLIGHT)
         .with_sections(door::SECTIONS)
         .with_needs(door::NEEDS)
         .with_secret_refs(door::SECRET_REFS)
@@ -336,6 +344,23 @@ impl PlaneLife for McpDoor {
         })
     }
 
+    /// `refresh` from the whole lent `in`: the new section judged ([`PlaneLife::refresh`]), then the
+    /// applied `mcp:` endpoint block, which rides the refresh's extensions under
+    /// `abi::plane::EXT_OWNED` (absent when the document writes none), judged as `open` judges it
+    /// ([`door::judge_endpoint_block`]): a malformed block refuses the reload in its grammar's words
+    /// rather than being kept silently. A well-formed one is judged only: the endpoint, its
+    /// protected-resource facts and its origins stay the ones `open` read.
+    fn refresh_in(&self, input: &Lent<'_, RefreshIn>) -> Result<Published<Held>, Refusal> {
+        let published = self.refresh(input.settings().bytes(), input.generation())?;
+        let owned = busbar_contract::abi::mechanism::extensions::get(
+            input.head().extensions().bytes(),
+            busbar_contract::abi::plane::EXT_OWNED,
+        )
+        .unwrap_or_default();
+        door::judge_endpoint_block(owned).map_err(Refusal::refused)?;
+        Ok(published)
+    }
+
     /// `refresh`: the new section judged, and the next generation's snapshot over the same public base
     /// URL.
     fn refresh(&self, settings: &[u8], generation: u64) -> Result<Published<Held>, Refusal> {
@@ -444,6 +469,11 @@ impl PlaneLife for McpDoor {
 
 /// The most units the instance keeps state for at once; past it, a new arrival is refused.
 pub const MAX_UNITS: usize = 4096;
+
+/// THE WORDS OF AN ARRIVAL REFUSED FOR A FULL UNIT TABLE ([`MAX_UNITS`]), at 429: the planes' one
+/// sentence for it, carried as this protocol's JSON-RPC refusal (`data.reason` `capacity`).
+pub const UNITS_FULL_TEXT: &str =
+    "busbar is holding as many MCP calls as it admits at once; retry once one has ended";
 
 /// The most principals the instance keeps a roots epoch of its own for ([`McpDoor::roots`]).
 pub const MAX_ROOTS_PRINCIPALS: usize = MAX_UNITS;
@@ -830,10 +860,14 @@ fn refusal_text(refusal: &crate::tool_arrival::Refusal) -> String {
 /// request path.
 pub const UNSERVED: u32 = 2;
 
-/// REFUSED in the plane's own `text`, at `status` ([`ArriveOut::refusal`] `1`): `refusal` renders
-/// them.
+/// [`ArriveOut::refusal`]: the arrival is refused in the plane's own words, which `refusal`
+/// renders ([`refused_arrival`]).
+pub const REFUSED_IN_OWN_WORDS: u32 = 1;
+
+/// REFUSED in the plane's own `text`, at `status` ([`ArriveOut::refusal`]
+/// [`REFUSED_IN_OWN_WORDS`]): `refusal` renders them.
 fn refused_arrival(out: &mut Out<'_, ArriveOut>, status: u32, text: String) -> Outcome {
-    out.set(|o| &o.refusal, 1);
+    out.set(|o| &o.refusal, REFUSED_IN_OWN_WORDS);
     out.set(|o| &o.refusal_status, status);
     out.fail(Refusal::refused(text))
 }
@@ -959,10 +993,7 @@ slot!(
                 status: 429,
                 id: None,
                 code: crate::codec::CODE_REFUSED,
-                message: format!(
-                    "this server holds {MAX_UNITS} requests in flight, the most it will; retry \
-                     when some have finished"
-                ),
+                message: UNITS_FULL_TEXT.to_string(),
                 data: Some(serde_json::json!({ "reason": "capacity" })),
             };
             return refused_arrival(&mut out, refusal.status, refusal_text(&refusal));
@@ -3912,10 +3943,15 @@ slot!(
 );
 
 slot!(
-    /// `hydrate` and `start`: nothing to restore (the plane's durable records are the host's, and
-    /// the trust state they feed is the kernel's) and no background work (re-verification is the
-    /// kernel's trust tick, and a stale server is re-verified on the call that names it).
-    Inert, GenIn, OutHead, |_, _, _| { Outcome::Ready }
+    /// `hydrate`: nothing to restore (the plane's durable records are the host's, and the trust
+    /// state they feed is the kernel's).
+    Hydrate, GenIn, OutHead, |_, _, _| { Outcome::Ready }
+);
+
+slot!(
+    /// `start`: no background work (re-verification is the kernel's trust tick, and a stale server
+    /// is re-verified on the call that names it).
+    Start, GenIn, OutHead, |_, _, _| { Outcome::Ready }
 );
 
 slot!(
@@ -4037,7 +4073,7 @@ busbar_contract::plugin_door! {
     lifecycle: plane_life(McpDoor),
     kind_ops: {
         arrive: Safe<Arrive>, on_piece: Safe<OnPiece>, refusal: Safe<RefusalSlot>,
-        serve: Safe<Serve>, hydrate: Safe<Inert>, start: Safe<Inert>, project: Safe<Project>,
+        serve: Safe<Serve>, hydrate: Safe<Hydrate>, start: Safe<Start>, project: Safe<Project>,
     },
 }
 
