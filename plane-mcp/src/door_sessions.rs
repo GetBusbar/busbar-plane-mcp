@@ -445,13 +445,7 @@ fn open_session(
 
 /// A JSON-RPC error envelope.
 fn rpc_error(id: &Value, code: i64, message: &str) -> Vec<u8> {
-    serde_json::to_vec(&busbar_contract::jsonrpc::error_body(
-        id.clone(),
-        code,
-        message,
-        None,
-    ))
-    .unwrap_or_default()
+    busbar_contract::jsonrpc::error_bytes(&crate::codec::json(id), code, message, None)
 }
 
 /// A whole JSON answer.
@@ -607,7 +601,10 @@ fn open_endpoint(
         Err((status, why)) => return answer_of(status, rpc_error(id, CODE_REFUSED, why)),
     };
     let result = adapt::initialize_result(&discovered, revision);
-    let body = serde_json::to_vec(&crate::line::result(id, result)).unwrap_or_default();
+    let body = busbar_contract::jsonrpc::result_bytes(
+        &crate::codec::json(id),
+        &crate::codec::json(&result),
+    );
     let mut pending = answer_of(200, body);
     pending
         .fields
@@ -626,8 +623,12 @@ fn here(
 ) -> Vec<u8> {
     let id = value.get("id").cloned().unwrap_or(Value::Null);
     let method = value.get("method").and_then(Value::as_str).unwrap_or("");
-    let ok =
-        |result: Value| serde_json::to_vec(&crate::line::result(&id, result)).unwrap_or_default();
+    let ok = |result: Value| {
+        busbar_contract::jsonrpc::result_bytes(
+            &crate::codec::json(&id),
+            &crate::codec::json(&result),
+        )
+    };
     let invalid = |message: &str| rpc_error(&id, CODE_INVALID_PARAMS, message);
     let uri = value.pointer("/params/uri").and_then(Value::as_str);
     match method {
@@ -918,14 +919,13 @@ pub(super) fn lower(plane: &McpDoor, ticket: Ticket, caller: &str, unit: &mut Ca
         Some(adapt::Lowered::Spliced(bytes)) => bytes,
         Some(adapt::Lowered::Inexpressible) => {
             let id = v.get("id").cloned().unwrap_or(Value::Null);
-            serde_json::to_vec(&busbar_contract::jsonrpc::error_body(
-                id,
+            busbar_contract::jsonrpc::error_bytes(
+                &crate::codec::json(&id),
                 CODE_REFUSED,
                 "this answer asks for input or names a task, which this session's MCP revision \
                  cannot carry",
                 None,
-            ))
-            .unwrap_or_default()
+            )
         }
     };
     if line {

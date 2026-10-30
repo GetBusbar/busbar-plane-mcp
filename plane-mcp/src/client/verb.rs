@@ -109,15 +109,15 @@ impl UpstreamVerb {
             );
         }
         let method = self.method();
+        let params = crate::codec::json(&params);
         let body = if self.is_notification() {
-            serde_json::json!({ "jsonrpc": "2.0", "method": method, "params": params })
+            busbar_contract::jsonrpc::notification_bytes(method, Some(&params))
         } else {
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "method": method,
-                "params": params,
-            })
+            busbar_contract::jsonrpc::request_bytes(
+                &crate::codec::json(&request_id),
+                method,
+                Some(&params),
+            )
         };
         envelope(url, method, self.target().as_deref(), body, authorization)
     }

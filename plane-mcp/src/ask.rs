@@ -14,7 +14,10 @@
 //! and never "proceed": proceeding would let a caller strip the operator's confirmation gate by
 //! declaring nothing.
 
+use busbar_contract::jsonrpc::result_bytes;
 use serde_json::{json, Map, Value};
+
+use crate::codec::json;
 
 use crate::tools_config::{AskRoundCfg, ASK_ELICITATION, ASK_ROOTS, ASK_SAMPLING};
 
@@ -684,7 +687,7 @@ pub fn input_required_result(id: &Value, asks: &[CallerAsk], request_state: &str
         "inputRequests": requests,
         "requestState": request_state,
     });
-    serde_json::to_vec(&json!({ "jsonrpc": "2.0", "id": id, "result": result })).unwrap_or_default()
+    result_bytes(&json(id), &json(&result))
 }
 
 /// The keys of a child's requests the retry did not answer, joined; `None` when it answered all.
@@ -748,8 +751,7 @@ pub fn open_relayed(
 pub fn relayed_result(id: &Value, upstream: &Value, state: &str) -> Vec<u8> {
     let mut result = upstream.as_object().cloned().unwrap_or_default();
     result.insert("requestState".into(), state.into());
-    serde_json::to_vec(&json!({ "jsonrpc": "2.0", "id": id, "result": Value::Object(result) }))
-        .unwrap_or_default()
+    result_bytes(&json(id), &json(&result))
 }
 
 #[cfg(test)]

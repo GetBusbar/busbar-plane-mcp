@@ -217,7 +217,7 @@ pub fn complete(id: &Value, mut value: Value) -> Vec<u8> {
     if let Some(obj) = value.as_object_mut() {
         obj.insert("resultType".into(), RESULT_TYPE_COMPLETE.into());
     }
-    serde_json::to_vec(&json!({ "jsonrpc": "2.0", "id": id, "result": value })).unwrap_or_default()
+    busbar_contract::jsonrpc::result_bytes(&crate::codec::json(id), &crate::codec::json(&value))
 }
 
 impl Catalogue {
