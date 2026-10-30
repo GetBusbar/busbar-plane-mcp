@@ -11,8 +11,8 @@
 //! per-server grant ([`ServerRequestGrants`], deny by default), re-read every round.
 
 use crate::codec::{
-    H_MCP_METHOD, H_MCP_NAME, H_PROTOCOL_VERSION, META_CLIENT_CAPABILITIES, META_PROTOCOL_VERSION,
-    PROTOCOL_VERSION,
+    json, H_MCP_METHOD, H_MCP_NAME, H_PROTOCOL_VERSION, META_CLIENT_CAPABILITIES,
+    META_PROTOCOL_VERSION, PROTOCOL_VERSION,
 };
 use crate::identity::ToolKey;
 
@@ -73,23 +73,18 @@ pub fn tools_call(
             capabilities.insert(cap.to_string(), serde_json::json!({}));
         }
     }
-    let mut body = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": request_id,
-        "method": "tools/call",
-        "params": {
-            "name": name,
-            "arguments": arguments,
-            "_meta": {
-                META_PROTOCOL_VERSION: PROTOCOL_VERSION,
-                "progressToken": progress_token,
-                META_CLIENT_CAPABILITIES: capabilities,
-            },
+    let mut params = serde_json::json!({
+        "name": name,
+        "arguments": arguments,
+        "_meta": {
+            META_PROTOCOL_VERSION: PROTOCOL_VERSION,
+            "progressToken": progress_token,
+            META_CLIENT_CAPABILITIES: capabilities,
         },
     });
     // EXACTLY TWO members of the continuation cross, by name.
     if let (Some(params), Some(responses)) = (
-        body["params"].as_object_mut(),
+        params.as_object_mut(),
         continuation.and_then(|c| c.get("inputResponses")),
     ) {
         params.insert("inputResponses".to_string(), responses.clone());
@@ -97,6 +92,11 @@ pub fn tools_call(
             params.insert("requestState".to_string(), state.clone());
         }
     }
+    let body = busbar_contract::jsonrpc::request_bytes(
+        &json(&request_id),
+        "tools/call",
+        Some(&json(&params)),
+    );
     envelope(url, "tools/call", Some(name), body, authorization)
 }
 
@@ -104,17 +104,17 @@ pub fn tools_call(
 /// verify-on-call fetch send a member over HTTP (`crate::tool_door`), and the one a stdio child is
 /// asked over its pipe (`crate::tool_door`'s program leg).
 pub fn tools_list(url: &str, request_id: u64, authorization: Option<&str>) -> OutboundRequest {
-    let body = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": request_id,
-        "method": "tools/list",
-        "params": {
-            "_meta": {
-                META_PROTOCOL_VERSION: PROTOCOL_VERSION,
-                META_CLIENT_CAPABILITIES: {},
-            },
+    let params = serde_json::json!({
+        "_meta": {
+            META_PROTOCOL_VERSION: PROTOCOL_VERSION,
+            META_CLIENT_CAPABILITIES: {},
         },
     });
+    let body = busbar_contract::jsonrpc::request_bytes(
+        &json(&request_id),
+        "tools/list",
+        Some(&json(&params)),
+    );
     envelope(url, "tools/list", None, body, authorization)
 }
 
@@ -124,7 +124,7 @@ pub fn envelope(
     url: &str,
     method: &str,
     name: Option<&str>,
-    body: serde_json::Value,
+    body: Vec<u8>,
     authorization: Option<&str>,
 ) -> OutboundRequest {
     let mut headers = vec![
@@ -146,7 +146,7 @@ pub fn envelope(
     OutboundRequest {
         url: url.to_string(),
         headers,
-        body: serde_json::to_vec(&body).unwrap_or_default(),
+        body,
     }
 }
 

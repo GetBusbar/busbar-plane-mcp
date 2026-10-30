@@ -300,13 +300,12 @@ pub(super) fn run_arrival(body: &[u8]) -> Option<(String, Value, Vec<u8>, Option
             seal: value.get("seal")?.as_str()?.to_string(),
         }),
     };
-    let call = json!({
-        "jsonrpc": "2.0",
-        "id": 0,
-        "method": crate::codec::METHOD_TOOLS_CALL,
-        "params": params,
-    });
-    Some((reference, params, serde_json::to_vec(&call).ok()?, retry))
+    let call = busbar_contract::jsonrpc::request_bytes(
+        b"0",
+        crate::codec::METHOD_TOOLS_CALL,
+        Some(&serde_json::to_vec(&params).ok()?),
+    );
+    Some((reference, params, call, retry))
 }
 
 /// The refused arrival of a continuation whose body names no task.
