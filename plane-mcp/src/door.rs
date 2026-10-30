@@ -61,12 +61,12 @@ pub const SECTIONS: &[Section] = &[
     Section {
         name: abi_str("tools"),
         flags: SECTION_DECLARING,
-        _reserved: 0,
+        ..Section::ZERO
     },
     Section {
         name: abi_str("mcp"),
         flags: SECTION_SELECTS,
-        _reserved: 0,
+        ..Section::ZERO
     },
 ];
 
@@ -482,17 +482,35 @@ pub struct ToolPool {
 
 /// `validate`: the blob stage 3g deals a plane (`{<verb>: <section>}` for each stated verb the
 /// document writes; the kernel's own judges hand the same shape), read at the `tools:` section. An
-/// empty blob, or one that writes no `tools:`, is the empty section; the `mcp:` endpoint block it may
-/// carry is judged where it is lowered.
+/// empty blob, or one that writes no `tools:`, is the empty section. The `mcp:` endpoint block it
+/// may carry is judged as `open` judges it ([`judge_endpoint_block`]), so a block `open` would
+/// refuse is refused here first.
 ///
 /// # Errors
 ///
-/// A blob that is not a JSON object, or the `tools:` section's first broken rule.
+/// A blob that is not a JSON object, the `tools:` section's first broken rule, or the `mcp:`
+/// block's.
 pub fn read_dealt_tools(settings: &[u8]) -> Result<ToolsCfg, String> {
-    match dealt_section(settings, crate::tools_config::SECTION)? {
-        None => Ok(ToolsCfg::default()),
-        Some(section) => read_tools_value(section),
-    }
+    let cfg = match dealt_section(settings, crate::tools_config::SECTION)? {
+        None => ToolsCfg::default(),
+        Some(section) => read_tools_value(section)?,
+    };
+    judge_endpoint_block(settings)?;
+    Ok(cfg)
+}
+
+/// THE `mcp:` ENDPOINT BLOCK JUDGED, among the sections `owned` keys by name, by every reader
+/// `open` lowers it through ([`admitted_endpoint`], [`resource_facts`], [`allowed_origins`]):
+/// `validate` judges a dealt block with it and `refresh` the applied one, so neither answers READY
+/// to a block `open` would refuse. Nothing written is nothing to judge.
+///
+/// # Errors
+///
+/// The block, written and malformed, in its grammar's words.
+pub fn judge_endpoint_block(owned: &[u8]) -> Result<(), String> {
+    admitted_endpoint(None, owned)?;
+    allowed_origins(owned)?;
+    Ok(())
 }
 
 /// THE SETTINGS `open` and `refresh` are handed: the section ([`read_tools_value`]) and the pools the
