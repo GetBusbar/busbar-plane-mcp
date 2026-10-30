@@ -32,7 +32,7 @@ use super::{
     Pending, StaticServices, Step, Ticket, Twin,
 };
 use crate::call::{client_capabilities, AdmittedCall, Leg, RelayedRetry};
-use crate::door::RECORD_TASK;
+use crate::statement::RECORD_TASK;
 use crate::tool_arrival::Refusal;
 use crate::tool_tasks::{
     self as tasks, run_digest, Status, Task, WorkRow, RUN_CLAIM_TTL_MS, TASK_PROTOCOL_ERROR_CODE,
@@ -983,7 +983,7 @@ fn asking(
     let sealed = {
         let mut seal = door_seal(plane, services, ticket, (&mut unit.issued, &mut unit.claim));
         let bind = |now| relay_bind(principal, &name, now);
-        crate::tool_door::seal_relayed(
+        crate::plane_door::seal_relayed(
             &mut seal,
             server,
             bind,

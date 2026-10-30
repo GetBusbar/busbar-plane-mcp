@@ -157,9 +157,9 @@ fn the_declares_file_states_the_catalog() {
 /// retired entry.
 #[test]
 fn the_declared_codes_are_exactly_the_raised_codes() {
-    let names = crate::tool_door::DIAG_NAMES;
+    let names = crate::plane_door::DIAG_NAMES;
     assert_eq!(
-        crate::tool_door::DIAG_IDS_LEN,
+        crate::plane_door::DIAG_IDS_LEN,
         names.len(),
         "every diagnostic id the Statement states is a named one"
     );

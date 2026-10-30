@@ -29,7 +29,7 @@ const SECTION_MORE: &[u8] = br#"{
 fn catalogue(generation: u64, section: &[u8]) -> Catalogue {
     Catalogue::build(
         generation,
-        &crate::door::read_tools_section(section).expect("the section reads"),
+        &crate::statement::read_tools_section(section).expect("the section reads"),
     )
 }
 
@@ -90,8 +90,9 @@ fn a_change_the_caller_can_see_notifies_and_one_it_cannot_does_not() {
     };
     assert_eq!(frames[0]["method"], "notifications/tools/list_changed");
     // A new generation whose change this caller cannot see (it is entitled to nothing new).
-    let only_read =
-        |kind: &str, name: &str| kind != crate::door::SCOPE_TOOL || name.ends_with("read_file");
+    let only_read = |kind: &str, name: &str| {
+        kind != crate::statement::SCOPE_TOOL || name.ends_with("read_file")
+    };
     let mut l = Listen::open(Some(&params), json!(1), 0, |_| false).expect("opened");
     let _ack = l.step(&catalogue(1, SECTION), &only_read, &Standing::Live, &[], 1);
     assert_eq!(

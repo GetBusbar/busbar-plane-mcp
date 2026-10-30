@@ -822,6 +822,83 @@ mod both_ways {
         }
     }
 
+    /// `refresh` of [`SECTION`] to `generation`, the applied document's other owned sections
+    /// `owned` riding the head's extensions under `EXT_OWNED` as the loader's `refresh_door` lays
+    /// them (absent when empty): the outcome, the generation it published, and its words.
+    fn refresh_owning(p: &Plugin<Plane>, generation: u64, owned: &[u8]) -> String {
+        use busbar_contract::abi::mechanism::call::{Blob, BLOB_OCTETS};
+        let extensions = if owned.is_empty() {
+            Vec::new()
+        } else {
+            busbar_contract::abi::mechanism::extensions::encode(&[(plane::EXT_OWNED, owned)])
+        };
+        let mut f: Frame<RefreshIn, PlaneRefreshOut> = Frame::new(z(), z());
+        (f.input.head, f.out.head) = (in_head(), out_head());
+        if !extensions.is_empty() {
+            // SAFETY: `extensions` outlives the call the blob is lent to.
+            f.input.head.extensions = unsafe {
+                Blob::from_raw_parts(extensions.as_ptr(), extensions.len(), BLOB_OCTETS, 0)
+            };
+        }
+        (f.input.generation, f.input.settings) = (generation, octets(SECTION));
+        let (c, snapshot) = p.refresh(&mut f);
+        format!(
+            "refresh {:?} {:?} {}",
+            c.outcome,
+            snapshot.map(|s| s.generation),
+            String::from_utf8_lossy(&c.error.unwrap_or_default())
+        )
+    }
+
+    /// G4: AN APPLY CARRYING A MALFORMED `mcp:` BLOCK IS REFUSED AT `refresh`, in the block's own
+    /// words, linked and dropped in alike, and publishes nothing; the same apply with a well-formed
+    /// block, or with none, refreshes. The applied block rides the refresh's extensions under
+    /// `EXT_OWNED` (the refresh-time twin of `PlaneOpenIn::owned`), judged as `open` judges it.
+    #[test]
+    fn an_apply_carrying_a_malformed_endpoint_block_is_refused_at_refresh() {
+        let d = Dispatcher::new(DispatchConfig::default());
+        for (how, p) in [("linked", linked(&d)), ("dropped in", dropped(&d))] {
+            let mut i: PlaneOpenIn = z();
+            i.open.head = in_head();
+            (i.open.generation, i.open.settings) = (1, octets(SECTION));
+            i.public_url = text(PUBLIC_URL.as_bytes());
+            let mut o: PlaneOpenOut = z();
+            o.open.head = out_head();
+            assert_eq!(
+                p.open(&mut Frame::new(i, o)).0.outcome,
+                Outcome::Ready,
+                "{how}: open"
+            );
+            let refused = refresh_owning(
+                &p,
+                2,
+                br#"{"mcp":{"canonical_uri":"https://gw.example/elsewhere","authorization_servers":["https://l.example"]}}"#,
+            );
+            assert!(
+                refused.starts_with(&format!("refresh {:?} None ", Outcome::Refused)),
+                "{how}: a malformed `mcp:` refuses the refresh: {refused}"
+            );
+            assert!(
+                refused.contains("only at `/mcp`"),
+                "{how}: in the block's own words: {refused}"
+            );
+            assert_eq!(
+                refresh_owning(
+                    &p,
+                    3,
+                    br#"{"mcp":{"canonical_uri":"https://gw.example/mcp","authorization_servers":["https://l.example"]}}"#,
+                ),
+                format!("refresh {:?} Some(3) ", Outcome::Ready),
+                "{how}: a well-formed `mcp:` refreshes"
+            );
+            assert_eq!(
+                refresh_owning(&p, 4, b""),
+                format!("refresh {:?} Some(4) ", Outcome::Ready),
+                "{how}: no block refreshes"
+            );
+        }
+    }
+
     #[test]
     fn the_linked_and_the_dropped_in_door_answer_every_op_the_same() {
         let d = Dispatcher::new(DispatchConfig::default());
@@ -2189,7 +2266,7 @@ mod bounds {
     /// read off the source at that site.
     #[test]
     fn an_upstreams_answer_is_gathered_only_under_the_reply_ceiling() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../plane-mcp/src/tool_door.rs");
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../plane-mcp/src/plane_door.rs");
         let source = std::fs::read_to_string(path).expect("the door's source reads");
         let lines: Vec<&str> = source.lines().collect();
         let gather = lines
