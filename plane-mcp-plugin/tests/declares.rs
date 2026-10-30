@@ -6,22 +6,34 @@
 //! dropped-in through the same table ... NOTHING CHANGES about the plugin itself").
 //!
 //! A busbar build that links the plane reads its `declares` off the door's Statement
-//! (`EXT_DECLARES`); the release signs the file its `declares_file:` names into the dropped-in
+//! (`EXT_DECLARES`); the release signs the file its recipe's `declares:` names into the dropped-in
 //! plane's manifest. Both must be the same document, byte for byte, or a dropped-in plane states
 //! other facts than the linked one: the breaker posture and the diagnostic codes the linked door
 //! carries, which the signed file once lacked.
 
-/// The declaration the release signs: the `declares_file:` its workflow names, and its bytes read
-/// from the repo.
+/// The declaration the release signs: the `declares:` of this plugin's entry in busbar's
+/// `plugins.yaml` (which replaced the per-repo `release.yml`'s `declares_file:`), and its bytes read
+/// from the repo. The recipe's path is pinned here; when the busbar tree is at hand
+/// (`BUSBAR_PLUGINS_YAML`, or a sibling checkout) the entry itself is read and must name it.
 fn signed() -> (String, Vec<u8>) {
+    const NAMED: &str = "plane-mcp/declares.json";
     let root = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
-    let release = std::fs::read_to_string(format!("{root}/.github/workflows/release.yml"))
-        .expect("the release workflow reads");
-    let named = release
-        .lines()
-        .find_map(|l| l.trim().strip_prefix("declares_file:"))
-        .map(|v| v.trim().trim_matches('"').to_string())
-        .expect("the release names its declares_file");
+    let yaml = std::env::var("BUSBAR_PLUGINS_YAML")
+        .unwrap_or_else(|_| format!("{root}/../busbar/plugins.yaml"));
+    let named = match std::fs::read_to_string(yaml) {
+        Ok(yaml) => yaml
+            .split("\n  - repo: ")
+            .find(|e| {
+                e.trim_start_matches("- repo: ")
+                    .starts_with("busbar-plane-mcp\n")
+            })
+            .expect("plugins.yaml has an entry for this repo")
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("declares:"))
+            .map(|v| v.trim().trim_matches('"').to_string())
+            .expect("the entry names its declares file"),
+        Err(_) => NAMED.to_string(),
+    };
     let bytes = std::fs::read(format!("{root}/{named}")).expect("the signed declaration reads");
     (named, bytes)
 }
