@@ -7,6 +7,13 @@
 /// The discriminator on a result this node is handing over as finished.
 pub const RESULT_TYPE_COMPLETE: &str = "complete";
 
+/// `value`'s compact JSON bytes, the members a [`busbar_contract::jsonrpc`] `*_bytes` envelope
+/// splices in.
+#[must_use]
+pub fn json(value: &impl serde::Serialize) -> Vec<u8> {
+    serde_json::to_vec(value).unwrap_or_default()
+}
+
 /// The discriminator on a result that asks the caller for something first.
 pub const RESULT_TYPE_INPUT_REQUIRED: &str = "input_required";
 

@@ -1556,64 +1556,41 @@ fn relayed(id: &Value, value: &Value, body: &[u8]) -> Vec<u8> {
     let Some(sent) = result_bytes(body) else {
         return complete(id, value.clone());
     };
-    let mut out = format!("{{\"id\":{id},\"jsonrpc\":\"2.0\",\"result\":");
-    match sent.trim_start().strip_prefix('{') {
+    let result = match sent.trim_start().strip_prefix('{') {
         Some(members) if value.get("resultType").is_none() => {
-            out.push_str("{\"resultType\":\"");
-            out.push_str(RESULT_TYPE_COMPLETE);
-            out.push('"');
+            let mut out = format!("{{\"resultType\":\"{RESULT_TYPE_COMPLETE}\"");
             if !members.trim_start().starts_with('}') {
                 out.push(',');
             }
             out.push_str(members);
+            std::borrow::Cow::Owned(out)
         }
-        _ => out.push_str(sent),
-    }
-    out.push('}');
-    out.into_bytes()
+        _ => std::borrow::Cow::Borrowed(sent),
+    };
+    busbar_contract::jsonrpc::result_bytes(&crate::codec::json(id), result.as_bytes())
 }
 
-/// The upstream's `result` member as it sits in `body`: its value's own bytes, found by reading
-/// the answer's top-level members in turn (each value read and its extent taken, never re-written,
-/// so serde_json's `raw_value` feature is not asked for: the binary would unify it into every
-/// linked plugin). `None` for an answer that is not one JSON object with exactly one `result`.
+/// The upstream's `result` member as it sits in `body` (an answer serde_json already read): its
+/// value's own bytes, found by the SDK's span scanner, never re-written. `None` for an answer that
+/// is not one JSON object with exactly one `result`.
 fn result_bytes(body: &[u8]) -> Option<&str> {
     let text = std::str::from_utf8(body).ok()?;
-    let ws = |at: usize| text.len() - text[at..].trim_start_matches([' ', '\t', '\n', '\r']).len();
-    let mut at = ws(0);
-    if text.as_bytes().get(at) != Some(&b'{') {
-        return None;
-    }
-    at = ws(at + 1);
-    let mut found = None;
-    if text.as_bytes().get(at) != Some(&b'}') {
-        loop {
-            let mut keys = serde_json::Deserializer::from_str(&text[at..]).into_iter::<String>();
-            let key = keys.next()?.ok()?;
-            at = ws(at + keys.byte_offset());
-            if text.as_bytes().get(at) != Some(&b':') {
-                return None;
-            }
-            let start = ws(at + 1);
-            let mut values = serde_json::Deserializer::from_str(&text[start..])
-                .into_iter::<serde::de::IgnoredAny>();
-            values.next()?.ok()?;
-            let end = start + values.byte_offset();
-            if key == "result" && found.replace(&text[start..end]).is_some() {
-                return None;
-            }
-            at = ws(end);
-            match text.as_bytes().get(at)? {
-                b',' => at = ws(at + 1),
-                b'}' => break,
-                _ => return None,
-            }
+    let (mut found, mut twice) = (None, false);
+    let (_, close) = busbar_contract::spans::scan(body, 0, |m| {
+        if m.is("result") {
+            twice |= found.replace(m.value()).is_some();
         }
-    }
-    if ws(at + 1) != text.len() {
+    })?;
+    if twice
+        || !text
+            .get(close + 1..)?
+            .trim_start_matches([' ', '\t', '\n', '\r'])
+            .is_empty()
+    {
         return None;
     }
-    found
+    let found = found?;
+    text.get(found.start..found.end)
 }
 
 #[cfg(test)]

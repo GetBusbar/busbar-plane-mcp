@@ -234,13 +234,12 @@ pub(super) fn open_listen(
 ) -> Result<(Listen, u64), Box<Pending>> {
     entitled_afresh(plane, ticket, unit, held);
     let Some(now) = mono_ns(plane.services, ticket, unit) else {
-        let body = busbar_contract::jsonrpc::error_body(
-            id,
+        let body = busbar_contract::jsonrpc::error_bytes(
+            &crate::codec::json(&id),
             crate::codec::CODE_REFUSED,
             super::CLOCK_UNREAD,
             None,
         );
-        let body = serde_json::to_vec(&body).unwrap_or_default();
         return Err(Box::new(Pending::answer(503, body, None, &[])));
     };
     let admit = admit(&unit.entitled);

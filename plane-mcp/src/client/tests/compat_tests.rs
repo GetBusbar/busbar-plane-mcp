@@ -10,9 +10,11 @@ fn stateless_call() -> OutboundRequest {
         "https://up.example/rpc",
         "tools/call",
         Some("echo"),
-        json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{
+        crate::codec::json(
+            &json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{
             "name":"echo","arguments":{"x":"y"},
             "_meta":{META_PROTOCOL_VERSION:"2026-07-28",META_CLIENT_CAPABILITIES:{},"progressToken":3}}}),
+        ),
         Some("tok"),
     )
 }

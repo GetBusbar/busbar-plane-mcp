@@ -10,6 +10,7 @@ use serde_json::Value;
 
 use super::jsonrpc::OutboundRequest;
 use crate::adapt::H_SESSION_ID;
+use crate::codec::json;
 use crate::codec::{
     CODE_INVALID_PARAMS, CODE_INVALID_REQUEST, CODE_METHOD_NOT_FOUND,
     CODE_UNSUPPORTED_PROTOCOL_VERSION, H_MCP_METHOD, H_MCP_NAME, H_PROTOCOL_VERSION,
@@ -108,17 +109,17 @@ pub fn initialize_request(
     asked: Revision,
     client_version: &str,
 ) -> OutboundRequest {
-    let body = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": INITIALIZE_ID,
-        "method": crate::adapt::METHOD_INITIALIZE,
-        "params": {
-            "protocolVersion": asked.wire(),
-            "capabilities": {},
-            "clientInfo": { "name": "busbar", "version": client_version },
-        },
+    let params = serde_json::json!({
+        "protocolVersion": asked.wire(),
+        "capabilities": {},
+        "clientInfo": { "name": "busbar", "version": client_version },
     });
-    session_envelope(template, url, &body, None, None)
+    let body = busbar_contract::jsonrpc::request_bytes(
+        &json(&INITIALIZE_ID),
+        crate::adapt::METHOD_INITIALIZE,
+        Some(&json(&params)),
+    );
+    session_envelope(template, url, body, None, None)
 }
 
 /// `notifications/initialized`, completing the opening of `revision`'s session.
@@ -129,11 +130,8 @@ pub fn initialized_notification(
     revision: Revision,
     session: Option<&str>,
 ) -> OutboundRequest {
-    let body = serde_json::json!({
-        "jsonrpc": "2.0",
-        "method": crate::adapt::METHOD_INITIALIZED,
-    });
-    session_envelope(template, url, &body, Some(revision), session)
+    let body = busbar_contract::jsonrpc::notification_bytes(crate::adapt::METHOD_INITIALIZED, None);
+    session_envelope(template, url, body, Some(revision), session)
 }
 
 /// The revision an `initialize` answer names, when this plane can carry it. `None` is an upstream
@@ -186,7 +184,7 @@ pub fn lower_request(
             params.remove("_meta");
         }
     }
-    session_envelope(req, url, &body, Some(revision), session)
+    session_envelope(req, url, json(&body), Some(revision), session)
 }
 
 /// The shared session-revision envelope: `template`'s headers without the stateless mirror, plus
@@ -194,7 +192,7 @@ pub fn lower_request(
 fn session_envelope(
     template: &OutboundRequest,
     url: &str,
-    body: &Value,
+    body: Vec<u8>,
     revision: Option<Revision>,
     session: Option<&str>,
 ) -> OutboundRequest {
@@ -219,7 +217,7 @@ fn session_envelope(
     OutboundRequest {
         url: url.to_string(),
         headers,
-        body: serde_json::to_vec(body).unwrap_or_default(),
+        body,
     }
 }
 

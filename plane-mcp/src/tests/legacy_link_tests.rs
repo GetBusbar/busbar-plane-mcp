@@ -12,7 +12,7 @@ fn link() -> Link {
         "https://up.example/events",
         "tools/call",
         None,
-        serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call"}),
+        crate::codec::json(&serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call"})),
         None,
     );
     Link::new(1, "https://up.example/events", "fs", &template)

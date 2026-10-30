@@ -297,8 +297,10 @@ pub fn child_replies(child: &crate::ask::ChildLeg, responses: Option<&Value>) ->
         .iter()
         .filter_map(|(key, id)| {
             let answer = responses?.get(key)?;
-            serde_json::to_vec(&serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": answer }))
-                .ok()
+            Some(busbar_contract::jsonrpc::result_bytes(
+                &crate::codec::json(id),
+                &crate::codec::json(answer),
+            ))
         })
         .collect()
 }

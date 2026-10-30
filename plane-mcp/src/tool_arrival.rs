@@ -45,13 +45,15 @@ impl Refusal {
     /// The refusal as the wire carries it: the one JSON-RPC error envelope.
     #[must_use]
     pub fn body(&self) -> Vec<u8> {
-        let envelope = busbar_contract::jsonrpc::error_body(
-            self.id.clone().unwrap_or(Value::Null),
+        busbar_contract::jsonrpc::error_bytes(
+            self.id
+                .as_ref()
+                .map_or(b"null".to_vec(), crate::codec::json)
+                .as_slice(),
             self.code,
             &self.message,
-            self.data.clone(),
-        );
-        serde_json::to_vec(&envelope).unwrap_or_default()
+            self.data.as_ref().map(crate::codec::json).as_deref(),
+        )
     }
 }
 
