@@ -43,7 +43,7 @@
 #                                 binary built from THIS COMMIT. The leg boots it on loopback,
 #                                 gives the suite a real audience-bound credential for it, and
 #                                 proves the plane boundary is still intact before believing any
-#                                 verdict. See scripts/mcp-subject/boot.sh.
+#                                 verdict. See testing/mcp-conformance/mcp-subject/boot.sh.
 #   MCP_CONFORMANCE_SUBJECT_URL   an EXTERNAL, already-deployed busbar endpoint. Kept as an optional
 #                                 extra leg; it is deliberately no longer the primary arm, because a
 #                                 release gate that depends on somebody's deployment being up
@@ -76,7 +76,7 @@
 #                    not a defect.
 
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 CONFORMANCE_PIN="@modelcontextprotocol/conformance@0.2.0-alpha.11"
 REVISION="2026-07-28"
@@ -143,7 +143,7 @@ ensure_node22() {
 # credential, and PROVE the plane boundary is intact before any verdict is believed. Sourced rather
 # than inlined because it is a substantial piece of reasoning of its own; sourced AFTER `say`/`die`
 # because it uses both.
-# shellcheck source=scripts/mcp-subject/boot.sh
+# shellcheck source=testing/mcp-conformance/mcp-subject/boot.sh
 . "$(dirname "$0")/mcp-subject/boot.sh"
 
 # ONE REAPER, INSTALLED BEFORE ANYTHING IS SPAWNED, and it reads its list when it FIRES rather than
@@ -465,7 +465,7 @@ green."
 
 official_subject() {
   say "== OFFICIAL SUITE · SUBJECT leg (busbar) =="
-  # ARMED BY A BINARY, and only secondarily by a URL. See scripts/mcp-subject/boot.sh for why the
+  # ARMED BY A BINARY, and only secondarily by a URL. See testing/mcp-conformance/mcp-subject/boot.sh for why the
   # subject is built from this commit and booted in this job rather than being an endpoint somebody
   # deployed: a release gate that depends on a live deployment produces two unreadable verdicts, a
   # green that means "the deployment was fine yesterday" and a red that means "somebody redeployed".
@@ -646,7 +646,7 @@ battery_subject() {
     # hands it `MCP_FAKE_MODE` / `MCP_FAKE_TRANSCRIPT` per test; `seam-arm.sh` writes those into the
     # control file the long-lived hostile peer reads, then execs the SAME bridge above so the front
     # door is the same busbar the rest of the battery has been driving all run.
-    MCP_SUBJECT_UPSTREAM_CONFIG_CMD="bash $(pwd)/scripts/mcp-subject/seam-arm.sh $seam_control $SUBJECT_URL"
+    MCP_SUBJECT_UPSTREAM_CONFIG_CMD="bash $(pwd)/testing/mcp-conformance/mcp-subject/seam-arm.sh $seam_control $SUBJECT_URL"
     export MCP_SUBJECT_UPSTREAM_CONFIG_CMD
 
     # ── THE CLIENT ROLE, ARMED ───────────────────────────────────────────────────────────────────
@@ -667,10 +667,10 @@ battery_subject() {
     # SAME PEER, SAME CONTROL FILE, SAME BUSBAR as the seam leg. The battery runs its tests
     # sequentially (`runAll` is a `for` loop), so one control file cannot be armed for two tests at
     # once, and reusing the one long-lived hostile upstream is what keeps a single busbar serving
-    # the whole run. See scripts/mcp-subject/client-arm.sh for what it does and, more importantly,
+    # the whole run. See testing/mcp-conformance/mcp-subject/client-arm.sh for what it does and, more importantly,
     # for the half of the suite's contract busbar cannot satisfy and why substituting the HTTP
     # mirror of the same fake server is a fact about the subject rather than a loosened test.
-    MCP_SUBJECT_CLIENT_CMD="bash $(pwd)/scripts/mcp-subject/client-arm.sh $seam_control $SUBJECT_URL"
+    MCP_SUBJECT_CLIENT_CMD="bash $(pwd)/testing/mcp-conformance/mcp-subject/client-arm.sh $seam_control $SUBJECT_URL"
     export MCP_SUBJECT_CLIENT_CMD
 
     # THE ADMIN HALF OF THE CLIENT ARM. busbar's client direction sends `tools/list` on exactly one
@@ -1056,7 +1056,7 @@ printf "{}" >reports/differential.json; exit 0'
   # expanding heredoc, where an unescaped backtick in a comment is a command substitution that
   # prints "command not found" into every subject run.
   if boot_selftest >/dev/null 2>&1; then say "  ok: boot.sh renders the subject config with nothing on stderr"
-  else say "  MISS: boot.sh selftest failed (run: bash -c '. scripts/mcp-subject/boot.sh; boot_selftest')"; failures=$((failures+1)); fi
+  else say "  MISS: boot.sh selftest failed (run: bash -c '. testing/mcp-conformance/mcp-subject/boot.sh; boot_selftest')"; failures=$((failures+1)); fi
 
   [ "$failures" -eq 0 ] || die "$failures self-test fixture(s) did not behave as declared"
   say "  self-test: 15 fixture(s) passed"

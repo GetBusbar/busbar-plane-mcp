@@ -9,10 +9,10 @@
 #
 #   compose-selftest.sh <busbar checkout> <stage dir>     (BUSBAR_CHECKOUT by default)
 set -euo pipefail
-here="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 checkout="${1:-${BUSBAR_CHECKOUT:?busbar checkout}}"
 stage="${2:-$(mktemp -d)}"
-manifest="$(bash "$here/scripts/mcp-subject/compose.sh" "$checkout" "$here/plane-mcp" "$stage")"
+manifest="$(bash "$here/testing/mcp-conformance/mcp-subject/compose.sh" "$checkout" "$here/plane-mcp" "$stage")"
 "${PYTHON:-python3}" -I - "$manifest" "$here/plane-mcp" "$checkout" <<'PY'
 import json, os, re, sys
 manifest, plane, checkout = sys.argv[1:4]
