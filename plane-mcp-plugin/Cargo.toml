@@ -35,3 +35,10 @@ serde_json = { workspace = true }
 # The SHARED HOST-SERVICES DOUBLE (`services-double`, dev-only): the door witness binds a clock on
 # its loader host through it.
 busbar-contract = { workspace = true, features = ["services-double"] }
+# THE SUITE'S HOST CONNECTOR (`tests/support/conformance_host.rs`, `conformance_host!`, mounted by
+# `tests/conformance.rs`): the transport doors this plugin's needs name, which the test kit's host
+# loads and opens as the root does: `tcp` and `http` at the revs the workspace pins, and `stdio`
+# (the process carrier of the `transport: stdio` need) at the rev busbar's dist links at the pin.
+busbar-transport-http = { workspace = true }
+busbar-transport-tcp = { workspace = true }
+busbar-transport-stdio = { git = "https://github.com/GetBusbar/busbar-transport-stdio", rev = "bfdfbd76eea2b3b49f523237cd8b846efc0d7124" }
