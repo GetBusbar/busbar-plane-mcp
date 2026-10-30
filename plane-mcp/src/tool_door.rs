@@ -44,15 +44,15 @@ use busbar_contract::abi::mechanism::ticket::{CompletionHandle, Ticket};
 use busbar_contract::abi::plane::{
     ArriveIn, ArriveOut, OnPieceIn, OnPieceOut, OutField, PlaneCancelIn, PlaneCancelOut,
     PlaneDriveIn, PlaneDriveOut, PlaneOpenIn, PlaneSnapshot, ProjectIn, ProjectOut, RecordWrite,
-    RefusalIn, RefusalOut, ServeIn, ServeOut, UnitCount, AUDIT_APPLIED, AUDIT_REJECTED,
-    CANCEL_ABORTED, CANCEL_OK_PARTIAL, EMIT_DONE, EMIT_TO_FAR_END, FROM_CALLER, FROM_FAR_END,
-    FROM_KERNEL, PIECE_HAS_STATUS, PIECE_LAST, PRINCIPAL_REQUIRED, RECORD_AUDIT, RECORD_PUT,
-    REFUSAL_ARRIVE, REFUSAL_GATE, REFUSAL_KERNEL, ROUTE_DIRECT, ROUTE_POOL, UNITS_REPORTED,
-    VERDICT_RETRY,
+    RefusalIn, RefusalOut, ServeIn, ServeOut, UnitCount, AUDIT_APPLIED, AUDIT_REJECTED, EMIT_DONE,
+    EMIT_TO_FAR_END, FROM_CALLER, FROM_FAR_END, FROM_KERNEL, PIECE_HAS_STATUS, PIECE_LAST,
+    PRINCIPAL_REQUIRED, RECORD_AUDIT, RECORD_PUT, REFUSAL_ARRIVE, REFUSAL_GATE, REFUSAL_KERNEL,
+    ROUTE_DIRECT, ROUTE_POOL, UNITS_REPORTED, VERDICT_RETRY,
 };
 use busbar_contract::abi::sdk::door::statement;
 use busbar_contract::abi::sdk::exchange::{REPLY_MAX, REPLY_OVER_BOUND};
 use busbar_contract::abi::sdk::life::Refusal;
+use busbar_contract::abi::sdk::plane::{cancel_disposition, Ending, UnitCancel};
 use busbar_contract::abi::sdk::plane_life::{Opened, PlaneLife, Published};
 use busbar_contract::abi::sdk::publish::{Generations, Keyed};
 use busbar_contract::abi::sdk::services::ServiceError;
@@ -401,22 +401,20 @@ impl PlaneLife for McpDoor {
         let mut stopped = Vec::new();
         let mut answered = false;
         if let Some(plane) = instance.get() {
-            let ticket = input.cancel().ticket();
-            // THE UNIT THE HOST NAMES: `arrive` keyed it, and a unit cancelled before its first
-            // piece (a deadline, a reload, a shutdown) carries no ticket yet, so it is found by
-            // its key alone (`0`: the driver ticket, or an op in flight that names its own unit).
-            let unit = input.unit();
-            let cancelled =
-                |key: &u64, u: &CallUnit| u.ticket == Some(ticket) || (unit != 0 && *key == unit);
+            // THE UNIT THE HOST NAMES, or the units on the cancelled ticket: a unit cancelled
+            // before its first piece (a deadline, a reload, a shutdown) carries no ticket yet, so
+            // it is found by its key alone.
+            let named = UnitCancel::of(&input);
+            let ticket = named.ticket;
             // A task's continuation the kernel cancelled leaves its task cancelled, audited as the
             // a task its shutdown stopped is audited.
             stopped = door_tasks::cancelled(plane, ticket);
-            plane.units.with_all(|m| {
-                answered = m.iter().any(|(k, u)| {
-                    cancelled(k, u) && u.relay.as_ref().is_some_and(|r| r.status != 0)
-                });
-                m.retain(|k, u| !cancelled(k, &*u));
-            });
+            answered = named.end(
+                &plane.units,
+                Ending::Remove,
+                |u| u.ticket,
+                |u| u.relay.as_ref().is_some_and(|r| r.status != 0),
+            );
             door_listen::cancelled(plane, ticket);
             door_sessions::cancelled(plane, ticket);
             door_legacy::cancelled(plane, ticket);
@@ -437,14 +435,7 @@ impl PlaneLife for McpDoor {
         let (aw, _) = arena.settle(false);
         out.set(|o| &o.records_written, rw as u32);
         out.set(|o| &o.arena_written, aw as u64);
-        out.set(
-            |o| &o.cancel.disposition,
-            if answered {
-                CANCEL_OK_PARTIAL
-            } else {
-                CANCEL_ABORTED
-            },
-        );
+        out.set(|o| &o.cancel.disposition, cancel_disposition(answered));
         Outcome::Ready
     }
 }
