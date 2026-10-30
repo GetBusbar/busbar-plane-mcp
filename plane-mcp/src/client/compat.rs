@@ -276,11 +276,27 @@ pub struct StreamEvent {
 }
 
 /// AN INCREMENTAL EVENT-STREAM READER: bytes in, whole events out, the unfinished tail kept.
-/// Bounded: a tail that grows past `max_pending` bytes without completing an event is dropped and
-/// [`Self::overflowed`] says so, so a peer that never ends an event cannot grow busbar's memory.
+///
+/// Lines end as the event-stream grammar ends them: CRLF, a lone LF or a lone CR. A CR ends its
+/// line as it arrives (an LF right after it, in this chunk or the next, is the rest of that one
+/// terminator), so an event whose blank line is `\r\r` is handed on at once, never held for a byte
+/// the far end may not send.
+///
+/// Bounded: an unfinished event that grows past `max_pending` bytes, every byte held counted
+/// (carriage returns included), is dropped and [`Self::overflowed`] says so, so a peer that never
+/// ends an event cannot grow busbar's memory.
 #[derive(Debug)]
 pub struct EventReader {
-    pending: Vec<u8>,
+    /// The current line, its terminator not yet seen.
+    line: Vec<u8>,
+    /// The unfinished event's `event:` name.
+    event: Option<String>,
+    /// The unfinished event's `data:` lines.
+    data: Vec<String>,
+    /// The bytes read since the last event ended: what the bound counts.
+    held: usize,
+    /// The last byte ended a line with a CR: an LF next is the rest of that CRLF.
+    after_cr: bool,
     max_pending: usize,
     overflowed: bool,
 }
@@ -290,7 +306,11 @@ impl EventReader {
     #[must_use]
     pub fn new(max_pending: usize) -> Self {
         Self {
-            pending: Vec::new(),
+            line: Vec::new(),
+            event: None,
+            data: Vec::new(),
+            held: 0,
+            after_cr: false,
             max_pending,
             overflowed: false,
         }
@@ -305,41 +325,55 @@ impl EventReader {
     /// Feeds `chunk` and returns every event it completed, in order. Comment lines and events with
     /// neither a name nor data are skipped.
     pub fn feed(&mut self, chunk: &[u8]) -> Vec<StreamEvent> {
-        // A carriage return only ever ends a line here, so it is dropped as it arrives and every
-        // line end reads as `\n`.
-        self.pending
-            .extend(chunk.iter().copied().filter(|b| *b != b'\r'));
         let mut out = Vec::new();
-        while let Some(end) = self.pending.windows(2).position(|w| w == b"\n\n") {
-            let raw: Vec<u8> = self.pending.drain(..end + 2).collect();
-            let raw = String::from_utf8_lossy(&raw[..end]);
-            let mut event = StreamEvent {
-                event: None,
-                data: String::new(),
-            };
-            let mut data: Vec<&str> = Vec::new();
-            for line in raw.lines() {
-                if line.starts_with(':') {
-                    continue;
-                }
-                let (field, value) = line.split_once(':').unwrap_or((line, ""));
-                let value = value.strip_prefix(' ').unwrap_or(value);
-                match field {
-                    "event" => event.event = Some(value.to_string()),
-                    "data" => data.push(value),
-                    _ => {}
-                }
+        for &b in chunk {
+            if std::mem::take(&mut self.after_cr) && b == b'\n' {
+                continue;
             }
-            event.data = data.join("\n");
-            if event.event.is_some() || !event.data.is_empty() {
-                out.push(event);
+            self.held += 1;
+            match b {
+                b'\r' => {
+                    self.after_cr = true;
+                    self.end_line(&mut out);
+                }
+                b'\n' => self.end_line(&mut out),
+                _ => self.line.push(b),
             }
         }
-        if self.pending.len() > self.max_pending {
-            self.pending.clear();
+        if self.held > self.max_pending {
+            self.line.clear();
+            self.event = None;
+            self.data.clear();
+            self.held = 0;
             self.overflowed = true;
         }
         out
+    }
+
+    /// The current line ended: a blank line ends the event (handed on when it named or carried
+    /// anything), any other line is read as a field.
+    fn end_line(&mut self, out: &mut Vec<StreamEvent>) {
+        if self.line.is_empty() {
+            let event = self.event.take();
+            let data = std::mem::take(&mut self.data).join("\n");
+            if event.is_some() || !data.is_empty() {
+                out.push(StreamEvent { event, data });
+            }
+            self.held = 0;
+            return;
+        }
+        let line = String::from_utf8_lossy(&self.line).into_owned();
+        self.line.clear();
+        if line.starts_with(':') {
+            return;
+        }
+        let (field, value) = line.split_once(':').unwrap_or((&line, ""));
+        let value = value.strip_prefix(' ').unwrap_or(value);
+        match field {
+            "event" => self.event = Some(value.to_string()),
+            "data" => self.data.push(value.to_string()),
+            _ => {}
+        }
     }
 }
 
