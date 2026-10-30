@@ -40,7 +40,7 @@
 # THE SHELL OPTIONS THIS FILE'S CORRECTNESS DEPENDS ON, DECLARED HERE rather than inherited. Several
 # guards below are pipelines ending `|| die` (e.g. the fixture digests in `subject_collect_digests`:
 # `node tool-digest.mjs ... | sed ... >> file || die`), and without `pipefail` such a pipeline's
-# status is `sed`'s, so `die` is unreachable. This file is SOURCED by scripts/mcp-conformance.sh,
+# status is `sed`'s, so `die` is unreachable. This file is SOURCED by testing/mcp-conformance/mcp-conformance.sh,
 # which sets the identical options first, so for that caller this line changes nothing; it exists so
 # the file cannot be sourced into a shell that silently disarms those guards. Pinned by `--selftest`.
 set -euo pipefail
@@ -138,13 +138,13 @@ dg() {
 subject_collect_digests() {
   local dir="$1" upstream_port="$2"
   SUBJECT_DIGESTS="$dir/digests.txt"
-  node scripts/mcp-subject/tool-digest.mjs --selftest \
+  node testing/mcp-conformance/mcp-subject/tool-digest.mjs --selftest \
     || die "tool-digest.mjs no longer agrees with busbar's digest layout; no approval it writes \
 can be trusted. Re-align it with mcp::client::catalogue::tool_digest and the pinned fixture."
   : > "$SUBJECT_DIGESTS"
   local sid
   for sid in test json slow failing protocol confirm multi greeter; do
-    node scripts/mcp-subject/tool-digest.mjs "http://127.0.0.1:$upstream_port/mcp/$sid" \
+    node testing/mcp-conformance/mcp-subject/tool-digest.mjs "http://127.0.0.1:$upstream_port/mcp/$sid" \
       | sed "s/^/$sid /" >> "$SUBJECT_DIGESTS" \
       || die "could not digest the served tool list of the '$sid' fixture registration."
   done
@@ -152,10 +152,10 @@ can be trusted. Re-align it with mcp::client::catalogue::tool_digest and the pin
   # any test: what is approved is the honest `echo`, which is exactly what an operator fronting
   # this peer would have seen and vouched for. `probe` fronts the same peer at the same digest.
   if [ -n "${MCP_SEAM_UPSTREAM_URL:-}" ]; then
-    node scripts/mcp-subject/tool-digest.mjs "$MCP_SEAM_UPSTREAM_URL" \
+    node testing/mcp-conformance/mcp-subject/tool-digest.mjs "$MCP_SEAM_UPSTREAM_URL" \
       | sed "s/^/seam /" >> "$SUBJECT_DIGESTS" \
       || die "could not digest the seam peer's honest tool list."
-    node scripts/mcp-subject/tool-digest.mjs "$MCP_SEAM_UPSTREAM_URL" \
+    node testing/mcp-conformance/mcp-subject/tool-digest.mjs "$MCP_SEAM_UPSTREAM_URL" \
       | sed "s/^/probe /" >> "$SUBJECT_DIGESTS" \
       || die "could not digest the seam peer's honest tool list for the probe registration."
   fi
@@ -1073,7 +1073,7 @@ busbar built FROM THIS COMMIT; if the build step did not produce one, that is th
     || { cat "$dir/generate-key.log" >&2; die "busbar --generate-signing-key failed."; }
 
   # THE REGISTERED UPSTREAM, booted before busbar so the registration points at something live.
-  node scripts/mcp-subject/diagnostic-upstream.mjs "$upstream_port" >"$dir/upstream.log" 2>&1 &
+  node testing/mcp-conformance/mcp-subject/diagnostic-upstream.mjs "$upstream_port" >"$dir/upstream.log" 2>&1 &
   SUBJECT_PIDS="$!"
   say "   diagnostic upstream on $upstream_port"
 
@@ -1127,7 +1127,7 @@ with an empty approval."
     || die "the admin API did not mint a key. Without a real binding there is no subject to bind a \
 token to, and a made-up one would be refused."
 
-  local minter="scripts/mcp-subject/mint-audience-token.mjs"
+  local minter="testing/mcp-conformance/mcp-subject/mint-audience-token.mjs"
   local bound wrong
   bound=$(node "$minter" "$dir/signing.key" "$plain" "$canonical") || die "could not mint the audience-bound token."
   # The counterfactual, minted for an audience this deployment is not. Used only to prove the check
@@ -1170,7 +1170,7 @@ with what the fixture actually serves: $view" ;;
   done
   say "   all $(echo "$connect_subjects" | wc -w | tr -d ' ') registrations connected and approved; next unattended re-check is refresh_ttl away"
 
-  node scripts/mcp-subject/credential-shim.mjs "$mcp_port" "$data_port" "$bound" \
+  node testing/mcp-conformance/mcp-subject/credential-shim.mjs "$mcp_port" "$data_port" "$bound" \
     >"$dir/credential-shim.log" 2>&1 &
   SUBJECT_PIDS="$SUBJECT_PIDS $!"
 
@@ -1186,7 +1186,7 @@ same token directly. That is a finding about the shim, not about busbar."
   done
   say "   the suite-facing endpoint answers tools/list 200 through a real, verified credential"
 
-  # SET FOR THE CALLER, which is `official_subject` in scripts/mcp-conformance.sh: the URL the suite
+  # SET FOR THE CALLER, which is `official_subject` in testing/mcp-conformance/mcp-conformance.sh: the URL the suite
   # is pointed at, and the pids it must reap. Deliberately not `local`.
   # shellcheck disable=SC2034
   SUBJECT_URL="$canonical"
@@ -1204,7 +1204,7 @@ same token directly. That is a finding about the shim, not about busbar."
 }
 
 # ── --selftest ─────────────────────────────────────────────────────────────────────────────────────
-# `./scripts/mcp-subject/boot.sh --selftest` -- no busbar, no node, no network. Sources this file into
+# `./testing/mcp-conformance/mcp-subject/boot.sh --selftest` -- no busbar, no node, no network. Sources this file into
 # a fresh shell with every option OFF and proves it leaves errexit, nounset and pipefail ON, and that
 # a failing producer in a pipeline is then a failure the `|| die` guards can see.
 boot_selftest() {
@@ -1243,6 +1243,6 @@ boot_selftest() {
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   case "${1:-}" in
     --selftest) boot_selftest; exit $? ;;
-    *) echo "usage: $0 --selftest  (this file is otherwise sourced by scripts/mcp-conformance.sh)" >&2; exit 2 ;;
+    *) echo "usage: $0 --selftest  (this file is otherwise sourced by testing/mcp-conformance/mcp-conformance.sh)" >&2; exit 2 ;;
   esac
 fi

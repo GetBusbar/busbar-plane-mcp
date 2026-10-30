@@ -45,7 +45,7 @@ url="${2:?seam-arm.sh needs the subject MCP endpoint URL}"
 mode="${MCP_FAKE_MODE:-honest}"
 transcript="${MCP_FAKE_TRANSCRIPT:-}"
 
-here="$(cd "$(dirname "$0")/../.." && pwd)"
+here="$(cd "$(dirname "$0")/../../.." && pwd)"
 bridge="$here/testing/mcp-conformance/scripts/stdio-http-bridge.mjs"
 
 # WRITTEN ATOMICALLY. The upstream reads this file on every request, and a half-written file would

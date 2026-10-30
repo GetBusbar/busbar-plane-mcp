@@ -33,7 +33,7 @@ A skip is the honest report when the harness is being exercised for its own
 sake. It is the wrong report when the run is a **release gate**, because a skip
 renders as a green tick over a surface nobody touched. Set `MCP_NO_SKIPS=1` and
 every `ctx.skip()` becomes a **FAILURE** naming what was not tested and why.
-`scripts/mcp-conformance.sh --battery-subject` sets it; the control and
+`testing/mcp-conformance/mcp-conformance.sh --battery-subject` sets it; the control and
 negative-control legs do not.
 
 Concretely, and this is the mechanism earning its keep rather than a hypothetical:
@@ -106,8 +106,8 @@ HTTP OAuth resource server, deliberately. A variable nobody can fill in from a
 GitHub-hosted runner is not an arm.
 
 So the leg is armed the way the official-suite leg is — from the **binary built
-in the job**, never from `vars.*`. `scripts/mcp-conformance.sh --battery-subject`
-boots that binary on loopback via `scripts/mcp-subject/boot.sh` (same real
+in the job**, never from `vars.*`. `testing/mcp-conformance/mcp-conformance.sh --battery-subject`
+boots that binary on loopback via `testing/mcp-conformance/mcp-subject/boot.sh` (same real
 audience-bound credential, same proof that the plane boundary is intact before
 any verdict is believed) and points this battery at it through the transport
 adapter:
@@ -130,7 +130,7 @@ the number is negotiable — and are read as adapter checks. Everything else
 statelessness) is busbar.
 
 The **client role** is armed from the same boot, by
-`scripts/mcp-subject/client-arm.sh`. The suite's contract is *a command that
+`testing/mcp-conformance/mcp-subject/client-arm.sh`. The suite's contract is *a command that
 connects to a stdio MCP server given as the final argv element*; busbar's client
 direction speaks streamable HTTP and deliberately nothing else, so that argument
 is read and ignored and the **same** `fakepeer/fake-server.mjs` is reached

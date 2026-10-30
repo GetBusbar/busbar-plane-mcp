@@ -5,7 +5,7 @@
 //! input schema, each length-framed) over two fixed inputs, to the constants every other reader of
 //! the digest asserts.
 //!
-//! - The cross-language pin fixture: busbar's `scripts/mcp-subject/tool-digest.mjs` asserts the same
+//! - The cross-language pin fixture: this repo's `testing/mcp-conformance/mcp-subject/tool-digest.mjs` asserts the same
 //!   constant (`PIN_EXPECTED`). A drift on either side lets an operator approve a digest one side
 //!   computes and the other never matches.
 //! - The `ping` tool this repo's black-box cases approve (`tests/blackbox/*_live_approval_*.json`,

@@ -44,7 +44,7 @@
 set -uo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 
-WORK_ROOT="${H2_WORK:-${here}/../../target/h2-scratch/mcp-ledger-unconditional.$$}"
+WORK_ROOT="${H2_WORK:-${here}/../../../target/h2-scratch/mcp-ledger-unconditional.$$}"
 
 # h2_arm <workdir> -- boot (with whatever `H2_RATE_CARD_YAML` the caller set), serve one call, and
 # report "<status> <metering-row-requests>". `-` for the row means this node metered nothing at all.
