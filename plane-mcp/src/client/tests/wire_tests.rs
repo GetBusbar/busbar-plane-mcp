@@ -212,3 +212,30 @@ fn every_malformed_shape_is_refused_rather_than_guessed_at() {
         );
     }
 }
+
+/// M3-17: `progressToken` is `string | number` and optional in every revision's schema; `null` is
+/// not a value it may take. A call whose caller asked no progress carries no token member at all,
+/// and one that asked carries busbar's own.
+#[test]
+fn a_call_that_asks_no_progress_carries_no_progress_token_member() {
+    let call = |progress| {
+        body_of(&tools_call(
+            "https://u.example/mcp",
+            &tkey("fs", "read"),
+            &serde_json::json!({}),
+            7,
+            None,
+            crate::client::jsonrpc::AdvertisedCaps {
+                progress,
+                ..Default::default()
+            },
+            None,
+        ))
+    };
+    let quiet = call(false);
+    assert!(
+        quiet["params"]["_meta"].get("progressToken").is_none(),
+        "no progress asked, no token member: {quiet}"
+    );
+    assert_eq!(call(true)["params"]["_meta"]["progressToken"], "busbar-7");
+}
