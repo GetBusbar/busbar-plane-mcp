@@ -187,6 +187,24 @@ extern "C" fn serves(_: HostCtx, _: *const c_void, out: *mut ServiceOut) -> RawO
     ready(out, VERDICT.load(Ordering::SeqCst), 0, 0)
 }
 
+/// The host's destination judge: a private address (`10.…`) is internal when the registration
+/// was granted no private reach (`DEST_REFUSE_PRIVATE`); every other destination is allowed.
+extern "C" fn dest_judge(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
+    use busbar_contract::abi::host::service::{
+        DestJudgeIn, DEST_ALLOWED, DEST_INTERNAL, DEST_REFUSE_PRIVATE,
+    };
+    // SAFETY: the SDK hands a `DestJudgeIn` naming its live destination.
+    let i = unsafe { input.cast::<DestJudgeIn>().read() };
+    let dest = String::from_utf8_lossy(&str_bytes(i.dest)).into_owned();
+    let private = dest.starts_with("10.");
+    let verdict = if private && i.flags & DEST_REFUSE_PRIVATE != 0 {
+        DEST_INTERNAL
+    } else {
+        DEST_ALLOWED
+    };
+    ready(out, verdict, 0, 0)
+}
+
 extern "C" fn sighted(_: HostCtx, _: *const c_void, out: *mut ServiceOut) -> RawOutcome {
     ready(out, TRUST_NEW, 0, 0)
 }
@@ -440,7 +458,7 @@ static HOST_SLOTS: HostSlots = HostSlots {
     records_get: None,
     records_list: Some(records_list),
     records_claim: Some(records_claim),
-    dest_judge: None,
+    dest_judge: Some(dest_judge),
     sign: Some(sign),
     unit_nest: Some(unit_nest),
     work_open: Some(work_open),
@@ -1258,7 +1276,12 @@ fn section() -> Value {
 
 /// `name` on `member` called as a task by ALICE on unit `unit`: the task's id.
 fn create(d: &Door, unit: u64, member: &str, name: &str) -> String {
-    let body = call(name, &json!({}));
+    create_with(d, unit, member, name, &json!({}))
+}
+
+/// `name` on `member` called as a task with `arguments` by ALICE on unit `unit`: the task's id.
+fn create_with(d: &Door, unit: u64, member: &str, name: &str, arguments: &Value) -> String {
+    let body = call(name, arguments);
     let arrived = d.arrive(unit, &body);
     assert_eq!(arrived.outcome, Outcome::Ready, "{arrived:?}");
     d.piece(unit, &Given::attempt(ALICE, member));
@@ -1899,4 +1922,40 @@ fn a_tasks_call_to_a_pool_twin_the_caller_is_not_granted_is_never_sent() {
         sent.text()
     );
     assert_failed(&get(&d, 3, &task), "not a tool this server exposes");
+}
+
+/// M2-1 [HIGH], the pool's twin: the arguments the continuation sends to the twin are judged under
+/// the twin's own registration (its private reach), as the synchronous call judges the twin it
+/// admits. The primary may reach a private address and the twin may not: nothing goes to the twin.
+#[test]
+fn a_tasks_call_to_a_pool_twin_is_judged_under_the_twins_own_reach() {
+    let _serial = fresh();
+    let tool = json!({"read_file": {"task_support": "required", "schema_hash": "h1"}});
+    let mut s = json!({
+        "st": {
+            "url": "https://up.example/st",
+            "pin": pin(),
+            "verify_ttl": "1h",
+            "allow_private": true,
+            "tools_allow": tool,
+        },
+        "st2": {"url": "https://up.example/st2", "pin": pin(), "verify_ttl": "1h", "tools_allow": tool},
+    });
+    s["pools"] = json!({"p": {"members": ["st", "st2"]}});
+    let d = open(&s);
+    let task = create_with(
+        &d,
+        1,
+        "st",
+        "st_read_file",
+        &json!({"from": "http://10.0.0.1/data"}),
+    );
+    let sent = run(&d, 2, "st2", &last_nested());
+    assert!(
+        !sent.far,
+        "a private address the twin may not reach was sent to it: {}",
+        sent.text()
+    );
+    let read = get(&d, 3, &task).json();
+    assert_eq!(read["result"]["status"], json!("failed"), "{read}");
 }
