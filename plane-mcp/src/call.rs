@@ -997,7 +997,7 @@ pub fn last_sse_data(raw: &[u8]) -> Vec<u8> {
     let text = String::from_utf8_lossy(raw);
     let mut current: Option<Vec<String>> = None;
     let mut last: Option<Vec<String>> = None;
-    for line in text.lines() {
+    for line in event_stream_lines(&text) {
         if let Some(rest) = line.strip_prefix("data:") {
             current
                 .get_or_insert_with(Vec::new)
@@ -1015,13 +1015,32 @@ pub fn last_sse_data(raw: &[u8]) -> Vec<u8> {
         .unwrap_or_default()
 }
 
+/// THE LINES OF A COMPLETE EVENT-STREAM BODY, ended as the event-stream grammar ends them: CRLF, a
+/// lone LF or a lone CR (the rule `client::compat::EventReader` reads a live stream by). A body that
+/// ends without a terminator ends its last line.
+fn event_stream_lines(text: &str) -> impl Iterator<Item = &str> {
+    let mut rest = text;
+    std::iter::from_fn(move || {
+        if rest.is_empty() {
+            return None;
+        }
+        let Some(at) = rest.find(['\r', '\n']) else {
+            return Some(std::mem::take(&mut rest));
+        };
+        let line = &rest[..at];
+        let end = if rest[at..].starts_with("\r\n") { 2 } else { 1 };
+        rest = &rest[at + end..];
+        Some(line)
+    })
+}
+
 /// Every `notifications/progress` frame in an event-stream body, in arrival order: the one
 /// server-originated frame busbar relays to its own caller.
 #[must_use]
 pub fn progress_frames(raw: &[u8]) -> Vec<Value> {
     use crate::client::peer::{NotificationEffect, ServerMessage};
-    String::from_utf8_lossy(raw)
-        .lines()
+    let text = String::from_utf8_lossy(raw);
+    event_stream_lines(&text)
         .filter_map(|l| l.strip_prefix("data:"))
         .filter_map(|d| serde_json::from_str::<Value>(d.trim()).ok())
         .filter(|frame| {
