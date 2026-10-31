@@ -127,6 +127,13 @@ pub fn prefers_event_stream(accept: Option<&str>) -> bool {
 /// One `message` event carrying `data` as it is: one `data:` line per line of it.
 fn push_raw_event(out: &mut String, data: &str) {
     out.push_str("event: message\n");
+    push_data_lines(out, data);
+    out.push('\n');
+}
+
+/// `data` as `data:` lines, one per line of it, a line ending at CR, LF or CRLF alike (every
+/// event-stream reader ends a line at each), so no line written carries a CR.
+pub(crate) fn push_data_lines(out: &mut String, data: &str) {
     let mut rest = data;
     loop {
         let (line, next) = match rest.find(['\r', '\n']) {
@@ -144,7 +151,6 @@ fn push_raw_event(out: &mut String, data: &str) {
             None => break,
         }
     }
-    out.push('\n');
 }
 
 /// One answer as an event stream: each of `frames`, then the answer, one `message` event each.
