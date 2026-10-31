@@ -1540,3 +1540,81 @@ fn a_302_from_the_upstream_is_a_failure_not_a_result() {
     );
     assert_eq!(line.reason, vocab::REASON_UPSTREAM_FAILED, "{line:?}");
 }
+
+/// One approved tool `t` on server `s` whose input schema is `schema`.
+fn entry_with_schema(schema: &Value) -> ToolEntry {
+    let section = json!({"s": {"url": "https://mcp.example/s", "pin": {"mechanism": "unpinned"},
+        "tools_allow": {"t": {"schema_hash": "sha256:aa", "input_schema": schema}}}});
+    let section = crate::statement::read_tools_section(section.to_string().as_bytes())
+        .expect("the section reads");
+    Catalogue::build(1, &section)
+        .tool("s_t")
+        .expect("approved")
+        .clone()
+}
+
+/// M1-7: an `x-mcp-header` may annotate an integer or a boolean. The body's value is rendered as
+/// the header carries it (a decimal integer, `true`/`false`), so a header that mirrors it agrees,
+/// one that does not disagrees, and a body that sets it with no header is refused.
+#[test]
+fn an_integer_or_boolean_annotated_argument_is_compared_as_the_header_renders_it() {
+    let entry = entry_with_schema(&json!({"type": "object", "properties": {
+        "count": {"type": "integer", "x-mcp-header": "Count"},
+        "dry": {"type": "boolean", "x-mcp-header": "Dry"}
+    }}));
+    let headers = |count: &'static str, dry: &'static str| {
+        move |name: &str| match name {
+            "mcp-param-count" => Some(count.to_string()),
+            "mcp-param-dry" => Some(dry.to_string()),
+            _ => None,
+        }
+    };
+    let args = json!({"count": 42, "dry": true});
+    assert_eq!(
+        custom_param_mismatch(&entry, &args, &headers("42", "true")),
+        None,
+        "the header mirrors the body"
+    );
+    assert!(custom_param_mismatch(&entry, &args, &headers("41", "true"))
+        .is_some_and(|m| m.contains("does not match")));
+    assert!(custom_param_mismatch(&entry, &args, &headers("42", "false"))
+        .is_some_and(|m| m.contains("does not match")));
+    assert!(
+        custom_param_mismatch(&entry, &args, &no_header).is_some(),
+        "a body that sets an annotated integer must carry its header"
+    );
+}
+
+/// M1-8: an annotation on a nested property, reached through a chain of `properties`, is validated
+/// against the argument at that path.
+#[test]
+fn a_nested_annotated_argument_is_compared_with_its_header() {
+    let entry = entry_with_schema(&json!({"type": "object", "properties": {
+        "opts": {"type": "object", "properties": {
+            "region": {"type": "string", "x-mcp-header": "Region"}
+        }}
+    }}));
+    let args = json!({"opts": {"region": "a"}});
+    let wrong = |name: &str| (name == "mcp-param-region").then(|| "b".to_string());
+    assert!(
+        custom_param_mismatch(&entry, &args, &wrong).is_some(),
+        "a nested annotated argument the header disagrees with is refused"
+    );
+    let right = |name: &str| (name == "mcp-param-region").then(|| "a".to_string());
+    assert_eq!(custom_param_mismatch(&entry, &args, &right), None);
+}
+
+/// M1-9: the relayed request mirrors every annotated argument into its `Mcp-Param-*` header, as a
+/// conforming client must, or a server that checks the mirror refuses it.
+#[test]
+fn the_relayed_request_mirrors_its_annotated_arguments() {
+    let section = section();
+    let def = section.servers.get("fs").expect("registered");
+    let o = outbound(&admitted(), "fs", def, 0, None).expect("reachable");
+    assert!(
+        o.fields
+            .contains(&("mcp-param-path".to_string(), "/a".to_string())),
+        "the annotated `path` argument is mirrored: {:?}",
+        o.fields
+    );
+}
