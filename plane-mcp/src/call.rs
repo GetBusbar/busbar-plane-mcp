@@ -872,7 +872,7 @@ pub fn outbound(
     if def.url.is_empty() {
         return None;
     }
-    let request = call_request(
+    let mut request = call_request(
         admitted,
         member,
         def,
@@ -880,6 +880,14 @@ pub fn outbound(
         wire::dispatch_request_id(round),
         continuation,
     )?;
+    // A conforming client mirrors every annotated argument into its `Mcp-Param-*` header; a server
+    // that checks the mirror refuses a request without it.
+    for (name, value) in crate::adapt::param_mirror(
+        admitted.entry.input_schema.as_ref(),
+        Some(&admitted.arguments),
+    ) {
+        request.headers.push((name.to_ascii_lowercase(), value));
+    }
     Some(OutboundCall {
         verb: "POST",
         target: path_of(&request.url),

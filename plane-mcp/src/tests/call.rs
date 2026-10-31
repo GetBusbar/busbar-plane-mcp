@@ -1577,8 +1577,10 @@ fn an_integer_or_boolean_annotated_argument_is_compared_as_the_header_renders_it
     );
     assert!(custom_param_mismatch(&entry, &args, &headers("41", "true"))
         .is_some_and(|m| m.contains("does not match")));
-    assert!(custom_param_mismatch(&entry, &args, &headers("42", "false"))
-        .is_some_and(|m| m.contains("does not match")));
+    assert!(
+        custom_param_mismatch(&entry, &args, &headers("42", "false"))
+            .is_some_and(|m| m.contains("does not match"))
+    );
     assert!(
         custom_param_mismatch(&entry, &args, &no_header).is_some(),
         "a body that sets an annotated integer must carry its header"
