@@ -2,12 +2,20 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE RELAYED CALL IS THE REQUEST AND THE ANSWER THE PLANE SAYS. The linked door is admitted
-//! through the one loader and driven op by op, as the plugin crate's door witness drives it
-//! (`plane-mcp-plugin/tests/door_witness.rs`), and its transcript is held to the plane's own
-//! builders: the request bound for the member is `call::outbound`'s, the settled answers are
-//! `call::settle_call`'s, the call record is `record::call_suffix`'s. Those builders are this crate's,
-//! so the comparison lives here; the door is driven through the loader's own frames
-//! (`busbar_test_kit::conformance::{input, output}`), so this module needs no raw ABI call.
+//! through the one loader and driven op by op, as `tests/both_ways.rs` drives it, and its
+//! transcript is held to what the plane's own builders answer: the request bound for the member is
+//! `call::outbound`'s, the settled answers are `call::settle_call_as`'s, the call record is
+//! `record::call_suffix`'s. This file reaches the logic crate through `door` alone (the loader is
+//! this plugin crate's dev-dependency, never the logic crate's), so those answers are restated in
+//! `plane-mcp/tests/support/door_facts.rs` and held to the builders by the logic crate's unit test
+//! `door_facts_tests`. The door is driven through the loader's own frames
+//! (`busbar_test_kit::conformance::{input, output}`), so this file needs no raw ABI call.
+
+// The door's private facts this file needs, restated and held to the crate's own items by the
+// logic crate's unit test `door_facts_tests`.
+#[path = "../../plane-mcp/tests/support/door_facts.rs"]
+#[allow(dead_code)]
+mod door_facts;
 
 use std::sync::Arc;
 
@@ -27,10 +35,11 @@ use busbar_plugin_loader::dispatch::{
 use busbar_test_kit::conformance::{input, output};
 use serde_json::{json, Value};
 
-use crate::codec::{H_MCP_METHOD, H_MCP_NAME, H_PROTOCOL_VERSION, PROTOCOL_VERSION};
-
-/// The relayed call (`tests/support/door_facts.rs`'s, which the plugin crate's witness sends).
-const RELAY_CALL: &[u8] = br#"{"jsonrpc":"2.0","id":30,"method":"tools/call","params":{"name":"fs_read_file","arguments":{"path":"/a"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#;
+use door_facts::{
+    H_MCP_METHOD, H_MCP_NAME, H_PROTOCOL_VERSION, PROTOCOL_VERSION, RELAY_CALL,
+    RELAY_FAR_ASK as FAR_ASK, RELAY_FAR_ERROR as FAR_ERROR, RELAY_FAR_OK as FAR_OK,
+    RELAY_FAR_SSE as FAR_SSE, RELAY_SECTION,
+};
 
 /// An empty element of each buffer a piece is answered into.
 const OUT_FIELD: OutField = OutField {
@@ -51,11 +60,7 @@ const UNIT_COUNT: UnitCount = UnitCount {
 
 /// The claim of `(verb, target)` on the HTTP carrier: its row of the door's route table.
 fn route_of(verb: &str, target: &str) -> u32 {
-    let i = crate::door::ROUTES
-        .iter()
-        .position(|r| r.verb == verb && r.target == target && r.carrier == "http")
-        .expect("the door routes it");
-    u32::try_from(i).expect("a small table")
+    door_facts::claim(verb, target, "http")
 }
 
 fn bind(d: &Dispatcher) -> Bind {
@@ -304,7 +309,8 @@ fn document(bytes: &[u8]) -> Value {
 }
 
 fn linked(d: &Dispatcher) -> Plugin<Plane> {
-    let row = LinkedRow::of_macro(crate::tool_door::MACRO_DOOR)
+    let door: busbar_contract::abi::mechanism::door::DoorFn = busbar_plane_mcp::door;
+    let row = LinkedRow::of_loaded(busbar_plugin_loader::dispatch::LoadedDoor::from(door))
         .expect("the linked door states its Statement");
     load_linked(&row, bind(d)).expect("the linked door loads")
 }
@@ -521,10 +527,6 @@ const ALL: &[&str] = &[
     "mcp_tool:fs_draft",
 ];
 
-/// One server with one approved tool (its `path` argument mirrored in `Mcp-Param-Path`), one
-/// tool awaiting approval, and the `roots` grant with nothing declared to disclose.
-const RELAY_SECTION: &[u8] = br#"{"fs": {"url": "https://mcp.example/fs/rpc?v=1", "pin": {"mechanism": "pinned_pubkey", "key": "sha256/K="}, "grants": {"roots": true}, "tools_allow": {"read_file": {"schema_hash": "sha256:aa", "input_schema": {"type": "object", "properties": {"path": {"type": "string", "x-mcp-header": "Path"}}}}, "draft": {}}}}"#;
-
 const RELAY_FIELDS: &[Field] = &[
     field(H_PROTOCOL_VERSION, PROTOCOL_VERSION),
     field(H_MCP_METHOD, "tools/call"),
@@ -535,17 +537,6 @@ const RELAY_FIELDS: &[Field] = &[
 const JSON_HEAD: &[Field] = &[field("content-type", "application/json")];
 
 const SSE_HEAD: &[Field] = &[field("content-type", "text/event-stream")];
-
-/// The far end's answers: a result, a JSON-RPC error, a result streamed after a progress
-/// frame, and an ask for roots busbar holds the grant for and has nothing to disclose.
-const FAR_OK: &[u8] =
-    br#"{"jsonrpc":"2.0","id":0,"result":{"content":[{"type":"text","text":"hi"}]}}"#;
-
-const FAR_ERROR: &[u8] = br#"{"jsonrpc":"2.0","id":0,"error":{"code":-32601,"message":"nope"}}"#;
-
-const FAR_SSE: &[u8] = b"event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{\"progressToken\":\"busbar-0\",\"progress\":1}}\n\nevent: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{\"content\":[]}}\n\n";
-
-const FAR_ASK: &[u8] = br#"{"jsonrpc":"2.0","id":0,"result":{"resultType":"input_required","inputRequests":{"r":{"method":"roots/list"}}}}"#;
 
 fn served(grants: &'static [&'static str]) -> Dispatcher {
     Dispatcher::with_services(DispatchConfig::default(), Arc::new(Grants(grants)))
@@ -575,42 +566,6 @@ fn relay_script(p: &Plugin<Plane>) -> Vec<Step> {
     t
 }
 
-/// What the plane's own pure functions say one relayed call answers.
-fn admitted() -> crate::call::AdmittedCall {
-    let section = crate::door::read_tools_section(RELAY_SECTION).expect("the section reads");
-    let catalogue = crate::catalogue::Catalogue::build(1, &section);
-    let params = document(RELAY_CALL)["params"].clone();
-    let header = |name: &str| (name == "mcp-param-path").then(|| "/a".to_string());
-    match crate::call::admit_trusted(
-        &catalogue,
-        &json!(30),
-        Some(&params),
-        &header,
-        &|_, _| true,
-        &mut |_| crate::call::Trust::Verdict(busbar_contract::abi::host::service::DISTRUST_NONE),
-        &mut |_, _| crate::ask::AskDecision::Proceed,
-    ) {
-        crate::call::Admission::Go(a) => a,
-        other => panic!("the call is admitted: {other:?}"),
-    }
-}
-
-fn settled(far: &[u8], sse: bool) -> (u32, Vec<u8>) {
-    let section = crate::door::read_tools_section(RELAY_SECTION).expect("the section reads");
-    match crate::call::settle_call_as(
-        &admitted(),
-        section.servers.get("fs"),
-        200,
-        far,
-        sse,
-        0,
-        crate::client::jsonrpc::dispatch_request_id(0),
-    ) {
-        crate::call::Settled::Answer { status, body, .. } => (status, body),
-        other => panic!("an answer: {other:?}"),
-    }
-}
-
 /// The relayed call: the ATTEMPT is taken, the caller's body becomes the request bound for the
 /// member (the dialect's own builder, at the path of the member's URL), and the far end's
 /// answer is settled as the plane's pure settle says, in JSON.
@@ -627,20 +582,24 @@ fn a_relayed_call_is_the_request_and_the_answer_the_plane_says() {
         "{}",
         send.detail
     );
-    let section = crate::door::read_tools_section(RELAY_SECTION).expect("the section reads");
-    let def = section.servers.get("fs").expect("registered");
-    let want =
-        crate::call::outbound(&admitted(), "fs", def, 0, None).expect("the member is reachable");
-    assert_eq!(send.reply, want.body, "the dialect builder's body");
-    assert_eq!(send.fields, want.fields, "the dialect builder's head");
+    assert_eq!(
+        send.reply,
+        door_facts::RELAY_REQUEST_BODY,
+        "the dialect builder's body"
+    );
+    let want: Vec<(String, String)> = door_facts::RELAY_REQUEST_FIELDS
+        .iter()
+        .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+        .collect();
+    assert_eq!(send.fields, want, "the dialect builder's head");
     assert_eq!(document(&send.reply)["params"]["name"], json!("read_file"));
 
     let ok = step(&t, "answer ok");
     assert_eq!(
         (ok.outcome, ok.status),
-        (Outcome::Ready, settled(FAR_OK, false).0)
+        (Outcome::Ready, door_facts::RELAY_SETTLED_OK.0)
     );
-    assert_eq!(ok.reply, settled(FAR_OK, false).1);
+    assert_eq!(ok.reply, door_facts::RELAY_SETTLED_OK.1);
     assert_eq!(document(&ok.reply)["id"], json!(30));
     assert_eq!(
         document(&ok.reply)["result"]["resultType"],
@@ -655,7 +614,7 @@ fn a_relayed_call_is_the_request_and_the_answer_the_plane_says() {
     assert_eq!(
         ok.units,
         vec![
-            (crate::door::CLASS_FEE_INDEX, 1),
+            (door_facts::CLASS_FEE_INDEX, 1),
             (0, 1),
             (1, u64::try_from(FAR_OK.len()).expect("a small answer"))
         ],
@@ -667,9 +626,9 @@ fn a_relayed_call_is_the_request_and_the_answer_the_plane_says() {
     assert_eq!(
         ok.records,
         vec![(
-            crate::door::RECORD_CALL,
-            crate::ask::UNGOVERNED.as_bytes().to_vec(),
-            crate::record::call_suffix(0, "fs", "fs_read_file", "dispatched", "", "sha256:aa", 1),
+            door_facts::RECORD_CALL,
+            door_facts::UNGOVERNED.as_bytes().to_vec(),
+            door_facts::call_suffix(0, "fs", "fs_read_file", "dispatched", "", "sha256:aa", 1),
         )],
         "one call record"
     );
@@ -699,13 +658,13 @@ fn a_relayed_call_is_the_request_and_the_answer_the_plane_says() {
     );
 
     let error = step(&t, "answer error");
-    assert_eq!(error.reply, settled(FAR_ERROR, false).1);
+    assert_eq!(error.reply, door_facts::RELAY_SETTLED_ERROR.1);
     assert_eq!(document(&error.reply)["result"]["isError"], json!(true));
 
     let stream = step(&t, "answer stream");
     assert_eq!(
         stream.reply,
-        settled(FAR_SSE, true).1,
+        door_facts::RELAY_SETTLED_STREAM.1,
         "the stream's last event"
     );
 

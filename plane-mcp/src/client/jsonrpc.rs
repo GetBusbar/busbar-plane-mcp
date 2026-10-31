@@ -101,8 +101,8 @@ pub fn tools_call(
 }
 
 /// Build a `tools/list` for one server: the request an operator `connect` and a call's
-/// verify-on-call fetch send a member over HTTP (`crate::tool_door`), and the one a stdio child is
-/// asked over its pipe (`crate::tool_door`'s program leg).
+/// verify-on-call fetch send a member over HTTP (`crate::plane_door`), and the one a stdio child is
+/// asked over its pipe (`crate::plane_door`'s program leg).
 pub fn tools_list(url: &str, request_id: u64, authorization: Option<&str>) -> OutboundRequest {
     let params = serde_json::json!({
         "_meta": {

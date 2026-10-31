@@ -234,16 +234,11 @@ fn the_claims_are_stated_under_the_endpoint_block_else_the_public_base() {
     assert_eq!(claimed.claims.len(), ROUTES.len());
 }
 
-/// The Statement's version is the crate's: read from the manifest, as the plane reads no build
-/// environment.
+/// The Statement's version is the crate's (the plane reads no build environment in `src/`; a test
+/// may).
 #[test]
 fn the_statement_version_is_the_crates() {
-    let manifest = include_str!("../../Cargo.toml");
-    assert!(
-        manifest.contains(&format!("version = \"{}\"", crate::tool_door::VERSION)),
-        "the Statement names {} and the manifest does not",
-        crate::tool_door::VERSION
-    );
+    assert_eq!(crate::plane_door::VERSION, env!("CARGO_PKG_VERSION"));
 }
 
 /// The tail states one operation class per method row's class, in their order, and each row's
@@ -330,13 +325,18 @@ fn the_admin_openapi_blob_states_every_body_its_verbs_name() {
 
 /// `validate` reads the blob stage 3g deals a plane (`{tools: <section>, mcp: <endpoint>}`): the
 /// `tools:` section inside it is judged; a blob that writes no `tools:` is the empty section; the
-/// endpoint block beside it is not this reader's to judge.
+/// endpoint block beside it is judged as `open` judges it.
 #[test]
 fn validate_reads_the_dealt_blob_at_its_tools_section() {
-    use crate::door::read_dealt_tools;
+    use crate::statement::read_dealt_tools;
     let empty = crate::tools_config::ToolsCfg::default();
     assert_eq!(read_dealt_tools(b""), Ok(empty.clone()));
-    assert_eq!(read_dealt_tools(br#"{"mcp":{}}"#), Ok(empty));
+    assert_eq!(
+        read_dealt_tools(
+            br#"{"mcp":{"canonical_uri":"https://gw.example/mcp","authorization_servers":["https://login.example"]}}"#
+        ),
+        Ok(empty)
+    );
     let mut dealt = br#"{"tools":"#.to_vec();
     dealt.extend_from_slice(GOOD);
     dealt.push(b'}');
@@ -354,7 +354,7 @@ fn validate_reads_the_dealt_blob_at_its_tools_section() {
 /// THE TASK-RUN ROUTE is a closed, exact route over the http carrier at its own path.
 #[test]
 fn the_task_run_route_is_closed_and_exact() {
-    let route = &ROUTES[crate::door::TASK_RUN_ROUTE];
+    let route = &ROUTES[crate::statement::TASK_RUN_ROUTE];
     assert_eq!(route.target, crate::tool_claims::TASK_RUN_MOUNT);
     assert_eq!(route.carrier, crate::tool_claims::CARRIER_HTTP);
     assert!(!route.open);
@@ -374,4 +374,54 @@ fn the_call_log_is_the_one_chain_the_host_keeps() {
     assert_eq!(chain.flags, CHAIN_DIGESTS_SCOPE);
     let kind = RECORD_KINDS[RECORD_CALL as usize];
     assert_eq!(text(kind), crate::tool_records::KIND_CALL);
+}
+
+/// B2: A SETTINGS REFUSAL NAMES NO POSITION IN THE HOST-BUILT BLOB. The plane reads its section
+/// from JSON the host built, never from text the operator wrote, so serde's words are read from a
+/// value (as the SDK's `settings_as` reads them) and name no `line`/`column`: core's refusal names
+/// the operator's own position after them. A `tools:` written as a list or a scalar is refused by
+/// serde_json's own reader, which is where a position was named: at validate (the dealt blob), and
+/// at open and refresh (the section and the pools beside it).
+#[test]
+fn a_settings_refusal_names_no_position_in_the_host_built_blob() {
+    for dealt in [&br#"{"tools":[1]}"#[..], br#"{"tools":"x"}"#] {
+        let refused =
+            crate::statement::read_dealt_tools(dealt).expect_err("a section that is no map");
+        assert!(refused.starts_with("invalid type: "), "{refused}");
+        assert!(!refused.contains(" at line "), "validate: {refused}");
+    }
+    for section in [&b"[1]"[..], br#""x""#] {
+        let refused = crate::statement::read_open(section).expect_err("a section that is no map");
+        assert!(refused.starts_with("invalid type: "), "{refused}");
+        assert!(!refused.contains(" at line "), "open/refresh: {refused}");
+        let refused = read_tools_section(section).expect_err("a section that is no map");
+        assert!(
+            !refused.contains(" at line "),
+            "the section reader: {refused}"
+        );
+    }
+    let typo = br#"{"tools":{"fs":{"url":"https://fs.example/mcp","pin":{"mechanism":"unpinned"},"bogus":1}}}"#;
+    let refused = crate::statement::read_dealt_tools(typo).expect_err("an unknown key is refused");
+    assert!(refused.starts_with("unknown field `bogus`"), "{refused}");
+    assert!(!refused.contains(" at line "), "{refused}");
+}
+
+/// G6: VALIDATE JUDGES A DEALT `mcp:` BLOCK AS `open` JUDGES IT, so a block `open` would refuse
+/// (an endpoint at another path, no authorization server, an unknown key) is refused at validate
+/// first, in the block's own words, and never answers READY there.
+#[test]
+fn validate_judges_a_dealt_endpoint_block_as_open_judges_it() {
+    use crate::statement::{judge_endpoint_block, read_dealt_tools};
+    for dealt in [
+        &br#"{"mcp":{}}"#[..],
+        br#"{"mcp":{"canonical_uri":"https://gw.example/elsewhere","authorization_servers":["https://l.example"]}}"#,
+        br#"{"mcp":{"canonical_uri":"https://gw.example/mcp"}}"#,
+        br#"{"mcp":{"canonical_uri":"https://gw.example/mcp","authorization_servers":["https://l.example"],"bogus":1}}"#,
+    ] {
+        let at_open = admitted_endpoint(None, dealt).expect_err("open refuses the block");
+        assert_eq!(read_dealt_tools(dealt), Err(at_open.clone()));
+        assert_eq!(judge_endpoint_block(dealt), Err(at_open));
+    }
+    assert_eq!(judge_endpoint_block(b""), Ok(()));
+    assert_eq!(judge_endpoint_block(br#"{"other":{}}"#), Ok(()));
 }

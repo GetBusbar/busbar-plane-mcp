@@ -22,7 +22,7 @@ const SECTION: &str = r#"{
 }"#;
 
 fn section() -> crate::tools_config::ToolsCfg {
-    crate::door::read_tools_section(SECTION.as_bytes()).expect("the section reads")
+    crate::statement::read_tools_section(SECTION.as_bytes()).expect("the section reads")
 }
 
 /// THE CALLER'S DOWN-SCOPE: the tools its `mcp_tool` grants name on the member's server, never

@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE DOOR'S FACTS THE DOOR-DRIVEN TESTS NAME (`tests/sessions.rs`, `tests/door_audit.rs`,
-//! `tests/tasks.rs`, and the plugin crate's `tests/door_witness.rs`). Those
+//! `tests/tasks.rs`, and the plugin crate's `tests/both_ways.rs`). Those
 //! tests drive the plane only through [`door`](busbar_plane_mcp::door), the crate's one public item,
 //! and need a few of its private constants to build their inputs and read its answers. They are
 //! restated here, plain data, and the crate's own unit test `door_facts_tests`
@@ -107,7 +107,7 @@ pub const OP_CLASS_NOTIFICATION: u32 = 16;
 /// `tool_arrival::NOT_JSON`: the words a body that is not JSON is refused in.
 pub const NOT_JSON: &str = "Request body is not valid JSON.";
 
-/// `tool_door::UNSERVED`: the refusal an arrival on a route the door does not answer carries.
+/// `plane_door::UNSERVED`: the refusal an arrival on a route the door does not answer carries.
 pub const UNSERVED: u32 = 2;
 
 /// `door::method_not_allowed_body()`, as its `(error, error_description)`.
@@ -163,3 +163,49 @@ pub fn call_suffix(
     num(&mut out, pin_generation);
     out
 }
+
+/// THE RELAYED-CALL SCRIPT's server (the plugin crate's `tests/relayed_call.rs`): one server with
+/// one approved tool (its `path` argument mirrored in `Mcp-Param-Path`), one tool awaiting
+/// approval, and the `roots` grant with nothing declared to disclose.
+pub const RELAY_SECTION: &[u8] = br#"{"fs": {"url": "https://mcp.example/fs/rpc?v=1", "pin": {"mechanism": "pinned_pubkey", "key": "sha256/K="}, "grants": {"roots": true}, "tools_allow": {"read_file": {"schema_hash": "sha256:aa", "input_schema": {"type": "object", "properties": {"path": {"type": "string", "x-mcp-header": "Path"}}}}, "draft": {}}}}"#;
+
+/// `call::outbound` of [`RELAY_CALL`] admitted over [`RELAY_SECTION`], to `fs` under request id
+/// `0`: the request bound for the member, its body.
+pub const RELAY_REQUEST_BODY: &[u8] = br#"{"id":0,"jsonrpc":"2.0","method":"tools/call","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/protocolVersion":"2026-07-28","progressToken":null},"arguments":{"path":"/a"},"name":"read_file"}}"#;
+
+/// The same request's head fields, in order.
+pub const RELAY_REQUEST_FIELDS: &[(&str, &str)] = &[
+    ("content-type", "application/json"),
+    ("accept", "application/json, text/event-stream"),
+    ("mcp-protocol-version", "2026-07-28"),
+    ("mcp-method", "tools/call"),
+    ("mcp-name", "read_file"),
+];
+
+/// The far end's answers to the relayed call: a result, a JSON-RPC error, a result streamed after
+/// a progress frame, and an ask for roots busbar holds the grant for and has nothing to disclose.
+pub const RELAY_FAR_OK: &[u8] =
+    br#"{"jsonrpc":"2.0","id":0,"result":{"content":[{"type":"text","text":"hi"}]}}"#;
+/// See [`RELAY_FAR_OK`].
+pub const RELAY_FAR_ERROR: &[u8] =
+    br#"{"jsonrpc":"2.0","id":0,"error":{"code":-32601,"message":"nope"}}"#;
+/// See [`RELAY_FAR_OK`].
+pub const RELAY_FAR_SSE: &[u8] = b"event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{\"progressToken\":\"busbar-0\",\"progress\":1}}\n\nevent: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{\"content\":[]}}\n\n";
+/// See [`RELAY_FAR_OK`].
+pub const RELAY_FAR_ASK: &[u8] = br#"{"jsonrpc":"2.0","id":0,"result":{"resultType":"input_required","inputRequests":{"r":{"method":"roots/list"}}}}"#;
+
+/// `call::settle_call_as` of each far answer (status 200), as the caller's answer: `(status, body)`.
+pub const RELAY_SETTLED_OK: (u32, &[u8]) = (
+    200,
+    br#"{"id":30,"jsonrpc":"2.0","result":{"resultType":"complete","content":[{"type":"text","text":"hi"}]}}"#,
+);
+/// See [`RELAY_SETTLED_OK`].
+pub const RELAY_SETTLED_ERROR: (u32, &[u8]) = (
+    200,
+    br#"{"id":30,"jsonrpc":"2.0","result":{"content":[{"text":"The MCP server `fs` did not complete this tool call: MCP upstream answered JSON-RPC error -32601: nope","type":"text"}],"isError":true,"resultType":"complete"}}"#,
+);
+/// See [`RELAY_SETTLED_OK`]: the stream's last event.
+pub const RELAY_SETTLED_STREAM: (u32, &[u8]) = (
+    200,
+    br#"{"id":30,"jsonrpc":"2.0","result":{"resultType":"complete","content":[]}}"#,
+);

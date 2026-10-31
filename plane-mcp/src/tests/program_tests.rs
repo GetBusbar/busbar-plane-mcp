@@ -183,7 +183,7 @@ fn list(door: &mut Door, id: u64, ticket: u32) -> Exchanged {
     let request = crate::client::jsonrpc::tools_list("", id, None).body;
     let mut exchange = ProgramExchange::new(
         "srv",
-        crate::door::NEED_PROGRAM,
+        crate::statement::NEED_PROGRAM,
         vec![(request, Some(id))],
         true,
     );

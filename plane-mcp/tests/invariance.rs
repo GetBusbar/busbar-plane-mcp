@@ -196,7 +196,11 @@ fn the_cadence_grammar_has_no_knob_that_slows_detection_or_delays_demotion() {
             .collect::<Vec<_>>()
             .join("\n")
     };
-    for rel in ["src/tools_config.rs", "src/endpoint.rs", "src/tool_door.rs"] {
+    for rel in [
+        "src/tools_config.rs",
+        "src/endpoint.rs",
+        "src/plane_door.rs",
+    ] {
         let src = code(&read(rel));
         for banned in [
             "detection_backoff",

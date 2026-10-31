@@ -25,7 +25,7 @@ const SECTION: &[u8] = br#"{
 fn catalogue() -> Catalogue {
     Catalogue::build(
         1,
-        &crate::door::read_tools_section(SECTION).expect("the section reads"),
+        &crate::statement::read_tools_section(SECTION).expect("the section reads"),
     )
 }
 

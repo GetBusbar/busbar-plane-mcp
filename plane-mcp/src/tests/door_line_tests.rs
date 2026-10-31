@@ -21,7 +21,7 @@ const SECTION: &[u8] = br#"{
 fn catalogue() -> Catalogue {
     Catalogue::build(
         1,
-        &crate::door::read_tools_section(SECTION).expect("the section reads"),
+        &crate::statement::read_tools_section(SECTION).expect("the section reads"),
     )
 }
 
@@ -75,7 +75,7 @@ fn a_line_subscription_its_caller_never_reconfirms_ends_on_its_frame() {
 /// another caller is not.
 #[test]
 fn one_caller_holds_at_most_the_http_carriers_count_of_line_subscriptions() {
-    let per_owner = crate::tool_door::door_listen::MAX_LISTENS_PER_OWNER;
+    let per_owner = crate::plane_door::door_listen::MAX_LISTENS_PER_OWNER;
     let mut held = BTreeMap::new();
     for n in 0..per_owner {
         held.insert((1, n.to_string()), opened("k", 1));

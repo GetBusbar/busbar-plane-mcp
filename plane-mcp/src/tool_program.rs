@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! Stdio upstream servers: a `transport: stdio`
-//! registration is a member of the door's PROGRAM need ([`crate::door::NEED_PROGRAM`]), and the
+//! registration is a member of the door's PROGRAM need ([`crate::statement::NEED_PROGRAM`]), and the
 //! host keeps ONE long-lived program per member. Every exchange the door has with that program — the
 //! relayed `tools/call` over the kernel's walk, verify-on-call's `tools/list`, an operator's
 //! `connect`, a further round, a reply to the program's own ask — is a lease on the same running
@@ -807,7 +807,7 @@ pub fn generation_of(block: &[u8]) -> u64 {
 #[must_use]
 pub fn initialize() -> Vec<u8> {
     crate::client::verb::UpstreamVerb::Initialize {
-        client_version: crate::tool_door::VERSION,
+        client_version: crate::plane_door::VERSION,
     }
     .build("", HANDSHAKE_REQUEST_ID, None)
     .body

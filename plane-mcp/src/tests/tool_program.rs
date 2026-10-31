@@ -422,7 +422,7 @@ fn the_call_an_ask_belongs_to() {
 /// exactly at the cap it goes to the caller.
 #[test]
 fn a_stdio_childs_sampling_ask_over_the_cap_is_refused_by_name() {
-    let mut def = crate::door::read_tools_section(
+    let mut def = crate::statement::read_tools_section(
         br#"{"kid": {"url": "https://mcp.example/kid", "pin": {"mechanism": "unpinned"},
             "grants": {"sampling": true}}}"#,
     )
@@ -456,7 +456,7 @@ fn a_stdio_childs_sampling_ask_over_the_cap_is_refused_by_name() {
 /// is the named refusal (nothing is written), exactly at the cap it is written.
 #[test]
 fn a_callers_answer_to_a_stdio_childs_ask_over_the_cap_is_refused() {
-    let mut def = crate::door::read_tools_section(
+    let mut def = crate::statement::read_tools_section(
         br#"{"kid": {"url": "https://mcp.example/kid", "pin": {"mechanism": "unpinned"},
             "grants": {"sampling": true}}}"#,
     )

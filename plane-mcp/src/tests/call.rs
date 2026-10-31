@@ -65,7 +65,7 @@ const SECTION: &str = r#"{"fs": {"url": "https://mcp.example/fs", "pin": {"mecha
   }}}"#;
 
 fn section() -> crate::tools_config::ToolsCfg {
-    crate::door::read_tools_section(SECTION.as_bytes()).expect("the section reads")
+    crate::statement::read_tools_section(SECTION.as_bytes()).expect("the section reads")
 }
 
 fn catalogue() -> Catalogue {
@@ -184,7 +184,7 @@ fn an_unknown_and_an_ungranted_tool_read_the_same_and_log_apart() {
         &json!(1),
         Some(&params("fs_read_file", json!({}))),
         &no_header,
-        &|kind: &str, _: &str| kind != crate::door::SCOPE_TOOL,
+        &|kind: &str, _: &str| kind != crate::statement::SCOPE_TOOL,
         &mut proceed,
     ));
     assert_eq!(hidden.status, 404);
@@ -1329,7 +1329,7 @@ fn asked_state(a: Admission) -> String {
 /// retries), so the earlier round's answers ride in the sealed state, not in the caller's memory.
 #[test]
 fn a_two_round_exchange_goes_out_with_every_rounds_answers() {
-    let section = crate::door::read_tools_section(TWO_ROUNDS.as_bytes()).expect("reads");
+    let section = crate::statement::read_tools_section(TWO_ROUNDS.as_bytes()).expect("reads");
     let cat = Catalogue::build(1, &section);
     let mut seal = Plain::default();
     let first = json!({ "name": "fs_pay", "arguments": { "amount": 5 }, "_meta": {} });
@@ -1496,7 +1496,7 @@ fn an_unknown_and_an_ungranted_tool_are_byte_identical_on_the_wire() {
         &id,
         Some(&asked),
         &no_header,
-        &|kind: &str, _: &str| kind != crate::door::SCOPE_TOOL,
+        &|kind: &str, _: &str| kind != crate::statement::SCOPE_TOOL,
         &mut proceed,
     ));
     let denied = not_granted(&id, "fs_read_file");

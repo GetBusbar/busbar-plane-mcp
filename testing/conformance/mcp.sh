@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The `mcp` conformance suite: one command, four judged legs, one verdict.
 #
-#   official control   the pinned official suite against a pinned third-party peer (scripts/mcp-conformance.sh)
+#   official control   the pinned official suite against a pinned third-party peer (testing/mcp-conformance/mcp-conformance.sh)
 #   battery control    the in-house battery against python `mcp` (the pinned SDK), run always
 #   negative control   the battery against deliberately broken peers: every one must grade red
 #   official subject  the pinned official suite against busbar (this plane in busbar at the pin)
@@ -10,7 +10,7 @@
 # Run by testing/conformance/run.sh with CONFORMANCE_OUT, BUSBAR_CHECKOUT, CARGO_TARGET_DIR set.
 # The subject is busbar built from $BUSBAR_CHECKOUT with THIS checkout's plane-mcp patched in by a
 # run-time cargo --config (nothing is written to a manifest), booted on loopback by
-# scripts/mcp-subject/boot.sh. MCP_NO_SKIPS=1 holds on every subject leg: a skip is red.
+# testing/mcp-conformance/mcp-subject/boot.sh. MCP_NO_SKIPS=1 holds on every subject leg: a skip is red.
 # `pass` only when every leg passed; a subject that cannot be built is `fail`, armed, with the reason.
 set -uo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -83,8 +83,8 @@ leg() { # <name> <command...>: run, tee to $out/<name>.log, record failure
     say "$name: FAIL (tail of $name.log follows)"; tail -40 "$out/$name.log" >&2; failed="$failed $name"; fi
 }
 
-leg official-control bash scripts/mcp-conformance.sh --official-control
-leg battery-control  bash scripts/mcp-conformance.sh --battery-control
+leg official-control bash testing/mcp-conformance/mcp-conformance.sh --official-control
+leg battery-control  bash testing/mcp-conformance/mcp-conformance.sh --battery-control
 leg negative-control bash testing/mcp-conformance/scripts/negative-control.sh
 
 # The subject: busbar at the pin, this checkout's plane patched in, default features (plane-mcp is one).
@@ -93,12 +93,12 @@ bin=""
 if [ -n "${CARGO_TARGET_DIR:-}" ]; then export CARGO_TARGET_DIR; fi
 stage="$out/subject-src"
 say "== compose subject (busbar at ${BUSBAR_PIN:-?} with this plane)"
-if ! bash scripts/mcp-subject/compose-selftest.sh "$BUSBAR_CHECKOUT" "$stage" >"$out/subject-compose.log" 2>&1; then
+if ! bash testing/mcp-conformance/mcp-subject/compose-selftest.sh "$BUSBAR_CHECKOUT" "$stage" >"$out/subject-compose.log" 2>&1; then
   cat "$out/subject-compose.log" >&2
   verdict fail "the subject's composition does not link this plane (subject-compose.log); legs failed before:${failed:- none}"
   exit 1
 fi
-manifest="$(bash scripts/mcp-subject/compose.sh "$BUSBAR_CHECKOUT" "$here/plane-mcp" "$stage")"
+manifest="$(bash testing/mcp-conformance/mcp-subject/compose.sh "$BUSBAR_CHECKOUT" "$here/plane-mcp" "$stage")"
 say "== build subject ($manifest)"
 if cargo build --release --manifest-path "$manifest" --bin busbar \
       --config "patch.\"https://github.com/GetBusbar/busbar-plane-mcp\".busbar-plane-mcp.path=\"$here/plane-mcp\"" \
@@ -112,8 +112,8 @@ if [ -z "$bin" ]; then
   exit 1
 fi
 export MCP_SUBJECT_BUSBAR_BIN="$bin" MCP_NO_SKIPS=1
-leg official-subject bash scripts/mcp-conformance.sh --official-subject
-leg battery-subject  bash scripts/mcp-conformance.sh --battery-subject
+leg official-subject bash testing/mcp-conformance/mcp-conformance.sh --official-subject
+leg battery-subject  bash testing/mcp-conformance/mcp-conformance.sh --battery-subject
 
 if [ -z "$failed" ]; then
   verdict pass "all five legs passed"; exit 0

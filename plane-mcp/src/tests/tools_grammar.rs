@@ -11,7 +11,7 @@
 //! means.
 //!
 //! Every document here goes through `serde_json` into `ToolsCfg` — the carriage the door itself
-//! reads its settings by (`door::read_tools_section`) — rather than constructing the struct, because
+//! reads its settings by (`statement::read_tools_section`) — rather than constructing the struct, because
 //! the thing under test IS the grammar: a test that built `McpServerDefCfg` directly would skip the
 //! custom `Deserialize` where the reserved keys, the section knobs and the value rules all live.
 
@@ -30,7 +30,9 @@ fn grammar(section: Value) -> Result<ToolsCfg, String> {
 
 /// The door's own `validate` over the whole section (what boot runs through the folded row).
 fn door_validate(section: &Value) -> Result<ToolsCfg, String> {
-    crate::door::read_tools_section(&serde_json::to_vec(section).expect("a section serialises"))
+    crate::statement::read_tools_section(
+        &serde_json::to_vec(section).expect("a section serialises"),
+    )
 }
 
 /// An ABSOLUTE program path AS THIS PLATFORM SPELLS ONE (the check is `Path::is_absolute`; see the
@@ -481,7 +483,7 @@ fn every_ask_list_is_validated_and_the_three_legal_methods_still_parse() {
 }
 
 /// Whether `stated` is the tail string built from `word` (the tail's strings are constants of this
-/// crate, so a word is found by address and length, as `tests/door.rs` reads them).
+/// crate, so a word is found by address and length, as `tests/statement.rs` reads them).
 fn spells(stated: AbiStr, word: &str) -> bool {
     stated.ptr() == word.as_ptr() && stated.len() == word.len()
 }
@@ -493,12 +495,12 @@ fn spells(stated: AbiStr, word: &str) -> bool {
 /// the section the Statement owns).
 #[test]
 fn the_statement_names_the_grammars_section_noun_and_endpoint() {
-    let sections = crate::door::SECTIONS;
+    let sections = crate::statement::SECTIONS;
     assert_eq!(sections.len(), 2);
     assert!(spells(sections[0].name, SECTION), "the declaring section");
     assert_ne!(sections[0].flags & SECTION_DECLARING, 0);
     assert!(
-        spells(sections[1].name, crate::door::ENDPOINT_SECTION),
+        spells(sections[1].name, crate::statement::ENDPOINT_SECTION),
         "the owned endpoint block"
     );
     assert_eq!(sections[1].flags & SECTION_DECLARING, 0);
@@ -507,19 +509,19 @@ fn the_statement_names_the_grammars_section_noun_and_endpoint() {
         0,
         "the endpoint block selects the plane (Law 7)"
     );
-    assert!(spells(crate::door::TAIL.subject_noun, SUBJECT_NOUN));
+    assert!(spells(crate::statement::TAIL.subject_noun, SUBJECT_NOUN));
     assert_eq!(
         crate::tool_claims::DEFAULT_MOUNT,
-        format!("/{}", crate::door::ENDPOINT_SECTION)
+        format!("/{}", crate::statement::ENDPOINT_SECTION)
     );
     assert_eq!(
         crate::tool_claims::DEFAULT_METADATA,
         format!(
             "/.well-known/oauth-protected-resource/{}",
-            crate::door::ENDPOINT_SECTION
+            crate::statement::ENDPOINT_SECTION
         )
     );
-    assert_eq!(crate::door::TAIL.dialects_len(), 1, "one wire dialect");
+    assert_eq!(crate::statement::TAIL.dialects_len(), 1, "one wire dialect");
 }
 
 /// RED (ARCHITECT timeout ruling): a server's `timeout:` is the kernel's reserved per-entry key, and
@@ -891,7 +893,7 @@ fn a_section_passthrough_default_refuses_a_token_exchange_registration() {
         .expect_err("a section passthrough default is refused");
     assert_explained(&err, "fs");
 
-    let tail = crate::door::TAIL.caller_credential_refusal;
+    let tail = crate::statement::TAIL.caller_credential_refusal;
     assert!(
         !tail.ptr().is_null() && !tail.is_empty(),
         "the tail states the sentence the kernel refuses a section passthrough default in"

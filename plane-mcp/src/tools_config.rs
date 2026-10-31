@@ -99,7 +99,7 @@ pub struct ServerPinCfg {
 ///
 /// A SIBLING of `pin:`, not a field inside it: `pin:` says how busbar knows the server is the one
 /// the operator meant, this says how the server knows the connection is busbar's. The host reads
-/// it at the http need's `trust_from` path ([`crate::door::CLIENT_IDENTITY_FROM`]), resolves both
+/// it at the http need's `trust_from` path ([`crate::statement::CLIENT_IDENTITY_FROM`]), resolves both
 /// references once, and the connector presents the certificate on every connection to the server.
 ///
 /// Both fields are SECRET REFERENCES (`{env: ..}`, `{file: ..}` or a `kind: secret` module), the

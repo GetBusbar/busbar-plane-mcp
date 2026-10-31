@@ -210,3 +210,45 @@ fn the_event_reader_joins_split_chunks_and_is_bounded() {
         "an event that never ends is dropped, not buffered forever"
     );
 }
+
+/// B5: THE EVENT-STREAM LINE RULE. CRLF, a lone LF and a lone CR each end a line, so a stream
+/// framed with bare CRs reads as the same events as one framed with LFs: a CR is never dropped
+/// into the line beside it. A CR that ends a chunk waits for the next (it may be half a CRLF).
+#[test]
+fn the_event_reader_ends_a_line_on_a_lone_cr() {
+    let mut r = EventReader::new(1024);
+    let got = r.feed(b"event: endpoint\rdata: /m?s=1\r\rdata: a\rdata: b\r\r");
+    assert_eq!(
+        got,
+        vec![
+            StreamEvent {
+                event: Some("endpoint".to_string()),
+                data: "/m?s=1".to_string(),
+            },
+            StreamEvent {
+                event: None,
+                data: "a\nb".to_string(),
+            },
+        ],
+        "a bare-CR stream is two events, each line its own"
+    );
+    let mut r = EventReader::new(1024);
+    assert!(r.feed(b"data: x\r").is_empty());
+    let got = r.feed(b"\ndata: y\r\n\r\n");
+    assert_eq!(got.len(), 1);
+    assert_eq!(
+        got[0].data, "x\ny",
+        "a CRLF split across chunks is one line end"
+    );
+}
+
+/// B5: THE BOUND COUNTS THE BYTES HELD, carriage returns included: a peer that sends nothing but
+/// CRs, never ending an event, still meets the bound.
+#[test]
+fn the_event_reader_bound_counts_every_byte_held() {
+    let mut r = EventReader::new(64);
+    let mut held = b"data: ".to_vec();
+    held.extend(b"\rx".repeat(40));
+    let _ = r.feed(&held);
+    assert!(r.overflowed(), "a tail of 86 bytes held past a bound of 64");
+}

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2026 Busbar Inc and contributors
 #
-# Shared boot/mint/call helpers for the H2 MCP gating scenarios (scripts/mcp-subject/h2-*.sh),
+# Shared boot/mint/call helpers for the H2 MCP gating scenarios (testing/mcp-conformance/mcp-subject/h2-*.sh),
 # the Teller-steps rule H2 (BUSBAR-1.6.0.md THE DESIGN, §1). Each h2-*.sh script sources this, boots its OWN
 # throwaway busbar + its own instance of h2-mock-upstream.mjs on its own ports (the same isolation
 # testing/shadow-oracle/scripts/teller-*.sh use for the llm plane), and asserts one Teller step.
@@ -19,8 +19,8 @@
 # operator would.
 set -uo pipefail
 H2_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-H2_REPO="$(cd "${H2_HERE}/../.." && pwd)"
-# shellcheck source=../../testing/fleet-fixtures/lib.sh
+H2_REPO="$(cd "${H2_HERE}/../../.." && pwd)"
+# shellcheck source=../../../testing/fleet-fixtures/lib.sh
 source "${H2_REPO}/testing/fleet-fixtures/lib.sh"
 
 # THE BILLING SWITCH (DECISION #42), and it is a PRESENCE, not a flag: `rate_card:` present ⇒ the
@@ -538,7 +538,7 @@ h2_verdict() {
 }
 
 # ── --selftest ────────────────────────────────────────────────────────────────────────────────────
-# `./scripts/mcp-subject/h2-lib.sh --selftest [case]` -- no busbar, no node, no network. Each rig case
+# `./testing/mcp-conformance/mcp-subject/h2-lib.sh --selftest [case]` -- no busbar, no node, no network. Each rig case
 # copies the REAL rig script into a scratch dir beside a STUB h2-lib.sh (this file's own h2_verdict
 # and h2_int_is, plus canned answers for every reader the rig calls) and runs it, so what is judged is
 # the rig's own decision logic against a read it was never written for. Every case carries a control
@@ -664,6 +664,6 @@ h2_selftest() {
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   case "${1:-}" in
     --selftest) h2_selftest "${2:-}"; exit $? ;;
-    *) echo "usage: $0 --selftest [case]  (this file is otherwise sourced by scripts/mcp-subject/h2-*.sh)" >&2; exit 2 ;;
+    *) echo "usage: $0 --selftest [case]  (this file is otherwise sourced by testing/mcp-conformance/mcp-subject/h2-*.sh)" >&2; exit 2 ;;
   esac
 fi

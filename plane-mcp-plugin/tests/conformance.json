@@ -4,7 +4,7 @@
   ],
   "settings": {
     "fs": {
-      "url": "https://mcp.example/fs/rpc?v=1",
+      "url": "https://localhost:56712/fs/rpc?v=1",
       "pin": {
         "mechanism": "pinned_pubkey",
         "key": "sha256/K="
@@ -52,7 +52,7 @@
     ],
     "refresh_settings": {
       "fs": {
-        "url": "https://mcp.example/fs/rpc?v=1",
+        "url": "https://localhost:56712/fs/rpc?v=1",
         "pin": {
           "mechanism": "pinned_pubkey",
           "key": "sha256/K="
