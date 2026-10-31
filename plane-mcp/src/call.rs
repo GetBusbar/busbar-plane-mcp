@@ -994,25 +994,32 @@ fn failure_answer(
 /// the JSON-RPC reader then reports as malformed.
 #[must_use]
 pub fn last_sse_data(raw: &[u8]) -> Vec<u8> {
-    let text = String::from_utf8_lossy(raw);
-    let mut current: Option<Vec<String>> = None;
-    let mut last: Option<Vec<String>> = None;
-    for line in event_stream_lines(&text) {
+    event_stream_data(&String::from_utf8_lossy(raw))
+        .pop()
+        .map(String::into_bytes)
+        .unwrap_or_default()
+}
+
+/// The `data` of every event in a complete event-stream body that carries any, in arrival order:
+/// its `data:` lines joined with `\n`, an event ending at a blank line or at the end of the body.
+fn event_stream_data(text: &str) -> Vec<String> {
+    let mut events = Vec::new();
+    let mut current: Option<Vec<&str>> = None;
+    for line in event_stream_lines(text) {
         if let Some(rest) = line.strip_prefix("data:") {
             current
                 .get_or_insert_with(Vec::new)
-                .push(rest.strip_prefix(' ').unwrap_or(rest).to_string());
+                .push(rest.strip_prefix(' ').unwrap_or(rest));
         } else if line.is_empty() {
             if let Some(done) = current.take() {
-                last = Some(done);
+                events.push(done.join("\n"));
             }
         }
     }
     if let Some(done) = current.take() {
-        last = Some(done);
+        events.push(done.join("\n"));
     }
-    last.map(|parts| parts.join("\n").into_bytes())
-        .unwrap_or_default()
+    events
 }
 
 /// THE LINES OF A COMPLETE EVENT-STREAM BODY, ended as the event-stream grammar ends them: CRLF, a
@@ -1039,9 +1046,8 @@ fn event_stream_lines(text: &str) -> impl Iterator<Item = &str> {
 #[must_use]
 pub fn progress_frames(raw: &[u8]) -> Vec<Value> {
     use crate::client::peer::{NotificationEffect, ServerMessage};
-    let text = String::from_utf8_lossy(raw);
-    event_stream_lines(&text)
-        .filter_map(|l| l.strip_prefix("data:"))
+    event_stream_data(&String::from_utf8_lossy(raw))
+        .into_iter()
         .filter_map(|d| serde_json::from_str::<Value>(d.trim()).ok())
         .filter(|frame| {
             matches!(
