@@ -174,16 +174,27 @@ fn event_stream_framing() {
 }
 
 #[test]
-fn the_param_mirror_names_every_annotated_string_argument() {
+fn the_param_mirror_names_every_annotated_string_integer_and_boolean_argument() {
     let schema = json!({"properties":{
         "region":{"type":"string","x-mcp-header":"Region"},
         "count":{"type":"integer","x-mcp-header":"Count"},
-        "note":{"type":"string"}
+        "dry":{"type":"boolean","x-mcp-header":"Dry"},
+        "ratio":{"type":"number","x-mcp-header":"Ratio"},
+        "note":{"type":"string"},
+        "opts":{"type":"object","properties":{"zone":{"type":"string","x-mcp-header":"Zone"}}}
     }});
-    let args = json!({"region":"eu-west","count":3,"note":"n"});
+    let args = json!({"region":"eu-west","count":3,"dry":false,"ratio":0.5,"note":"n",
+        "opts":{"zone":"b"}});
+    let mut mirror = param_mirror(Some(&schema), Some(&args));
+    mirror.sort();
     assert_eq!(
-        param_mirror(Some(&schema), Some(&args)),
-        vec![("mcp-param-Region".to_string(), "eu-west".to_string())]
+        mirror,
+        vec![
+            ("mcp-param-Count".to_string(), "3".to_string()),
+            ("mcp-param-Dry".to_string(), "false".to_string()),
+            ("mcp-param-Region".to_string(), "eu-west".to_string()),
+            ("mcp-param-Zone".to_string(), "b".to_string()),
+        ]
     );
     assert!(param_mirror(None, Some(&args)).is_empty());
     assert!(param_mirror(Some(&schema), None).is_empty());
