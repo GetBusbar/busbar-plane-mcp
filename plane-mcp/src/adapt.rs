@@ -215,7 +215,8 @@ pub enum Lowered {
     Unchanged,
     /// The answer's own bytes with only the stateless-only members' spans cut out of its result.
     Spliced(Vec<u8>),
-    /// The result is not a complete one ([`NotExpressible`]): the caller answers an error instead.
+    /// The result is not a complete one ([`lower_result`] answers `false`: a `resultType` other
+    /// than `complete`): the caller answers an error instead.
     Inexpressible,
 }
 
