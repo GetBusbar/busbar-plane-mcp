@@ -374,21 +374,17 @@ pub fn custom_param_mismatch(
     arguments: &Value,
     header: &impl Fn(&str) -> Option<String>,
 ) -> Option<String> {
-    let properties = entry
-        .input_schema
-        .as_ref()?
-        .get("properties")?
-        .as_object()?;
-    for (property, definition) in properties {
-        let Some(suffix) = definition.get("x-mcp-header").and_then(|v| v.as_str()) else {
-            continue;
-        };
+    // Every annotation, nested ones through their chain of `properties` too, each compared with
+    // the argument at its path rendered as the header carries it (a string, a decimal integer,
+    // `true`/`false`).
+    for (path, suffix) in crate::adapt::annotated_params(entry.input_schema.as_ref()) {
+        let property = path.join(".");
         // The reader takes the lower-case name; the engine's head lookup was case-insensitive.
         let header_name = format!("mcp-param-{}", suffix.to_ascii_lowercase());
         let value = header(&header_name);
         let header_value = value.as_deref().map(str::trim);
-        let body = arguments.get(property).and_then(|v| v.as_str());
-        match (header_value, body) {
+        let body = crate::adapt::argument_at(arguments, &path).and_then(crate::adapt::param_text);
+        match (header_value, body.as_deref()) {
             (None, None) => continue,
             (None, Some(_)) => {
                 return Some(format!(
@@ -400,7 +396,8 @@ pub fn custom_param_mismatch(
             (Some(_), None) => {
                 return Some(format!(
                     "The `Mcp-Param-{suffix}` header is set but the body's `arguments.{property}` \
-                     is absent or is not a string, so there is nothing for it to mirror."
+                     is absent or is not a string, an integer or a boolean, so there is nothing \
+                     for it to mirror."
                 ))
             }
             (Some(header_value), Some(body)) => {
@@ -875,7 +872,7 @@ pub fn outbound(
     if def.url.is_empty() {
         return None;
     }
-    let request = call_request(
+    let mut request = call_request(
         admitted,
         member,
         def,
@@ -883,6 +880,14 @@ pub fn outbound(
         wire::dispatch_request_id(round),
         continuation,
     )?;
+    // A conforming client mirrors every annotated argument into its `Mcp-Param-*` header; a server
+    // that checks the mirror refuses a request without it.
+    for (name, value) in crate::adapt::param_mirror(
+        admitted.entry.input_schema.as_ref(),
+        Some(&admitted.arguments),
+    ) {
+        request.headers.push((name.to_ascii_lowercase(), value));
+    }
     Some(OutboundCall {
         verb: "POST",
         target: path_of(&request.url),
@@ -989,25 +994,51 @@ fn failure_answer(
 /// the JSON-RPC reader then reports as malformed.
 #[must_use]
 pub fn last_sse_data(raw: &[u8]) -> Vec<u8> {
-    let text = String::from_utf8_lossy(raw);
-    let mut current: Option<Vec<String>> = None;
-    let mut last: Option<Vec<String>> = None;
-    for line in text.lines() {
+    event_stream_data(&String::from_utf8_lossy(raw))
+        .pop()
+        .map(String::into_bytes)
+        .unwrap_or_default()
+}
+
+/// The `data` of every event in a complete event-stream body that carries any, in arrival order:
+/// its `data:` lines joined with `\n`, an event ending at a blank line or at the end of the body.
+fn event_stream_data(text: &str) -> Vec<String> {
+    let mut events = Vec::new();
+    let mut current: Option<Vec<&str>> = None;
+    for line in event_stream_lines(text) {
         if let Some(rest) = line.strip_prefix("data:") {
             current
                 .get_or_insert_with(Vec::new)
-                .push(rest.strip_prefix(' ').unwrap_or(rest).to_string());
+                .push(rest.strip_prefix(' ').unwrap_or(rest));
         } else if line.is_empty() {
             if let Some(done) = current.take() {
-                last = Some(done);
+                events.push(done.join("\n"));
             }
         }
     }
     if let Some(done) = current.take() {
-        last = Some(done);
+        events.push(done.join("\n"));
     }
-    last.map(|parts| parts.join("\n").into_bytes())
-        .unwrap_or_default()
+    events
+}
+
+/// THE LINES OF A COMPLETE EVENT-STREAM BODY, ended as the event-stream grammar ends them: CRLF, a
+/// lone LF or a lone CR (the rule `client::compat::EventReader` reads a live stream by). A body that
+/// ends without a terminator ends its last line.
+fn event_stream_lines(text: &str) -> impl Iterator<Item = &str> {
+    let mut rest = text;
+    std::iter::from_fn(move || {
+        if rest.is_empty() {
+            return None;
+        }
+        let Some(at) = rest.find(['\r', '\n']) else {
+            return Some(std::mem::take(&mut rest));
+        };
+        let line = &rest[..at];
+        let end = if rest[at..].starts_with("\r\n") { 2 } else { 1 };
+        rest = &rest[at + end..];
+        Some(line)
+    })
 }
 
 /// Every `notifications/progress` frame in an event-stream body, in arrival order: the one
@@ -1015,9 +1046,8 @@ pub fn last_sse_data(raw: &[u8]) -> Vec<u8> {
 #[must_use]
 pub fn progress_frames(raw: &[u8]) -> Vec<Value> {
     use crate::client::peer::{NotificationEffect, ServerMessage};
-    String::from_utf8_lossy(raw)
-        .lines()
-        .filter_map(|l| l.strip_prefix("data:"))
+    event_stream_data(&String::from_utf8_lossy(raw))
+        .into_iter()
         .filter_map(|d| serde_json::from_str::<Value>(d.trim()).ok())
         .filter(|frame| {
             matches!(
@@ -1061,6 +1091,13 @@ pub fn upstream_failure_result(server: &str, reason: &str) -> Value {
 /// the caller's behalf (Law 11).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AskRefusal {
+    /// The ask cannot be safely interpreted for grant and bounds checks.
+    Malformed {
+        /// The server.
+        server: String,
+        /// The invalid field and its required shape.
+        reason: String,
+    },
     /// The operator granted this server nothing for this kind of ask.
     Ungranted {
         /// The server.
@@ -1105,6 +1142,10 @@ pub enum AskRefusal {
 impl std::fmt::Display for AskRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            AskRefusal::Malformed { server, reason } => write!(
+                f,
+                "MCP server `{server}` returned a malformed ask: {reason}, so the ask was not relayed."
+            ),
             AskRefusal::Ungranted { server, kind } => write!(
                 f,
                 "MCP server `{server}` asked its caller for a `{kind}` request, and that grant is \
@@ -1167,6 +1208,7 @@ impl AskRefusal {
     #[must_use]
     pub fn audit_reason(&self) -> &'static str {
         match self {
+            AskRefusal::Malformed { .. } => "ask_malformed",
             AskRefusal::Ungranted { .. } => "ask_ungranted",
             AskRefusal::RoundCapExceeded { .. } => "ask_round_cap",
             AskRefusal::NoSealer { .. } => "ask_no_sealer",
@@ -1317,8 +1359,8 @@ pub fn task_line(entry: &ToolEntry, reason: &str) -> CallLine {
     line
 }
 
-/// The ask judged: the bound, then the grant of EVERY kind it asks for (an unknown method is judged
-/// as the most privileged, as the recogniser reads it). A granted ask is relayed to the caller;
+/// The ask judged: the bound, then the grant of EVERY recognized kind it asks for. An unknown
+/// method cannot be checked and is refused. A granted ask is relayed to the caller;
 /// busbar answers none itself.
 fn judge_ask(
     admitted: &AdmittedCall,
@@ -1335,16 +1377,28 @@ fn judge_ask(
         return Err(AskRefusal::RoundCapExceeded { server, cap });
     }
     let grants = def.map(|d| d.grants).unwrap_or_default();
-    let mut kinds: Vec<wire::ServerAsk> = payload
+    let requests = payload
         .get("inputRequests")
         .and_then(Value::as_object)
-        .map(|requests| {
-            requests
-                .values()
-                .map(|r| wire::ServerAsk::of_method(r.get("method").and_then(Value::as_str)))
-                .collect()
-        })
-        .unwrap_or_default();
+        .ok_or_else(|| AskRefusal::Malformed {
+            server: server.clone(),
+            reason: "inputRequests is not an object".to_string(),
+        })?;
+    for request in requests.values() {
+        if !matches!(
+            request.get("method").and_then(Value::as_str),
+            Some("roots/list" | "elicitation/create" | "sampling/createMessage")
+        ) {
+            return Err(AskRefusal::Malformed {
+                server,
+                reason: "inputRequests contains an unrecognized method".to_string(),
+            });
+        }
+    }
+    let mut kinds: Vec<wire::ServerAsk> = requests
+        .values()
+        .map(|r| wire::ServerAsk::of_method(r.get("method").and_then(Value::as_str)))
+        .collect();
     kinds.push(kind);
     if let Some(denied) = kinds.into_iter().find(|k| !grants.allows(*k)) {
         return Err(AskRefusal::Ungranted {
@@ -1355,11 +1409,7 @@ fn judge_ask(
     judge_sampling_bounds(
         &server,
         &def.map(|d| d.sampling_bounds).unwrap_or_default(),
-        payload
-            .get("inputRequests")
-            .and_then(Value::as_object)
-            .into_iter()
-            .flat_map(|requests| requests.values()),
+        requests.values(),
     )?;
     Ok(Settled::Relay {
         result: payload.clone(),
@@ -1478,15 +1528,20 @@ pub fn judge_sampling_bounds<'a>(
             }
         }
         if let Some(t) = params.and_then(|p| p.get("temperature")) {
+            let temperature =
+                t.as_f64()
+                    .filter(|v| v.is_finite())
+                    .ok_or_else(|| AskRefusal::Malformed {
+                        server: server.to_string(),
+                        reason: "temperature is not a number".to_string(),
+                    })?;
             let min = f64::from(bounds.temperature_min_milli) / 1000.0;
             let max = f64::from(bounds.temperature_max_milli) / 1000.0;
-            if !t
-                .as_f64()
-                .is_some_and(|v| v.is_finite() && (min..=max).contains(&v))
-            {
-                let (key, limit) = match t.as_f64() {
-                    Some(v) if v > max => ("temperature_max_milli", bounds.temperature_max_milli),
-                    _ => ("temperature_min_milli", bounds.temperature_min_milli),
+            if !(min..=max).contains(&temperature) {
+                let (key, limit) = if temperature > max {
+                    ("temperature_max_milli", bounds.temperature_max_milli)
+                } else {
+                    ("temperature_min_milli", bounds.temperature_min_milli)
                 };
                 return Err(refuse(
                     key,

@@ -162,28 +162,76 @@ pub fn raise(message: &mut Value) -> Option<()> {
     Some(())
 }
 
-/// THE CUSTOM PARAMETER MIRROR a raised `tools/call` must carry (a session client's revision has
-/// none): for every `inputSchema` property naming an `x-mcp-header` suffix whose argument is a
-/// string, (`mcp-param-<suffix>`, the value in the name sentinel where it needs one).
+/// How deep a chain of `properties` the annotation walk follows. A pinned schema is the operator's,
+/// so this bounds stack use, not an attack.
+const MAX_PARAM_DEPTH: usize = 16;
+
+/// THE `x-mcp-header` ANNOTATIONS of a tool's `inputSchema`: each annotated property's path (its
+/// chain of `properties` keys, outermost first) and its header suffix. The walk follows `properties`
+/// only (never `items`, a combinator or a `$ref`), as the custom-header rule reaches a parameter.
+#[must_use]
+pub fn annotated_params(input_schema: Option<&Value>) -> Vec<(Vec<String>, String)> {
+    let mut found = Vec::new();
+    if let Some(schema) = input_schema {
+        annotations(schema, &mut Vec::new(), &mut found);
+    }
+    found
+}
+
+fn annotations(schema: &Value, path: &mut Vec<String>, found: &mut Vec<(Vec<String>, String)>) {
+    if path.len() >= MAX_PARAM_DEPTH {
+        return;
+    }
+    let Some(props) = schema.get("properties").and_then(Value::as_object) else {
+        return;
+    };
+    for (property, definition) in props {
+        path.push(property.clone());
+        match definition.get("x-mcp-header").and_then(Value::as_str) {
+            Some(suffix) => found.push((path.clone(), suffix.to_string())),
+            None => annotations(definition, path, found),
+        }
+        path.pop();
+    }
+}
+
+/// The argument at `path` (an [`annotated_params`] path) in `arguments`.
+#[must_use]
+pub fn argument_at<'a>(arguments: &'a Value, path: &[String]) -> Option<&'a Value> {
+    path.iter().try_fold(arguments, |v, key| v.get(key))
+}
+
+/// THE TEXT AN `Mcp-Param-*` HEADER CARRIES for one argument value: a string as it is, an integer
+/// in decimal, a boolean as `true` or `false`; `None` for any other value (no header mirrors it).
+#[must_use]
+pub fn param_text(value: &Value) -> Option<String> {
+    match value {
+        Value::String(s) => Some(s.clone()),
+        Value::Bool(b) => Some(b.to_string()),
+        Value::Number(n) if n.is_i64() || n.is_u64() => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+/// THE CUSTOM PARAMETER MIRROR a raised or relayed `tools/call` must carry (a session client's
+/// revision has none): for every `x-mcp-header` annotation ([`annotated_params`]) whose argument is
+/// a string, an integer or a boolean ([`param_text`]), (`mcp-param-<suffix>`, the value in the
+/// name sentinel where it needs one).
 #[must_use]
 pub fn param_mirror(
     input_schema: Option<&Value>,
     arguments: Option<&Value>,
 ) -> Vec<(String, String)> {
-    let Some(props) = input_schema
-        .and_then(|s| s.get("properties"))
-        .and_then(Value::as_object)
-    else {
+    let Some(arguments) = arguments else {
         return Vec::new();
     };
-    props
-        .iter()
-        .filter_map(|(property, definition)| {
-            let suffix = definition.get("x-mcp-header")?.as_str()?;
-            let value = arguments?.get(property)?.as_str()?;
+    annotated_params(input_schema)
+        .into_iter()
+        .filter_map(|(path, suffix)| {
+            let text = param_text(argument_at(arguments, &path)?)?;
             Some((
                 format!("mcp-param-{suffix}"),
-                crate::client::jsonrpc::encode_sentinel(value),
+                crate::client::jsonrpc::encode_sentinel(&text),
             ))
         })
         .collect()
