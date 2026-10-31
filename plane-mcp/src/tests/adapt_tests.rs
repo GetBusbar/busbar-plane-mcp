@@ -178,7 +178,10 @@ fn event_stream_framing() {
 #[test]
 fn a_bare_cr_in_framed_data_ends_its_data_line() {
     let framed = frame(None, Some(EVENT_MESSAGE), "{\"a\":1\r,\"b\":2}");
-    assert_eq!(framed, "event: message\ndata: {\"a\":1\ndata: ,\"b\":2}\n\n");
+    assert_eq!(
+        framed,
+        "event: message\ndata: {\"a\":1\ndata: ,\"b\":2}\n\n"
+    );
     assert!(!framed.contains('\r'));
     assert_eq!(
         frame(None, None, "a\r\nb"),

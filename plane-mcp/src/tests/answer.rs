@@ -122,7 +122,9 @@ fn discover_counts_no_tool_the_verdict_hides() {
     let hide_all = |_: &crate::catalogue::ToolEntry| true;
     let (d, params) = request("tools/list", json!({}));
     let listed = answer(&d, Some(&params), &catalogue(), &everyone, hide_all);
-    let listed = body(&listed)["result"]["tools"].as_array().map_or(0, Vec::len);
+    let listed = body(&listed)["result"]["tools"]
+        .as_array()
+        .map_or(0, Vec::len);
     let (d, params) = request("server/discover", json!({}));
     let discovered = answer(&d, Some(&params), &catalogue(), &everyone, hide_all);
     assert_eq!(body(&discovered)["result"]["counts"]["tools"], listed);

@@ -107,20 +107,155 @@ pub fn tools_call(
 
 /// Build a `tools/list` for one server: the request an operator `connect` and a call's
 /// verify-on-call fetch send a member over HTTP (`crate::plane_door`), and the one a stdio child is
-/// asked over its pipe (`crate::plane_door`'s program leg).
+/// asked over its pipe (`crate::plane_door`'s program leg). Its first page: [`tools_list_page`]
+/// asks the ones after.
 pub fn tools_list(url: &str, request_id: u64, authorization: Option<&str>) -> OutboundRequest {
-    let params = serde_json::json!({
+    tools_list_page(url, request_id, authorization, None)
+}
+
+/// [`tools_list`] for the page `cursor` names (the previous page's `nextCursor`, carried as
+/// `params.cursor`); `None` is the first page, the request [`tools_list`] builds.
+pub fn tools_list_page(
+    url: &str,
+    request_id: u64,
+    authorization: Option<&str>,
+    cursor: Option<&str>,
+) -> OutboundRequest {
+    let mut params = serde_json::json!({
         "_meta": {
             META_PROTOCOL_VERSION: PROTOCOL_VERSION,
             META_CLIENT_CAPABILITIES: {},
         },
     });
+    if let (Some(params), Some(cursor)) = (params.as_object_mut(), cursor) {
+        params.insert("cursor".to_string(), serde_json::Value::from(cursor));
+    }
     let body = busbar_contract::jsonrpc::request_bytes(
         &json(&request_id),
         "tools/list",
         Some(&json(&params)),
     );
     envelope(url, "tools/list", None, body, authorization)
+}
+
+/// The most pages one `tools/list` fetch follows. A list longer than this is refused, never taken
+/// as complete.
+pub const MAX_LIST_PAGES: u32 = 64;
+
+/// The most tools one paginated `tools/list` fetch gathers before it is refused.
+pub const MAX_LISTED_TOOLS: usize = 10_000;
+
+/// What one page of a `tools/list` came to ([`ToolPages::take`]).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Paged {
+    /// More follows: ask [`tools_list_page`] for this cursor next.
+    Next(String),
+    /// The list is whole: the `tools/list` result to judge, every page's `tools` in one array.
+    Done(serde_json::Value),
+}
+
+/// A PAGINATED `tools/list`, gathered page by page (`params.cursor` / `nextCursor`) into the one
+/// list a sighting judges. busbar reads a server's tool list whole or not at all: a page past
+/// [`MAX_LIST_PAGES`], a list past [`MAX_LISTED_TOOLS`], a cursor the server already gave, a tool
+/// named on two pages or a page that is not a tool list is refused in words, never judged as the
+/// server's whole catalogue. A list that fits on one page is handed on exactly as it came.
+#[derive(Clone, Debug, Default)]
+pub struct ToolPages {
+    /// The first page's result, its `tools` the union so far.
+    first: Option<serde_json::Value>,
+    /// How many pages were taken.
+    pages: u32,
+    /// Every cursor the server gave, so one that comes round again is a loop.
+    cursors: std::collections::HashSet<String>,
+    /// Every tool name taken so far.
+    names: std::collections::HashSet<String>,
+}
+
+impl ToolPages {
+    /// How many pages were taken so far.
+    #[must_use]
+    pub fn pages(&self) -> u32 {
+        self.pages
+    }
+
+    /// TAKE ONE PAGE's `result`: the cursor to ask next, or the whole list.
+    ///
+    /// # Errors
+    ///
+    /// The sentence saying why the list cannot be read whole.
+    pub fn take(&mut self, mut result: serde_json::Value) -> Result<Paged, String> {
+        // An absent or `null` cursor is the last page (SDKs write `null` on a single page).
+        let next = match result.get("nextCursor") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(c)) => Some(c.clone()),
+            Some(_) => {
+                return Err(
+                    "the upstream's `tools/list` answered a `nextCursor` that is not a \
+                            string; busbar reads a tool list whole or not at all"
+                        .to_string(),
+                )
+            }
+        };
+        self.pages += 1;
+        if self.first.is_none() && next.is_none() {
+            return Ok(Paged::Done(result));
+        }
+        let Some(tools) = result
+            .get_mut("tools")
+            .and_then(serde_json::Value::as_array_mut)
+            .map(std::mem::take)
+        else {
+            return Err(format!(
+                "page {} of the upstream's `tools/list` carries no `tools` array; busbar reads a \
+                 tool list whole or not at all",
+                self.pages
+            ));
+        };
+        for tool in &tools {
+            if let Some(name) = tool.get("name").and_then(serde_json::Value::as_str) {
+                if !self.names.insert(name.to_string()) {
+                    return Err(format!(
+                        "the upstream's `tools/list` names tool `{name}` on two of its pages; \
+                         busbar reads a tool list whole or not at all"
+                    ));
+                }
+            }
+        }
+        if let Some(obj) = result.as_object_mut() {
+            obj.remove("nextCursor");
+        }
+        let first = self.first.get_or_insert(result);
+        let Some(all) = first
+            .get_mut("tools")
+            .and_then(serde_json::Value::as_array_mut)
+        else {
+            return Err("the upstream's `tools/list` first page is not an object".to_string());
+        };
+        all.extend(tools);
+        if all.len() > MAX_LISTED_TOOLS {
+            return Err(format!(
+                "the upstream's `tools/list` lists more than {MAX_LISTED_TOOLS} tools; busbar \
+                 reads a tool list whole or not at all"
+            ));
+        }
+        let Some(cursor) = next else {
+            return Ok(Paged::Done(self.first.take().unwrap_or_default()));
+        };
+        if self.pages >= MAX_LIST_PAGES {
+            return Err(format!(
+                "the upstream's `tools/list` runs past {MAX_LIST_PAGES} pages; busbar reads a \
+                 tool list whole or not at all"
+            ));
+        }
+        if !self.cursors.insert(cursor.clone()) {
+            return Err(
+                "the upstream's `tools/list` gave a cursor it already gave, so its pages \
+                        never end; busbar reads a tool list whole or not at all"
+                    .to_string(),
+            );
+        }
+        Ok(Paged::Next(cursor))
+    }
 }
 
 /// The shared envelope: the mirrored headers this revision REQUIRES, written from the same values

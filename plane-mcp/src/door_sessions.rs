@@ -572,8 +572,7 @@ fn discovery(plane: &McpDoor, ticket: Ticket, unit: &mut CallUnit, id: &Value) -
     let held = unit.held.clone().or_else(|| plane.current())?;
     ask_entitlements(plane.services, ticket, unit, &held.catalogue.grants());
     // `initialize` reads only the capabilities and the server's identity off it, never a count.
-    let document =
-        crate::answer::discover(&held.catalogue, id, &admit(&unit.entitled), |_| false);
+    let document = crate::answer::discover(&held.catalogue, id, &admit(&unit.entitled), |_| false);
     serde_json::from_slice::<Value>(&document)
         .ok()?
         .get("result")
