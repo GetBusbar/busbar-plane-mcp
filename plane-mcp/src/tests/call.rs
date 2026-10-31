@@ -1151,10 +1151,16 @@ fn sampling_temperature_outside_the_range_is_refused_at_the_edges_relays() {
         "temperature_min_milli",
         "200",
     );
-    assert_bound_refused(
-        sampling_settle(&def, json!({ "temperature": "hot" })),
-        "temperature_min_milli",
-        "200",
+    let (status, body, line) = answer_of(sampling_settle(&def, json!({ "temperature": "hot" })));
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(body["error"]["data"]["reason"], json!("ask_malformed"));
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("not a number"));
+    assert_eq!(
+        (line.outcome, line.reason.as_str()),
+        ("refused", "ask_malformed")
     );
     assert_relayed(sampling_settle(&def, json!({ "temperature": 0.2 })));
     assert_relayed(sampling_settle(&def, json!({ "temperature": 1.5 })));
@@ -1539,4 +1545,152 @@ fn a_302_from_the_upstream_is_a_failure_not_a_result() {
         "nothing the redirect carried is served: {body}"
     );
     assert_eq!(line.reason, vocab::REASON_UPSTREAM_FAILED, "{line:?}");
+}
+
+/// One approved tool `t` on server `s` whose input schema is `schema`.
+fn entry_with_schema(schema: &Value) -> ToolEntry {
+    let section = json!({"s": {"url": "https://mcp.example/s", "pin": {"mechanism": "unpinned"},
+        "tools_allow": {"t": {"schema_hash": "sha256:aa", "input_schema": schema}}}});
+    let section = crate::statement::read_tools_section(section.to_string().as_bytes())
+        .expect("the section reads");
+    Catalogue::build(1, &section)
+        .tool("s_t")
+        .expect("approved")
+        .clone()
+}
+
+/// M1-7: an `x-mcp-header` may annotate an integer or a boolean. The body's value is rendered as
+/// the header carries it (a decimal integer, `true`/`false`), so a header that mirrors it agrees,
+/// one that does not disagrees, and a body that sets it with no header is refused.
+#[test]
+fn an_integer_or_boolean_annotated_argument_is_compared_as_the_header_renders_it() {
+    let entry = entry_with_schema(&json!({"type": "object", "properties": {
+        "count": {"type": "integer", "x-mcp-header": "Count"},
+        "dry": {"type": "boolean", "x-mcp-header": "Dry"}
+    }}));
+    let headers = |count: &'static str, dry: &'static str| {
+        move |name: &str| match name {
+            "mcp-param-count" => Some(count.to_string()),
+            "mcp-param-dry" => Some(dry.to_string()),
+            _ => None,
+        }
+    };
+    let args = json!({"count": 42, "dry": true});
+    assert_eq!(
+        custom_param_mismatch(&entry, &args, &headers("42", "true")),
+        None,
+        "the header mirrors the body"
+    );
+    assert!(custom_param_mismatch(&entry, &args, &headers("41", "true"))
+        .is_some_and(|m| m.contains("does not match")));
+    assert!(
+        custom_param_mismatch(&entry, &args, &headers("42", "false"))
+            .is_some_and(|m| m.contains("does not match"))
+    );
+    assert!(
+        custom_param_mismatch(&entry, &args, &no_header).is_some(),
+        "a body that sets an annotated integer must carry its header"
+    );
+}
+
+/// M1-8: an annotation on a nested property, reached through a chain of `properties`, is validated
+/// against the argument at that path.
+#[test]
+fn a_nested_annotated_argument_is_compared_with_its_header() {
+    let entry = entry_with_schema(&json!({"type": "object", "properties": {
+        "opts": {"type": "object", "properties": {
+            "region": {"type": "string", "x-mcp-header": "Region"}
+        }}
+    }}));
+    let args = json!({"opts": {"region": "a"}});
+    let wrong = |name: &str| (name == "mcp-param-region").then(|| "b".to_string());
+    assert!(
+        custom_param_mismatch(&entry, &args, &wrong).is_some(),
+        "a nested annotated argument the header disagrees with is refused"
+    );
+    let right = |name: &str| (name == "mcp-param-region").then(|| "a".to_string());
+    assert_eq!(custom_param_mismatch(&entry, &args, &right), None);
+}
+
+/// M1-9: the relayed request mirrors every annotated argument into its `Mcp-Param-*` header, as a
+/// conforming client must, or a server that checks the mirror refuses it.
+#[test]
+fn the_relayed_request_mirrors_its_annotated_arguments() {
+    let section = section();
+    let def = section.servers.get("fs").expect("registered");
+    let o = outbound(&admitted(), "fs", def, 0, None).expect("reachable");
+    assert!(
+        o.fields
+            .contains(&("mcp-param-path".to_string(), "/a".to_string())),
+        "the annotated `path` argument is mirrored: {:?}",
+        o.fields
+    );
+}
+
+/// M1-11: THE EVENT-STREAM LINE RULE, as `client::compat::EventReader` reads it (B5): CRLF, a lone
+/// LF and a lone CR each end a line, so a body framed with bare CRs reads as the same events.
+#[test]
+fn an_answer_framed_with_bare_crs_reads_as_its_events() {
+    let raw = b"event: message\rdata: {\"a\":1}\r\rdata: {\"b\":\rdata: 2}\r\r";
+    assert_eq!(last_sse_data(raw), b"{\"b\":\n2}".to_vec());
+    let progress = br#"{"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":"busbar-0","progress":1}}"#;
+    let mut raw = b"data: ".to_vec();
+    raw.extend_from_slice(progress);
+    raw.extend_from_slice(b"\r\rdata: {\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{}}\r\r");
+    assert_eq!(progress_frames(&raw).len(), 1, "the progress frame is read");
+}
+
+/// M1-13: a progress notification whose JSON is split over several `data:` lines is one event,
+/// read as `last_sse_data` reads one.
+#[test]
+fn a_progress_frame_split_over_data_lines_is_one_frame() {
+    let raw = b"data: {\"jsonrpc\":\"2.0\",\ndata: \"method\":\"notifications/progress\",\ndata: \"params\":{\"progressToken\":\"busbar-0\",\"progress\":1}}\n\n";
+    assert_eq!(progress_frames(raw).len(), 1);
+}
+
+/// M1-14: an ask the bounds cannot read is not relayed past them. An `inputRequests` that is not
+/// an object of requests, and a request whose method is none of the asks this plane knows, are
+/// refused rather than relayed whole under the sampling grant.
+#[test]
+fn an_ask_the_sampling_bounds_cannot_read_is_refused_not_relayed() {
+    let def = sampling_def(|_| {});
+    let too_many = json!({ "method": "sampling/createMessage",
+        "params": { "messages": text_messages(65, "") } });
+    for requests in [
+        json!([too_many]),
+        json!({ "s": { "method": "sampling/createMessageX",
+            "params": { "messages": text_messages(65, "") } } }),
+    ] {
+        let far = json!({ "jsonrpc": "2.0", "id": 0, "result": {
+            "resultType": "input_required",
+            "inputRequests": requests,
+            "requestState": "opaque"
+        }});
+        let settled = settle_call(
+            &admitted(),
+            Some(&def),
+            200,
+            far.to_string().as_bytes(),
+            false,
+            0,
+        );
+        assert!(
+            !matches!(settled, Settled::Relay { .. }),
+            "`{requests}` must not be relayed: {settled:?}"
+        );
+    }
+}
+
+/// M1-16: a temperature that is not a number is refused for that, never by naming a bound the
+/// operator would then adjust in vain.
+#[test]
+fn a_temperature_that_is_not_a_number_is_refused_naming_that() {
+    let def = sampling_def(|_| {});
+    let (status, body, _) = answer_of(sampling_settle(&def, json!({ "temperature": "hot" })));
+    assert_eq!(status, 403, "{body}");
+    let message = body["error"]["message"].as_str().expect("message");
+    assert!(
+        !message.contains("temperature_min_milli") && message.contains("not a number"),
+        "{message}"
+    );
 }

@@ -1579,3 +1579,97 @@ fn every_gap_the_differential_review_found_is_refused() {
         allowed.join("\n")
     );
 }
+
+/// M1-1: a scheme-relative `uri-reference` whose authority holds a backslash before an `@`. A
+/// WHATWG reader ends a special authority at the backslash, so `//169.254.169.254\@public.example/x`
+/// dials the metadata address; the `@` is never inside the authority it reads.
+#[test]
+fn a_scheme_relative_reference_with_a_backslash_before_the_at_is_judged_on_the_dialled_host() {
+    let schema = field_schema(Field::Reference);
+    let err = guard(
+        &schema,
+        &json!({ "target": "//169.254.169.254\\@public.example/x" }),
+        public(),
+    )
+    .expect_err("the dialled host is the metadata address");
+    assert_eq!(err.why, ArgWhy::CloudMetadata("169.254.169.254".into()));
+    let err = guard(
+        &schema,
+        &json!({ "target": "//127.0.0.1\\@example.com" }),
+        public(),
+    )
+    .expect_err("the dialled host is loopback");
+    assert!(
+        matches!(err.why, ArgWhy::InternalHost(ref h) if h == "127.0.0.1"),
+        "judged on the dialled loopback host, got {:?}",
+        err.why
+    );
+}
+
+#[test]
+fn a_backslash_authority_is_safe_under_both_host_readings() {
+    let reference = field_schema(Field::Reference);
+    for target in [
+        r"//127.0.0.1\@public.example/x",
+        r"//public.example\@127.0.0.1/x",
+    ] {
+        let err = guard(&reference, &json!({"target": target}), public())
+            .expect_err("neither interpretation may reach loopback");
+        assert!(matches!(err.why, ArgWhy::InternalHost(ref h) if h == "127.0.0.1"));
+    }
+    let uri = json!({
+        "type": "object",
+        "properties": {"target": {"type": "string", "format": "uri"}}
+    });
+    let untyped = field_schema(Field::Undeclared);
+    for schema in [&reference, &uri, &untyped] {
+        for target in [
+            r"https://127.0.0.1\@public.example/x",
+            r"https://public.example\@127.0.0.1/x",
+        ] {
+            let err = guard(schema, &json!({"target": target}), public())
+                .expect_err("neither interpretation may reach loopback");
+            assert!(matches!(err.why, ArgWhy::InternalHost(ref h) if h == "127.0.0.1"));
+        }
+    }
+}
+
+#[test]
+fn an_undeclared_special_url_judges_both_authorities_after_cleanup() {
+    let schema = field_schema(Field::Undeclared);
+    for target in [
+        "ht\ttps://public.example\\@127.0.0.1/x",
+        "ftp://public.example\\@127.0.0.1/x",
+        "ht\ttps://127.0.0.1\\@public.example/x",
+        "ftp://127.0.0.1\\@public.example/x",
+    ] {
+        let err = guard(&schema, &json!({"target": target}), public())
+            .expect_err("neither URL reading may reach loopback");
+        assert!(matches!(err.why, ArgWhy::InternalHost(ref h) if h == "127.0.0.1"));
+    }
+    for target in [
+        "ht\ttps://public.example\\@other.example/x",
+        "ftp://public.example\\@other.example/x",
+    ] {
+        guard(&schema, &json!({"target": target}), public())
+            .expect("both public readings remain allowed");
+    }
+}
+
+/// M1-2: a path-relative `uri-reference` whose query carries a URL names no host of its own, so it
+/// is admitted without asking the judge.
+#[test]
+fn a_relative_reference_carrying_a_url_in_its_query_is_admitted() {
+    let mut asked = 0;
+    let scan = guard(
+        &field_schema(Field::Reference),
+        &json!({ "target": "/callback?next=https://example.com" }),
+        |_: &str| {
+            asked += 1;
+            Some(DEST_ALLOWED)
+        },
+    )
+    .unwrap_or_else(|e| panic!("a relative reference names no host: {e}"));
+    assert_eq!(scan.declared_judged, 1, "the field was reached");
+    assert_eq!(asked, 0, "a relative reference names no host to ask about");
+}

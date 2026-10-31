@@ -904,7 +904,7 @@ pub(super) fn lower(plane: &McpDoor, ticket: Ticket, caller: &str, unit: &mut Ca
     // A legacy answer goes on its session's stream, which a failed clock read cannot touch: the
     // POST is answered that it was not delivered.
     let Some(now) = now else {
-        *pending = unavailable(&Value::Null, super::CLOCK_UNREAD);
+        replace_wire_answer(pending, unavailable(&Value::Null, super::CLOCK_UNREAD));
         return;
     };
     let Ok(v) = serde_json::from_slice::<Value>(&pending.bytes) else {
@@ -948,7 +948,10 @@ pub(super) fn lower(plane: &McpDoor, ticket: Ticket, caller: &str, unit: &mut Ca
                 pending.fields.clear();
                 pending.status = STATUS_ACCEPTED;
             } else {
-                *pending = not_found(&v.get("id").cloned().unwrap_or(Value::Null));
+                replace_wire_answer(
+                    pending,
+                    not_found(&v.get("id").cloned().unwrap_or(Value::Null)),
+                );
             }
         }
         None => {
@@ -963,6 +966,16 @@ pub(super) fn lower(plane: &McpDoor, ticket: Ticket, caller: &str, unit: &mut Ca
             pending.bytes = bytes;
         }
     }
+}
+
+fn replace_wire_answer(pending: &mut Pending, answer: Pending) {
+    pending.status = answer.status;
+    pending.fields = answer.fields;
+    pending.bytes = answer.bytes;
+    // Delivery failed; completed upstream work still reports its usage, records and audit.
+    pending
+        .units
+        .retain(|u| u.class != crate::statement::CLASS_FEE_INDEX);
 }
 
 // ── the streams ─────────────────────────────────────────────────────────────────────────────────
