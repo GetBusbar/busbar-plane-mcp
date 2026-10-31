@@ -151,8 +151,22 @@ extern "C" fn entitled(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -
     if NARROW.load(Ordering::SeqCst) && NOT_GRANTED.contains(&target.as_str()) {
         return ready(out, NOT_ENTITLED, 0, 0);
     }
+    if revoked().iter().any(|t| *t == target) {
+        return ready(out, NOT_ENTITLED, 0, 0);
+    }
     ready(out, ENTITLED, 0, 0)
 }
+
+/// THE GRANTS REVOKED since a task was created: the targets the kernel's entitlement answers say
+/// the caller no longer holds (none by default).
+static REVOKED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+fn revoked() -> MutexGuard<'static, Vec<String>> {
+    REVOKED.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// THE KERNEL'S TRUST VERDICT every `trust.serves` answers (`DISTRUST_NONE` by default: it serves).
+static VERDICT: AtomicU64 = AtomicU64::new(DISTRUST_NONE);
 
 static FILLS: AtomicU64 = AtomicU64::new(0);
 
@@ -170,7 +184,7 @@ extern "C" fn random_fill(_: HostCtx, input: *const c_void, out: *mut ServiceOut
 }
 
 extern "C" fn serves(_: HostCtx, _: *const c_void, out: *mut ServiceOut) -> RawOutcome {
-    ready(out, DISTRUST_NONE, 0, 0)
+    ready(out, VERDICT.load(Ordering::SeqCst), 0, 0)
 }
 
 extern "C" fn sighted(_: HostCtx, _: *const c_void, out: *mut ServiceOut) -> RawOutcome {
@@ -731,6 +745,8 @@ fn fresh() -> MutexGuard<'static, ()> {
     *book() = Some(Book::default());
     *upstreams() = Some(Upstreams::default());
     NARROW.store(false, Ordering::SeqCst);
+    revoked().clear();
+    VERDICT.store(DISTRUST_NONE, Ordering::SeqCst);
     serial
 }
 
@@ -1819,4 +1835,68 @@ fn a_cancel_whose_audit_row_does_not_fit_is_a_fault() {
     let (outcome, rows) = d.cancel_with(4, 8);
     assert_eq!(outcome, Outcome::Ready);
     assert_eq!(rows.len(), 1, "the task's cancel is audited once: {rows:?}");
+}
+
+// ── M2-1: the continuation's call is admitted on what it actually sends, when it sends it ───────
+
+/// M2-1 [HIGH], time of check: a grant the caller lost after the task was created is consulted
+/// when the continuation sends the call, as the synchronous call consults it; the task fails in
+/// words and nothing goes out.
+#[test]
+fn a_tasks_call_whose_grant_was_revoked_is_never_sent() {
+    let _serial = fresh();
+    let d = open(&section());
+    let task = create(&d, 1, "st", "st_read_file");
+    revoked().push("mcp_tool:st_read_file".to_string());
+    let sent = run(&d, 2, "st", &last_nested());
+    assert!(
+        !sent.far,
+        "a call the caller is no longer granted was sent: {}",
+        sent.text()
+    );
+    assert_failed(&get(&d, 3, &task), "not a tool this server exposes");
+}
+
+/// M2-1 [HIGH], time of check: a server the kernel quarantined after the task was created serves
+/// nothing to the continuation either.
+#[test]
+fn a_tasks_call_to_a_server_quarantined_since_its_create_is_never_sent() {
+    let _serial = fresh();
+    let d = open(&section());
+    let task = create(&d, 1, "st", "st_read_file");
+    VERDICT.store(
+        busbar_contract::abi::host::service::DISTRUST_QUARANTINED,
+        Ordering::SeqCst,
+    );
+    let sent = run(&d, 2, "st", &last_nested());
+    assert!(
+        !sent.far,
+        "a call to a quarantined server was sent: {}",
+        sent.text()
+    );
+    assert_failed(&get(&d, 3, &task), "quarantined");
+}
+
+/// M2-1 [HIGH], the pool's twin: the continuation's walk picked another member of the tool's
+/// pool, and the twin it sends is admitted as its own (its grants), as the synchronous call admits
+/// it. The caller holds the primary's grant and not the twin's: nothing goes to the twin.
+#[test]
+fn a_tasks_call_to_a_pool_twin_the_caller_is_not_granted_is_never_sent() {
+    let _serial = fresh();
+    let tool = json!({"read_file": {"task_support": "required", "schema_hash": "h1"}});
+    let mut s = json!({
+        "st": {"url": "https://up.example/st", "pin": pin(), "verify_ttl": "1h", "tools_allow": tool},
+        "st2": {"url": "https://up.example/st2", "pin": pin(), "verify_ttl": "1h", "tools_allow": tool},
+    });
+    s["pools"] = json!({"p": {"members": ["st", "st2"]}});
+    let d = open(&s);
+    let task = create(&d, 1, "st", "st_read_file");
+    revoked().push("mcp_tool:st2_read_file".to_string());
+    let sent = run(&d, 2, "st2", &last_nested());
+    assert!(
+        !sent.far,
+        "the twin the caller is not granted was sent the call: {}",
+        sent.text()
+    );
+    assert_failed(&get(&d, 3, &task), "not a tool this server exposes");
 }
