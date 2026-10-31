@@ -7,11 +7,11 @@
 //!
 //! The lifecycle is the SDK's plane lifecycle ([`PlaneLife`]) over this plane's answers:
 //!
-//! * `validate` reads the settings blob as the `tools:` section ([`door::read_tools_section`]) and
+//! * `validate` reads the settings blob as the `tools:` section ([`statement::read_dealt_tools`]) and
 //!   refuses in the grammar's words;
 //! * `open` judges the same section, reads the deployment's public base URL, keeps the host
 //!   services it was handed and publishes the first generation's snapshot
-//!   ([`door::snapshot_spec_with`]); `refresh` judges the new section and publishes the next generation
+//!   ([`statement::snapshot_spec_with`]); `refresh` judges the new section and publishes the next generation
 //!   over the base URL `open` was given; `retire` drops a generation's snapshot, and what the plane
 //!   held for it ([`Held`]) with it. A request is answered from the newest live generation
 //!   ([`McpDoor::current`]);
@@ -39,7 +39,7 @@ use std::sync::Arc;
 
 use busbar_contract::abi::mechanism::call::{OutHead, Outcome};
 use busbar_contract::abi::mechanism::door::Statement;
-use busbar_contract::abi::mechanism::lifecycle::{GenIn, TickIn, TickOut};
+use busbar_contract::abi::mechanism::lifecycle::{GenIn, RefreshIn, TickIn, TickOut};
 use busbar_contract::abi::mechanism::ticket::{CompletionHandle, Ticket};
 use busbar_contract::abi::plane::{
     ArriveIn, ArriveOut, OnPieceIn, OnPieceOut, OutField, PlaneCancelIn, PlaneCancelOut,
@@ -65,10 +65,10 @@ use crate::answer::Answer;
 use crate::ask::AskDecision;
 use crate::call::{Admission, AdmittedCall, Settled};
 use crate::catalogue::Catalogue;
-use crate::door::{self};
 use crate::framing::{
     Framing, CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE, EVENT_STREAM, JSON, NO_STORE,
 };
+use crate::statement::{self};
 use crate::tool_arrival::Disposition;
 use crate::tools_config::ToolsCfg;
 
@@ -84,18 +84,26 @@ pub(crate) const DIAG_NAMES: &[&str] = door_sessions::DIAG_NAMES;
 #[cfg(test)]
 pub(crate) const DIAG_IDS_LEN: usize = door_sessions::DIAG_IDS.len();
 
+/// At most 64 calls in flight on one instance, as the transport doors state it.
+pub const MAX_INFLIGHT: u32 = 64;
+
 /// THE STATEMENT: the plane's name and version, the settings sections it declares
-/// ([`door::SECTIONS`]), its outbound needs ([`door::NEEDS`]) and its tail ([`door::TAIL`]).
+/// ([`statement::SECTIONS`]), its outbound needs ([`statement::NEEDS`]) and its tail ([`statement::TAIL`]).
+///
+/// WHY ITS DIAGNOSTIC RIDES THE ABI CHANNEL (Statement diagnostic ids and `out.diag`), not
+/// `diag_warn!` as its sibling planes raise theirs: an ungoverned legacy stream
+/// (`MCP_LEGACY_STREAM_UNGOVERNED`, 7108) is a governance event, and the ABI channel is the only one
+/// that yields a host AUDIT row; a log line alone would let it pass unaudited (plane kind lead
+/// decision, 2026-10-30).
 pub const STATEMENT: Statement = {
-    // At most 64 calls in flight on one instance, as the transport doors state it.
-    let mut s = statement(crate::PLANE_KEY, VERSION, 64)
-        .with_sections(door::SECTIONS)
-        .with_needs(door::NEEDS)
-        .with_secret_refs(door::SECRET_REFS)
+    let mut s = statement(crate::PLANE_KEY, VERSION, MAX_INFLIGHT)
+        .with_sections(statement::SECTIONS)
+        .with_needs(statement::NEEDS)
+        .with_secret_refs(statement::SECRET_REFS)
         // The instance's own diagnostic: an ungoverned chain's sessions are unisolated
         // ([`door_sessions::UNGOVERNED_LEGACY_STREAM`]).
         .with_diag_ids(door_sessions::DIAG_IDS)
-        .with_kind_tail(door::TAIL);
+        .with_kind_tail(statement::TAIL);
     s.extensions = EXTENSIONS;
     s
 };
@@ -122,8 +130,8 @@ pub struct Held {
     pub catalogue: Catalogue,
     /// The section it was built from.
     pub section: ToolsCfg,
-    /// The pools its servers are members of ([`door::read_open`]).
-    pub pools: BTreeMap<String, door::ToolPool>,
+    /// The pools its servers are members of ([`statement::read_open`]).
+    pub pools: BTreeMap<String, statement::ToolPool>,
 }
 
 impl Held {
@@ -139,7 +147,7 @@ impl Held {
 
     /// The pool `server` is a member of, by name, when it is one (the first in name order).
     #[must_use]
-    pub fn pool_of(&self, server: &str) -> Option<(&str, &door::ToolPool)> {
+    pub fn pool_of(&self, server: &str) -> Option<(&str, &statement::ToolPool)> {
         self.pools
             .iter()
             .find(|(_, p)| p.members.iter().any(|m| m == server))
@@ -152,11 +160,11 @@ impl Held {
 #[derive(Default)]
 pub struct McpDoor {
     /// The endpoint its claims are stated under: its audience and metadata document
-    /// ([`door::admitted`]).
+    /// ([`statement::admitted`]).
     admitted: Option<(String, String)>,
-    /// Its protected-resource facts ([`door::resource_facts`]).
+    /// Its protected-resource facts ([`statement::resource_facts`]).
     facts: Option<Vec<u8>>,
-    /// The browser origins it admits beyond loopback ([`door::allowed_origins`]).
+    /// The browser origins it admits beyond loopback ([`statement::allowed_origins`]).
     origins: Vec<String>,
     services: Option<StaticServices>,
     generations: Generations<PlaneSnapshot, Held>,
@@ -288,7 +296,7 @@ impl PlaneLife for McpDoor {
 
     /// `validate`: the settings read as the section, or refused in the grammar's words.
     fn validate(settings: &[u8]) -> Result<(), Refusal> {
-        door::read_dealt_tools(settings)
+        statement::read_dealt_tools(settings)
             .map(|_| ())
             .map_err(Refusal::refused)
     }
@@ -297,13 +305,13 @@ impl PlaneLife for McpDoor {
     /// first generation's snapshot.
     fn open(input: &Lent<'_, PlaneOpenIn>) -> Result<Opened<Self>, Refusal> {
         let (cfg, pools) =
-            door::read_open(input.open().settings().bytes()).map_err(Refusal::refused)?;
+            statement::read_open(input.open().settings().bytes()).map_err(Refusal::refused)?;
         let generation = input.open().generation();
         let owned = input.owned().bytes();
-        let admitted = door::admitted_endpoint(input.public_url().stated().as_deref(), owned)
+        let admitted = statement::admitted_endpoint(input.public_url().stated().as_deref(), owned)
             .map_err(Refusal::refused)?;
-        let facts = door::resource_facts(owned).map_err(Refusal::refused)?;
-        let origins = door::allowed_origins(owned).map_err(Refusal::refused)?;
+        let facts = statement::resource_facts(owned).map_err(Refusal::refused)?;
+        let origins = statement::allowed_origins(owned).map_err(Refusal::refused)?;
         let open = input.field(|i| &i.open);
         let host = open.host();
         let plane = McpDoor {
@@ -325,7 +333,7 @@ impl PlaneLife for McpDoor {
             // one costs one renegotiation.
             crate::tool_sessions::UpstreamTable::new(1024, 1 << 20),
         );
-        let spec = door::snapshot_spec_with(plane.admitted.clone(), plane.facts.clone());
+        let spec = statement::snapshot_spec_with(plane.admitted.clone(), plane.facts.clone());
         let held = Held {
             pools,
             ..Held::of(generation, cfg)
@@ -336,11 +344,28 @@ impl PlaneLife for McpDoor {
         })
     }
 
+    /// `refresh` from the whole lent `in`: the new section judged ([`PlaneLife::refresh`]), then the
+    /// applied `mcp:` endpoint block, which rides the refresh's extensions under
+    /// `abi::plane::EXT_OWNED` (absent when the document writes none), judged as `open` judges it
+    /// ([`statement::judge_endpoint_block`]): a malformed block refuses the reload in its grammar's words
+    /// rather than being kept silently. A well-formed one is judged only: the endpoint, its
+    /// protected-resource facts and its origins stay the ones `open` read.
+    fn refresh_in(&self, input: &Lent<'_, RefreshIn>) -> Result<Published<Held>, Refusal> {
+        let published = self.refresh(input.settings().bytes(), input.generation())?;
+        let owned = busbar_contract::abi::mechanism::extensions::get(
+            input.head().extensions().bytes(),
+            busbar_contract::abi::plane::EXT_OWNED,
+        )
+        .unwrap_or_default();
+        statement::judge_endpoint_block(owned).map_err(Refusal::refused)?;
+        Ok(published)
+    }
+
     /// `refresh`: the new section judged, and the next generation's snapshot over the same public base
     /// URL.
     fn refresh(&self, settings: &[u8], generation: u64) -> Result<Published<Held>, Refusal> {
-        let (cfg, pools) = door::read_open(settings).map_err(Refusal::refused)?;
-        let spec = door::snapshot_spec_with(self.admitted.clone(), self.facts.clone());
+        let (cfg, pools) = statement::read_open(settings).map_err(Refusal::refused)?;
+        let spec = statement::snapshot_spec_with(self.admitted.clone(), self.facts.clone());
         let held = Held {
             pools,
             ..Held::of(generation, cfg)
@@ -444,6 +469,11 @@ impl PlaneLife for McpDoor {
 
 /// The most units the instance keeps state for at once; past it, a new arrival is refused.
 pub const MAX_UNITS: usize = 4096;
+
+/// THE WORDS OF AN ARRIVAL REFUSED FOR A FULL UNIT TABLE ([`MAX_UNITS`]), at 429: the planes' one
+/// sentence for it, carried as this protocol's JSON-RPC refusal (`data.reason` `capacity`).
+pub const UNITS_FULL_TEXT: &str =
+    "busbar is holding as many MCP calls as it admits at once; retry once one has ended";
 
 /// The most principals the instance keeps a roots epoch of its own for ([`McpDoor::roots`]).
 pub const MAX_ROOTS_PRINCIPALS: usize = MAX_UNITS;
@@ -618,7 +648,7 @@ struct Pending {
 /// registration's name), as the a2a plane bills an agent under `agent:<id>` and as the kernel holds
 /// a present `tools.rate_card` to every registration at boot. A per-tool key names no lane.
 pub(crate) fn server_lane(server: &str) -> String {
-    format!("{}:{server}", door::SCOPE)
+    format!("{}:{server}", statement::SCOPE)
 }
 
 /// The kernel's one clock (`clock.now`) on a fresh handle of the unit's ticket; `None` when the
@@ -689,7 +719,7 @@ impl Pending {
         };
         if let Some(ts) = ts {
             self.records.push((
-                door::RECORD_CALL,
+                statement::RECORD_CALL,
                 scope.as_bytes().to_vec(),
                 crate::record::call_suffix(
                     ts,
@@ -713,7 +743,7 @@ impl Pending {
     /// and so earns none ([`never_sent_answer`]). A unit that reports no fee unit has its
     /// admission's fee given back (the kernel's `FeeRefund::PlaneFeeUnits`).
     fn unbilled(mut self) -> Self {
-        self.units.retain(|u| u.class != door::CLASS_FEE_INDEX);
+        self.units.retain(|u| u.class != statement::CLASS_FEE_INDEX);
         self
     }
 
@@ -754,7 +784,7 @@ impl Pending {
         // fee of an end whose caller status was not a success is refunded).
         let units = if (200..=299).contains(&status) {
             vec![UnitCount {
-                class: door::CLASS_FEE_INDEX,
+                class: statement::CLASS_FEE_INDEX,
                 source: UNITS_REPORTED,
                 amount: 1,
             }]
@@ -777,7 +807,7 @@ impl Pending {
     /// that never reached a server is not a call this node made, and the byte class is "the length
     /// of the document it just read back"). The plane states its counts; the kernel prices them
     /// (the plane reports; the kernel writes).
-    /// Classes by [`door::TAIL`] index: `0` tool calls, `1` bytes.
+    /// Classes by [`statement::TAIL`] index: `0` tool calls, `1` bytes.
     fn counted(mut self, answered: usize) -> Self {
         self.units.push(UnitCount {
             class: 0,
@@ -807,8 +837,8 @@ impl Pending {
 /// refused arrival is counted under none.
 fn op_class(disposition: &Disposition) -> Option<u32> {
     match disposition {
-        Disposition::Request { row, .. } => door::op_class_index(row.op),
-        Disposition::Notice { .. } => door::op_class_index(crate::tool_ops::OP_NOTIFICATION),
+        Disposition::Request { row, .. } => statement::op_class_index(row.op),
+        Disposition::Notice { .. } => statement::op_class_index(crate::tool_ops::OP_NOTIFICATION),
         Disposition::Refused(_) => None,
     }
 }
@@ -830,10 +860,14 @@ fn refusal_text(refusal: &crate::tool_arrival::Refusal) -> String {
 /// request path.
 pub const UNSERVED: u32 = 2;
 
-/// REFUSED in the plane's own `text`, at `status` ([`ArriveOut::refusal`] `1`): `refusal` renders
-/// them.
+/// [`ArriveOut::refusal`]: the arrival is refused in the plane's own words, which `refusal`
+/// renders ([`refused_arrival`]).
+pub const REFUSED_IN_OWN_WORDS: u32 = 1;
+
+/// REFUSED in the plane's own `text`, at `status` ([`ArriveOut::refusal`]
+/// [`REFUSED_IN_OWN_WORDS`]): `refusal` renders them.
 fn refused_arrival(out: &mut Out<'_, ArriveOut>, status: u32, text: String) -> Outcome {
-    out.set(|o| &o.refusal, 1);
+    out.set(|o| &o.refusal, REFUSED_IN_OWN_WORDS);
     out.set(|o| &o.refusal_status, status);
     out.fail(Refusal::refused(text))
 }
@@ -874,7 +908,7 @@ slot!(
         let Some(plane) = instance.get() else {
             return Outcome::Failed;
         };
-        let claim = door::ROUTES.get(input.claim() as usize);
+        let claim = statement::ROUTES.get(input.claim() as usize);
         let body = input.body().bytes();
         let fields = input.fields();
         if claim.is_some_and(|r| r.open) {
@@ -890,7 +924,7 @@ slot!(
         if origin.is_some_and(|o| !busbar_contract::jsonrpc::origin_admitted(o, &plane.origins)) {
             return refused_arrival(
                 &mut out,
-                door::STATUS_FORBIDDEN_ORIGIN,
+                statement::STATUS_FORBIDDEN_ORIGIN,
                 FORBIDDEN_ORIGIN_TEXT.to_string(),
             );
         }
@@ -921,7 +955,7 @@ slot!(
             door_sessions::SessionArrived::NotAllowed => {
                 return refused_arrival(
                     &mut out,
-                    door::STATUS_METHOD_NOT_ALLOWED,
+                    statement::STATUS_METHOD_NOT_ALLOWED,
                     NOT_ALLOWED_TEXT.to_string(),
                 )
             }
@@ -935,7 +969,7 @@ slot!(
         let session_local = session_unit.is_some() && session_body.is_none();
         // A task's continuation: the task it runs, and the
         // call it carries, decided below as the `tools/call` it is.
-        let task_run = (input.claim() as usize == door::TASK_RUN_ROUTE)
+        let task_run = (input.claim() as usize == statement::TASK_RUN_ROUTE)
             .then(|| door_tasks::run_arrival(body));
         if let Some(None) = task_run {
             let refusal = door_tasks::unknown_arrival();
@@ -959,17 +993,14 @@ slot!(
                 status: 429,
                 id: None,
                 code: crate::codec::CODE_REFUSED,
-                message: format!(
-                    "this server holds {MAX_UNITS} requests in flight, the most it will; retry \
-                     when some have finished"
-                ),
+                message: UNITS_FULL_TEXT.to_string(),
                 data: Some(serde_json::json!({ "reason": "capacity" })),
             };
             return refused_arrival(&mut out, refusal.status, refusal_text(&refusal));
         }
         // A line of the line carrier: what it is to the carrier session it arrived
         // over, and the bytes the one dispatch decides on (none: the unit answers its preset).
-        let line_route = input.claim() as usize == door::LINE_ROUTE;
+        let line_route = input.claim() as usize == statement::LINE_ROUTE;
         // A SHORT ANSWER APPLIES NOTHING, and the re-call reads what was stored: reading a line
         // moves its carrier session (a live ask's answer is taken, a revision kept, a cancel
         // applied), so the one buffer a line's arrival can come up short on (the units buffer its
@@ -1133,7 +1164,7 @@ slot!(
             if door_listen::asks_a_round(row.op, held, v) {
                 let mut units = input.units_buf();
                 units.push(UnitCount {
-                    class: door::CLASS_FEE_INDEX,
+                    class: statement::CLASS_FEE_INDEX,
                     source: busbar_contract::abi::plane::UNITS_ESTIMATED,
                     amount: 1,
                 });
@@ -1909,8 +1940,8 @@ fn answer_body(
     // grant the catalogue holds.
     let grants = match (&named_tool, called) {
         (Some(_), Some(t)) => vec![
-            (door::SCOPE, t.server.as_str()),
-            (door::SCOPE_TOOL, t.namespaced.as_str()),
+            (statement::SCOPE, t.server.as_str()),
+            (statement::SCOPE_TOOL, t.namespaced.as_str()),
         ],
         (Some(_), None) => Vec::new(),
         (None, _) => held.catalogue.grants(),
@@ -1920,7 +1951,7 @@ fn answer_body(
     // server serves now.
     if let Some(t) = called.filter(|t| {
         let admit = admit(&unit.entitled);
-        admit(door::SCOPE, &t.server) && admit(door::SCOPE_TOOL, &t.namespaced)
+        admit(statement::SCOPE, &t.server) && admit(statement::SCOPE_TOOL, &t.namespaced)
     }) {
         if let Looked::Pending =
             verify_on_call(instance, plane, ticket, unit, &held, (&t.server, caller))
@@ -2807,17 +2838,17 @@ fn exchange_scope(
     let mut names = vec![String::new()];
     names.extend(
         held.catalogue
-            .tools_for(&|kind: &str, name: &str| kind != door::SCOPE || name == member)
+            .tools_for(&|kind: &str, name: &str| kind != statement::SCOPE || name == member)
             .into_iter()
             .map(|t| t.namespaced.clone()),
     );
     let grants: Vec<(&'static str, &str)> = names
         .iter()
-        .map(|n| (door::SCOPE_TOOL, n.as_str()))
+        .map(|n| (statement::SCOPE_TOOL, n.as_str()))
         .collect();
     ask_entitlements(services, ticket, unit, &grants);
     let admit = admit(&unit.entitled);
-    let entitled = |name: &str| admit(door::SCOPE_TOOL, name);
+    let entitled = |name: &str| admit(statement::SCOPE_TOOL, name);
     Some(crate::tool_scope::caller_downscope(
         &held.catalogue,
         member,
@@ -3482,9 +3513,9 @@ slot!(
         } else if given.cause() == REFUSAL_ARRIVE {
             // A refused arrival's words read back.
             if text == NOT_ALLOWED_TEXT.as_bytes() {
-                (door::STATUS_METHOD_NOT_ALLOWED, door::method_not_allowed_body(), true)
+                (statement::STATUS_METHOD_NOT_ALLOWED, statement::method_not_allowed_body(), true)
             } else if text == FORBIDDEN_ORIGIN_TEXT.as_bytes() {
-                (door::STATUS_FORBIDDEN_ORIGIN, door::forbidden_origin_body(), false)
+                (statement::STATUS_FORBIDDEN_ORIGIN, statement::forbidden_origin_body(), false)
             } else {
                 let Ok(refusal) = serde_json::from_slice::<crate::tool_arrival::Refusal>(text) else {
                     return Outcome::Failed;
@@ -3621,7 +3652,7 @@ slot!(
         let mut records = input.records_buf();
         for (key, value) in &task_records {
             records.push(RecordWrite {
-                kind: door::RECORD_TASK,
+                kind: statement::RECORD_TASK,
                 op: RECORD_PUT,
                 key: arena.span(key),
                 value: arena.span(value),
@@ -3799,7 +3830,7 @@ slot!(
         let route = input.route() as usize;
         let held = plane.current();
         let name = verb_subject(input.target().bytes());
-        let verb = door::ADMIN_VERBS.get(route).map_or("", |(_, t)| t.rsplit('/').next().unwrap_or(""));
+        let verb = statement::ADMIN_VERBS.get(route).map_or("", |(_, t)| t.rsplit('/').next().unwrap_or(""));
         let found = held
             .as_ref()
             .zip(name.as_ref())
@@ -3912,10 +3943,15 @@ slot!(
 );
 
 slot!(
-    /// `hydrate` and `start`: nothing to restore (the plane's durable records are the host's, and
-    /// the trust state they feed is the kernel's) and no background work (re-verification is the
-    /// kernel's trust tick, and a stale server is re-verified on the call that names it).
-    Inert, GenIn, OutHead, |_, _, _| { Outcome::Ready }
+    /// `hydrate`: nothing to restore (the plane's durable records are the host's, and the trust
+    /// state they feed is the kernel's).
+    Hydrate, GenIn, OutHead, |_, _, _| { Outcome::Ready }
+);
+
+slot!(
+    /// `start`: no background work (re-verification is the kernel's trust tick, and a stale server
+    /// is re-verified on the call that names it).
+    Start, GenIn, OutHead, |_, _, _| { Outcome::Ready }
 );
 
 slot!(
@@ -4037,7 +4073,7 @@ busbar_contract::plugin_door! {
     lifecycle: plane_life(McpDoor),
     kind_ops: {
         arrive: Safe<Arrive>, on_piece: Safe<OnPiece>, refusal: Safe<RefusalSlot>,
-        serve: Safe<Serve>, hydrate: Safe<Inert>, start: Safe<Inert>, project: Safe<Project>,
+        serve: Safe<Serve>, hydrate: Safe<Hydrate>, start: Safe<Start>, project: Safe<Project>,
     },
 }
 

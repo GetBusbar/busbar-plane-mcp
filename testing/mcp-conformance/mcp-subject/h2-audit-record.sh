@@ -12,7 +12,7 @@ here="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=h2-lib.sh
 source "${here}/h2-lib.sh"
 
-WORK="${H2_WORK:-${here}/../../target/h2-scratch/audit-record.$$}"
+WORK="${H2_WORK:-${here}/../../../target/h2-scratch/audit-record.$$}"
 trap 'h2_stop' EXIT
 
 H2_GROUPS_YAML="groups:

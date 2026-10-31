@@ -6,7 +6,7 @@
 //! `testing/mcp-conformance`, moved here from busbar by busbar 7f43d8a777), so a battery that starts
 //! sending something new fails HERE rather than in a run someone has to interpret.
 //!
-//! Moved in from the plugin crate's `tests/door_witness.rs` when this crate's only public item
+//! Moved in from the plugin crate's `tests/both_ways.rs` when this crate's only public item
 //! became `door`: these tests read the plane's own tables. The door driven both ways stays there.
 
 use crate::{codec, tool_ops as ops};

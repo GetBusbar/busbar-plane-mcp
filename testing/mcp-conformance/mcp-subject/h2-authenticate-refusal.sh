@@ -7,7 +7,7 @@
 # check (or is missing entirely) is refused with the plane's native 401 BEFORE step 2 (VERIFY) is
 # ever reached, so no egress reaches the registered upstream and no admission slot is drawn.
 #
-# docs/mcp.md's own audience-boundary proof (scripts/mcp-subject/boot.sh::prove_the_boundary_is_intact)
+# docs/mcp.md's own audience-boundary proof (testing/mcp-conformance/mcp-subject/boot.sh::prove_the_boundary_is_intact)
 # asserts this same contract as a boot-time check on every official-subject run; this script promotes
 # it to a NAMED, LEDGERED scenario (see rigs-ledger.sh's run_mcp(), which folds this script's result
 # into the `mcp.rig|*` row set) with its own egress-capture proof, independent of that boot path.
@@ -20,7 +20,7 @@ here="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=h2-lib.sh
 source "${here}/h2-lib.sh"
 
-WORK="${H2_WORK:-${here}/../../target/h2-scratch/authenticate-refusal.$$}"
+WORK="${H2_WORK:-${here}/../../../target/h2-scratch/authenticate-refusal.$$}"
 trap 'h2_stop' EXIT
 
 H2_GROUPS_YAML="groups:

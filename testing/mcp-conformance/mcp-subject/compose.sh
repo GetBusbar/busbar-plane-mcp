@@ -5,7 +5,7 @@
 #
 # Prints the manifest path of the package to build (`cargo build --release --manifest-path <it>
 # --bin busbar`, this plane patched in by a run-time --config). Held by
-# scripts/mcp-subject/compose-selftest.sh, which mcp.sh runs before the subject build.
+# testing/mcp-conformance/mcp-subject/compose-selftest.sh, which mcp.sh runs before the subject build.
 #
 # The package is busbar's default distribution (dist/default): the root crate (crates/busbar) is core
 # with no plugin linked, so it serves no MCP. The checkout is copied to <stage> and is never written.

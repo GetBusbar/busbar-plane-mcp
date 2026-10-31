@@ -37,7 +37,7 @@ pub fn caller_downscope(
     } else {
         catalogue
             .tools_for(&|kind: &str, name: &str| {
-                if kind == crate::door::SCOPE {
+                if kind == crate::statement::SCOPE {
                     name == server
                 } else {
                     granted(name)

@@ -18,7 +18,7 @@ workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# THE LOGIC, same repo: its `tool_door::door` is the door this image exports. A busbar build that
+# THE LOGIC, same repo: its `door` is the door this image exports. A busbar build that
 # LINKS the plane names the logic crate, which exports no symbol.
 busbar-plane-mcp = { path = "../plane-mcp" }
 busbar-contract = { workspace = true }
@@ -26,7 +26,7 @@ busbar-contract = { workspace = true }
 [dev-dependencies]
 # The conformance tests load the linked door and dlopen the built cdylib over busbar's REAL loader:
 # dev-only, never in the shipped artifact. `conformance` is busbar's published suite
-# (`tests/conformance.rs`, `conformance_suite!`); `tests/door_witness.rs` is the door witness that
+# (`tests/conformance.rs`, `conformance_suite!`); `tests/both_ways.rs` is the door witness that
 # moved here with the crate from busbar's crates/busbar-plane-mcp (its `tests/conformance.rs`).
 busbar-plugin-loader = { workspace = true }
 busbar-test-kit = { workspace = true }
@@ -35,3 +35,10 @@ serde_json = { workspace = true }
 # The SHARED HOST-SERVICES DOUBLE (`services-double`, dev-only): the door witness binds a clock on
 # its loader host through it.
 busbar-contract = { workspace = true, features = ["services-double"] }
+# THE SUITE'S HOST CONNECTOR (`tests/support/conformance_host.rs`, `conformance_host!`, mounted by
+# `tests/conformance.rs`): the transport doors this plugin's needs name, which the test kit's host
+# loads and opens as the root does: `tcp` and `http` at the revs the workspace pins, and `stdio`
+# (the process carrier of the `transport: stdio` need) at the rev busbar's dist links at the pin.
+busbar-transport-http = { workspace = true }
+busbar-transport-tcp = { workspace = true }
+busbar-transport-stdio = { git = "https://github.com/GetBusbar/busbar-transport-stdio", rev = "bfdfbd76eea2b3b49f523237cd8b846efc0d7124" }

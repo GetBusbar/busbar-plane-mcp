@@ -5,7 +5,7 @@
 //! in from those suites.
 //!
 //! The suites that drive the door over its C ABI (`tests/sessions.rs`, `tests/door_audit.rs`,
-//! `tests/tasks.rs`, the plugin crate's `tests/door_witness.rs`) need `unsafe` for the host they
+//! `tests/tasks.rs`, the plugin crate's `tests/both_ways.rs`) need `unsafe` for the host they
 //! stand up, so they stay integration tests and reach the crate through `door` alone (this crate
 //! forbids `unsafe`, BUSBAR-1.6.0.md l.273). The door's private constants they need are restated in
 //! `tests/support/door_facts.rs`; this module includes that same file and holds each value to the
@@ -14,7 +14,7 @@
 
 use serde_json::{json, Value};
 
-use crate::door;
+use crate::statement;
 
 #[path = "../../tests/support/door_facts.rs"]
 #[allow(dead_code)] // `claim` is the door-driven tests' reader, not this check's
@@ -22,16 +22,16 @@ mod stated;
 
 #[test]
 fn the_door_driven_tests_restate_the_doors_own_constants() {
-    let routes: Vec<(&str, &str, &str)> = door::ROUTES
+    let routes: Vec<(&str, &str, &str)> = statement::ROUTES
         .iter()
         .map(|r| (r.verb, r.target, r.carrier))
         .collect();
     assert_eq!(stated::ROUTES, &routes[..]);
-    assert_eq!(stated::LINE_ROUTE, door::LINE_ROUTE);
-    assert_eq!(stated::TASK_RUN_ROUTE, door::TASK_RUN_ROUTE);
+    assert_eq!(stated::LINE_ROUTE, statement::LINE_ROUTE);
+    assert_eq!(stated::TASK_RUN_ROUTE, statement::TASK_RUN_ROUTE);
     assert_eq!(stated::TASK_RUN_MOUNT, crate::tool_claims::TASK_RUN_MOUNT);
-    assert_eq!(stated::RECORD_TASK, door::RECORD_TASK);
-    assert_eq!(stated::CLASS_FEE_INDEX, door::CLASS_FEE_INDEX);
+    assert_eq!(stated::RECORD_TASK, statement::RECORD_TASK);
+    assert_eq!(stated::CLASS_FEE_INDEX, statement::CLASS_FEE_INDEX);
     assert_eq!(stated::H_PROTOCOL_VERSION, crate::codec::H_PROTOCOL_VERSION);
     assert_eq!(stated::H_MCP_METHOD, crate::codec::H_MCP_METHOD);
     assert_eq!(stated::H_MCP_NAME, crate::codec::H_MCP_NAME);
@@ -41,48 +41,49 @@ fn the_door_driven_tests_restate_the_doors_own_constants() {
         crate::tool_claims::DEFAULT_METADATA
     );
     assert_eq!(stated::TOOLS_SECTION, crate::tools_config::SECTION);
-    assert_eq!(stated::ENDPOINT_SECTION, door::ENDPOINT_SECTION);
+    assert_eq!(stated::ENDPOINT_SECTION, statement::ENDPOINT_SECTION);
     assert_eq!(stated::CODE_REFUSED, crate::codec::CODE_REFUSED);
     assert_eq!(stated::CODE_INTERNAL, crate::codec::CODE_INTERNAL);
     assert_eq!(
         stated::CODE_HEADER_MISMATCH,
         crate::codec::CODE_HEADER_MISMATCH
     );
-    assert_eq!(stated::RECORD_CALL, door::RECORD_CALL);
+    assert_eq!(stated::RECORD_CALL, statement::RECORD_CALL);
     assert_eq!(stated::UNGOVERNED, crate::ask::UNGOVERNED);
-    let open: Vec<bool> = door::ROUTES.iter().map(|r| r.open).collect();
+    let open: Vec<bool> = statement::ROUTES.iter().map(|r| r.open).collect();
     assert_eq!(stated::ROUTES_OPEN, &open[..]);
-    assert_eq!(stated::ADMIN_VERBS, door::ADMIN_VERBS);
+    assert_eq!(stated::ADMIN_VERBS, statement::ADMIN_VERBS);
     assert_eq!(
         Some(stated::OP_CLASS_TOOLS_LIST),
-        door::op_class_index(crate::tool_ops::OP_TOOLS_LIST)
+        statement::op_class_index(crate::tool_ops::OP_TOOLS_LIST)
     );
     assert_eq!(
         Some(stated::OP_CLASS_NOTIFICATION),
-        door::op_class_index(crate::tool_ops::OP_NOTIFICATION)
+        statement::op_class_index(crate::tool_ops::OP_NOTIFICATION)
     );
     assert_eq!(stated::NOT_JSON, crate::tool_arrival::NOT_JSON);
-    assert_eq!(stated::UNSERVED, crate::tool_door::UNSERVED);
+    assert_eq!(stated::UNSERVED, crate::plane_door::UNSERVED);
     let (error, description) = stated::METHOD_NOT_ALLOWED;
     assert_eq!(
-        door::method_not_allowed_body(),
+        statement::method_not_allowed_body(),
         serde_json::to_vec(&json!({ "error": error, "error_description": description })).unwrap()
     );
 }
 
 /// The door witness's expectations of the plane's own functions (`plane-mcp-plugin/tests/
-/// door_witness.rs`, which reaches only `door`): the catalogue's answer for its section, the endpoint
+/// both_ways.rs`, which reaches only `door`): the catalogue's answer for its section, the endpoint
 /// under its public base URL, the size of its relayed call's projection, and the call record's framing.
 #[test]
 fn the_door_witness_restates_what_the_planes_functions_answer() {
-    let section = door::read_tools_section(stated::WITNESS_SECTION).expect("the section reads");
+    let section =
+        statement::read_tools_section(stated::WITNESS_SECTION).expect("the section reads");
     let catalogue = crate::catalogue::Catalogue::build(1, &section);
     assert_eq!(
         catalogue.tools_list(&json!(9), &|_: &str, _: &str| false, |_| false),
         stated::WITNESS_TOOLS_LIST_ANSWER
     );
     assert_eq!(
-        door::under_public_url("https://busbar.example"),
+        statement::under_public_url("https://busbar.example"),
         (
             "https://busbar.example/mcp".to_string(),
             format!("https://busbar.example{}", stated::DEFAULT_METADATA)
@@ -175,16 +176,16 @@ fn the_suites_task_rows_are_the_planes() {
 #[test]
 fn a_name_the_routing_key_cannot_spell_is_refused_at_validate() {
     let tool = br#"{"st": {"url": "https://up.example/st", "pin": {"mechanism": "unpinned"}, "tools_allow": {"read file": {}}}}"#;
-    let refused = crate::door::read_tools_section(tool).expect_err("a tool name with a space");
+    let refused = crate::statement::read_tools_section(tool).expect_err("a tool name with a space");
     assert!(
         refused.contains("`tools.st`") && refused.contains("read file"),
         "{refused}"
     );
     let server = br#"{"s+t": {"url": "https://up.example/st", "pin": {"mechanism": "unpinned"}, "tools_allow": {"read_file": {}}}}"#;
-    let refused = crate::door::read_tools_section(server).expect_err("a server id with a `+`");
+    let refused = crate::statement::read_tools_section(server).expect_err("a server id with a `+`");
     assert!(refused.contains("s+t"), "{refused}");
     let fine = br#"{"st": {"url": "https://up.example/st", "pin": {"mechanism": "unpinned"}, "tools_allow": {"read_file.v2-x": {}}}}"#;
-    assert!(crate::door::read_tools_section(fine).is_ok());
+    assert!(crate::statement::read_tools_section(fine).is_ok());
 }
 
 // ── A-M2: the event stream carries the answer's own bytes ─────────────────────────────────────
@@ -278,4 +279,67 @@ fn an_answer_never_rewrites_an_admitted_argument() {
         json!({ "path": "/a", "confirm": {"action": "accept"} }),
         "an answer rewrote an admitted argument"
     );
+}
+
+/// THE RELAYED-CALL SCRIPT'S EXPECTATIONS ARE THE PLANE'S BUILDERS' (the plugin crate's
+/// `tests/relayed_call.rs`, which reaches only `door`): the request bound for the member is
+/// `call::outbound`'s, and each settled answer is `call::settle_call_as`'s.
+#[test]
+fn the_relayed_call_script_restates_what_the_planes_builders_answer() {
+    let section = statement::read_tools_section(stated::RELAY_SECTION).expect("the section reads");
+    let catalogue = crate::catalogue::Catalogue::build(1, &section);
+    let params =
+        serde_json::from_slice::<Value>(stated::RELAY_CALL).expect("a document")["params"].clone();
+    let header = |name: &str| (name == "mcp-param-path").then(|| "/a".to_string());
+    let admitted = match crate::call::admit_trusted(
+        &catalogue,
+        &json!(30),
+        Some(&params),
+        &header,
+        &|_, _| true,
+        &mut |_| crate::call::Trust::Verdict(busbar_contract::abi::host::service::DISTRUST_NONE),
+        &mut |_, _| crate::ask::AskDecision::Proceed,
+    ) {
+        crate::call::Admission::Go(a) => a,
+        other => panic!("the call is admitted: {other:?}"),
+    };
+    let def = section.servers.get("fs").expect("registered");
+    let want = crate::call::outbound(&admitted, "fs", def, 0, None).expect("reachable");
+    assert_eq!(
+        want.body,
+        stated::RELAY_REQUEST_BODY,
+        "the dialect builder's body"
+    );
+    let fields: Vec<(&str, &str)> = want
+        .fields
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    assert_eq!(
+        fields,
+        stated::RELAY_REQUEST_FIELDS,
+        "the dialect builder's head"
+    );
+    for (far, sse, (status, body)) in [
+        (stated::RELAY_FAR_OK, false, stated::RELAY_SETTLED_OK),
+        (stated::RELAY_FAR_ERROR, false, stated::RELAY_SETTLED_ERROR),
+        (stated::RELAY_FAR_SSE, true, stated::RELAY_SETTLED_STREAM),
+    ] {
+        match crate::call::settle_call_as(
+            &admitted,
+            Some(def),
+            200,
+            far,
+            sse,
+            0,
+            crate::client::jsonrpc::dispatch_request_id(0),
+        ) {
+            crate::call::Settled::Answer {
+                status: s, body: b, ..
+            } => {
+                assert_eq!((s, b.as_slice()), (status, body));
+            }
+            other => panic!("an answer: {other:?}"),
+        }
+    }
 }

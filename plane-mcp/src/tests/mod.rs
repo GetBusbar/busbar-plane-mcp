@@ -22,7 +22,7 @@ static A: busbar_test_kit::alloc_counter::Counting =
 
 /// What reading a stdio child's message may allocate (`tests/alloc_gate.rs`).
 mod alloc_gate_tests;
-/// The plane's vocabulary against the conformance battery (the plugin crate's `tests/door_witness.rs`).
+/// The plane's vocabulary against the conformance battery (the plugin crate's `tests/both_ways.rs`).
 mod battery_vocabulary_tests;
 /// The plane's own declarations agree with each other (`tests/declarations_agree.rs`).
 /// The approval digest, pinned (`tests/digest_pin.rs`).
@@ -37,8 +37,5 @@ mod door_facts_tests;
 mod method_inventory_tests;
 /// The door's own exchanges with a stdio child (`ProgramExchange` over a child that is a value).
 mod program_tests;
-/// The relayed call is the request and the answer the plane's own builders say (the linked door
-/// driven through the loader).
-mod relayed_call_tests;
 /// The sanitiser's complexity guards (`tests/sanitize_complexity.rs`).
 mod sanitize_complexity_tests;

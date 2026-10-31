@@ -74,7 +74,7 @@ pub fn discover(catalogue: &Catalogue, id: &Value, admit: &impl Fn(&str, &str) -
         json!({
             "protocolVersion": PROTOCOL_VERSION,
             "supportedVersions": SUPPORTED_PROTOCOL_VERSIONS,
-            "serverInfo": { "name": "busbar", "version": crate::tool_door::VERSION },
+            "serverInfo": { "name": "busbar", "version": crate::plane_door::VERSION },
             "capabilities": {
                 "tools": { "listChanged": true },
                 "prompts": { "listChanged": true },

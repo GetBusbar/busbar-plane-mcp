@@ -465,7 +465,7 @@ impl Link {
             match self.step {
                 Step::Establish => {
                     let dialled = c.establish_as(
-                        crate::door::NEED_UPSTREAM,
+                        crate::statement::NEED_UPSTREAM,
                         Some(&self.url),
                         "",
                         0,
@@ -581,7 +581,7 @@ impl Link {
             // taken (a failed reply is let go: the stream itself says whether the server is there).
             let done = match r.step {
                 ReplyStep::Establish => match c.establish_as(
-                    crate::door::NEED_UPSTREAM,
+                    crate::statement::NEED_UPSTREAM,
                     Some(&address),
                     "",
                     0,

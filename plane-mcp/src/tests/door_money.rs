@@ -15,7 +15,8 @@ const SECTION: &str = r#"{"fs": {"url": "https://mcp.example/fs", "pin": {"mecha
 
 /// `fs_read_file`, admitted under the kernel's trust verdict `trust`.
 fn admission(trust: crate::call::Trust) -> Admission {
-    let section = crate::door::read_tools_section(SECTION.as_bytes()).expect("the section reads");
+    let section =
+        crate::statement::read_tools_section(SECTION.as_bytes()).expect("the section reads");
     let catalogue = Catalogue::build(1, &section);
     let params = json!({ "name": "fs_read_file", "arguments": {}, "_meta": {} });
     crate::call::admit_trusted(
@@ -57,7 +58,7 @@ fn units(answer: &Pending) -> Vec<(u32, u64)> {
 /// at 7.
 fn logged(outcome: &str, reason: &str) -> Vec<(u32, Vec<u8>, Vec<u8>)> {
     vec![(
-        door::RECORD_CALL,
+        statement::RECORD_CALL,
         b"k".to_vec(),
         crate::record::call_suffix(7, "fs", "fs_read_file", outcome, reason, "sha256:aa", 1),
     )]
@@ -119,7 +120,7 @@ fn a_call_that_went_out_and_failed_keeps_its_fee_unit_and_its_dispatched_line() 
     tool_error(&answer);
     assert_eq!(
         units(&answer),
-        vec![(door::CLASS_FEE_INDEX, 1)],
+        vec![(statement::CLASS_FEE_INDEX, 1)],
         "the fee unit alone"
     );
     assert_eq!(

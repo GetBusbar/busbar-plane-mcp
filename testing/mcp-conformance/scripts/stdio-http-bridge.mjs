@@ -12,7 +12,7 @@
 // `MCP_SUBJECT_SERVER_CMD` wanted a command nobody could write.
 //
 // THIS IS THE MISSING HALF OF THE CLIENT, NOT A STAND-IN FOR THE SERVER. It is the same class of
-// object as `scripts/mcp-subject/credential-shim.mjs` on the official leg: the part of an MCP client
+// object as `testing/mcp-conformance/mcp-subject/credential-shim.mjs` on the official leg: the part of an MCP client
 // that this particular harness cannot be told to be. Everything it does is what a conformant HTTP
 // MCP client MUST do anyway, and everything it does NOT do is the point:
 //

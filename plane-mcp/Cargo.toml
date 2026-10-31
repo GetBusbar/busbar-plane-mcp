@@ -1,28 +1,6 @@
-# busbar-plane-mcp — THE MCP PLANE, as an ADAPTER and nothing else.
-#
-# WHAT THIS CRATE IS. One implementation of the plugin contract's plane kind for the Model Context
-# Protocol. Every method is a thin adapter over a codec that already exists in `busbar-mcp`: the
-# JSON-RPC envelope reader and writer, the method dispatch vocabulary, the notification codec and
-# the error envelopes. No wire format is written twice. If a byte differs between what this crate
-# produces and what the existing codec produces, the existing codec is the answer and this crate
-# has the bug.
-#
-# WHAT THIS CRATE IS NOT. There is no governance here, no breaker, no hook seat, no approval
-# decision and no metering arithmetic. Those are units, and a unit is on the other side of the
-# kernel from a plane. The metering method returns LOCATORS — where the numbers are — and never a
-# number the ledger would post. The routing method returns a plan, never a connection. The plane's
-# durable state — the tool catalogue, the approvals, the settings — is reached only through record
-# legs on that plan, never through a store this crate holds.
-#
-# THE DEPENDENCY EDGE, AND THE THING THAT CHANGED. There is no longer a codec crate to name. The
-# MCP wire dialect — the mount path, the revision, the method names, the `_meta` keys, the error
-# code table, the notification pair, the durable record vocabulary and the content sanitizer —
-# folded IN here, because definition 16–20 puts everything one protocol needs and no other protocol
-# may name in the protocol's own plane crate (#39: no `busbar-*-codec`).
-# The engine's registry row and its two operation cells did NOT come with it: they name the kernel's
-# handler matrix, which is kernel-side machinery, and they now read this crate's vocabulary rather
-# than restating it. The adapter still names no runtime, opens nothing, holds no connection and
-# reads no clock but the one the context hands it.
+# busbar-plane-mcp: the MCP plane. Its door (`busbar_plane_mcp::door`, in `plane_door`) over the
+# Model Context Protocol's JSON-RPC dialect, which lives here; the cdylib twin
+# `busbar-plane-mcp-plugin` exports the same door.
 [package]
 name = "busbar-plane-mcp"
 version = "1.6.0"
@@ -30,7 +8,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "The MCP plane for busbar: the plugin contract's plane kind implemented as a thin adapter over the busbar-mcp JSON-RPC codec."
+description = "The MCP plane for busbar: the plugin contract's plane kind over the Model Context Protocol's JSON-RPC dialect, revisions 2024-11-05 through 2026-07-28."
 # THE ROOT CELLS' ADDRESS: `build.rs` states `cells=<this crate>/tests/root/mod.rs` under this
 # `links` name, and the composition root's `build.rs` reads it as `DEP_BUSBAR_DOOR_CELLS_<CRATE>_CELLS`
 # (the same for a path dependency and a pinned one), so the root compiles this plane's own root cells
@@ -43,11 +21,6 @@ workspace = true
 [lib]
 name = "busbar_plane_mcp"
 path = "src/lib.rs"
-# rlib: the LINKED door, which a busbar build names as a compiled-in row (`tool_door::door`, the
-# root's `plane-mcp` row on the plane axis). The dropped-in door is the sibling
-# `busbar-plane-mcp-plugin` cdylib, which exports this same door as its one symbol; this crate
-# exports none.
-crate-type = ["rlib"]
 
 # NO FEATURES, ON PURPOSE. A plane compiled two ways is two planes, and the kernel would have no way
 # to tell which one it registered. The contract crate holds itself to the same rule and asserts it.
@@ -73,8 +46,5 @@ url = { workspace = true }
 # fixture implementor of the SEALED `KernelSeal` trait; this crate's test harnesses used to
 # forge their own. Dev-only and feature-gated, so it is absent from every release build.
 busbar-contract = { workspace = true, features = ["test-seal"] }
-# THE LOADER, TEST-ONLY: `src/tests/relayed_call_tests.rs` admits the linked door through the one
-# loader, as busbar does, and drives it with the loader's own frames (`conformance::{input,
-# output}`), so the door's transcript is held to the crate's builders with no raw ABI call.
-busbar-plugin-loader = { workspace = true }
+# The test kit, test-only: the counting allocator the allocation gates read (`src/tests/mod.rs`).
 busbar-test-kit = { workspace = true }

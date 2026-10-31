@@ -60,7 +60,7 @@
 set -uo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 
-WORK_ROOT="${H2_WORK:-${here}/../../target/h2-scratch/mcp-unpriced-refuses.$$}"
+WORK_ROOT="${H2_WORK:-${here}/../../../target/h2-scratch/mcp-unpriced-refuses.$$}"
 
 # ── ARM 1: BILLING OFF -- the silent zero that IS correct ─────────────────────────────────────────
 # Run in a subshell with its OWN boot: the two arms differ only in the config's `rate_card:` key, and

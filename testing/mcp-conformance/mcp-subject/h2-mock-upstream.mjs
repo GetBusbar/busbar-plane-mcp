@@ -6,7 +6,7 @@
 //
 // The official-suite fixtures (diagnostic-upstream.mjs) exist to serve the pinned conformance
 // suite's own scenario names and carry no egress-capture instrumentation. The H2 gating scenarios
-// (scripts/mcp-subject/h2-*.sh) need something narrower: one tool, on one path, that records EVERY
+// (testing/mcp-conformance/mcp-subject/h2-*.sh) need something narrower: one tool, on one path, that records EVERY
 // request it receives so a scenario can assert "zero egress reached the upstream" the same way
 // the oracle's `mock` subcommand does for the llm plane. This is that mock, written once
 // and shared by every h2-*.sh script (each boots its own instance on its own port).
