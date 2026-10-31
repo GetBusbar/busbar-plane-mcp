@@ -115,6 +115,34 @@ fn discover_counts_what_the_caller_reaches_and_names_the_revisions() {
     assert_eq!(body(&none)["result"]["servers"], json!([]));
 }
 
+/// M3-5: a tool the kernel's verdict hides is gone from `server/discover`'s count as it is from
+/// `tools/list`: the two answers agree on what this caller reaches.
+#[test]
+fn discover_counts_no_tool_the_verdict_hides() {
+    let hide_all = |_: &crate::catalogue::ToolEntry| true;
+    let (d, params) = request("tools/list", json!({}));
+    let listed = answer(&d, Some(&params), &catalogue(), &everyone, hide_all);
+    let listed = body(&listed)["result"]["tools"].as_array().map_or(0, Vec::len);
+    let (d, params) = request("server/discover", json!({}));
+    let discovered = answer(&d, Some(&params), &catalogue(), &everyone, hide_all);
+    assert_eq!(body(&discovered)["result"]["counts"]["tools"], listed);
+}
+
+/// M3-6: the server's identity rides where the schema carries it on every result,
+/// `_meta["io.modelcontextprotocol/serverInfo"]`.
+#[test]
+fn discover_carries_server_info_in_meta() {
+    let v = body(&run("server/discover", json!({})));
+    assert_eq!(
+        v["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+        "busbar"
+    );
+    assert_eq!(
+        v["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["version"],
+        crate::plane_door::VERSION
+    );
+}
+
 /// A call, and a prompt that asks its caller first, are not answered here.
 #[test]
 fn a_call_and_an_asking_prompt_go_on() {
