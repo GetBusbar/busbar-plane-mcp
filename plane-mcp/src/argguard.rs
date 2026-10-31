@@ -427,11 +427,6 @@ fn judge_argument(kind: Urlish, value: &str, judge: &mut Judge<'_>) -> Result<()
             // A scheme-relative reference (`//169.254.169.254/x`) inherits the base scheme and
             // names a host, so it is judged as one. A path-relative reference names no host and
             // there is nothing to judge.
-            if let Some(rest) = value.strip_prefix("//") {
-                let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
-                let host = authority.rsplit('@').next().unwrap_or(authority);
-                return judge_host(strip_port(host), judge);
-            }
             // An absolute URL by its opening (`scheme://`, or an `http(s):` spelled without the
             // slashes). A `://` later in the value (a URL in a relative reference's query) does not
             // make the reference absolute: it names no host of its own.
@@ -444,7 +439,8 @@ fn judge_argument(kind: Urlish, value: &str, judge: &mut Judge<'_>) -> Result<()
                 Some(Some(host)) => judge_host(&host, judge),
                 Some(None) => Err(ArgWhy::NoHost(value.to_string())),
                 None => Ok(()),
-            }
+            }?;
+            judge_rfc_authority(&cleaned, judge)
         }
         Urlish::Host => {
             // A `hostname`/`ipv4`/`ipv6`-declared field is supposed to carry a bare host, but
@@ -486,7 +482,26 @@ fn judge_absolute(url: &str, judge: &mut Judge<'_>) -> Result<(), ArgWhy> {
             .map(|p| p.host)
     }
     .ok_or_else(|| ArgWhy::NoHost(url.to_string()))?;
-    judge_host(&host, judge)
+    judge_host(&host, judge)?;
+    judge_rfc_authority(&cleaned, judge)
+}
+
+// Backslash is a boundary for a WHATWG reader but can be userinfo for an RFC reader.
+// Both interpretations must pass the same host policy.
+fn judge_rfc_authority(cleaned: &str, judge: &mut Judge<'_>) -> Result<(), ArgWhy> {
+    let rest = cleaned.strip_prefix("//").or_else(|| {
+        cleaned
+            .split_once(':')
+            .and_then(|(_, after)| after.strip_prefix("//"))
+    });
+    if let Some(rest) = rest {
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+        if authority.contains('\\') {
+            let host = authority.rsplit('@').next().unwrap_or(authority);
+            judge_host(strip_port(host), judge)?;
+        }
+    }
+    Ok(())
 }
 
 /// The host, asked of the host's one judge (`dest.judge`):
