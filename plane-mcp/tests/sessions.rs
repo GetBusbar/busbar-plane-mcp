@@ -1549,7 +1549,6 @@ fn a_stateless_upstream_sees_the_stateless_request_unchanged() {
                 "_meta": {
                     "io.modelcontextprotocol/protocolVersion": "2026-07-28",
                     "io.modelcontextprotocol/clientCapabilities": {},
-                    "progressToken": null,
                 },
             },
         })
