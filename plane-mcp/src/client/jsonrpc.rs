@@ -73,14 +73,19 @@ pub fn tools_call(
             capabilities.insert(cap.to_string(), serde_json::json!({}));
         }
     }
+    let mut meta = serde_json::json!({
+        META_PROTOCOL_VERSION: PROTOCOL_VERSION,
+        META_CLIENT_CAPABILITIES: capabilities,
+    });
+    // `progressToken` is `string | number` and optional: absent when no progress is asked, never
+    // `null`, which a schema-validating upstream refuses.
+    if let (Some(meta), Some(token)) = (meta.as_object_mut(), progress_token) {
+        meta.insert("progressToken".to_string(), serde_json::Value::from(token));
+    }
     let mut params = serde_json::json!({
         "name": name,
         "arguments": arguments,
-        "_meta": {
-            META_PROTOCOL_VERSION: PROTOCOL_VERSION,
-            "progressToken": progress_token,
-            META_CLIENT_CAPABILITIES: capabilities,
-        },
+        "_meta": meta,
     });
     // EXACTLY TWO members of the continuation cross, by name.
     if let (Some(params), Some(responses)) = (

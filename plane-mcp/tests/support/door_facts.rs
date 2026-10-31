@@ -171,7 +171,7 @@ pub const RELAY_SECTION: &[u8] = br#"{"fs": {"url": "https://mcp.example/fs/rpc?
 
 /// `call::outbound` of [`RELAY_CALL`] admitted over [`RELAY_SECTION`], to `fs` under request id
 /// `0`: the request bound for the member, its body.
-pub const RELAY_REQUEST_BODY: &[u8] = br#"{"id":0,"jsonrpc":"2.0","method":"tools/call","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/protocolVersion":"2026-07-28","progressToken":null},"arguments":{"path":"/a"},"name":"read_file"}}"#;
+pub const RELAY_REQUEST_BODY: &[u8] = br#"{"id":0,"jsonrpc":"2.0","method":"tools/call","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/protocolVersion":"2026-07-28"},"arguments":{"path":"/a"},"name":"read_file"}}"#;
 
 /// The same request's head fields, in order.
 pub const RELAY_REQUEST_FIELDS: &[(&str, &str)] = &[

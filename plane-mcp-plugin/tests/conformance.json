@@ -202,7 +202,7 @@
       "status": 405
     },
     "request": "{\"jsonrpc\":\"2.0\",\"id\":30,\"method\":\"tools/call\",\"params\":{\"name\":\"fs_read_file\",\"arguments\":{\"path\":\"/a\"},\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{}}}}",
-    "request_out": "{\"id\":0,\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/clientCapabilities\":{},\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"progressToken\":null},\"arguments\":{\"path\":\"/a\"},\"name\":\"read_file\"}}",
+    "request_out": "{\"id\":0,\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/clientCapabilities\":{},\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\"},\"arguments\":{\"path\":\"/a\"},\"name\":\"read_file\"}}",
     "far_end": {
       "status": 200,
       "fields": [
