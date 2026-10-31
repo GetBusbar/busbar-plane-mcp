@@ -173,6 +173,20 @@ fn event_stream_framing() {
     );
 }
 
+/// M3-1: a bare CR is JSON whitespace, and every event-stream reader ends a line at one; a frame
+/// splits on CR, LF and CRLF alike, so no `data:` line carries a CR.
+#[test]
+fn a_bare_cr_in_framed_data_ends_its_data_line() {
+    let framed = frame(None, Some(EVENT_MESSAGE), "{\"a\":1\r,\"b\":2}");
+    assert_eq!(framed, "event: message\ndata: {\"a\":1\ndata: ,\"b\":2}\n\n");
+    assert!(!framed.contains('\r'));
+    assert_eq!(
+        frame(None, None, "a\r\nb"),
+        "data: a\ndata: b\n\n",
+        "CRLF stays one break"
+    );
+}
+
 #[test]
 fn the_param_mirror_names_every_annotated_string_argument() {
     let schema = json!({"properties":{
