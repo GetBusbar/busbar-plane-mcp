@@ -266,7 +266,8 @@ fn judge_string(
     if let Some(found) = whatwg_host(s) {
         scan.undeclared_judged += 1;
         return match found {
-            Some(host) => judge_host(&host, judge),
+            Some(host) => judge_host(&host, judge)
+                .and_then(|()| judge_rfc_authority(&whatwg_cleaned(s), judge)),
             None => Err(ArgWhy::NoHost(s.to_string())),
         }
         .map_err(refused(None));
