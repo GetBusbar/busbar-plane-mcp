@@ -1091,6 +1091,13 @@ pub fn upstream_failure_result(server: &str, reason: &str) -> Value {
 /// the caller's behalf (Law 11).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AskRefusal {
+    /// The ask cannot be safely interpreted for grant and bounds checks.
+    Malformed {
+        /// The server.
+        server: String,
+        /// The invalid field and its required shape.
+        reason: String,
+    },
     /// The operator granted this server nothing for this kind of ask.
     Ungranted {
         /// The server.
@@ -1135,6 +1142,10 @@ pub enum AskRefusal {
 impl std::fmt::Display for AskRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            AskRefusal::Malformed { server, reason } => write!(
+                f,
+                "MCP server `{server}` returned a malformed ask: {reason}, so the ask was not relayed."
+            ),
             AskRefusal::Ungranted { server, kind } => write!(
                 f,
                 "MCP server `{server}` asked its caller for a `{kind}` request, and that grant is \
@@ -1197,6 +1208,7 @@ impl AskRefusal {
     #[must_use]
     pub fn audit_reason(&self) -> &'static str {
         match self {
+            AskRefusal::Malformed { .. } => "ask_malformed",
             AskRefusal::Ungranted { .. } => "ask_ungranted",
             AskRefusal::RoundCapExceeded { .. } => "ask_round_cap",
             AskRefusal::NoSealer { .. } => "ask_no_sealer",
@@ -1347,8 +1359,8 @@ pub fn task_line(entry: &ToolEntry, reason: &str) -> CallLine {
     line
 }
 
-/// The ask judged: the bound, then the grant of EVERY kind it asks for (an unknown method is judged
-/// as the most privileged, as the recogniser reads it). A granted ask is relayed to the caller;
+/// The ask judged: the bound, then the grant of EVERY recognized kind it asks for. An unknown
+/// method cannot be checked and is refused. A granted ask is relayed to the caller;
 /// busbar answers none itself.
 fn judge_ask(
     admitted: &AdmittedCall,
@@ -1365,16 +1377,28 @@ fn judge_ask(
         return Err(AskRefusal::RoundCapExceeded { server, cap });
     }
     let grants = def.map(|d| d.grants).unwrap_or_default();
-    let mut kinds: Vec<wire::ServerAsk> = payload
+    let requests = payload
         .get("inputRequests")
         .and_then(Value::as_object)
-        .map(|requests| {
-            requests
-                .values()
-                .map(|r| wire::ServerAsk::of_method(r.get("method").and_then(Value::as_str)))
-                .collect()
-        })
-        .unwrap_or_default();
+        .ok_or_else(|| AskRefusal::Malformed {
+            server: server.clone(),
+            reason: "inputRequests is not an object".to_string(),
+        })?;
+    for request in requests.values() {
+        if !matches!(
+            request.get("method").and_then(Value::as_str),
+            Some("roots/list" | "elicitation/create" | "sampling/createMessage")
+        ) {
+            return Err(AskRefusal::Malformed {
+                server,
+                reason: "inputRequests contains an unrecognized method".to_string(),
+            });
+        }
+    }
+    let mut kinds: Vec<wire::ServerAsk> = requests
+        .values()
+        .map(|r| wire::ServerAsk::of_method(r.get("method").and_then(Value::as_str)))
+        .collect();
     kinds.push(kind);
     if let Some(denied) = kinds.into_iter().find(|k| !grants.allows(*k)) {
         return Err(AskRefusal::Ungranted {
@@ -1385,11 +1409,7 @@ fn judge_ask(
     judge_sampling_bounds(
         &server,
         &def.map(|d| d.sampling_bounds).unwrap_or_default(),
-        payload
-            .get("inputRequests")
-            .and_then(Value::as_object)
-            .into_iter()
-            .flat_map(|requests| requests.values()),
+        requests.values(),
     )?;
     Ok(Settled::Relay {
         result: payload.clone(),
@@ -1508,15 +1528,20 @@ pub fn judge_sampling_bounds<'a>(
             }
         }
         if let Some(t) = params.and_then(|p| p.get("temperature")) {
+            let temperature =
+                t.as_f64()
+                    .filter(|v| v.is_finite())
+                    .ok_or_else(|| AskRefusal::Malformed {
+                        server: server.to_string(),
+                        reason: "temperature is not a number".to_string(),
+                    })?;
             let min = f64::from(bounds.temperature_min_milli) / 1000.0;
             let max = f64::from(bounds.temperature_max_milli) / 1000.0;
-            if !t
-                .as_f64()
-                .is_some_and(|v| v.is_finite() && (min..=max).contains(&v))
-            {
-                let (key, limit) = match t.as_f64() {
-                    Some(v) if v > max => ("temperature_max_milli", bounds.temperature_max_milli),
-                    _ => ("temperature_min_milli", bounds.temperature_min_milli),
+            if !(min..=max).contains(&temperature) {
+                let (key, limit) = if temperature > max {
+                    ("temperature_max_milli", bounds.temperature_max_milli)
+                } else {
+                    ("temperature_min_milli", bounds.temperature_min_milli)
                 };
                 return Err(refuse(
                     key,
