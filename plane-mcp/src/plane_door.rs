@@ -1984,8 +1984,9 @@ fn answer_body(
         )
     });
     use busbar_contract::abi::host::service::{DISTRUST_CHANGED, DISTRUST_QUARANTINED};
+    // `server/discover` counts what `tools/list` lists, so it is judged the same way.
     let listing = matches!(&disposition, Disposition::Request { row, .. }
-        if row.op == crate::tool_ops::OP_TOOLS_LIST);
+        if row.op == crate::tool_ops::OP_TOOLS_LIST || row.op == crate::tool_ops::OP_DISCOVER);
     let mut hidden = std::collections::BTreeSet::new();
     if listing {
         let listed: Vec<crate::catalogue::ToolEntry> = held
