@@ -1620,3 +1620,24 @@ fn the_relayed_request_mirrors_its_annotated_arguments() {
         o.fields
     );
 }
+
+/// M1-11: THE EVENT-STREAM LINE RULE, as `client::compat::EventReader` reads it (B5): CRLF, a lone
+/// LF and a lone CR each end a line, so a body framed with bare CRs reads as the same events.
+#[test]
+fn an_answer_framed_with_bare_crs_reads_as_its_events() {
+    let raw = b"event: message\rdata: {\"a\":1}\r\rdata: {\"b\":\rdata: 2}\r\r";
+    assert_eq!(last_sse_data(raw), b"{\"b\":\n2}".to_vec());
+    let progress = br#"{"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":"busbar-0","progress":1}}"#;
+    let mut raw = b"data: ".to_vec();
+    raw.extend_from_slice(progress);
+    raw.extend_from_slice(b"\r\rdata: {\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{}}\r\r");
+    assert_eq!(progress_frames(&raw).len(), 1, "the progress frame is read");
+}
+
+/// M1-13: a progress notification whose JSON is split over several `data:` lines is one event,
+/// read as `last_sse_data` reads one.
+#[test]
+fn a_progress_frame_split_over_data_lines_is_one_frame() {
+    let raw = b"data: {\"jsonrpc\":\"2.0\",\ndata: \"method\":\"notifications/progress\",\ndata: \"params\":{\"progressToken\":\"busbar-0\",\"progress\":1}}\n\n";
+    assert_eq!(progress_frames(raw).len(), 1);
+}
