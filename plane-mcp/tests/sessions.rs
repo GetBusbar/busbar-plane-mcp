@@ -50,7 +50,7 @@ use busbar_contract::abi::plane::{
     slot, ArriveIn, ArriveOut, OnPieceIn, OnPieceOut, Ops, OutField, PlaneCancelIn, PlaneCancelOut,
     PlaneDriveIn, PlaneDriveOut, PlaneOpenIn, PlaneOpenOut, RecordWrite, UnitCount, AUDIT_REJECTED,
     EMIT_DONE, EMIT_TO_FAR_END, FROM_CALLER, FROM_FAR_END, FROM_KERNEL, PIECE_HAS_STATUS,
-    PIECE_LAST, RECORD_AUDIT,
+    PIECE_LAST, RECORD_AUDIT, RECORD_PUT,
 };
 use busbar_contract::abi::transport::FrameSpan;
 use busbar_plane_mcp::door;
@@ -1095,6 +1095,24 @@ impl Door {
                     .filter(|r| r.op == RECORD_AUDIT)
                     .map(|r| (at(r.key), at(r.value), r.kind == AUDIT_REJECTED)),
             );
+            got.units.extend(
+                units[..o.units_written as usize]
+                    .iter()
+                    .map(|u| (u.class, u.amount)),
+            );
+            if o.lane.len != 0 {
+                got.lane = Some(at(o.lane));
+            }
+            let bytes_at = |s: busbar_contract::abi::mechanism::call::Span| {
+                let from = s.offset as usize;
+                arena[from..from + s.len as usize].to_vec()
+            };
+            got.put_records.extend(
+                records[..o.records_written as usize]
+                    .iter()
+                    .filter(|r| r.op == RECORD_PUT)
+                    .map(|r| (r.kind, bytes_at(r.key), bytes_at(r.value))),
+            );
             got.diags += o.head.envelope.diags_len;
             got.bytes
                 .extend_from_slice(&reply[..usize::try_from(o.emitted).unwrap()]);
@@ -1190,6 +1208,9 @@ struct Answered {
     audits: Vec<(String, String, bool)>,
     /// The diagnostics the reply's envelope carried.
     diags: usize,
+    units: Vec<(u32, u64)>,
+    lane: Option<String>,
+    put_records: Vec<(u32, Vec<u8>, Vec<u8>)>,
 }
 
 impl Answered {
@@ -2653,6 +2674,71 @@ fn a_legacy_session_ends_with_its_stream() {
     );
     let posted = d.piece(153, &Given::caller(ALICE, list));
     assert_eq!(posted.status, 404, "{}", posted.text());
+}
+
+#[test]
+fn completed_legacy_work_keeps_its_usage_and_audit_when_the_get_ends_during_dispatch() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    for close_stream in [false, true] {
+        *upstreams() = Some(Upstreams::default());
+        let d = open();
+        let address = legacy_stream(&d, 150, ALICE);
+        let call = br#"{"jsonrpc":"2.0","id":31,"method":"tools/call","params":{"name":"st_read_file","arguments":{}}}"#;
+        assert_eq!(
+            d.arrive(151, "POST", &address, call, &[JSON_TYPE]).outcome,
+            Outcome::Ready
+        );
+        d.piece(151, &Given::attempt(ALICE, "st"));
+        let sent = d.pump(151, &Given::caller(ALICE, call));
+        assert!(sent.far, "the control dispatches: {sent:?}");
+        let id = sent.json()["id"].clone();
+        assert!(!id.is_null(), "the outbound request is correlated");
+        if close_stream {
+            d.cancel(150);
+        }
+        let far = serde_json::to_vec(&json!({"jsonrpc":"2.0", "id":id,
+            "result":{"resultType":"complete", "content":[{"type":"text","text":"done"}]}}))
+        .unwrap();
+        let answered = d.settle(151, &Given::far(ALICE, 200, vec![JSON_TYPE], &far));
+        assert_eq!(
+            answered.status,
+            if close_stream { 404 } else { 202 },
+            "{answered:?}"
+        );
+        assert!(
+            answered.units.contains(&(0, 1)),
+            "completed tool call: {answered:?}"
+        );
+        assert!(
+            answered.units.contains(&(1, far.len() as u64)),
+            "received bytes: {answered:?}"
+        );
+        assert_eq!(answered.lane.as_deref(), Some("mcp_server:st"));
+        assert!(
+            answered
+                .put_records
+                .iter()
+                .any(|(kind, key, value)| *kind == door_facts::RECORD_CALL
+                    && key == ALICE.as_bytes()
+                    && !value.is_empty()),
+            "the completed call record survives: {answered:?}"
+        );
+        assert!(
+            answered
+                .audits
+                .iter()
+                .any(|(action, _, rejected)| action == "mcp_tool.call" && !rejected),
+            "the applied call audit survives: {answered:?}"
+        );
+        assert_eq!(
+            answered
+                .units
+                .iter()
+                .any(|(class, _)| *class == door_facts::CLASS_FEE_INDEX),
+            !close_stream,
+            "only a delivered success earns the fee: {answered:?}"
+        );
+    }
 }
 
 /// THE UNGOVERNED CHAIN'S DIAGNOSTIC IS REPORTED ONCE PER INSTANCE, on its first `2024-11-05`

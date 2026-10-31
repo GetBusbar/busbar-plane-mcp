@@ -1151,10 +1151,16 @@ fn sampling_temperature_outside_the_range_is_refused_at_the_edges_relays() {
         "temperature_min_milli",
         "200",
     );
-    assert_bound_refused(
-        sampling_settle(&def, json!({ "temperature": "hot" })),
-        "temperature_min_milli",
-        "200",
+    let (status, body, line) = answer_of(sampling_settle(&def, json!({ "temperature": "hot" })));
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(body["error"]["data"]["reason"], json!("ask_malformed"));
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("not a number"));
+    assert_eq!(
+        (line.outcome, line.reason.as_str()),
+        ("refused", "ask_malformed")
     );
     assert_relayed(sampling_settle(&def, json!({ "temperature": 0.2 })));
     assert_relayed(sampling_settle(&def, json!({ "temperature": 1.5 })));

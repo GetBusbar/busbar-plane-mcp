@@ -1634,6 +1634,28 @@ fn a_backslash_authority_is_safe_under_both_host_readings() {
     }
 }
 
+#[test]
+fn an_undeclared_special_url_judges_both_authorities_after_cleanup() {
+    let schema = field_schema(Field::Undeclared);
+    for target in [
+        "ht\ttps://public.example\\@127.0.0.1/x",
+        "ftp://public.example\\@127.0.0.1/x",
+        "ht\ttps://127.0.0.1\\@public.example/x",
+        "ftp://127.0.0.1\\@public.example/x",
+    ] {
+        let err = guard(&schema, &json!({"target": target}), public())
+            .expect_err("neither URL reading may reach loopback");
+        assert!(matches!(err.why, ArgWhy::InternalHost(ref h) if h == "127.0.0.1"));
+    }
+    for target in [
+        "ht\ttps://public.example\\@other.example/x",
+        "ftp://public.example\\@other.example/x",
+    ] {
+        guard(&schema, &json!({"target": target}), public())
+            .expect("both public readings remain allowed");
+    }
+}
+
 /// M1-2: a path-relative `uri-reference` whose query carries a URL names no host of its own, so it
 /// is admitted without asking the judge.
 #[test]
