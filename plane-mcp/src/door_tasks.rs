@@ -1517,9 +1517,10 @@ fn kept_end(reference: &str, end: End) -> End {
 }
 
 /// THE CALL, sent to the member the continuation's walk picked: the arguments as admitted with the
-/// answers to the task's own rounds merged in (`answers`, never over an admitted argument), judged
-/// again by the argument guard on what is actually about to be dispatched (the answers were never
-/// screened), a pool's twin taken as the synchronous path takes it, and sent by the one
+/// answers to the task's own rounds merged in (`answers`, never over an admitted argument), a pool's
+/// twin taken as the synchronous path takes it, the entry actually sent admitted as its own when it
+/// is sent (its grants, the kernel's verdict, then the argument guard on what is about to be
+/// dispatched: the answers were never screened), and sent by the one
 /// member-send the synchronous call uses ([`super::send_to_member`]): the caller's down-scope to a `token_exchange:` member, the client ladder, a stdio
 /// member's child, the bound on the caller's reply to a relayed ask. Every host the arguments name
 /// is asked of `dest.judge` on `ticket`. `Err` = the task ends here, in the engine's words.
@@ -1546,17 +1547,6 @@ fn call(
             .unwrap_or_else(|| json!({})),
         answers,
     );
-    let schema = entry
-        .input_schema
-        .clone()
-        .unwrap_or_else(|| json!({ "type": "object" }));
-    let judged = crate::argguard::guard(&schema, &arguments, |dest| {
-        let h = handle(ticket, &mut unit.issued, &mut None);
-        super::dest_verdict(services, h, held, &entry, dest)
-    });
-    if let Err(refused) = judged {
-        return Err(End::Failed(refused.to_string()));
-    }
     let Some(member) = unit.member.clone() else {
         // No member to send it to: the walk's terminal is the kernel's to render.
         return Ok(Step::Taken);
@@ -1575,6 +1565,35 @@ fn call(
     };
     if !held.section.servers.contains_key(&member) {
         return Ok(Step::Decline);
+    }
+    // THE ENTRY IT SENDS, ADMITTED AS ITS OWN when it is sent (M2-1), in the synchronous call's
+    // order: its grants and the kernel's verdict asked now (a grant revoked, or a verdict raised,
+    // since the task was created or parked is heard), then its arguments judged under its own
+    // registration. A list whose last re-fetch failed is no fresh list here (the continuation fetches
+    // none): the kernel's book answers on its own word, as for a server never sighted.
+    let grants = [
+        (crate::statement::SCOPE, entry.server.as_str()),
+        (crate::statement::SCOPE_TOOL, entry.namespaced.as_str()),
+    ];
+    super::ask_entitlements(Some(services), ticket, unit, &grants);
+    let mut list = super::published(plane, &entry.server);
+    if matches!(list.sighting, crate::trust::Sighting::Failed(_)) {
+        list.sighting = crate::trust::Sighting::Never;
+    }
+    let trust = super::trust_of(plane, ticket, &mut unit.issued, &entry, &list);
+    if let Err(words) = crate::call::admits_entry(&entry, &super::admit(&unit.entitled), trust) {
+        return Err(End::Failed(words));
+    }
+    let schema = entry
+        .input_schema
+        .clone()
+        .unwrap_or_else(|| json!({ "type": "object" }));
+    let judged = crate::argguard::guard(&schema, &arguments, |dest| {
+        let h = handle(ticket, &mut unit.issued, &mut None);
+        super::dest_verdict(services, h, held, &entry, dest)
+    });
+    if let Err(refused) = judged {
+        return Err(End::Failed(refused.to_string()));
     }
     // A stdio member's child is greeted (once per generation) before the call, as the synchronous
     // call's is.

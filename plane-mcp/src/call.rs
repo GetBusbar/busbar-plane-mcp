@@ -503,6 +503,34 @@ fn trust_answer(id: &Value, name: &str, entry: &ToolEntry, trust: Trust) -> Opti
     })
 }
 
+/// THE GRANT AND THE KERNEL'S VERDICT of an entry already resolved, as [`admit_trusted`] asks
+/// them and in its words: what a task's continuation asks again of the entry it actually sends (a
+/// pool's twin included) at the moment it sends it. `Err` the refusal's words.
+pub(crate) fn admits_entry(
+    entry: &ToolEntry,
+    admit: &impl Fn(&str, &str) -> bool,
+    trust: Trust,
+) -> Result<(), String> {
+    if !granted(admit, &entry.server, &entry.namespaced) {
+        return Err(not_exposed(&entry.namespaced));
+    }
+    if let Trust::Unreached(reason) = &trust {
+        return Err(format!(
+            "The MCP server `{}` did not complete this tool call: busbar could not reach it to \
+             verify its tool list: {reason}",
+            entry.server
+        ));
+    }
+    match trust_answer(&Value::Null, &entry.namespaced, entry, trust) {
+        None => Ok(()),
+        Some(Admission::Refused(refusal, _)) => Err(refusal.message),
+        Some(_) => Err(format!(
+            "MCP server `{}` is not one this door may trust, so it serves nothing",
+            entry.server
+        )),
+    }
+}
+
 /// [`admit`], with THE KERNEL'S TRUST VERDICT: `trust` answers, for the named tool, what the
 /// kernel's Approve said of it ([`Trust`], `trust.serves` over the tool's registration and trust
 /// key after the door's re-fetch sighted it), rendered by [`trust_answer`]. Asked after the name
