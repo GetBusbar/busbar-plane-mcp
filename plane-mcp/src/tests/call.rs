@@ -1641,3 +1641,50 @@ fn a_progress_frame_split_over_data_lines_is_one_frame() {
     let raw = b"data: {\"jsonrpc\":\"2.0\",\ndata: \"method\":\"notifications/progress\",\ndata: \"params\":{\"progressToken\":\"busbar-0\",\"progress\":1}}\n\n";
     assert_eq!(progress_frames(raw).len(), 1);
 }
+
+/// M1-14: an ask the bounds cannot read is not relayed past them. An `inputRequests` that is not
+/// an object of requests, and a request whose method is none of the asks this plane knows, are
+/// refused rather than relayed whole under the sampling grant.
+#[test]
+fn an_ask_the_sampling_bounds_cannot_read_is_refused_not_relayed() {
+    let def = sampling_def(|_| {});
+    let too_many = json!({ "method": "sampling/createMessage",
+        "params": { "messages": text_messages(65, "") } });
+    for requests in [
+        json!([too_many]),
+        json!({ "s": { "method": "sampling/createMessageX",
+            "params": { "messages": text_messages(65, "") } } }),
+    ] {
+        let far = json!({ "jsonrpc": "2.0", "id": 0, "result": {
+            "resultType": "input_required",
+            "inputRequests": requests,
+            "requestState": "opaque"
+        }});
+        let settled = settle_call(
+            &admitted(),
+            Some(&def),
+            200,
+            far.to_string().as_bytes(),
+            false,
+            0,
+        );
+        assert!(
+            !matches!(settled, Settled::Relay { .. }),
+            "`{requests}` must not be relayed: {settled:?}"
+        );
+    }
+}
+
+/// M1-16: a temperature that is not a number is refused for that, never by naming a bound the
+/// operator would then adjust in vain.
+#[test]
+fn a_temperature_that_is_not_a_number_is_refused_naming_that() {
+    let def = sampling_def(|_| {});
+    let (status, body, _) = answer_of(sampling_settle(&def, json!({ "temperature": "hot" })));
+    assert_eq!(status, 403, "{body}");
+    let message = body["error"]["message"].as_str().expect("message");
+    assert!(
+        !message.contains("temperature_min_milli") && message.contains("not a number"),
+        "{message}"
+    );
+}
