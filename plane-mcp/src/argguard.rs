@@ -432,7 +432,11 @@ fn judge_argument(kind: Urlish, value: &str, judge: &mut Judge<'_>) -> Result<()
                 let host = authority.rsplit('@').next().unwrap_or(authority);
                 return judge_host(strip_port(host), judge);
             }
-            if value.contains("://") || http_scheme(&whatwg_cleaned(value)) {
+            // An absolute URL by its opening (`scheme://`, or an `http(s):` spelled without the
+            // slashes). A `://` later in the value (a URL in a relative reference's query) does not
+            // make the reference absolute: it names no host of its own.
+            let cleaned = whatwg_cleaned(value);
+            if opens_with_authority(&cleaned) || http_scheme(&cleaned) {
                 return judge_absolute(value, judge);
             }
             // Every other spelling a WHATWG reader takes as naming a host.
