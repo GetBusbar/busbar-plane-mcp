@@ -1606,6 +1606,34 @@ fn a_scheme_relative_reference_with_a_backslash_before_the_at_is_judged_on_the_d
     );
 }
 
+#[test]
+fn a_backslash_authority_is_safe_under_both_host_readings() {
+    let reference = field_schema(Field::Reference);
+    for target in [
+        r"//127.0.0.1\@public.example/x",
+        r"//public.example\@127.0.0.1/x",
+    ] {
+        let err = guard(&reference, &json!({"target": target}), public())
+            .expect_err("neither interpretation may reach loopback");
+        assert!(matches!(err.why, ArgWhy::InternalHost(ref h) if h == "127.0.0.1"));
+    }
+    let uri = json!({
+        "type": "object",
+        "properties": {"target": {"type": "string", "format": "uri"}}
+    });
+    let untyped = field_schema(Field::Undeclared);
+    for schema in [&reference, &uri, &untyped] {
+        for target in [
+            r"https://127.0.0.1\@public.example/x",
+            r"https://public.example\@127.0.0.1/x",
+        ] {
+            let err = guard(schema, &json!({"target": target}), public())
+                .expect_err("neither interpretation may reach loopback");
+            assert!(matches!(err.why, ArgWhy::InternalHost(ref h) if h == "127.0.0.1"));
+        }
+    }
+}
+
 /// M1-2: a path-relative `uri-reference` whose query carries a URL names no host of its own, so it
 /// is admitted without asking the judge.
 #[test]
