@@ -336,11 +336,7 @@ pub fn frame(id: Option<&str>, event: Option<&str>, data: &str) -> String {
         out.push_str(i);
         out.push('\n');
     }
-    for line in data.split('\n') {
-        out.push_str("data: ");
-        out.push_str(line.strip_suffix('\r').unwrap_or(line));
-        out.push('\n');
-    }
+    crate::framing::push_data_lines(&mut out, data);
     out.push('\n');
     out
 }
