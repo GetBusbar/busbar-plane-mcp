@@ -374,21 +374,17 @@ pub fn custom_param_mismatch(
     arguments: &Value,
     header: &impl Fn(&str) -> Option<String>,
 ) -> Option<String> {
-    let properties = entry
-        .input_schema
-        .as_ref()?
-        .get("properties")?
-        .as_object()?;
-    for (property, definition) in properties {
-        let Some(suffix) = definition.get("x-mcp-header").and_then(|v| v.as_str()) else {
-            continue;
-        };
+    // Every annotation, nested ones through their chain of `properties` too, each compared with
+    // the argument at its path rendered as the header carries it (a string, a decimal integer,
+    // `true`/`false`).
+    for (path, suffix) in crate::adapt::annotated_params(entry.input_schema.as_ref()) {
+        let property = path.join(".");
         // The reader takes the lower-case name; the engine's head lookup was case-insensitive.
         let header_name = format!("mcp-param-{}", suffix.to_ascii_lowercase());
         let value = header(&header_name);
         let header_value = value.as_deref().map(str::trim);
-        let body = arguments.get(property).and_then(|v| v.as_str());
-        match (header_value, body) {
+        let body = crate::adapt::argument_at(arguments, &path).and_then(crate::adapt::param_text);
+        match (header_value, body.as_deref()) {
             (None, None) => continue,
             (None, Some(_)) => {
                 return Some(format!(
@@ -400,7 +396,8 @@ pub fn custom_param_mismatch(
             (Some(_), None) => {
                 return Some(format!(
                     "The `Mcp-Param-{suffix}` header is set but the body's `arguments.{property}` \
-                     is absent or is not a string, so there is nothing for it to mirror."
+                     is absent or is not a string, an integer or a boolean, so there is nothing \
+                     for it to mirror."
                 ))
             }
             (Some(header_value), Some(body)) => {
