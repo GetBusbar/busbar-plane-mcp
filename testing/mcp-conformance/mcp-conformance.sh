@@ -1045,6 +1045,53 @@ printf "{}" >reports/differential.json; exit 0'
   then say "  ok: one reasoned baseline entry excuses exactly its own failure"
   else say "  MISS: a valid one-entry baseline over a matching run was refused"; failures=$((failures+1)); fi
 
+  # Check-evidence controls use the real JSON guard, independently of the suite exit code.
+  checks_probe() (
+    local payload="$1" bl="${2:-}" out="$tmp/checks-$RANDOM" n
+    for n in alpha beta gamma delta epsilon; do
+      mkdir -p "$out/server-$n-$STAMP"
+      printf '[{"id":"c1","status":"SUCCESS"}]' >"$out/server-$n-$STAMP/checks.json"
+    done
+    printf '%s' "$payload" >"$out/server-alpha-$STAMP/checks.json"
+    assert_passed "$out" selftest-check-evidence "$bl" >/dev/null 2>&1
+  )
+  local payload
+  for payload in '[]' '[{"id":"c1","status":"SKIPPED"}]' \
+    '[{"id":"c1","status":"INFO"}]' '[{"id":"c1","status":"WARNING"}]' \
+    '[{"id":"c1","status":"MYSTERY"}]' '[{}]' '[null]' \
+    '[{"status":"SUCCESS"}]' '[{"id":"c1","status":"FAILURE"}]'; do
+    if checks_probe "$payload"; then
+      say "  MISS: invalid or unsuccessful check evidence was accepted: $payload"
+      failures=$((failures+1))
+    else say "  ok: invalid or unsuccessful check evidence is refused: $payload"; fi
+  done
+  if checks_probe '[{"id":"wire-info","status":"INFO"},{"id":"c1","status":"SUCCESS"},{"id":"optional","status":"SKIPPED"}]'; then
+    say "  ok: official informational and optional skipped entries coexist with evaluated success"
+  else say "  MISS: valid official status vocabulary was refused"; failures=$((failures+1)); fi
+  printf 'server:\n  - alpha:c1  # reason: fixture exact check\n' >"$tmp/bl-check.yml"
+  if checks_probe '[{"id":"c1","status":"WARNING"}]' "$tmp/bl-check.yml"; then
+    say "  ok: an exact warning waiver follows the official baseline semantics"
+  else say "  MISS: an exact warning waiver was refused"; failures=$((failures+1)); fi
+  if checks_probe '[{"id":"c1","status":"WARNING"},{"id":"c2","status":"WARNING"}]' "$tmp/bl-check.yml"; then
+    say "  MISS: a warning waiver excused an unrelated warning"; failures=$((failures+1))
+  else say "  ok: warning waivers stay specific to their named checks"; fi
+  if checks_probe '[{"id":"c1","status":"FAILURE"},{"id":"c2","status":"SUCCESS"}]' "$tmp/bl-check.yml"; then
+    say "  ok: a check waiver accepts its own failure and leaves the successful sibling intact"
+  else say "  MISS: an exact check waiver was refused"; failures=$((failures+1)); fi
+  if checks_probe '[{"id":"c1","status":"FAILURE"},{"id":"c2","status":"FAILURE"}]' "$tmp/bl-check.yml"; then
+    say "  MISS: a check waiver excused an unrelated failing sibling"; failures=$((failures+1))
+  else say "  ok: a check waiver cannot excuse an unrelated failing sibling"; fi
+  printf 'client:\n  - alpha  # reason: client-only fixture\n' >"$tmp/bl-client.yml"
+  if checks_probe '[{"id":"c1","status":"FAILURE"}]' "$tmp/bl-client.yml"; then
+    say "  MISS: a client waiver excused a server failure"; failures=$((failures+1))
+  else say "  ok: a client waiver cannot excuse a server failure"; fi
+  for payload in '[]' '[{"id":"c1","status":"SKIPPED"}]' '[{"id":"c1","status":"MYSTERY"}]'; do
+    if checks_probe "$payload" "$tmp/bl-one.yml"; then
+      say "  MISS: a whole-scenario waiver excused absent or unknown evidence: $payload"
+      failures=$((failures+1))
+    else say "  ok: a waiver cannot replace actual check execution: $payload"; fi
+  done
+
   # RED 6: the battery must be IN THIS REPOSITORY. It was moved here so no leg needs a secret or a
   # reachable private host; if the directory is gone, every battery verdict is vacuous, and the
   # honest report is red rather than a skip.
