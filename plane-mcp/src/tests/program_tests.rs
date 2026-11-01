@@ -19,6 +19,9 @@ use busbar_contract::abi::sdk::conn::Replied;
 use busbar_contract::abi::transport::FrameSpan;
 use serde_json::{json, Value};
 
+#[path = "program_namespace_tests.rs"]
+mod namespace;
+
 /// THE STAND-IN CHILD: its generation, every message it received, the messages each open lease has
 /// to read (its head first), and what it says before each answer.
 #[derive(Default)]
@@ -303,5 +306,208 @@ fn an_exchange_takes_its_own_answer_and_handles_the_childs_messages() {
         received[1],
         json!({"jsonrpc": "2.0", "id": "srv-ping", "result": {}}),
         "the child's ping is answered on its input"
+    );
+}
+
+#[test]
+fn concurrent_operator_lists_with_the_same_generation_take_only_their_own_child_reply() {
+    let _one = SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    reset(1, Vec::new());
+    let host = ChildConn;
+    let tickets = [
+        Ticket {
+            slot: 1,
+            generation: 7,
+        },
+        Ticket {
+            slot: 2,
+            generation: 7,
+        },
+    ];
+    let key = |ticket: Ticket| (u64::from(ticket.slot) << 32) | u64::from(ticket.generation);
+    let mut streams = Vec::new();
+    for ticket in tickets {
+        let Poll::Ready(Ok(stream)) = host.establish(ticket, 0, 0, "srv", 0) else {
+            panic!("the child opens")
+        };
+        let mut buf = vec![0; 4096];
+        let mut piece = ReplyPiece::default();
+        assert!(matches!(
+            host.read_reply(ticket, 1, stream, &mut buf, &mut piece),
+            Poll::Ready(Ok(_))
+        ));
+        streams.push(stream);
+    }
+    let request = |ticket| {
+        let mut request: Value =
+            serde_json::from_slice(&crate::client::jsonrpc::tools_list("", 0, None).body).unwrap();
+        request["id"] = json!(list_id(key(ticket), 0));
+        serde_json::to_vec(&request).unwrap()
+    };
+    let mut peer = Door::default();
+    let mut first = crate::tool_program::Correlator::default();
+    let mut second = crate::tool_program::Correlator::default();
+    assert!(matches!(
+        host.write(tickets[0], 2, streams[0], &request(tickets[0])),
+        Poll::Ready(Ok(_))
+    ));
+    let mut buf = vec![0; 4096];
+    let mut piece = ReplyPiece::default();
+    let Poll::Ready(Ok(got)) = host.read_reply(tickets[1], 3, streams[1], &mut buf, &mut piece)
+    else {
+        panic!("the other lease sees the first answer")
+    };
+    assert!(
+        second
+            .take(
+                &buf[..got.len],
+                list_id(key(tickets[1]), 0),
+                "srv",
+                1,
+                &mut peer
+            )
+            .unwrap()
+            .is_none(),
+        "the second operator must pass over the first operator's answer"
+    );
+    let Poll::Ready(Ok(got)) = host.read_reply(tickets[0], 3, streams[0], &mut buf, &mut piece)
+    else {
+        panic!("the first operator sees its answer")
+    };
+    assert!(first
+        .take(
+            &buf[..got.len],
+            list_id(key(tickets[0]), 0),
+            "srv",
+            1,
+            &mut peer
+        )
+        .unwrap()
+        .is_some());
+    assert!(matches!(
+        host.write(tickets[1], 4, streams[1], &request(tickets[1])),
+        Poll::Ready(Ok(_))
+    ));
+    let Poll::Ready(Ok(got)) = host.read_reply(tickets[1], 5, streams[1], &mut buf, &mut piece)
+    else {
+        panic!("the second operator sees its own answer")
+    };
+    assert!(second
+        .take(
+            &buf[..got.len],
+            list_id(key(tickets[1]), 0),
+            "srv",
+            1,
+            &mut peer
+        )
+        .unwrap()
+        .is_some());
+    let received = with(|c| c.received.clone());
+    assert_ne!(received[0]["id"], received[1]["id"]);
+    for (ticket, stream) in tickets.into_iter().zip(streams) {
+        assert!(host.close(ticket, 6, stream).is_ready());
+    }
+    assert!(with(|c| c.leases.is_empty()));
+}
+
+struct PendingClose {
+    calls: Mutex<Vec<u32>>,
+}
+
+impl ProgramConn for PendingClose {
+    fn establish(
+        &self,
+        ticket: Ticket,
+        seq: u32,
+        need: u32,
+        member: &str,
+        timeout: u32,
+    ) -> Poll<Result<u64, String>> {
+        ChildConn.establish(ticket, seq, need, member, timeout)
+    }
+    fn read_reply(
+        &self,
+        ticket: Ticket,
+        seq: u32,
+        stream: u64,
+        buf: &mut [u8],
+        piece: &mut ReplyPiece,
+    ) -> Poll<Result<Replied, String>> {
+        ChildConn.read_reply(ticket, seq, stream, buf, piece)
+    }
+    fn write(
+        &self,
+        ticket: Ticket,
+        seq: u32,
+        stream: u64,
+        bytes: &[u8],
+    ) -> Poll<Result<usize, String>> {
+        ChildConn.write(ticket, seq, stream, bytes)
+    }
+    fn close(&self, ticket: Ticket, seq: u32, stream: u64) -> Poll<()> {
+        let mut calls = self.calls.lock().unwrap();
+        calls.push(seq);
+        if calls.len() <= 2 {
+            Poll::Pending
+        } else {
+            ChildConn.close(ticket, seq, stream)
+        }
+    }
+}
+
+#[test]
+fn an_exhausted_exchange_keeps_settling_its_pending_close_before_returning_the_error() {
+    let _one = SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    reset(1, Vec::new());
+    let host = PendingClose {
+        calls: Mutex::new(Vec::new()),
+    };
+    let messages = (0..crate::tool_program::EXCHANGE_SERVICES)
+        .map(|_| {
+            (
+                br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#.to_vec(),
+                None,
+            )
+        })
+        .collect();
+    let mut exchange = ProgramExchange::new("srv", 0, messages, false);
+    let ticket = Ticket {
+        slot: 9,
+        generation: 3,
+    };
+    let mut peer = Door::default();
+    assert!(exchange
+        .drive(&host, ticket, 17, &|_| true, &mut peer)
+        .is_pending());
+    let written = with(|c| c.received.len());
+    assert_eq!(with(|c| c.leases.len()), 1);
+    assert!(
+        exchange
+            .drive(&host, ticket, 17, &|_| true, &mut peer)
+            .is_pending(),
+        "an unsettled close keeps the exchange pending"
+    );
+    assert_eq!(
+        with(|c| c.received.len()),
+        written,
+        "cleanup writes no further messages"
+    );
+    let Poll::Ready(Err(reason)) = exchange.drive(&host, ticket, 17, &|_| true, &mut peer) else {
+        panic!("the settled close returns the original bound failure")
+    };
+    assert!(reason.contains("passed its bound"));
+    assert!(
+        with(|c| c.leases.is_empty()),
+        "the member's lease is actually closed"
+    );
+    let calls = host.calls.lock().unwrap();
+    assert_eq!(calls.len(), 3);
+    assert!(
+        calls.iter().all(|seq| *seq == calls[0]),
+        "every pending close uses the same service handle"
     );
 }
