@@ -180,6 +180,7 @@ pub const RELAY_REQUEST_FIELDS: &[(&str, &str)] = &[
     ("mcp-protocol-version", "2026-07-28"),
     ("mcp-method", "tools/call"),
     ("mcp-name", "read_file"),
+    ("mcp-param-path", "/a"),
 ];
 
 /// The far end's answers to the relayed call: a result, a JSON-RPC error, a result streamed after
