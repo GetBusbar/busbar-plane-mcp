@@ -7,6 +7,9 @@
 
 use super::*;
 
+#[path = "legacy_initialization_regressions.rs"]
+mod initialization;
+
 fn link() -> Link {
     let template = crate::client::jsonrpc::envelope(
         "https://up.example/events",
