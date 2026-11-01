@@ -24,36 +24,39 @@
 #[allow(dead_code)]
 mod door_facts;
 
+#[path = "support/wire_pagination.rs"]
+mod wire_pagination;
+
 use std::collections::{HashMap, VecDeque};
 use std::os::raw::c_void;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use busbar_contract::abi::host::conn::connector::{
-    ConnectorSlots, EstablishIn, ReplyIn, ReplyPiece, RequestIn, RequestPiece, StreamIn,
-    REPLY_BODY, REPLY_END, REPLY_HEAD, REQUEST_BODY, REQUEST_HEAD, SERVICES as CONN_SERVICES,
+    ConnectorSlots, EstablishIn, REPLY_BODY, REPLY_END, REPLY_HEAD, REQUEST_BODY, REQUEST_HEAD,
+    ReplyIn, ReplyPiece, RequestIn, RequestPiece, SERVICES as CONN_SERVICES, StreamIn,
 };
 use busbar_contract::abi::host::service::{
-    ClockNowIn, HostSlots, RandomFillIn, ServiceOut, SessionEmitIn, TrustServesIn,
-    TrustSightItemIn, DISTRUST_CHANGED, DISTRUST_NONE, DISTRUST_UNKNOWN_ITEM, ENTITLED,
-    SERVICES as HOST_SERVICES, TRUST_NEW,
+    ClockNowIn, DISTRUST_CHANGED, DISTRUST_NONE, DISTRUST_UNKNOWN_ITEM, ENTITLED, HostSlots,
+    RandomFillIn, SERVICES as HOST_SERVICES, ServiceOut, SessionEmitIn, TRUST_NEW, TrustServesIn,
+    TrustSightItemIn,
 };
 use busbar_contract::abi::mechanism::call::{
-    AbiStr, Blob, Field, InHead, OutHead, Outcome, RawOutcome, BLOB_OCTETS, FLAG_RESUME,
+    AbiStr, BLOB_OCTETS, Blob, FLAG_RESUME, Field, InHead, OutHead, Outcome, RawOutcome,
 };
 use busbar_contract::abi::mechanism::lifecycle::{
-    slot as life, CancelIn, DriveIn, OpenIn, OpenOut, OpsHead, TickIn, TickOut,
+    CancelIn, DriveIn, OpenIn, OpenOut, OpsHead, TickIn, TickOut, slot as life,
 };
 use busbar_contract::abi::mechanism::ticket::{HostCtx, HostTables, Ticket};
 use busbar_contract::abi::plane::{
-    slot, ArriveIn, ArriveOut, OnPieceIn, OnPieceOut, Ops, OutField, PlaneCancelIn, PlaneCancelOut,
-    PlaneDriveIn, PlaneDriveOut, PlaneOpenIn, PlaneOpenOut, RecordWrite, ServeIn, ServeOut,
-    UnitCount, AUDIT_REJECTED, CANCEL_ABORTED, CANCEL_OK_PARTIAL, EMIT_DONE, EMIT_TO_FAR_END,
-    FROM_CALLER, FROM_FAR_END, FROM_KERNEL, PIECE_HAS_STATUS, PIECE_LAST, RECORD_AUDIT,
+    AUDIT_REJECTED, ArriveIn, ArriveOut, CANCEL_ABORTED, CANCEL_OK_PARTIAL, EMIT_DONE,
+    EMIT_TO_FAR_END, FROM_CALLER, FROM_FAR_END, FROM_KERNEL, OnPieceIn, OnPieceOut, Ops, OutField,
+    PIECE_HAS_STATUS, PIECE_LAST, PlaneCancelIn, PlaneCancelOut, PlaneDriveIn, PlaneDriveOut,
+    PlaneOpenIn, PlaneOpenOut, RECORD_AUDIT, RecordWrite, ServeIn, ServeOut, UnitCount, slot,
 };
 use busbar_contract::abi::transport::FrameSpan;
 use busbar_plane_mcp::door;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 // ── the host's services ─────────────────────────────────────────────────────────────────────────
 
@@ -493,6 +496,9 @@ static TWO_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 /// What an upstream answers one request.
 fn upstream_answer(url: &str, fields: &[(String, String)], body: &Value) -> Reply {
+    if let Some(reply) = wire_pagination::http_reply(url, body) {
+        return reply;
+    }
     if url.starts_with(DOWN_URL) {
         return (503, Vec::new(), b"down".to_vec());
     }
@@ -1969,7 +1975,7 @@ fn a_members_update_reaches_a_line_subscriber_exactly_once() {
 
 /// `refusal` for a kernel refusal before any unit: the status and body the door answers.
 fn unitless_kernel_refusal(d: &Door, status: u32, reason: u32) -> (Outcome, u32, Vec<u8>) {
-    use busbar_contract::abi::plane::{RefusalIn, RefusalOut, REFUSAL_KERNEL};
+    use busbar_contract::abi::plane::{REFUSAL_KERNEL, RefusalIn, RefusalOut};
     let mut reply = vec![0_u8; 1 << 12];
     let mut fields = [z::<OutField>(); 8];
     let mut arena = vec![0_u8; 1 << 12];

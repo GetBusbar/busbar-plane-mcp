@@ -100,9 +100,11 @@ fn raising_adds_the_stateless_meta_and_mirrors_the_name() {
 
     let mut bare = json!({"jsonrpc":"2.0","id":4,"method":"tools/list"});
     assert_eq!(raise(&mut bare), Some(()));
-    assert!(crate::codec::mirrored(&bare)
-        .iter()
-        .all(|(k, _)| k != "mcp-name"));
+    assert!(
+        crate::codec::mirrored(&bare)
+            .iter()
+            .all(|(k, _)| k != "mcp-name")
+    );
     assert!(bare["params"]["_meta"].is_object());
 
     let mut bad = json!({"jsonrpc":"2.0","id":5,"method":"tools/list","params":[1]});
@@ -247,4 +249,18 @@ fn lowering_an_answer_splices_its_own_bytes() {
         Some(Lowered::Inexpressible)
     );
     assert_eq!(lower_answer(b"not json"), None);
+}
+
+#[test]
+fn event_frames_normalize_each_sse_line_ending() {
+    for data in ["one\ntwo", "one\rtwo", "one\r\ntwo"] {
+        assert_eq!(
+            frame(None, Some("message"), data),
+            "event: message\ndata: one\ndata: two\n\n"
+        );
+    }
+    assert_eq!(
+        frame(None, None, "one\r\rthree"),
+        "data: one\ndata: \ndata: three\n\n"
+    );
 }

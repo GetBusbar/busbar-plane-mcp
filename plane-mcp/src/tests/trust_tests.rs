@@ -213,3 +213,12 @@ fn the_views_read_the_verdict_the_kernel_enforces() {
         assert_ne!(view["capabilities"][0]["status"], "approved", "{view}");
     }
 }
+
+#[test]
+fn a_present_nonstring_description_is_refused_not_hashed_as_absent() {
+    for description in [json!(null), json!(false), json!(3), json!([]), json!({})] {
+        assert!(observe(&json!({"tools":[{"name":"read","description":description}]})).is_err());
+    }
+    assert!(observe(&json!({"tools":[{"name":"read"}]})).is_ok());
+    assert!(observe(&json!({"tools":[{"name":"read","description":""}]})).is_ok());
+}

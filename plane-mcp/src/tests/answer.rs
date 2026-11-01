@@ -3,7 +3,7 @@
 
 //! Each arrival is answered here or sent on, and what is answered here is the served engine's.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::*;
 use crate::tests::everyone;
@@ -187,4 +187,45 @@ fn a_notice_is_acknowledged_and_a_refusal_answered() {
     let a = answer(&d, None, &catalogue(), &everyone, |_| false);
     assert!(matches!(a, Answer::Here { status: 400, .. }));
     assert_eq!(body(&a)["error"]["code"], -32700);
+}
+
+#[test]
+fn discover_hides_the_same_quarantined_tools_as_tools_list() {
+    let cfg = crate::statement::read_tools_section(
+        br#"{"only":{"url":"https://mcp.example","tools_allow":{"hidden":{}}}}"#,
+    )
+    .unwrap();
+    let cat = Catalogue::build(1, &cfg);
+    let (d, params) = request("server/discover", json!({}));
+    let a = answer(&d, Some(&params), &cat, &everyone, |_| true);
+    assert_eq!(body(&a)["result"]["counts"]["tools"], 0);
+    assert_eq!(body(&a)["result"]["servers"], json!([]));
+}
+
+#[test]
+fn discovery_carries_namespaced_server_info_metadata() {
+    let a = run("server/discover", json!({}));
+    let v = body(&a);
+    assert_eq!(
+        v["result"]["_meta"]["io.modelcontextprotocol/serverInfo"],
+        v["result"]["serverInfo"]
+    );
+}
+
+#[test]
+fn resources_without_display_names_still_render_protocol_names() {
+    let cfg = crate::statement::read_tools_section(br#"{"only":{"url":"https://mcp.example","resources_allow":{"file:///readme":{"text":"x"}},"resource_templates_allow":{"file:///{id}":{"text":"{id}"}}}}"#).unwrap();
+    let cat = Catalogue::build(1, &cfg);
+    let resources: Value =
+        serde_json::from_slice(&cat.resources_list(&json!(1), &everyone)).unwrap();
+    assert_eq!(
+        resources["result"]["resources"][0]["name"],
+        "file:///readme"
+    );
+    let templates: Value =
+        serde_json::from_slice(&cat.resource_templates_list(&json!(1), &everyone)).unwrap();
+    assert_eq!(
+        templates["result"]["resourceTemplates"][0]["name"],
+        "file:///{id}"
+    );
 }
