@@ -215,8 +215,7 @@ pub enum Lowered {
     Unchanged,
     /// The answer's own bytes with only the stateless-only members' spans cut out of its result.
     Spliced(Vec<u8>),
-    /// The result is not a complete one ([`lower_result`] answers `false`: a `resultType` other
-    /// than `complete`): the caller answers an error instead.
+    /// The result is not a complete one ([`NotExpressible`]): the caller answers an error instead.
     Inexpressible,
 }
 
@@ -337,7 +336,11 @@ pub fn frame(id: Option<&str>, event: Option<&str>, data: &str) -> String {
         out.push_str(i);
         out.push('\n');
     }
-    crate::framing::push_data_lines(&mut out, data);
+    for line in data.split('\n') {
+        out.push_str("data: ");
+        out.push_str(line.strip_suffix('\r').unwrap_or(line));
+        out.push('\n');
+    }
     out.push('\n');
     out
 }

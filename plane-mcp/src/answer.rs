@@ -55,18 +55,10 @@ impl Answer {
     }
 }
 
-/// `server/discover`: the capabilities, and the catalogue this caller reaches, counted. `hidden` is
-/// the kernel's trust verdict `tools/list` applies: a tool it hides is neither counted nor names
-/// its server.
+/// `server/discover`: the capabilities, and the catalogue this caller reaches, counted.
 #[must_use]
-pub fn discover(
-    catalogue: &Catalogue,
-    id: &Value,
-    admit: &impl Fn(&str, &str) -> bool,
-    hidden: impl Fn(&crate::catalogue::ToolEntry) -> bool,
-) -> Vec<u8> {
-    let mut tools = catalogue.tools_for(admit);
-    tools.retain(|t| !hidden(t));
+pub fn discover(catalogue: &Catalogue, id: &Value, admit: &impl Fn(&str, &str) -> bool) -> Vec<u8> {
+    let tools = catalogue.tools_for(admit);
     let prompts = catalogue.prompts_for(admit);
     let resources = catalogue.resources_for(admit);
     let mut servers: Vec<&str> = tools
@@ -153,7 +145,7 @@ pub fn answer(
                 let empty = json!({ "completion": { "values": [], "hasMore": false, "total": 0 } });
                 Answer::ok(complete(id, empty))
             } else if op == OP_DISCOVER {
-                Answer::ok(discover(catalogue, id, admit, hidden))
+                Answer::ok(discover(catalogue, id, admit))
             } else {
                 Answer::Far
             }
