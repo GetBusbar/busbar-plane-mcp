@@ -31,7 +31,7 @@ function fakeLaunch() {
  * Run the subject's client against the fake server in a given mode, wait for
  * the client process to exit, and return the observed transcript.
  */
-async function driveClient(ctx, mode, { failsafeMs = 20000, armListing = false } = {}) {
+async function driveClient(ctx, mode, { failsafeMs = 20000, armListing = false, observeStall = false } = {}) {
   if (!ctx.target.hasClientRole) ctx.skip('target has no client role configured');
   const dir = mkdtempSync(join(tmpdir(), 'mcp-battery-'));
   const transcript = join(dir, 'transcript.jsonl');
@@ -45,18 +45,28 @@ async function driveClient(ctx, mode, { failsafeMs = 20000, armListing = false }
     ...(armListing ? { MCP_ARM_LISTING: '1' } : {}),
   });
   let exited = true;
+  let waitError;
   try {
     await peer.waitForExit(failsafeMs);
-  } catch {
+  } catch (err) {
+    if (err?.message !== `failsafe timeout after ${failsafeMs}ms waiting for peer exit`) throw err;
     exited = false;
+    waitError = err;
   } finally {
     await peer.stop();
   }
   const lines = existsSync(transcript)
     ? readFileSync(transcript, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))
     : [];
+  ctx.note('client.driver', {
+    mode, exitedBeforeCleanup: exited, exitCode: peer.exitCode,
+    exitSignal: peer.exitSignal, transcript, waitError: waitError?.message || null,
+  });
+  if (peer.spawnError) throw peer.spawnError;
+  if (waitError && !observeStall) throw waitError;
   return {
     exited,
+    waitError,
     exitCode: peer.exitCode,
     stderr: peer.stderr,
     stdout: peer.stdoutBytes.toString('utf8'),
@@ -93,6 +103,57 @@ function stimulated(ctx, obs, mode, pred, what) {
 const PV = 'io.modelcontextprotocol/protocolVersion';
 const CC = 'io.modelcontextprotocol/clientCapabilities';
 const CI = 'io.modelcontextprotocol/clientInfo';
+
+// Associate retries with the request that actually received this input request. A capability
+// declaration on some other request, or a response to another input key, is not evidence here.
+function inputRetries(obs, inputKey, inputMethod) {
+  const sent = new Map();
+  const challenges = new Map();
+  const retries = [];
+  for (const entry of obs.entries) {
+    const m = entry.payload;
+    if (!m || typeof m !== 'object') continue;
+    if (entry.direction === 'client->server' && m.method && m.id !== undefined) {
+      const candidates = challenges.get(m.method) || [];
+      if (candidates.length > 0 && Object.hasOwn(m.params?.inputResponses || {}, inputKey)) {
+        // The peer reuses input keys. Concurrent calls of the same method cannot be paired
+        // uniquely from those keys alone; retain the response without inventing its parent.
+        const challenge = candidates.length === 1 ? candidates[0] : {};
+        retries.push({ request: challenge.request, result: challenge.result, retry: m,
+          response: m.params.inputResponses[inputKey] });
+        challenges.delete(m.method);
+      }
+      sent.set(m.id, m);
+    } else if (entry.direction === 'server->client' && m.id !== undefined && !m.method) {
+      const request = sent.get(m.id);
+      sent.delete(m.id);
+      if (request && m.result?.resultType === 'input_required'
+        && m.result.inputRequests?.[inputKey]?.method === inputMethod) {
+        const candidates = challenges.get(request.method) || [];
+        candidates.push({ request, result: m.result });
+        challenges.set(request.method, candidates);
+      }
+    }
+  }
+  return retries;
+}
+
+function assertRetry(ctx, { request, result, retry }) {
+  if (!request) {
+    ctx.note('client.retry-correlation', 'Concurrent input requests reused the same input key; '
+      + 'the parent request is ambiguous, so retry id/state assertions are unavailable.');
+    return;
+  }
+  ctx.assert('PAT.MRTR.NEW-ID', retry.id !== request.id,
+    `retry of ${request.method} reused its original id`);
+  if (Object.hasOwn(result, 'requestState')) {
+    ctx.assert('PAT.MRTR.ECHO-STATE', retry.params.requestState === result.requestState,
+      `retry of ${request.method} did not echo the server's requestState`);
+  } else {
+    ctx.assert('PAT.MRTR.NO-STATE-INVENTION', !Object.hasOwn(retry.params, 'requestState'),
+      `retry of ${request.method} invented requestState`);
+  }
+}
 
 test({
   id: 'CLI.META.EVERY-REQUEST-CARRIES-VERSION-AND-CAPS',
@@ -135,21 +196,25 @@ test({
     if (requests.length === 0) ctx.skip(`client sent no requests; driver stderr: ${JSON.stringify(String(obs.stderr || '').slice(-800))}`);
     ctx.evidence('subject.sentRequests', requests.length > 0,
       'no request from the subject means no id allocation to judge');
-    const seen = new Set();
+    const pending = new Set();
     const reused = [];
-    for (const r of requests) {
-      const key = `${typeof r.id}:${JSON.stringify(r.id)}`;
-      if (seen.has(key)) reused.push(r.id);
-      seen.add(key);
-    }
-    // Reuse AFTER a response is legal. We only have the send order here, so we
-    // assert the weaker, always-true property: ids are not null, and any reuse
-    // is reported as a variance point rather than a failure.
-    for (const r of requests) {
-      ctx.assert('BASE.REQ.ID-NOT-NULL', r.id !== null, `request ${r.method} used id null`);
-      ctx.assert('BASE.REQ.ID-PRESENT',
-        typeof r.id === 'string' || typeof r.id === 'number',
-        `request ${r.method} id is ${typeof r.id}`);
+    for (const entry of obs.entries) {
+      const m = entry.payload;
+      if (!m || m.id === undefined) continue;
+      const key = `${typeof m.id}:${JSON.stringify(m.id)}`;
+      if (entry.direction === 'server->client' && !m.method && ('result' in m || 'error' in m)) {
+        pending.delete(key);
+      } else if (entry.direction === 'client->server' && m.method) {
+        ctx.assert('BASE.REQ.ID-NOT-NULL', m.id !== null, `request ${m.method} used id null`);
+        ctx.assert('BASE.REQ.ID-PRESENT',
+          typeof m.id === 'string' || (typeof m.id === 'number' && Number.isInteger(m.id)),
+          `request ${m.method} id is ${JSON.stringify(m.id)}`);
+        const collision = pending.has(key);
+        ctx.assert('BASE.REQ.ID-UNIQUE', !collision,
+          `request ${m.method} reused pending ${typeof m.id} id ${JSON.stringify(m.id)}`);
+        if (collision) reused.push(m.id);
+        pending.add(key);
+      }
     }
     ctx.variance('client.reusedIds', reused);
     ctx.variance('client.idType', typeof requests[0].id);
@@ -162,16 +227,15 @@ test({
   role: 'client', area: 'conformance', tier: 'push', peer: 'fake',
   catches: 'A client carried forward from 2025-11-25 answering server-initiated requests, which is forbidden in 2026-07-28.',
   run: async (ctx) => {
-    const obs = await driveClient(ctx, 'honest');
+    const obs = await driveClient(ctx, 'server-request');
     const responses = obs.fromClient.filter(
       (m) => m.id !== undefined && !m.method && ('result' in m || 'error' in m),
     );
     // "It sent no responses" is true of a subject that sent nothing. The row means "it talked to
     // the server AND none of what it sent was a response".
-    ctx.evidence('subject.acted.honest', obs.fromClient.length > 0,
-      'the subject sent nothing at all, so "sent no responses" is a fact about silence');
-    ctx.evidence('stimulus.honest', obs.fromServer.length > 0,
-      'the peer answered nothing, so the subject was never in a position to reply to anything');
+    stimulated(ctx, obs, 'server-request',
+      (m) => m && m.id === 'server-initiated-1' && m.method,
+      'the forbidden server-initiated request');
     ctx.assert('STDIO.CLIENT-NO-RESPONSES', responses.length === 0,
       `client sent JSON-RPC responses: ${JSON.stringify(responses).slice(0, 300)}`);
   },
@@ -207,13 +271,18 @@ test({
     stimulated(ctx, obs, 'malformed',
       (m) => typeof m === 'string' && m.includes('"jsonrpc"') && !m.trim().endsWith('}'),
       'the unparseable frame');
-    // The only assertable property is that the client did not itself emit
-    // garbage in response. Whether it retries or gives up is its own business.
+    // Refusing to send a JSON-RPC response is observable; process recovery is not.
     ctx.assert('STDIO.CLIENT-NO-RESPONSES',
       obs.unparseable.length === 0,
       `client emitted unparseable frames after a malformed server frame: ${JSON.stringify(obs.unparseable.slice(0, 2))}`);
+    ctx.assert('STDIO.CLIENT-NO-RESPONSES',
+      !obs.fromClient.some((m) => m.id !== undefined && !m.method && ('result' in m || 'error' in m)),
+      'client emitted a forbidden JSON-RPC response after a malformed server frame');
     ctx.variance('hostile.malformed.clientExited', obs.exited);
     ctx.variance('hostile.malformed.requestsSent', obs.fromClient.length);
+    ctx.note('limitation', 'The no-response assertion above does not establish client survival. A malformed '
+      + 'server frame may legitimately terminate this driver; proving host recovery needs a '
+      + 'client-side completion or recovery hook.');
   },
 });
 
@@ -223,7 +292,7 @@ test({
   role: 'client', area: 'hostile', tier: 'pr', peer: 'fake', timing: true,
   catches: 'A client with no request timeout, so one stalling server hangs the host indefinitely.',
   run: async (ctx) => {
-    const obs = await driveClient(ctx, 'stall', { failsafeMs: 25000 });
+    const obs = await driveClient(ctx, 'stall', { failsafeMs: 25000, observeStall: true });
     // The stimulus in `stall` is an ABSENCE — the peer's silence — so it cannot be read off the
     // server half of the transcript. What CAN be read is that the subject put a request in flight
     // and that the peer never answered it: without those two, "the client exited" says nothing
@@ -237,10 +306,15 @@ test({
       'every request the subject sent was answered, so the stalling peer never stalled it');
     // Spec: implementations SHOULD establish timeouts for all sent requests.
     // SHOULD, so advisory, but a strong signal in a differential run.
-    ctx.recommend('client.hasRequestTimeout', obs.exited,
-      'Spec SHOULD: implementations establish timeouts for all sent requests to prevent hung connections.');
+    ctx.recommend('client.driverCompletedAgainstStall', obs.exited,
+      'The driver exited before the harness failsafe. This does not establish a per-request timeout.');
     ctx.variance('hostile.stall.clientExitedWithin25s', obs.exited);
     ctx.variance('hostile.stall.exitCode', obs.exitCode);
+    ctx.note('limitation', 'Request timeouts are advisory. Driver exit or harness termination cannot prove '
+      + 'that a request timeout fired; proving that needs a correlated client-side timeout event.');
+    // The peer's silence is intentional; an interrupted driver run is still not a completed
+    // observation. Preserve the stimulus/advice above, then report the original harness error.
+    if (obs.waitError) throw obs.waitError;
   },
 });
 
@@ -254,10 +328,10 @@ test({
     stimulated(ctx, obs, 'half-answer',
       (m) => typeof m === 'string' && m.includes('"result"') && !m.trim().endsWith('}'),
       'the half-written frame followed by a closed stdout');
-    ctx.recommend('client.survivesMidFrameDisconnect', obs.exited,
-      'A client should terminate or recover when the server closes the stream mid-frame.');
     ctx.variance('hostile.halfAnswer.clientExited', obs.exited);
     ctx.variance('hostile.halfAnswer.exitCode', obs.exitCode);
+    ctx.note('limitation', 'Mid-frame EOF may legitimately terminate the driver. Exit alone cannot distinguish '
+      + 'handled disconnection from a crash; proving recovery needs a client-side completion hook.');
   },
 });
 
@@ -274,24 +348,23 @@ test({
       'the form-mode elicitation asking for a password');
     // The SERVER is the violator here (form mode MUST NOT request secrets).
     // The client-side question is whether it leaked anything back.
-    const retries = obs.fromClient.filter((m) => m.method === 'tools/call'
-      && m.params && m.params.inputResponses);
+    const retries = inputRetries(obs, 'creds', 'elicitation/create');
     const leaked = [];
     for (const r of retries) {
-      const blob = JSON.stringify(r.params.inputResponses);
-      if (/password|apiKey/i.test(blob) && /"action"\s*:\s*"accept"/.test(blob)) {
-        // Accepting is only a leak if content was actually supplied.
-        for (const v of Object.values(r.params.inputResponses)) {
-          if (v && v.action === 'accept' && v.content
-            && Object.keys(v.content).length > 0) leaked.push(v.content);
-        }
+      assertRetry(ctx, r);
+      const v = r.response;
+      if (v?.action === 'accept' && v.content && typeof v.content === 'object') {
+        const fields = ['password', 'apiKey'].filter((key) => Object.hasOwn(v.content, key));
+        if (fields.length > 0) leaked.push(...fields);
       }
     }
     ctx.recommend('client.doesNotAutoFillCredentials', leaked.length === 0,
       'Servers MUST NOT request secrets in form mode; a client that auto-accepts such a form leaks them.');
     ctx.variance('hostile.evilElicitation.retried', retries.length > 0);
-    ctx.variance('hostile.evilElicitation.leakedFields',
-      leaked.flatMap((c) => Object.keys(c)).sort());
+    ctx.variance('hostile.evilElicitation.leakedFields', [...new Set(leaked)].sort());
+    ctx.note('limitation', 'The registered form-secret prohibition constrains the server. Correlated client '
+      + 'disclosures are recorded above, but no registered clause makes client refusal mandatory; '
+      + 'this row cannot certify credential protection or user consent over stdio.');
   },
 });
 
@@ -308,16 +381,22 @@ test({
       (m) => m && m.result && m.result.resultType === 'input_required'
         && JSON.stringify(m.result.inputRequests || {}).includes('sampling/createMessage'),
       'the MRTR request for an undeclared sampling capability');
-    const declaredSampling = requests.some(
-      (r) => (((r.params || {})._meta || {})[CC] || {}).sampling !== undefined,
-    );
-    const answeredSampling = requests.some((r) => r.params && r.params.inputResponses
-      && Object.values(r.params.inputResponses).some((v) => v && (v.model || v.stopReason)));
+    const retries = inputRetries(obs, 'sample', 'sampling/createMessage');
+    for (const retry of retries) assertRetry(ctx, retry);
+    const fulfilled = retries.filter(({ response }) => response
+      && typeof response === 'object' && !response.error
+      && (Object.hasOwn(response, 'model') || Object.hasOwn(response, 'stopReason')));
+    const declaredSampling = fulfilled.length === 0 ? null : fulfilled.every(({ request }) => request &&
+      (((request.params || {})._meta || {})[CC] || {}).sampling !== undefined);
+    const answeredSampling = fulfilled.length > 0;
     ctx.recommend('client.honoursOwnCapabilityDeclaration',
       declaredSampling || !answeredSampling,
       'A client that did not declare sampling should not fulfil a sampling inputRequest.');
     ctx.variance('hostile.mrtrUndeclared.declaredSampling', declaredSampling);
     ctx.variance('hostile.mrtrUndeclared.answeredSampling', answeredSampling);
+    ctx.note('limitation', 'The registered undeclared-capability prohibition constrains the server. Sampling '
+      + 'responses are correlated above with the triggering request declaration, but no registered '
+      + 'client clause requires refusal; client consent needs an in-process hook.');
   },
 });
 
@@ -342,6 +421,8 @@ test({
       'RECOMMENDATION (this battery): re-reading tools/list after a call limits the window for a schema rug-pull.');
     ctx.variance('hostile.rugpull.listCount', lists.length);
     ctx.variance('hostile.rugpull.callCount', calls.length);
+    ctx.note('limitation', 'Re-listing after a call is not required by the protocol. Listing counts do not prove '
+      + 'that a changed schema was detected; that needs a client-side schema or invocation hook.');
   },
 });
 
@@ -356,19 +437,13 @@ test({
       (m) => m && m.result && m.result.structuredContent
         && m.result.structuredContent.count === 'not-an-integer',
       'the result that violates the declared outputSchema');
-    // Clients SHOULD validate. We cannot see validation from the wire, only whether the client kept
-    // going — so the recommendation is keyed on THAT, and not, as it was, on a literal `true`, which
-    // recorded a green opinion about a subject nobody had observed.
-    ctx.recommend('client.survivesOutputSchemaViolation',
-      obs.fromClient.length > 0 && obs.unparseable.length === 0,
-      'Spec SHOULD: clients validate structured results against outputSchema. Whether it validated '
-      + 'is NOT observable from the wire; what is recorded here is that it stayed well-formed after '
-      + 'being lied to. Proving validation needs a client-side hook.');
     ctx.variance('hostile.outputSchemaLie.clientExited', obs.exited);
     ctx.variance('hostile.outputSchemaLie.requestCount', obs.fromClient.length);
     ctx.note('limitation',
       'Whether the client validated structuredContent is NOT observable from the server side. '
-      + 'This test records survival only. Proving validation requires an in-process hook in the client.');
+      + 'Proving validation requires an in-process hook in the client.');
+    ctx.note('limitation', 'Earlier client traffic does not prove validation or post-result survival. Proving '
+      + 'the advisory outputSchema check needs a client-side validation hook.');
   },
 });
 
@@ -384,14 +459,9 @@ test({
       'the multi-megabyte result');
     ctx.variance('hostile.giant.clientExited', obs.exited);
     ctx.variance('hostile.giant.exitCode', obs.exitCode);
-    // Keyed on an observation and not on a literal `true`: what the wire shows is whether the
-    // subject was still coherent after the giant frame, which is the only half of this that is
-    // observable from the server side at all.
-    ctx.recommend('client.survivesGiantResult',
-      obs.unparseable.length === 0,
-      'RECOMMENDATION (this battery): clients should cap inbound message size rather than buffering '
-      + 'without limit. The cap itself is not visible from here; the recorded fact is that the '
-      + 'subject did not start emitting garbage after the frame.');
+    ctx.variance('hostile.giant.unparseableFrames', obs.unparseable.length);
+    ctx.note('limitation', 'Silence after a giant result does not prove survival or bounded buffering. Proving '
+      + 'either needs a client-side completion or memory observation; no size cap is imposed here.');
   },
 });
 
@@ -410,13 +480,8 @@ test({
     ctx.note('limitation',
       'Icon fetching happens outside the MCP stdio channel. Detecting a fetch needs a network sinkhole, '
       + 'which is in the HTTP half of the battery, not the stdio half.');
-    // Keyed on an observation and not on a literal `true`. The scheme check itself is invisible from
-    // here; that the subject was SHOWN the URI and kept talking is not, and it is what the row
-    // records. The unproven half is named in the note above and in the text below.
-    ctx.recommend('client.wasOfferedUnsafeIconScheme',
-      obs.fromClient.length > 0,
-      'Spec MUST for clients that render icons. NOT observable over stdio: this row proves only that '
-      + 'the subject was offered a javascript: icon. Proving it never fetched one needs an HTTP sinkhole.');
+    ctx.note('limitation', 'Offering an unsafe URI does not observe fetching or rendering. Icon-scheme '
+      + 'conformance requires a network sinkhole or rendering hook outside this stdio transcript.');
   },
 });
 
@@ -454,13 +519,10 @@ test({
         && m.result.ttlMs === undefined && m.result.cacheScope === undefined),
       'the peer served no hint-free listing, so the tolerance this row is named for was never tested');
 
-    const keptGoing = without.fromClient.filter((m) => m.method).length
-      >= withHints.fromClient.filter((m) => m.method).length;
-    ctx.recommend('client.toleratesAbsentCachingHints', keptGoing,
-      'Spec SHOULD: if ttlMs is absent, clients assume 0 and carry on. A client that raises a '
-      + 'validation error instead cannot talk to older or minimal servers.');
     ctx.variance('cache.requestsWithHints', withHints.fromClient.filter((m) => m.method).length);
     ctx.variance('cache.requestsWithoutHints', without.fromClient.filter((m) => m.method).length);
     ctx.note('spec-clause', 'CACHE.CLIENT-TOLERATES-ABSENT-TTL');
+    ctx.note('limitation', 'Absent-TTL tolerance is advisory. Cross-run request counts do not establish '
+      + 'whether a listing was accepted; proving that needs a correlated client-side listing result.');
   },
 });

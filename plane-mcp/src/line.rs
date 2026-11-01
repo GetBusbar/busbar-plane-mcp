@@ -86,11 +86,20 @@ pub fn initialize_result(id: &Value) -> Value {
 /// answer lowered ([`crate::adapt`]).
 #[must_use]
 pub fn session_initialize_result(id: &Value, revision: Revision) -> Value {
+    let mut caps = capabilities();
+    for group in ["tools", "prompts", "resources"] {
+        caps[group]["listChanged"] = Value::Bool(false);
+    }
+    if revision == Revision::R2024_11_05 {
+        caps.as_object_mut()
+            .expect("capabilities is an object")
+            .remove("completions");
+    }
     result(
         id,
         json!({
             "protocolVersion": revision.wire(),
-            "capabilities": capabilities(),
+            "capabilities": caps,
             "serverInfo": server_info(),
         }),
     )
@@ -141,9 +150,11 @@ pub fn era(value: &Value) -> Era {
         crate::adapt::METHOD_INITIALIZE => match value
             .pointer("/params/protocolVersion")
             .and_then(Value::as_str)
-            .and_then(crate::revision::accept_offered)
         {
-            Some(revision) => Era::Opened(revision, session_initialize_result(id, revision)),
+            Some(requested) => {
+                let revision = crate::revision::negotiate(Some(requested));
+                Era::Opened(revision, session_initialize_result(id, revision))
+            }
             None => Era::Answer(initialize_result(id)),
         },
         crate::adapt::METHOD_PING => Era::Answer(result(id, json!({}))),
@@ -233,7 +244,7 @@ pub struct LiveAsk {
     /// The `input_required` result itself: what the caller is handed when it does not answer.
     pub fallback: Vec<u8>,
     /// The asks not yet issued, in order: `(key, method, params)`.
-    pub queued: Vec<(String, String, Value)>,
+    pub queued: Vec<(String, String, Option<Value>)>,
     /// The key of the ask in flight.
     pub current: String,
     /// The answers so far, by key.
@@ -253,13 +264,13 @@ impl LiveAsk {
     pub fn of(original: Value, fallback: Vec<u8>, result: &Value, round: u32) -> Option<Self> {
         let requests = result.get("inputRequests")?.as_object()?;
         let state = result.get("requestState")?.as_str()?.to_string();
-        let mut queued: Vec<(String, String, Value)> = requests
+        let mut queued: Vec<(String, String, Option<Value>)> = requests
             .iter()
             .filter_map(|(key, ask)| {
                 Some((
                     key.clone(),
                     ask.get("method")?.as_str()?.to_string(),
-                    ask.get("params").cloned().unwrap_or(Value::Null),
+                    ask.get("params").cloned(),
                 ))
             })
             .collect();
@@ -295,10 +306,11 @@ impl LiveAsk {
     pub fn issue(&mut self, n: u64) -> Option<Vec<u8>> {
         let (key, method, params) = self.queued.pop()?;
         self.current = key;
+        let params = params.as_ref().map(crate::codec::json);
         let mut line = busbar_contract::jsonrpc::request_bytes(
             &crate::codec::json(&format!("{ASK_ID_PREFIX}{n}")),
             &method,
-            Some(&crate::codec::json(&params)),
+            params.as_deref(),
         );
         line.push(b'\n');
         Some(line)

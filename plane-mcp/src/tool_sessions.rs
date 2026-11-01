@@ -95,36 +95,36 @@ struct Use {
 /// One buffered server-sent event of a session stream, kept so a reconnecting `Last-Event-ID` can
 /// resume from it.
 #[derive(Debug)]
-struct ReplayEvent {
+struct ReplayEvent<D: ReplayData> {
     seq: u64,
     /// Session-wide write order, so the oldest event in any stream is found without a clock.
     order: u64,
-    data: String,
+    data: D,
 }
 
 #[derive(Debug)]
-struct Stream {
+struct Stream<D: ReplayData> {
     id: u32,
     /// How many live streams read this cursor: while any does, it is never dropped.
     live: u32,
     next_seq: u64,
     /// The highest seq ever trimmed away, or 0 when nothing was trimmed.
     trimmed_through: u64,
-    events: VecDeque<ReplayEvent>,
+    events: VecDeque<ReplayEvent<D>>,
 }
 
 #[derive(Debug)]
-struct Session {
+struct Session<D: ReplayData> {
     owner: Owner,
     revision: Revision,
     last_ms: u64,
-    open: Vec<Stream>,
+    open: Vec<Stream<D>>,
     next_stream: u32,
     next_order: u64,
     bytes: usize,
 }
 
-impl Session {
+impl<D: ReplayData> Session<D> {
     /// A live stream reads one of its cursors: it is live work, never evicted.
     fn held(&self) -> bool {
         self.open.iter().any(|s| s.live > 0)
@@ -156,23 +156,39 @@ impl Session {
 
 /// What a `Last-Event-ID` resumes.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Replay {
+pub struct Replay<D = String> {
     /// The stream the cursor named, which the resumed connection continues.
     pub stream: u32,
     /// `(event id, data)` for every buffered event after the cursor, in order.
-    pub events: Vec<(String, String)>,
+    pub events: Vec<(String, D)>,
     /// `false` when events after the cursor were trimmed and cannot be replayed.
     pub complete: bool,
 }
 
 /// The session table for one plane instance.
 #[derive(Debug)]
-pub struct SessionTable {
+pub struct ReplayTable<D: ReplayData> {
     bounds: Bounds,
-    sessions: BTreeMap<String, Session>,
+    sessions: BTreeMap<String, Session<D>>,
     total_bytes: usize,
     owners: BTreeMap<Owner, Use>,
 }
+
+/// An event's encoded bytes are charged even when its output is generated on collection.
+pub trait ReplayData: Clone + std::fmt::Debug + From<String> {
+    fn len(&self) -> usize;
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl ReplayData for String {
+    fn len(&self) -> usize {
+        String::len(self)
+    }
+}
+
+pub type SessionTable = ReplayTable<String>;
 
 /// Formats an event id: `<stream>-<seq>`, unique within the session.
 fn event_id(stream: u32, seq: u64) -> String {
@@ -185,7 +201,7 @@ fn parse_event_id(raw: &str) -> Option<(u32, u64)> {
     Some((s.parse().ok()?, q.parse().ok()?))
 }
 
-impl SessionTable {
+impl<D: ReplayData> ReplayTable<D> {
     /// An empty table under `bounds`.
     #[must_use]
     pub fn new(bounds: Bounds) -> Self {
@@ -264,7 +280,7 @@ impl SessionTable {
                 return Err(OpenRefused::Full);
             }
         }
-        let bytes = Session::base_bytes(&owner);
+        let bytes = Session::<D>::base_bytes(&owner);
         self.hold_bytes(&owner, bytes);
         self.owners.entry(owner.clone()).or_default().sessions += 1;
         let key = owner.clone();
@@ -396,21 +412,70 @@ impl SessionTable {
         data: &str,
         now_ms: u64,
     ) -> Option<String> {
+        self.push_with(id, owner, stream, || data.to_string().into(), now_ms)
+    }
+
+    pub fn push_data(
+        &mut self,
+        id: &str,
+        owner: &Owner,
+        stream: u32,
+        data: D,
+        now_ms: u64,
+    ) -> Option<String> {
+        self.push_with(id, owner, stream, || data, now_ms)
+    }
+
+    /// Whether an event can survive this table's existing per-session retention quota. This
+    /// chooses its storage representation; oversized events still advance and trim as before.
+    pub fn retained_event_fits(&self, encoded_len: usize) -> bool {
+        encoded_len
+            .checked_add(EVENT_OVERHEAD)
+            .is_some_and(|cost| cost <= self.bounds.max_session_bytes)
+    }
+
+    /// Prepare retained storage only after the same owner and open-cursor checks as `push`.
+    /// Both checks and preparation remain inside this table's exclusive borrow.
+    pub fn push_prepared<E>(
+        &mut self,
+        id: &str,
+        owner: &Owner,
+        stream: u32,
+        data: D,
+        prepare: impl FnOnce(&Self, D) -> Result<D, E>,
+        now_ms: u64,
+    ) -> Result<Option<String>, E> {
+        if !self
+            .find(id, owner, now_ms)
+            .is_some_and(|session| session.open.iter().any(|cursor| cursor.id == stream))
+        {
+            return Ok(None);
+        }
+        let data = prepare(self, data)?;
+        Ok(self.push_data(id, owner, stream, data, now_ms))
+    }
+
+    fn push_with(
+        &mut self,
+        id: &str,
+        owner: &Owner,
+        stream: u32,
+        data: impl FnOnce() -> D,
+        now_ms: u64,
+    ) -> Option<String> {
         let max_session = self.bounds.max_session_bytes;
         let s = self.find(id, owner, now_ms)?;
         let order = s.next_order;
         let st = s.open.iter_mut().find(|st| st.id == stream)?;
+        let data = data();
+        let cost = data.len().checked_add(EVENT_OVERHEAD)?;
+        let charged = s.bytes.checked_add(cost)?;
         let seq = st.next_seq;
         st.next_seq += 1;
-        let cost = data.len() + EVENT_OVERHEAD;
-        st.events.push_back(ReplayEvent {
-            seq,
-            order,
-            data: data.to_string(),
-        });
+        st.events.push_back(ReplayEvent { seq, order, data });
         s.next_order += 1;
-        s.bytes += cost;
-        let base = Session::base_bytes(&s.owner);
+        s.bytes = charged;
+        let base = Session::<D>::base_bytes(&s.owner);
         let mut freed = 0;
         while s.bytes > base + max_session {
             let f = s.trim_oldest();
@@ -439,11 +504,11 @@ impl SessionTable {
         owner: &Owner,
         last_event_id: &str,
         now_ms: u64,
-    ) -> Option<Replay> {
+    ) -> Option<Replay<D>> {
         let (stream, cursor) = parse_event_id(last_event_id)?;
         let s = self.find(id, owner, now_ms)?;
         let st = s.open.iter().find(|st| st.id == stream)?;
-        let events: Vec<(String, String)> = st
+        let events: Vec<(String, D)> = st
             .events
             .iter()
             .filter(|e| e.seq > cursor)
@@ -514,7 +579,10 @@ impl SessionTable {
             if self.evict_lru_of(owner, Some(keep)) {
                 continue;
             }
-            let freed = self.sessions.get_mut(keep).map_or(0, Session::trim_oldest);
+            let freed = self
+                .sessions
+                .get_mut(keep)
+                .map_or(0, Session::<D>::trim_oldest);
             if freed == 0 {
                 return false;
             }

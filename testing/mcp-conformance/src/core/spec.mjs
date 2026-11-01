@@ -19,6 +19,9 @@ function clause(id, level, url, quote) {
 
 export const CLAUSES = Object.fromEntries(
   [
+    clause(
+      'AUTH.NO-TOKEN-PASSTHROUGH', 'MUST NOT', `${S}/basic/authorization/security-considerations#access-token-privilege-restriction`,
+      'The MCP server MUST NOT pass through the token it received from the MCP client.'),
     // ---- Base protocol: messages -------------------------------------------
     clause(
       'BASE.REQ.ID-PRESENT', 'MUST', `${S}/basic#requests`,

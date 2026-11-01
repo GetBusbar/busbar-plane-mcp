@@ -58,8 +58,8 @@ read -r meter_status meter_body <<<"$(h2_call "$bound" "meter")"
 [ "$meter_status" = "200" ] || { failures=$((failures+1)); detail="${detail}meter_status=${meter_status}(want 200): ${meter_body}; "; }
 
 usage_after="$(h2_usage "$kid")"
-req_before="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("requests") or 0)' <<<"$usage_before")"
-req_after="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("requests") or 0)' <<<"$usage_after")"
+req_before="$(h2_read_usage_field requests <<<"$usage_before")"
+req_after="$(h2_read_usage_field requests <<<"$usage_after")"
 spend_before="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("spend_cents") or 0)' <<<"$usage_before")"
 spend_after="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("spend_cents") or 0)' <<<"$usage_after")"
 req_delta="$((req_after - req_before))"

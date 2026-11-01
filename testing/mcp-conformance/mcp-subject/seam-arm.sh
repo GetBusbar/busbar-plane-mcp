@@ -44,6 +44,15 @@ control="${1:?seam-arm.sh needs the fake server control file}"
 url="${2:?seam-arm.sh needs the subject MCP endpoint URL}"
 mode="${MCP_FAKE_MODE:-honest}"
 transcript="${MCP_FAKE_TRANSCRIPT:-}"
+credential_file=""
+if [ "${MCP_SEAM_CREDENTIAL_PROBE:-0}" = 1 ]; then
+  credential_file="${MCP_SEAM_BEARER_FILE:?credential seam needs the booted subject bearer file}"
+  # The bridge sends the real admitted bearer as an HTTP Authorization header.
+  # It never appears in argv, the JSON-RPC body, or the observation file.
+  MCP_BRIDGE_BEARER="$(cat "$credential_file")"
+  [ -n "$MCP_BRIDGE_BEARER" ] || { printf 'arm: empty credential probe file\n' >&2; exit 2; }
+  export MCP_BRIDGE_BEARER
+fi
 
 here="$(cd "$(dirname "$0")/../../.." && pwd)"
 bridge="$here/testing/mcp-conformance/scripts/stdio-http-bridge.mjs"
@@ -58,9 +67,15 @@ arm() {
     fs.writeFileSync(process.argv[1], JSON.stringify({
       mode: process.argv[2],
       transcript: process.argv[3] || null,
-    }));
-  ' "$tmp" "$1" "$2"
+      credentialFile: process.argv[4] || null,
+    }), { mode: 0o600 });
+  ' "$tmp" "$1" "$2" "$credential_file"
   mv -f "$tmp" "$control"
+  if [ -n "${MCP_SEAM_RIGHT_CONTROL:-}" ]; then
+    local right_tmp="$MCP_SEAM_RIGHT_CONTROL.$$"
+    cp "$control" "$right_tmp"
+    mv -f "$right_tmp" "$MCP_SEAM_RIGHT_CONTROL"
+  fi
 }
 
 # EACH SCENARIO MEETS ITS OWN ATTACK, THROUGH AN APPROVAL BUSBAR HAS JUST VERIFIED.
@@ -110,13 +125,16 @@ if [ "$ttl" -gt 0 ] 2>/dev/null; then
       arm honest ""
       printf 'arm: waiting out verify_ttl (%ss) against the honest peer, then one honest call to verify the approved baseline\n' "$ttl" >&2
       wait_out
-      curl -s --max-time 20 -X POST "$url" \
+      baseline=$(curl -s --fail --max-time 20 -X POST "$url" \
         -H 'content-type: application/json' \
-        -H 'accept: application/json, text/event-stream' \
+        -H 'accept: application/json' \
         -H 'mcp-method: tools/call' \
         -H 'mcp-protocol-version: 2026-07-28' \
         -H 'mcp-name: echo' \
-        -d '{"jsonrpc":"2.0","id":0,"method":"tools/call","params":{"name":"echo","arguments":{"text":"baseline"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}' >&2 || true
+        -d '{"jsonrpc":"2.0","id":0,"method":"tools/call","params":{"name":"echo","arguments":{"text":"baseline"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}') \
+        || { printf 'arm: the honest baseline call failed before %s was armed\n' "$mode" >&2; exit 2; }
+      printf '%s\n' "$baseline" | node -e 'let s=""; process.stdin.on("data", c => s += c).on("end", () => { try { const m=JSON.parse(s); if(m.id!==0 || !m.result || m.result.isError===true) process.exit(1); } catch { process.exit(1); } });' \
+        || { printf 'arm: the honest baseline returned no successful tool result\n' >&2; exit 2; }
       printf '\n' >&2
       arm "$mode" "$transcript" ;;
   esac

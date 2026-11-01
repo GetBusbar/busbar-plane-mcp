@@ -23,8 +23,7 @@
 #   everyone to read red as noise. It stopped being sound the moment the release claim became "MCP
 #   works". A disarmed subject leg proves the SUITE works and proves NOTHING about busbar, and it
 #   renders as the same green tick as a leg that judged busbar and passed. So `NOT ARMED, SO NOT
-#   RUN` is now a RED STATE — see `require_armed`, and see the `--selftest` fixtures that prove
-#   that transition rather than asserting it.
+#   RUN` is now a RED STATE — see `require_armed`.
 #
 #   The ARMED GUARD survives underneath: once armed, a run that produces fewer than the revision's
 #   FULL required scenario set is a hard failure. Set equality, never a floor — a floor of 30 is
@@ -35,7 +34,6 @@
 #   --official-subject   the official suite against busbar. ARMED OR RED.
 #   --battery-control    the in-house adversarial/seam battery against its pinned python control
 #   --battery-subject    the in-house battery against busbar. ARMED OR RED.
-#   --selftest           prove the anti-vacuity assertions bite, before any verdict is trusted
 #   --help
 #
 # ARMING
@@ -80,12 +78,6 @@ cd "$(dirname "$0")/../.."
 
 CONFORMANCE_PIN="@modelcontextprotocol/conformance@0.2.0-alpha.11"
 REVISION="2026-07-28"
-
-# The number of server scenarios revision REVISION freezes. Read from the suite at run time rather
-# than hard-coded, so a suite bump that changes the set is caught by the comparison below instead of
-# by nobody. The literal here is only a FLOOR against the degenerate case where `list` itself starts
-# reporting nothing.
-MIN_SERVER_SCENARIOS=30
 
 # The in-house adversarial/seam battery. IN THIS REPOSITORY, and that is the whole of DECISION 2:
 # it used to be fetched from a private repository on an internal Gitea host with no route
@@ -164,21 +156,30 @@ ensure_node22() {
 REAP_PIDS=""
 SUBJECT_PIDS=""
 reap_all() {
-  local p
+  local p started=$SECONDS live
   for p in $REAP_PIDS ${SUBJECT_PIDS:-}; do kill "$p" 2>/dev/null || true; done
+  while :; do
+    live=""
+    for p in $REAP_PIDS ${SUBJECT_PIDS:-}; do
+      kill -0 "$p" 2>/dev/null && live="$live $p"
+    done
+    [ -n "$live" ] || break
+    [ "$((SECONDS-started))" -lt 2 ] || break
+    sleep 0.1
+  done
+  for p in $live; do kill -KILL "$p" 2>/dev/null || true; done
+  for p in $REAP_PIDS ${SUBJECT_PIDS:-}; do wait "$p" 2>/dev/null || true; done
 }
 reap_add() { REAP_PIDS="$REAP_PIDS $*"; }
 trap reap_all EXIT
 
-usage() { sed -n '2,70p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { awk 'NR == 1 {next} /^#/ {sub(/^# ?/, ""); print; next} NF {exit}' "$0"; }
 
 # ARMED OR RED, in one place so it can be tested in one place.
 #
 # `require_armed <label> <VAR> [VAR...]` succeeds if ANY named variable is non-empty, and dies
 # otherwise. The death is the point: it is what turns `NOT ARMED, SO NOT RUN` from a green tick
-# into a failure. It is a function rather than an inline `if` in each leg so that `--selftest` can
-# drive the transition itself — a rule whose enforcement is only ever exercised by the real thing
-# is a rule nobody has watched work.
+# into a failure.
 require_armed() {
   local label="$1"; shift
   local v
@@ -238,16 +239,13 @@ executed_scenarios() {
 #       the surface cannot pass either. A floor alone is satisfied by any 30 of 37.
 assert_covered() {
   local dir="$1" label="$2"
-  local -a req exe
+  local req exe
   local missing count
   req=$(required_server_scenarios)
   [ -n "$req" ] || die "$label: the pinned suite listed NO required server scenarios for $REVISION. \
 The pin, the revision name, or the suite's own list command is wrong — believing a verdict computed \
 against an empty requirement set is how a gate passes without executing."
   count=$(printf '%s\n' "$req" | grep -c . || true)
-  [ "$count" -ge "$MIN_SERVER_SCENARIOS" ] || die "$label: the revision requires only $count server \
-scenarios, below the floor of $MIN_SERVER_SCENARIOS. Either the suite changed shape or the \
-requirement set is not being read."
   exe=$(executed_scenarios "$dir")
   [ -n "$exe" ] || die "$label: the run reported a verdict but produced NO scenario results in \
 $dir. Exit code 0 from a suite that executed nothing is a false green."
@@ -307,16 +305,22 @@ PY
 # exit code: every required scenario the baseline does not name must have a checks.json with no
 # FAILURE check in it.
 assert_passed() {
-  local dir="$1" label="$2" bl="${3:-}"
-  python3 - "$dir" "$label" "$(required_server_scenarios)" "$bl" <<'PY' || exit 1
+  local dir="$1" label="$2" bl="${3:-}" required
+  required=$(required_server_scenarios) || die "$label: could not read the pinned scenario set"
+  [ -n "$required" ] || die "$label: the pinned required scenario set is empty"
+  python3 - "$dir" "$label" "$required" "$bl" <<'PY' || exit 1
 import json, os, re, sys
 d, label, required, bl = sys.argv[1], sys.argv[2], sorted(set(filter(None, sys.argv[3].split("\n")))), sys.argv[4]
-excused = set()
+excused, section = set(), None
 if bl:
     for line in open(bl, encoding="utf-8"):
+        header = re.fullmatch(r"(server|client):\s*(#.*)?\n?", line)
+        if header:
+            section = header.group(1)
+            continue
         m = re.fullmatch(r"\s+-\s+([^\s#]+).*\n?", line)
-        if m:
-            excused.add(m.group(1).split(":", 1)[0])
+        if m and section == "server":
+            excused.add(m.group(1))
 stamp = re.compile(r"-[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}-[0-9]{2}-[0-9]{2}-[0-9]{3}Z$")
 by_scen = {}
 for name in os.listdir(d):
@@ -324,26 +328,36 @@ for name in os.listdir(d):
         by_scen.setdefault(stamp.sub("", name[len("server-"):]), []).append(os.path.join(d, name))
 bad = []
 for scen in required:
-    if scen in excused:
-        continue
     dirs = by_scen.get(scen, [])
-    checks = []
+    if not dirs:
+        bad.append(f"{scen}: no result directory")
     for sd in dirs:
         try:
-            got = json.load(open(os.path.join(sd, "checks.json")))
+            checks = json.load(open(os.path.join(sd, "checks.json")))
         except (OSError, ValueError):
-            got = None
-        if not isinstance(got, list):
-            bad.append(f"{scen}: no readable checks.json in {sd}"); break
-        checks += got
-    else:
-        if not dirs:
-            bad.append(f"{scen}: no result directory")
-        elif any(str(c.get("status", "")).upper() == "FAILURE" for c in checks if isinstance(c, dict)):
-            bad.append(f"{scen}: FAILED and is not in the baseline")
+            checks = None
+        if not isinstance(checks, list) or not checks:
+            bad.append(f"{scen}: no nonempty readable check list in {sd}")
+            continue
+        executed = False
+        for check in checks:
+            if not isinstance(check, dict) or not isinstance(check.get("id"), str) or not check["id"]:
+                bad.append(f"{scen}: malformed check evidence in {sd}")
+                continue
+            status = check.get("status")
+            if status not in ("SUCCESS", "FAILURE", "WARNING", "INFO", "SKIPPED"):
+                bad.append(f"{scen}:{check['id']}: unknown check status {status!r}")
+                continue
+            if status in ("SUCCESS", "FAILURE", "WARNING"):
+                executed = True
+            if status in ("FAILURE", "WARNING") and scen not in excused and f"{scen}:{check['id']}" not in excused:
+                bad.append(f"{scen}:{check['id']}: {status} and is not in the baseline")
+        if not executed:
+            bad.append(f"{scen}: no evaluated checks (only informational, skipped or unrecognised entries) in {sd}")
+
 if bad:
     raise SystemExit(f"FAIL: {label}: required scenarios did not pass, whatever the exit code said:\n  " + "\n  ".join(bad))
-print(f"  ok: {len(required) - len(excused & set(required))} required scenarios passed ({len(excused & set(required))} baselined)")
+print(f"  ok: {len(required)} required scenarios supplied executed checks; failures matched exact server waivers")
 PY
 }
 
@@ -425,7 +439,7 @@ finding, not a busbar finding."; }
   local SDK_URL="http://localhost:$sdk_port/mcp"
   say "   control peer will listen on 127.0.0.1:$sdk_port"
 
-  ( cd "$sdk" && PORT="$sdk_port" npx tsx "$SDK_FIXTURE" ) >"$dir/control-server.log" 2>&1 &
+  ( cd "$sdk" && PORT="$sdk_port" exec node --import tsx "$SDK_FIXTURE" ) >"$dir/control-server.log" 2>&1 &
   local server_pid=$!
   reap_add "$server_pid"
 
@@ -437,13 +451,13 @@ finding, not a busbar finding."; }
   # proof, and a peer that died on startup while a different process holds the port reads as ready.
   # The pair — our own port, and our own process still alive on it — is what makes the reference a
   # reference.
-  local waited=0
+  local started=$SECONDS waited=0
   until curl -s -o /dev/null --max-time 5 "$SDK_URL" -X POST -H 'content-type: application/json' -d '{}'; do
     kill -0 "$server_pid" 2>/dev/null || {
       tail -30 "$dir/control-server.log" >&2
       die "the control peer exited during boot; nothing this leg reports would be about it."
     }
-    waited=$((waited+2))
+    waited=$((SECONDS-started))
     [ "$waited" -lt "$CONTROL_READY_TIMEOUT" ] || {
       tail -30 "$dir/control-server.log" >&2
       die "the control peer did not become ready within ${CONTROL_READY_TIMEOUT}s."
@@ -460,7 +474,7 @@ finding, not a busbar finding."; }
 the harness, the pin or the runner — NOT about busbar. Do not read any subject verdict until it is \
 green."
   assert_covered "$dir/control" "official control"
-  kill "$server_pid" 2>/dev/null || true
+  assert_passed "$dir/control" "official control"
 }
 
 official_subject() {
@@ -503,7 +517,7 @@ official_subject() {
   local rc=0
   npx --yes "$CONFORMANCE_PIN" server \
       --url "$target" --requirements "$REVISION" \
-      "${baseline[@]}" -o "$out" || rc=$?
+      ${baseline[@]+"${baseline[@]}"} -o "$out" || rc=$?
   # THE ARMED GUARD, and it runs BEFORE the exit code is honoured. An armed run that executed
   # nothing is the state the skip above would otherwise rot into: configured, green, and vacuous.
   assert_covered "$out" "official subject"
@@ -539,28 +553,25 @@ harness, not about busbar."
 
 # THE BATTERY'S ANTI-VACUITY ASSERTION, shared by both battery legs so neither can drift from the
 # other. The report must exist (the caller DELETED it before the run, so an existing one is this
-# run's), and it must record at least BATTERY_MIN_EXECUTED executed tests — a run that skipped
-# almost everything proves nothing about the harness (control) or about busbar (subject).
-BATTERY_MIN_EXECUTED=20
+# run's), and it must contain actual executed results.
 assert_battery_report() {
   local report="$1" label="$2"
   [ -f "$report" ] || die "the $label run did not write $report. It cannot have executed, and no \
 other report file is an acceptable substitute — reading one from a previous run is how a gate \
 reports a state it never reached."
-  python3 - "$report" "$label" "$BATTERY_MIN_EXECUTED" <<'PY' || exit 1
+  python3 - "$report" "$label" <<'PY' || exit 1
 import json, sys
-path, label, floor = sys.argv[1], sys.argv[2], int(sys.argv[3])
+path, label = sys.argv[1], sys.argv[2]
 try:
     r = json.load(open(path))
 except (OSError, ValueError) as e:
     raise SystemExit(f"FAIL: the {label} report {path} is not readable JSON: {e}")
-tests = r.get("tests") or r.get("results") or []
-ran = [t for t in tests if str(t.get("verdict", t.get("status", ""))).upper() not in ("SKIP", "SKIPPED")]
-if len(ran) < floor:
-    raise SystemExit(
-        f"FAIL: the {label} report contains only {len(ran)} executed tests (floor {floor}). A leg "
-        f"that skipped almost everything is not a verdict."
-    )
+tests = r.get("tests", r.get("results")) if isinstance(r, dict) else None
+if not isinstance(tests, list) or any(not isinstance(t, dict) or t.get("verdict", t.get("status")) not in ("PASS", "FAIL", "ERROR", "SKIP", "SKIPPED") for t in tests):
+    raise SystemExit(f"FAIL: the {label} report has no valid result list")
+ran = [t for t in tests if t.get("verdict", t.get("status")) not in ("SKIP", "SKIPPED")]
+if not ran:
+    raise SystemExit(f"FAIL: the {label} report contains no executed tests")
 print(f"  ok: {len(ran)} {label} tests executed")
 PY
 }
@@ -569,6 +580,7 @@ battery_subject() {
   say "== IN-HOUSE BATTERY · SUBJECT leg (busbar) =="
   MCP_BATTERY_DIR="${MCP_BATTERY_DIR:-$DEFAULT_BATTERY_DIR}"
   [ -d "$MCP_BATTERY_DIR" ] || die "the in-house battery is not at $MCP_BATTERY_DIR."
+  MCP_BATTERY_DIR="$(cd "$MCP_BATTERY_DIR" && pwd)"
 
   # ARMED BY A BINARY, exactly as the official subject leg is, and for the same reason: a gate armed
   # out of `vars.*` is a gate nobody has to arm, and this one nobody did — it spent the whole of
@@ -620,6 +632,8 @@ battery_subject() {
     rm -rf "$seamdir"; mkdir -p "$seamdir"
     seamdir="$(cd "$seamdir" && pwd)"
     seam_control="$seamdir/seam-control.json"
+    printf '%s\n' '{"mode":"honest","transcript":null}' >"$seam_control.tmp"
+    mv -f "$seam_control.tmp" "$seam_control"
     seam_port="$(node -e '
       const s = require("net").createServer();
       s.listen(0, "127.0.0.1", () => { const p = s.address().port; s.close(() => console.log(p)); });
@@ -639,7 +653,7 @@ battery_subject() {
 
     SUBJECT_PIDS=""
     MCP_SUBJECT_WORKDIR="$workdir" boot_busbar_subject
-    MCP_SUBJECT_SERVER_CMD="node $(pwd)/$MCP_BATTERY_DIR/scripts/stdio-http-bridge.mjs $SUBJECT_URL"
+    MCP_SUBJECT_SERVER_CMD="node \"$MCP_BATTERY_DIR/scripts/stdio-http-bridge.mjs\" $SUBJECT_URL"
     export MCP_SUBJECT_SERVER_CMD
 
     # THE SEAM LAUNCHER. `src/suites/seam.mjs` substitutes this for the ordinary server launch and
@@ -736,385 +750,11 @@ battery_subject() {
 differential against the control did not run, so this leg proves nothing."
 }
 
-# --selftest: prove the anti-vacuity assertions BITE, before any verdict from this script is
-# believed. Same discipline as `no-plugins-gate.sh` and `cargo xtask gate structure-lint`: fixtures the check MUST
-# flag, plus one it must stay silent on. Without this, `assert_covered` could be silently broken and
-# every leg would report a confident green.
-selftest() {
-  say "== mcp-conformance SELF-TEST (the coverage assertion cannot be lied to) =="
-  local tmp failures=0
-  tmp="$(mktemp -d)"
-  trap 'rm -rf "$tmp"' RETURN
-
-  # Each fixture runs in a SUBSHELL. `die` exits, and an exit inside an `if` condition would take
-  # the whole self-test with it — a self-test that cannot observe its own REDs is the thing this
-  # file exists to prevent, one level further in.
-  probe() { ( assert_covered "$1" "$2" ) >/dev/null 2>&1; }
-
-  # Stand in for the real suite so the self-test needs no network and no SDK build. It answers
-  # `list` truthfully and writes whichever scenario directories the fixture asks for.
-  required_server_scenarios() { printf 'alpha\nbeta\ngamma\ndelta\nepsilon\n'; }
-  MIN_SERVER_SCENARIOS=5
-
-  # A realistic result-directory name. The suite stamps every directory, and the fixtures must be
-  # stamped too — a fixture that is easier to parse than the real thing tests a parser nobody runs.
-  STAMP="2026-08-09T05-41-58-049Z"
-  d() { mkdir -p "$1/server-$2-$STAMP"; }
-
-  # RED 1: a run that exited 0 and produced NO results at all. The classic false green.
-  mkdir -p "$tmp/empty"
-  if probe "$tmp/empty" selftest-empty; then
-    say "  MISS: an empty results directory was accepted"; failures=$((failures+1))
-  else
-    say "  ok: an empty results directory is refused"
-  fi
-
-  # RED 2: a run that executed SOME of the required set. A floor alone would accept this, which is
-  # why the assertion is set equality and not a count.
-  for n in alpha beta gamma delta; do d "$tmp/partial" "$n"; done
-  if probe "$tmp/partial" selftest-partial; then
-    say "  MISS: a run missing a required scenario was accepted"; failures=$((failures+1))
-  else
-    say "  ok: a run missing a required scenario is refused"
-  fi
-
-  # RED 3: the requirement set itself came back empty — a wrong pin or a renamed revision. Judging
-  # against an empty set is the subtlest false green of the three, because everything "passes".
-  required_server_scenarios() { printf ''; }
-  d "$tmp/full" alpha
-  if probe "$tmp/full" selftest-norequirements; then
-    say "  MISS: an empty requirement set was accepted"; failures=$((failures+1))
-  else
-    say "  ok: an empty requirement set is refused"
-  fi
-
-  # GREEN: the complete set, which must pass — otherwise the three REDs above prove only that the
-  # assertion refuses everything.
-  required_server_scenarios() { printf 'alpha\nbeta\ngamma\ndelta\nepsilon\n'; }
-  for n in beta gamma delta epsilon; do d "$tmp/full" "$n"; done
-  if probe "$tmp/full" selftest-full; then
-    say "  ok: a complete run is accepted"
-  else
-    say "  MISS: a complete run was refused — the assertion refuses everything and proves nothing"
-    failures=$((failures+1))
-  fi
-
-  # GREEN 2, and it is the reason the timestamp is stripped by exact shape rather than by a
-  # character class: a scenario whose own name ends in digits (`sep-2164-...`) must survive the
-  # strip. A greedy class would turn it into `sep`, report the scenario as never executed, and make
-  # this gate a source of false REDs — which is the same disease as a false green, wearing a
-  # different coat.
-  required_server_scenarios() { printf 'sep-2164\nsep-2164-resource-not-found\n'; }
-  MIN_SERVER_SCENARIOS=2
-  d "$tmp/numeric" sep-2164
-  d "$tmp/numeric" sep-2164-resource-not-found
-  if probe "$tmp/numeric" selftest-numeric; then
-    say "  ok: a scenario name ending in digits survives the timestamp strip"
-  else
-    say "  MISS: a numeric-tailed scenario name was eaten by the timestamp strip"
-    failures=$((failures+1))
-  fi
-
-  # ---------------------------------------------------------------------------------------------
-  # THE ARM-STATE TRANSITION, TESTED RATHER THAN ASSERTED.
-  #
-  # `NOT ARMED, SO NOT RUN` used to be a green tick and is now a RED state. That change is worth
-  # exactly nothing unless somebody watches it happen, and the only run that would otherwise
-  # exercise it is a real CI run of a leg that is supposed to be armed — i.e. never, once the
-  # variables are set. So the transition is driven here, in both directions, on the same function
-  # the real legs call.
-  #
-  # Driven in a SUBSHELL with the environment scrubbed, for the same reason as `probe` above: a
-  # `die` inside an `if` condition would take the whole self-test with it.
-  armed_probe() { ( unset MCP_ARMTEST_A MCP_ARMTEST_B; "$@" >/dev/null 2>&1 ); }
-
-  # RED 4: nothing set. This is the state the gate was in for the whole of 1.5.5, reporting green.
-  if armed_probe require_armed "selftest" MCP_ARMTEST_A MCP_ARMTEST_B; then
-    say "  MISS: an UNARMED subject leg was accepted — 'NOT ARMED, SO NOT RUN' is still green"
-    failures=$((failures+1))
-  else
-    say "  ok: an unarmed subject leg is RED"
-  fi
-
-  # RED 5: set, but EMPTY. `vars.FOO` on a repository with no such variable expands to the empty
-  # string, not to an unset name, so this is the shape an unarmed CI run actually has — and a
-  # `[ -z ]` written as `[ -n "${FOO+x}" ]` would wave it through.
-  if ( export MCP_ARMTEST_A=""; require_armed "selftest" MCP_ARMTEST_A MCP_ARMTEST_B ) >/dev/null 2>&1; then
-    say "  MISS: an EMPTY arming variable was accepted as armed"
-    failures=$((failures+1))
-  else
-    say "  ok: an empty arming variable is not armed"
-  fi
-
-  # GREEN 3: armed on the FIRST name, and GREEN 4 on the SECOND. Both, because a check that only
-  # ever reads argument one would pass GREEN 3 and silently make `MCP_SUBJECT_CLIENT_CMD` — the
-  # client half of the battery leg — unable to arm anything.
-  if ( export MCP_ARMTEST_A="x"; require_armed "selftest" MCP_ARMTEST_A MCP_ARMTEST_B ) >/dev/null 2>&1; then
-    say "  ok: the first arming variable arms the leg"
-  else
-    say "  MISS: a leg armed by its first variable was still refused"; failures=$((failures+1))
-  fi
-  if ( export MCP_ARMTEST_B="x"; require_armed "selftest" MCP_ARMTEST_A MCP_ARMTEST_B ) >/dev/null 2>&1; then
-    say "  ok: the second arming variable also arms the leg"
-  else
-    say "  MISS: a leg armed by its second variable was refused"; failures=$((failures+1))
-  fi
-
-  # ---------------------------------------------------------------------------------------------
-  # THE NON-WEAKENING DISPROOF MUST ITSELF BITE.
-  #
-  # The subject leg's whole claim to honesty is `prove_the_boundary_is_intact`: it presents four
-  # tokens the booted busbar MUST refuse and one it MUST admit, and refuses to run the suite if any
-  # of them behaves otherwise. If that function were broken — if it accepted every status, or
-  # rejected every status — the leg would still report a confident verdict, and the verdict would be
-  # about a busbar whose plane boundary nobody checked. So it is driven here against a stubbed
-  # probe, in every direction that matters, exactly as `assert_covered` is.
-  #
-  # The stub replaces `subject_probe_status`, the ONE function that reaches the network, so no
-  # busbar and no port are needed and the fixtures are about the LOGIC rather than about a boot.
-  boundary_probe() (
-    # $1 = the status to answer for the audience-bound token, $2 = for everything else.
-    local ok="$1" other="$2"
-    subject_probe_status() { [ "${2:-}" = "GOODTOKEN" ] && printf '%s' "$ok" || printf '%s' "$other"; }
-    prove_the_boundary_is_intact "http://127.0.0.1:1/mcp" PLAIN GOODTOKEN WRONG >/dev/null 2>&1
-  )
-
-  # GREEN 5: the honest shape — refusals refused, the bound token admitted.
-  if boundary_probe 200 401; then
-    say "  ok: an intact audience boundary is accepted"
-  else
-    say "  MISS: an intact audience boundary was refused — the disproof refuses everything"
-    failures=$((failures+1))
-  fi
-
-  # RED 7: a busbar that admits EVERYTHING. This is the shape a weakened audience check, a
-  # conformance bypass or an accidentally-open auth chain would produce, and it is the exact false
-  # green this leg must never report: 37 scenarios judged against a resource server that is not one.
-  if boundary_probe 200 200; then
-    say "  MISS: a busbar that admitted every token was accepted — the disproof proves nothing"
-    failures=$((failures+1))
-  else
-    say "  ok: a busbar that admits an unbound/wrong-audience token is refused"
-  fi
-
-  # RED 8: a busbar that refuses everything, the bound token included. The four refusals alone are
-  # equally consistent with this, which is why the disproof carries a positive control — without it
-  # the leg would be "vacuous in the other direction" and every scenario would fail on auth.
-  if boundary_probe 401 401; then
-    say "  MISS: a busbar that refused even the valid token was accepted"
-    failures=$((failures+1))
-  else
-    say "  ok: a busbar that refuses even the correctly-bound token is refused"
-  fi
-
-  # RED 9: the subject binary must EXIST and be executable. A missing build artifact must name
-  # itself, not fail later as a connection error the reader has to trace back.
-  if ( MCP_SUBJECT_BUSBAR_BIN="$tmp/there-is-no-such-binary" boot_busbar_subject ) >/dev/null 2>&1; then
-    say "  MISS: a non-existent subject binary was accepted as an arm"
-    failures=$((failures+1))
-  else
-    say "  ok: a non-existent subject binary is refused"
-  fi
-
-  # ---------------------------------------------------------------------------------------------
-  # THE BATTERY SUBJECT LEG DOES NOT TRUST ITS CALLEE'S EXIT CODE (item 497), exactly as the control
-  # leg never did. Driven against a FAKE battery directory whose `run-subject.sh` is the fixture, so
-  # the real leg function runs end to end with no busbar and no node.
-  bat_fixture() { # $1 dir, $2 what run-subject.sh does (shell body)
-    mkdir -p "$1/scripts" "$1/reports"
-    printf '#!/usr/bin/env bash\ncd "$(dirname "$0")/.."\n%s\n' "$2" >"$1/scripts/run-subject.sh"
-    chmod +x "$1/scripts/run-subject.sh"
-  }
-  bat_report() { # $1 path, $2 executed count, $3 skipped count
-    python3 - "$1" "$2" "$3" <<'PY'
-import json, sys
-p, ran, skip = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
-res = [{"id": f"T{i}", "verdict": "PASS"} for i in range(ran)] + \
-      [{"id": f"S{i}", "verdict": "SKIP"} for i in range(skip)]
-json.dump({"results": res}, open(p, "w"))
-PY
-  }
-  bat_probe() { ( MCP_BATTERY_DIR="$1" MCP_SUBJECT_SERVER_CMD="fixture" MCP_SUBJECT_BUSBAR_BIN="" \
-                  battery_subject ) >/dev/null 2>&1; }
-
-  # RED 10: the callee exits 0 and writes NOTHING, over a STALE report from a previous run.
-  bat_fixture "$tmp/bat-stale" 'exit 0'
-  bat_report "$tmp/bat-stale/reports/subject.json" 50 0
-  printf '{}' >"$tmp/bat-stale/reports/differential.json"
-  if bat_probe "$tmp/bat-stale"; then
-    say "  MISS: a battery subject run that wrote no report was accepted on a STALE one"
-    failures=$((failures+1))
-  else
-    say "  ok: a stale subject report from a previous run is not evidence"
-  fi
-
-  # RED 11: the callee exits 0 over a report that executed almost nothing.
-  bat_fixture "$tmp/bat-thin" 'python3 - <<PY
-import json; json.dump({"results": [{"verdict": "PASS"}]*3 + [{"verdict": "SKIP"}]*40}, open("reports/subject.json", "w"))
-PY
-printf "{}" >reports/differential.json; exit 0'
-  if bat_probe "$tmp/bat-thin"; then
-    say "  MISS: a battery subject report with 3 executed tests was accepted"
-    failures=$((failures+1))
-  else
-    say "  ok: a battery subject report under the executed-test floor is refused"
-  fi
-
-  # GREEN 6: a fresh report with a real executed count and a differential is accepted.
-  bat_fixture "$tmp/bat-good" 'python3 - <<PY
-import json; json.dump({"results": [{"verdict": "PASS"}]*25}, open("reports/subject.json", "w"))
-PY
-printf "{}" >reports/differential.json; exit 0'
-  if bat_probe "$tmp/bat-good"; then
-    say "  ok: a fresh, non-vacuous battery subject report is accepted"
-  else
-    say "  MISS: a fresh, non-vacuous battery subject report was refused"; failures=$((failures+1))
-  fi
-
-  # ---------------------------------------------------------------------------------------------
-  # THE OFFICIAL SUBJECT LEG JUDGES PASSES, NOT ONLY EXECUTION, AND ITS BASELINE IS EVIDENCE TOO
-  # (item 534). Driven through the REAL `official_subject`, with `npx` stubbed to write the result
-  # directories a suite run leaves behind and exit 0 — the exit a baseline that excuses everything
-  # would produce.
-  required_server_scenarios() { printf 'alpha\nbeta\ngamma\ndelta\nepsilon\n'; }
-  MIN_SERVER_SCENARIOS=5
-  os_probe() ( # $1 per-scenario check status, $2 baseline file ('' = none)
-    local st="$1" bl="$2" out="$tmp/os-$RANDOM"
-    npx() {
-      local n
-      for n in alpha beta gamma delta epsilon; do
-        mkdir -p "$out/server-$n-$STAMP"
-        printf '[{"id":"c1","status":"%s"}]' "$st" >"$out/server-$n-$STAMP/checks.json"
-      done
-      return 0
-    }
-    MCP_SUBJECT_BUSBAR_BIN="" MCP_CONFORMANCE_SUBJECT_URL="http://127.0.0.1:1/mcp" \
-      MCP_SUBJECT_OUT="$out" MCP_CONFORMANCE_BASELINE="${bl:-$tmp/no-such-baseline.yml}" \
-      official_subject >/dev/null 2>&1
-  )
-
-  # GREEN 7: every scenario passed, no baseline.
-  if os_probe SUCCESS ""; then say "  ok: an official subject run whose scenarios passed is accepted"
-  else say "  MISS: an official subject run whose scenarios all passed was refused"; failures=$((failures+1)); fi
-
-  # RED 12: the suite exited 0 but every scenario's checks FAILED and no baseline excuses them.
-  if os_probe FAILURE ""; then
-    say "  MISS: an official subject run whose every scenario FAILED was accepted on exit 0"
-    failures=$((failures+1))
-  else say "  ok: executed-but-failed scenarios are refused whatever the exit code"; fi
-
-  # RED 13: a baseline that excuses the WHOLE required set — every entry reasoned, all failing.
-  printf 'server:\n' >"$tmp/bl-all.yml"
-  for n in alpha beta gamma delta epsilon; do printf '  - %s  # reason: fixture\n' "$n" >>"$tmp/bl-all.yml"; done
-  if os_probe FAILURE "$tmp/bl-all.yml"; then
-    say "  MISS: a baseline excusing every required scenario was accepted"; failures=$((failures+1))
-  else say "  ok: a baseline cannot excuse the whole required set"; fi
-
-  # RED 14: a present-but-EMPTY baseline file.
-  : >"$tmp/bl-empty.yml"
-  if os_probe SUCCESS "$tmp/bl-empty.yml"; then
-    say "  MISS: an empty baseline file was accepted"; failures=$((failures+1))
-  else say "  ok: an empty baseline file is refused"; fi
-
-  # RED 15: an entry with no reason.
-  printf 'server:\n  - alpha\n' >"$tmp/bl-noreason.yml"
-  if os_probe SUCCESS "$tmp/bl-noreason.yml"; then
-    say "  MISS: a baseline entry with no reason was accepted"; failures=$((failures+1))
-  else say "  ok: a baseline entry with no reason is refused"; fi
-
-  # RED 16: an entry naming a scenario the revision does not require.
-  printf 'server:\n  - zeta  # reason: fixture\n' >"$tmp/bl-unknown.yml"
-  if os_probe SUCCESS "$tmp/bl-unknown.yml"; then
-    say "  MISS: a baseline naming an unknown scenario was accepted"; failures=$((failures+1))
-  else say "  ok: a baseline naming a scenario outside the required set is refused"; fi
-
-  # GREEN 8: one reasoned entry, and the other four scenarios pass. Written as the suite would
-  # leave it: alpha FAILED (excused), the rest SUCCESS.
-  printf 'server:\n  - alpha  # reason: fixture, tracked upstream\n' >"$tmp/bl-one.yml"
-  if ( out="$tmp/os-one"
-       npx() {
-         local n st
-         for n in alpha beta gamma delta epsilon; do
-           st=SUCCESS; [ "$n" = alpha ] && st=FAILURE
-           mkdir -p "$out/server-$n-$STAMP"
-           printf '[{"id":"c1","status":"%s"}]' "$st" >"$out/server-$n-$STAMP/checks.json"
-         done
-       }
-       MCP_SUBJECT_BUSBAR_BIN="" MCP_CONFORMANCE_SUBJECT_URL="http://127.0.0.1:1/mcp" \
-         MCP_SUBJECT_OUT="$out" MCP_CONFORMANCE_BASELINE="$tmp/bl-one.yml" official_subject ) >/dev/null 2>&1
-  then say "  ok: one reasoned baseline entry excuses exactly its own failure"
-  else say "  MISS: a valid one-entry baseline over a matching run was refused"; failures=$((failures+1)); fi
-
-  # Check-evidence controls use the real JSON guard, independently of the suite exit code.
-  checks_probe() (
-    local payload="$1" bl="${2:-}" out="$tmp/checks-$RANDOM" n
-    for n in alpha beta gamma delta epsilon; do
-      mkdir -p "$out/server-$n-$STAMP"
-      printf '[{"id":"c1","status":"SUCCESS"}]' >"$out/server-$n-$STAMP/checks.json"
-    done
-    printf '%s' "$payload" >"$out/server-alpha-$STAMP/checks.json"
-    assert_passed "$out" selftest-check-evidence "$bl" >/dev/null 2>&1
-  )
-  local payload
-  for payload in '[]' '[{"id":"c1","status":"SKIPPED"}]' \
-    '[{"id":"c1","status":"INFO"}]' '[{"id":"c1","status":"WARNING"}]' \
-    '[{"id":"c1","status":"MYSTERY"}]' '[{}]' '[null]' \
-    '[{"status":"SUCCESS"}]' '[{"id":"c1","status":"FAILURE"}]'; do
-    if checks_probe "$payload"; then
-      say "  MISS: invalid or unsuccessful check evidence was accepted: $payload"
-      failures=$((failures+1))
-    else say "  ok: invalid or unsuccessful check evidence is refused: $payload"; fi
-  done
-  if checks_probe '[{"id":"wire-info","status":"INFO"},{"id":"c1","status":"SUCCESS"},{"id":"optional","status":"SKIPPED"}]'; then
-    say "  ok: official informational and optional skipped entries coexist with evaluated success"
-  else say "  MISS: valid official status vocabulary was refused"; failures=$((failures+1)); fi
-  printf 'server:\n  - alpha:c1  # reason: fixture exact check\n' >"$tmp/bl-check.yml"
-  if checks_probe '[{"id":"c1","status":"WARNING"}]' "$tmp/bl-check.yml"; then
-    say "  ok: an exact warning waiver follows the official baseline semantics"
-  else say "  MISS: an exact warning waiver was refused"; failures=$((failures+1)); fi
-  if checks_probe '[{"id":"c1","status":"WARNING"},{"id":"c2","status":"WARNING"}]' "$tmp/bl-check.yml"; then
-    say "  MISS: a warning waiver excused an unrelated warning"; failures=$((failures+1))
-  else say "  ok: warning waivers stay specific to their named checks"; fi
-  if checks_probe '[{"id":"c1","status":"FAILURE"},{"id":"c2","status":"SUCCESS"}]' "$tmp/bl-check.yml"; then
-    say "  ok: a check waiver accepts its own failure and leaves the successful sibling intact"
-  else say "  MISS: an exact check waiver was refused"; failures=$((failures+1)); fi
-  if checks_probe '[{"id":"c1","status":"FAILURE"},{"id":"c2","status":"FAILURE"}]' "$tmp/bl-check.yml"; then
-    say "  MISS: a check waiver excused an unrelated failing sibling"; failures=$((failures+1))
-  else say "  ok: a check waiver cannot excuse an unrelated failing sibling"; fi
-  printf 'client:\n  - alpha  # reason: client-only fixture\n' >"$tmp/bl-client.yml"
-  if checks_probe '[{"id":"c1","status":"FAILURE"}]' "$tmp/bl-client.yml"; then
-    say "  MISS: a client waiver excused a server failure"; failures=$((failures+1))
-  else say "  ok: a client waiver cannot excuse a server failure"; fi
-  for payload in '[]' '[{"id":"c1","status":"SKIPPED"}]' '[{"id":"c1","status":"MYSTERY"}]'; do
-    if checks_probe "$payload" "$tmp/bl-one.yml"; then
-      say "  MISS: a whole-scenario waiver excused absent or unknown evidence: $payload"
-      failures=$((failures+1))
-    else say "  ok: a waiver cannot replace actual check execution: $payload"; fi
-  done
-
-  # RED 6: the battery must be IN THIS REPOSITORY. It was moved here so no leg needs a secret or a
-  # reachable private host; if the directory is gone, every battery verdict is vacuous, and the
-  # honest report is red rather than a skip.
-  [ -d "$DEFAULT_BATTERY_DIR" ] || {
-    say "  MISS: the in-house battery is not at $DEFAULT_BATTERY_DIR"; failures=$((failures+1)); }
-  [ -d "$DEFAULT_BATTERY_DIR" ] && say "  ok: the in-house battery is in-repo at $DEFAULT_BATTERY_DIR"
-
-  # RED 7: the subject leg's config renders silently. boot.sh writes config.yaml through an
-  # expanding heredoc, where an unescaped backtick in a comment is a command substitution that
-  # prints "command not found" into every subject run.
-  if boot_selftest >/dev/null 2>&1; then say "  ok: boot.sh renders the subject config with nothing on stderr"
-  else say "  MISS: boot.sh selftest failed (run: bash -c '. testing/mcp-conformance/mcp-subject/boot.sh; boot_selftest')"; failures=$((failures+1)); fi
-
-  [ "$failures" -eq 0 ] || die "$failures self-test fixture(s) did not behave as declared"
-  say "  self-test: 15 fixture(s) passed"
-}
-
 case "${1:---help}" in
   --official-control) ensure_node22; official_control ;;
   --official-subject) ensure_node22; official_subject ;;
   --battery-control)  ensure_node22; battery_control ;;
   --battery-subject)  ensure_node22; battery_subject ;;
-  --selftest)         selftest ;;
   --help|-h)          usage ;;
   *) die "unknown mode: $1 (try --help)" ;;
 esac

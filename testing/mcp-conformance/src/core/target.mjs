@@ -96,17 +96,3 @@ export class Target {
     };
   }
 }
-
-export function targetFromEnvAndArgs(args) {
-  const cfg = {
-    name: args.name || process.env.MCP_SUBJECT_NAME || 'unnamed-target',
-    serverLaunch: args.serverLaunch || process.env.MCP_SUBJECT_SERVER_CMD || null,
-    clientLaunch: args.clientLaunch || process.env.MCP_SUBJECT_CLIENT_CMD || null,
-    failingTool: args.failingTool || process.env.MCP_SUBJECT_FAILING_TOOL || null,
-  };
-  if (process.env.MCP_SUBJECT_SAMPLE_CALLS) {
-    cfg.sampleCallFor = JSON.parse(process.env.MCP_SUBJECT_SAMPLE_CALLS);
-  }
-  if (args.sampleCalls) cfg.sampleCallFor = JSON.parse(args.sampleCalls);
-  return new Target(cfg);
-}

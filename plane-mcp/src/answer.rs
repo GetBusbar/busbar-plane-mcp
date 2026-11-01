@@ -58,7 +58,20 @@ impl Answer {
 /// `server/discover`: the capabilities, and the catalogue this caller reaches, counted.
 #[must_use]
 pub fn discover(catalogue: &Catalogue, id: &Value, admit: &impl Fn(&str, &str) -> bool) -> Vec<u8> {
-    let tools = catalogue.tools_for(admit);
+    discover_visible(catalogue, id, admit, |_| false)
+}
+
+fn discover_visible(
+    catalogue: &Catalogue,
+    id: &Value,
+    admit: &impl Fn(&str, &str) -> bool,
+    hidden: impl Fn(&crate::catalogue::ToolEntry) -> bool,
+) -> Vec<u8> {
+    let tools: Vec<_> = catalogue
+        .tools_for(admit)
+        .into_iter()
+        .filter(|tool| !hidden(tool))
+        .collect();
     let prompts = catalogue.prompts_for(admit);
     let resources = catalogue.resources_for(admit);
     let mut servers: Vec<&str> = tools
@@ -75,6 +88,7 @@ pub fn discover(catalogue: &Catalogue, id: &Value, admit: &impl Fn(&str, &str) -
             "protocolVersion": PROTOCOL_VERSION,
             "supportedVersions": SUPPORTED_PROTOCOL_VERSIONS,
             "serverInfo": { "name": "busbar", "version": crate::plane_door::VERSION },
+            "_meta": { "io.modelcontextprotocol/serverInfo": { "name": "busbar", "version": crate::plane_door::VERSION } },
             "capabilities": {
                 "tools": { "listChanged": true },
                 "prompts": { "listChanged": true },
@@ -145,7 +159,7 @@ pub fn answer(
                 let empty = json!({ "completion": { "values": [], "hasMore": false, "total": 0 } });
                 Answer::ok(complete(id, empty))
             } else if op == OP_DISCOVER {
-                Answer::ok(discover(catalogue, id, admit))
+                Answer::ok(discover_visible(catalogue, id, admit, hidden))
             } else {
                 Answer::Far
             }

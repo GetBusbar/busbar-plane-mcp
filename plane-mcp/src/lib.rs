@@ -1,6 +1,7 @@
 //! The MCP plane: the plugin contract's plane kind for the Model Context Protocol, served through
-//! its door ([`door`], the crate's one public item). It opens no socket, reads no file and holds no
-//! state of its own.
+//! its door ([`door`]) and declared metadata ([`DECLARES`]). It opens no socket, reads no file and holds no
+//! durable state outside the host's records. Per-instance memory holds sessions, active units,
+//! sightings, leases and pending protocol exchanges.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -26,6 +27,8 @@ mod framing;
 mod identity;
 /// The line carrier's meanings: one JSON-RPC message per line, each its own unit.
 mod line;
+mod local_output;
+mod local_renderer;
 mod plane_door;
 mod statement;
 mod tool_arrival;
@@ -39,15 +42,12 @@ mod tool_scope;
 mod tool_tasks;
 mod tools_config;
 
-/// The door: this plugin's one public item.
+/// The plugin's memory-ABI door.
 pub use plane_door::door;
 
-/// THE PLANE'S DECLARED METADATA (`declares.json`), as the tests read it: the one document the
-/// door's Statement carries under `EXT_DECLARES` ([`plane_door`]'s `EXTENSIONS`) and the release signs
-/// into a dropped-in plane's manifest. The codes its catalog holds are `diagnostics::DIAGNOSTICS`,
-/// the codes the door raises (the tests hold the three equal).
-#[cfg(test)]
-const DECLARES: &str = include_str!("../declares.json");
+/// The plane's declared metadata (`declares.json`), linked by the distribution and signed into a
+/// dropped-in plane's manifest. The door's Statement carries the same document under `EXT_DECLARES`.
+pub const DECLARES: &str = include_str!("../declares.json");
 
 mod reads;
 mod record;

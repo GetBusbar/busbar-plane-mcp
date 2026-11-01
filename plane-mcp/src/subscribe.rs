@@ -9,9 +9,8 @@
 //!   the requested one: the three list-changed categories, and `resourceSubscriptions` narrowed per
 //!   uri to what this caller is entitled to read. A request that opts in to nothing deliverable is
 //!   refused: a stream that can deliver nothing is a connection held open to say nothing.
-//! - WHAT COUNTS AS A CHANGE IS THIS CALLER'S CHANGE: a generation move is the cheap gate, followed
-//!   by a comparison of the catalogue THIS CALLER CAN SEE ([`change_keys`]), so a registration the
-//!   caller may not reach never wakes its stream.
+//! - WHAT COUNTS AS A CHANGE IS THIS CALLER'S CHANGE: compare the catalogue THIS CALLER CAN SEE
+//!   ([`change_keys`]) after re-asking its grants, including role changes within one generation.
 //! - THE PERMISSION IS RE-ASKED ON EVERY FRAME (the door passes [`Standing`]): a principal that has
 //!   stopped resolving live ends the stream on that frame, with the reason.
 //! - THE STREAM IS BOUNDED ([`MAX_LIFETIME_NS`]) and ends by saying so: the revision's own
@@ -125,6 +124,8 @@ impl Filter {
 pub enum Standing {
     /// It stands.
     Live,
+    /// The host could not re-confirm permission; this is not an identity revocation.
+    Unavailable,
     /// It lapsed, for this reason: the stream ends on this frame, saying so.
     Lapsed {
         /// The sentence.
@@ -178,6 +179,13 @@ fn invalid(id: &Value, message: &str) -> Value {
 }
 
 impl Listen {
+    /// Whether this subscription accepted this resource URI.
+    pub(crate) fn watches_resource(&self, uri: &str) -> bool {
+        self.accepted
+            .resources
+            .as_ref()
+            .is_some_and(|uris| uris.iter().any(|u| u == uri))
+    }
     /// OPEN one subscription for `params` under `id` at `now_ns`: the requested filter read,
     /// bounded, and narrowed by `entitled` (whether this caller's grant reaches a resource at a uri);
     /// `Err` is the refusal envelope.
@@ -266,6 +274,15 @@ impl Listen {
         if self.phase == Phase::Ended {
             return Step::Closed;
         }
+        if *standing == Standing::Unavailable {
+            self.phase = Phase::Ended;
+            return Step::End(vec![error_body(
+                self.id.clone(),
+                crate::codec::CODE_INTERNAL,
+                "the host could not re-confirm this subscription's permission",
+                Some(json!({"reason":"standing_unavailable"})),
+            )]);
+        }
         if let Standing::Lapsed { message, reason } = standing {
             self.phase = Phase::Ended;
             // The base protocol's invalid request closes it.
@@ -298,9 +315,13 @@ impl Listen {
                 seen,
             } => {
                 let mut changed = Vec::new();
-                if *at != generation {
+                let fresh = if self.accepted.lists.iter().any(|on| *on) {
+                    change_keys(catalogue, admit)
+                } else {
+                    *seen
+                };
+                if *at != generation || fresh != *seen {
                     *at = generation;
-                    let fresh = change_keys(catalogue, admit);
                     for (i, (_, method)) in KINDS.into_iter().enumerate() {
                         if fresh[i] != seen[i] && self.accepted.lists[i] {
                             changed.push(method);
@@ -349,13 +370,15 @@ impl Listen {
 
 /// A change key over one grant-scoped catalogue slice: FNV-1a, trusted for nothing (a collision
 /// costs one missed re-read of a list the caller can re-read at any time).
-fn change_key(mut parts: Vec<&str>) -> u64 {
+fn change_key(mut parts: Vec<(&str, &str)>) -> u64 {
     parts.sort_unstable();
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for part in parts {
-        for byte in part.as_bytes().iter().chain(std::iter::once(&0u8)) {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    for pair in parts {
+        for part in [pair.0, pair.1] {
+            for byte in part.as_bytes().iter().chain(std::iter::once(&0u8)) {
+                hash ^= u64::from(*byte);
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
         }
     }
     hash
@@ -366,10 +389,12 @@ fn change_key(mut parts: Vec<&str>) -> u64 {
 #[must_use]
 pub fn change_keys(catalogue: &Catalogue, admit: &impl Fn(&str, &str) -> bool) -> [u64; 3] {
     let tools = catalogue.tools_for(admit);
-    let mut tool_parts: Vec<&str> = Vec::with_capacity(tools.len() * 2);
+    let mut tool_parts: Vec<(&str, &str)> = Vec::with_capacity(tools.len());
     for tool in &tools {
-        tool_parts.push(tool.namespaced.as_str());
-        tool_parts.push(tool.schema_hash.as_deref().unwrap_or(""));
+        tool_parts.push((
+            tool.namespaced.as_str(),
+            tool.schema_hash.as_deref().unwrap_or(""),
+        ));
     }
     [
         change_key(tool_parts),
@@ -377,14 +402,14 @@ pub fn change_keys(catalogue: &Catalogue, admit: &impl Fn(&str, &str) -> bool) -
             catalogue
                 .prompts_for(admit)
                 .iter()
-                .map(|p| p.namespaced.as_str())
+                .map(|p| (p.namespaced.as_str(), ""))
                 .collect(),
         ),
         change_key(
             catalogue
                 .resources_for(admit)
                 .iter()
-                .map(|r| r.namespaced.as_str())
+                .map(|r| (r.namespaced.as_str(), ""))
                 .collect(),
         ),
     ]

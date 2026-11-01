@@ -34,17 +34,45 @@
 //     own credential keeps it, so a future authorization scenario is not silently overwritten by
 //     ours.
 //
-// Usage: node credential-shim.mjs <listen-port> <upstream-port> <bearer-token>
+// Usage: node credential-shim.mjs <listen-port> <upstream-port> 3<<<"$bearer"
 
 import http from 'node:http';
+import { readFileSync, closeSync, appendFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 
-const [listenPort, upstreamPort, token] = process.argv.slice(2);
+const [listenPort, upstreamPort] = process.argv.slice(2);
+let token;
+try { token = readFileSync(3, 'utf8').trim(); closeSync(3); }
+catch { console.error('provide the bearer token on descriptor 3'); process.exit(2); }
 if (!listenPort || !upstreamPort || !token) {
-  console.error('usage: credential-shim.mjs <listen-port> <upstream-port> <bearer-token>');
+  console.error('usage: credential-shim.mjs <listen-port> <upstream-port> 3<<<"$bearer"');
   process.exit(2);
 }
 
 const server = http.createServer((req, res) => {
+  // Optional, hash-only witness for the credential seam. Observe the client's
+  // supplied header before adding our fallback; never persist credential bytes
+  // or request bodies, including on the negative forwarding case.
+  const witness = process.env.MCP_SEAM_FRONT_TRANSCRIPT;
+  if (witness && typeof req.headers.authorization === 'string') {
+    const suppliedAuthorizationSha256 = createHash('sha256').update(req.headers.authorization).digest('hex');
+    let chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('end', () => {
+      let id;
+      try { id = JSON.parse(Buffer.concat(chunks).toString('utf8')).id; }
+      catch { /* malformed requests are still forwarded unchanged */ }
+      chunks = [];
+      if (id === undefined) return;
+      try {
+        appendFileSync(witness, `${JSON.stringify({
+          method: req.headers['mcp-method'] === 'tools/call' ? 'tools/call' : null,
+          requestIdSha256: createHash('sha256').update(JSON.stringify(id)).digest('hex'),
+          suppliedAuthorizationSha256,
+        })}\n`, { mode: 0o600 });
+      } catch { upstream.destroy(); res.destroy(); }
+    });
+  }
   const headers = { ...req.headers, host: `127.0.0.1:${upstreamPort}` };
   // Case-insensitively, because a client may send `Authorization` in any case and Node lowercases
   // incoming header names but a future refactor of this object must not depend on that.
@@ -55,6 +83,8 @@ const server = http.createServer((req, res) => {
     { host: '127.0.0.1', port: Number(upstreamPort), path: req.url, method: req.method, headers },
     (upstreamRes) => {
       res.writeHead(upstreamRes.statusCode, upstreamRes.headers);
+      upstreamRes.on('error', (error) => res.destroy(error));
+      upstreamRes.on('aborted', () => res.destroy());
       upstreamRes.pipe(res);
     },
   );
@@ -62,6 +92,7 @@ const server = http.createServer((req, res) => {
   // the reason, so a scenario that fails because busbar exited says so instead of being read as a
   // protocol defect.
   upstream.on('error', (e) => {
+    if (res.headersSent) { res.destroy(e); return; }
     res.writeHead(502, { 'content-type': 'text/plain' });
     res.end(`credential-shim: upstream busbar at 127.0.0.1:${upstreamPort} did not answer: ${e}`);
   });

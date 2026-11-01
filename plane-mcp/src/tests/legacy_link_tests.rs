@@ -7,6 +7,9 @@
 
 use super::*;
 
+#[path = "legacy_driver_regressions.rs"]
+mod driver_regressions;
+
 #[path = "legacy_retention_regressions.rs"]
 mod retention;
 

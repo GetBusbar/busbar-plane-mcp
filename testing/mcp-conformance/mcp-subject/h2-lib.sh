@@ -20,8 +20,16 @@
 set -uo pipefail
 H2_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 H2_REPO="$(cd "${H2_HERE}/../../.." && pwd)"
-# shellcheck source=../../../testing/fleet-fixtures/lib.sh
-source "${H2_REPO}/testing/fleet-fixtures/lib.sh"
+H2_UPSTREAM_PID=""
+H2_BUSBAR_PID=""
+
+h2_wait_for_http() {
+  local url="$1" limit="$2" started=$SECONDS
+  while ! curl -s -o /dev/null --max-time 1 "$url"; do
+    [ "$((SECONDS-started))" -lt "$limit" ] || return 1
+    sleep 1
+  done
+}
 
 # THE BILLING SWITCH (DECISION #42), and it is a PRESENCE, not a flag: `rate_card:` present ⇒ the
 # deployment is BILLED; `rate_card:` absent ⇒ it is not billed at all. The difference is not
@@ -32,23 +40,13 @@ source "${H2_REPO}/testing/fleet-fixtures/lib.sh"
 # could only ever assert the flat fee (#44) off the admission counter, and a priced meter class was
 # unreachable by construction.
 #
-# IT IS EMPTY, AND THE EMPTINESS IS THE HONEST SHAPE — not a stub left unfilled. The config grammar
-# in this tree keys `rate_card:` by CONFIG MODEL NAME and validates every key against `models:`
-# (`crates/busbar-kernel/src/config_validate/mod.rs:1465-1472`), and an entry's only members are the
-# four LLM token tiers (`RateEntryCfg`, `crates/busbar-kernel/src/config/sections.rs:324`,
-# `deny_unknown_fields`). This plane declares `tool_calls` and `bytes`
-# (`crates/busbar-plane-mcp/src/tool_meta.rs:33-52`); neither is a `models:` key and neither is one of the
-# four tiers, so THERE IS NO CONFIGURATION THAT PRICES EITHER DECLARED CLASS. An empty map is
-# therefore the most a billing-ON mcp deployment can say today, and `h2-class-price.sh` is the leg
-# that says what that costs.
 # The card is the PLANE's own (`tools.rate_card`, keyed by lane): it must configure every class the plane
 # declares, and an explicit 0 counts. Written inside the `tools:` section, two-space indented.
 H2_RATE_CARD_DEFAULT='  rate_card:
     probe_ping: { units: { tool_calls: 0, bytes: 0 } }'
 
 H2_BIN="${MCP_SUBJECT_BUSBAR_BIN:-${H2_REPO}/target/release/busbar}"
-# `--selftest` (bottom of this file) drives no busbar at all, so it is the one run that needs no binary.
-[ -x "$H2_BIN" ] || [ "${BASH_SOURCE[0]}:${1:-}" = "$0:--selftest" ] || { echo "H2: no busbar binary at $H2_BIN (build with: cargo build --release -p busbar)" >&2; exit 2; }
+[ -x "$H2_BIN" ] || { echo "H2: no busbar binary at $H2_BIN (build with: cargo build --release -p busbar)" >&2; exit 2; }
 
 # Three free loopback ports: data, admin, upstream.
 h2_free_ports() {
@@ -66,7 +64,7 @@ PY
 }
 
 # h2_boot <workdir> <group-yaml-block>
-# Boots busbar with one registered MCP server "probe", one tool "ping", `per_request_fee: 1` (so a
+# Boots busbar with one registered MCP server "probe", one tool "ping", `tools.fees.per_request: 1` (so a
 # served call posts a real, non-zero priced figure -- see h2-meter-row.sh), and the group(s) named
 # in <group-yaml-block> (indented under `groups:`, caller's responsibility to indent correctly).
 # Sets: H2_DATA_PORT H2_ADMIN_PORT H2_UPSTREAM_PORT H2_CANON H2_ADMIN_TOKEN H2_SIGNING_KEY
@@ -87,8 +85,7 @@ h2_boot() {
   MCP_MOCK_CAPTURE_DIR="$H2_EGRESS_DIR" node "${H2_HERE}/h2-mock-upstream.mjs" "$H2_UPSTREAM_PORT" \
     >"$dir/upstream.log" 2>&1 &
   H2_UPSTREAM_PID=$!
-  track_pid "$H2_UPSTREAM_PID"
-  wait_for_http "http://127.0.0.1:${H2_UPSTREAM_PORT}/" 10 || true
+  h2_wait_for_http "http://127.0.0.1:${H2_UPSTREAM_PORT}/" 10 || return 1
 
   ( umask 077; "$H2_BIN" --generate-signing-key >"$H2_SIGNING_KEY" 2>"$dir/genkey.log" ) \
     || { cat "$dir/genkey.log" >&2; return 1; }
@@ -127,8 +124,7 @@ ${H2_RATE_CARD_YAML:-$H2_RATE_CARD_DEFAULT}
     url: "http://127.0.0.1:${H2_UPSTREAM_PORT}/mcp"
     allow_private: true
     pin:
-      mechanism: pinned_pubkey
-      key: "sha256/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      mechanism: unpinned
     tools_allow:
       ping:
         schema_hash: "${digest}"
@@ -138,15 +134,14 @@ YAML
   BUSBAR_CONFIG="$dir/config.yaml" BUSBAR_ADMIN_TOKEN="$H2_ADMIN_TOKEN" RUST_LOG=warn \
     nohup "$H2_BIN" >"$dir/busbar.log" 2>&1 &
   H2_BUSBAR_PID=$!
-  track_pid "$H2_BUSBAR_PID"
 
-  local waited=0
+  local started=$SECONDS waited=0
   until [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 -X POST "$H2_CANON" \
               -H 'content-type: application/json' -H 'mcp-method: tools/list' \
               -H 'mcp-protocol-version: 2026-07-28' \
               -d '{"jsonrpc":"2.0","id":0,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}')" != "000" ]; do
     kill -0 "$H2_BUSBAR_PID" 2>/dev/null || { cat "$dir/busbar.log" >&2; return 1; }
-    waited=$((waited+1))
+    waited=$((SECONDS-started))
     [ "$waited" -lt 60 ] || { cat "$dir/busbar.log" >&2; return 1; }
     sleep 1
   done
@@ -162,7 +157,7 @@ YAML
 h2_approve_server() {
   local view
   view="$(curl -s --max-time 30 -X POST "http://127.0.0.1:${H2_ADMIN_PORT}/api/v1/admin/tools/probe/connect" \
-            -H "authorization: Bearer $H2_ADMIN_TOKEN")"
+            -H @/dev/fd/3 3<<<"authorization: Bearer $H2_ADMIN_TOKEN")"
   case "$view" in
     *'"state":"approved"'*) ;;
     *) echo "H2: the connect of 'probe' did not land approved: $view" >&2; return 1 ;;
@@ -171,10 +166,12 @@ h2_approve_server() {
 }
 
 h2_stop() {
-  kill "$H2_BUSBAR_PID" 2>/dev/null || true
-  kill "$H2_UPSTREAM_PID" 2>/dev/null || true
-  wait "$H2_BUSBAR_PID" 2>/dev/null || true
-  wait "$H2_UPSTREAM_PID" 2>/dev/null || true
+  local pid
+  for pid in "${H2_BUSBAR_PID:-}" "${H2_UPSTREAM_PID:-}"; do
+    [ -n "$pid" ] || continue
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
 }
 
 # h2_mint <group-or-empty> <extra-json-fields-or-empty> -> prints "id token" on one line
@@ -187,7 +184,7 @@ h2_mint() {
   fi
   local resp
   resp="$(curl -sS -m 10 -X POST "http://127.0.0.1:${H2_ADMIN_PORT}/api/v1/admin/keys" \
-            -H "Authorization: Bearer $H2_ADMIN_TOKEN" -H 'Content-Type: application/json' -d "$body")"
+            -H @/dev/fd/3 3<<<"Authorization: Bearer $H2_ADMIN_TOKEN" -H 'Content-Type: application/json' -d "$body")"
   local kid tok
   kid="$(python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("id") or "")' <<<"$resp")"
   tok="$(python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("token") or "")' <<<"$resp")"
@@ -196,7 +193,7 @@ h2_mint() {
 
 # h2_bind <plain-token> -> prints an audience-bound bearer for H2_CANON
 h2_bind() {
-  node "${H2_HERE}/mint-audience-token.mjs" "$H2_SIGNING_KEY" "$1" "$H2_CANON"
+  node "${H2_HERE}/mint-audience-token.mjs" "$H2_SIGNING_KEY" "$H2_CANON" 3<<<"$1"
 }
 
 # h2_call <bound-token> <label> -> prints "<status> <body>" (body on one line, JSON-compact)
@@ -204,7 +201,7 @@ h2_call() {
   local tok="$1" label="$2" out status
   out="${H2_WORKDIR}/call.$$.$RANDOM"
   status="$(curl -sS -m 20 -o "$out" -w '%{http_code}' -X POST "$H2_CANON" \
-    -H "authorization: Bearer $tok" -H 'content-type: application/json' \
+    -H @/dev/fd/3 3<<<"authorization: Bearer $tok" -H 'content-type: application/json' \
     -H 'mcp-method: tools/call' -H 'mcp-protocol-version: 2026-07-28' -H 'Mcp-Name: probe_ping' \
     -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"probe_ping\",\"arguments\":{\"label\":\"$label\"},\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{}}}}")"
   printf '%s %s\n' "$status" "$(tr -d '\n' <"$out")"
@@ -213,7 +210,7 @@ h2_call() {
 
 h2_usage() {
   local kid="$1"
-  curl -sS -m 10 -H "Authorization: Bearer $H2_ADMIN_TOKEN" \
+  curl -sS -m 10 -H @/dev/fd/3 3<<<"Authorization: Bearer $H2_ADMIN_TOKEN" \
     "http://127.0.0.1:${H2_ADMIN_PORT}/api/v1/admin/keys/${kid}/usage"
 }
 
@@ -225,9 +222,21 @@ h2_usage() {
 # `spend_cents` as `Σ counts × current rates + per_request_fee × billable_requests`. It survives a
 # live config swap, which the write-behind metering buffer does not, so every leg that spans an
 # apply reads its money HERE.
+h2_read_usage_field() {
+  python3 -c 'import json, math, sys
+field = sys.argv[1]
+d = json.load(sys.stdin)
+if not isinstance(d, dict) or field not in d:
+    raise SystemExit("usage response has no " + field)
+value = d[field]
+if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+    raise SystemExit("usage field is not a nonnegative number: " + field)
+print(value)' "$1"
+}
+
 h2_usage_field() {
   local kid="$1" field="$2"
-  h2_usage "$kid" | python3 -c "import json,sys; print(json.load(sys.stdin).get('$field') or 0)"
+  h2_usage "$kid" | h2_read_usage_field "$field"
 }
 
 # One field of the `by_model` row `GET /api/v1/admin/usage` carries for (model, provider), or `-`
@@ -240,7 +249,7 @@ h2_usage_field() {
 # assertion and not a restatement of the flat fee.
 h2_meter_row_field() {
   local model="$1" provider="$2" field="$3"
-  curl -sS -m 10 -H "Authorization: Bearer $H2_ADMIN_TOKEN" \
+  curl -sS -m 10 -H @/dev/fd/3 3<<<"Authorization: Bearer $H2_ADMIN_TOKEN" \
     "http://127.0.0.1:${H2_ADMIN_PORT}/api/v1/admin/usage" \
     | python3 -c "import json,sys
 d=json.load(sys.stdin)
@@ -259,7 +268,7 @@ print(rows[0].get('$field') if rows else '-')"
 # each plane-declared class's `{count, cost}`, and its counts are summed with the token columns.
 h2_meter_row_quantity() {
   local model="$1" provider="$2"
-  curl -sS -m 10 -H "Authorization: Bearer $H2_ADMIN_TOKEN" \
+  curl -sS -m 10 -H @/dev/fd/3 3<<<"Authorization: Bearer $H2_ADMIN_TOKEN" \
     "http://127.0.0.1:${H2_ADMIN_PORT}/api/v1/admin/usage" \
     | python3 -c "import json,sys
 d=json.load(sys.stdin)
@@ -278,7 +287,7 @@ else:
 # rule -- a token-only row carries no `classes` key at all, as 1.5.5's did).
 h2_meter_row_class() {
   local model="$1" provider="$2" class="$3" field="$4"
-  curl -sS -m 10 -H "Authorization: Bearer $H2_ADMIN_TOKEN" \
+  curl -sS -m 10 -H @/dev/fd/3 3<<<"Authorization: Bearer $H2_ADMIN_TOKEN" \
     "http://127.0.0.1:${H2_ADMIN_PORT}/api/v1/admin/usage" \
     | python3 -c "import json,sys
 d=json.load(sys.stdin)
@@ -295,7 +304,7 @@ print(((rows[0].get('classes') or {}).get('$class') or {}).get('$field', 0) if r
 # ledger is a defect in one of them, not a threshold to tune.
 h2_admin_usage_total() {
   local field="$1"
-  curl -sS -m 10 -H "Authorization: Bearer $H2_ADMIN_TOKEN" \
+  curl -sS -m 10 -H @/dev/fd/3 3<<<"Authorization: Bearer $H2_ADMIN_TOKEN" \
     "http://127.0.0.1:${H2_ADMIN_PORT}/api/v1/admin/usage" \
     | python3 -c "import json,sys
 d=json.load(sys.stdin)
@@ -434,7 +443,7 @@ json.dump({'config': doc, 'providers': {}}, sys.stdout)" >"$body"; then
     return
   fi
   curl -sS -m 30 -X POST "http://127.0.0.1:${H2_ADMIN_PORT}/api/v1/admin/config/apply" \
-    -H "Authorization: Bearer $H2_ADMIN_TOKEN" -H 'content-type: application/json' \
+    -H @/dev/fd/3 3<<<"Authorization: Bearer $H2_ADMIN_TOKEN" -H 'content-type: application/json' \
     --data-binary "@${body}"
   rm -f "$body"
 }
@@ -481,11 +490,15 @@ sys.stdout.write(src.replace(needle, os.environ['CARD']))" "${H2_WORKDIR}/config
   printf 'rc=%s %s\n' "$rc" "$(printf '%s' "$why" | tr -d '\n')"
 }
 
-h2_egress_count() { find "$H2_EGRESS_DIR" -type f 2>/dev/null | wc -l | tr -d ' '; }
+h2_egress_count() {
+  kill -0 "${H2_UPSTREAM_PID:?upstream was not started}" 2>/dev/null || { echo 'egress observer is not alive' >&2; return 1; }
+  [ -d "$H2_EGRESS_DIR" ] || { echo 'egress capture directory is missing' >&2; return 1; }
+  find "$H2_EGRESS_DIR" -type f -name '*.json' | wc -l | tr -d ' '
+}
 
 # h2_audit_max_seq -> the current top seq of the admin audit chain (0 if empty)
 h2_audit_max_seq() {
-  curl -sS -m 10 -H "Authorization: Bearer $H2_ADMIN_TOKEN" \
+  curl -sS -m 10 -H @/dev/fd/3 3<<<"Authorization: Bearer $H2_ADMIN_TOKEN" \
     "http://127.0.0.1:${H2_ADMIN_PORT}/api/v1/admin/audit?limit=1" \
     | python3 -c 'import json,sys
 d=json.load(sys.stdin)
@@ -496,7 +509,7 @@ print(items[0]["seq"] if items else 0)'
 # h2_audit_rows_since <seq> <action> <resource> -> count of rows with seq > <seq> matching action+resource
 h2_audit_rows_since() {
   local since="$1" action="$2" resource="$3"
-  curl -sS -m 10 -H "Authorization: Bearer $H2_ADMIN_TOKEN" \
+  curl -sS -m 10 -H @/dev/fd/3 3<<<"Authorization: Bearer $H2_ADMIN_TOKEN" \
     "http://127.0.0.1:${H2_ADMIN_PORT}/api/v1/admin/audit?limit=50" \
     | python3 -c "import json,sys
 d=json.load(sys.stdin)
@@ -511,7 +524,7 @@ print(sum(1 for r in items if r.get('seq',0) > since and r.get('action')==action
 # holds. A money assertion asks its question through this, negated (`if ! h2_int_is "$x" -eq 8`),
 # because the bare `if [ "$x" -ne 8 ]` FAILS OPEN on a read that came back empty or non-numeric: `[`
 # exits 2, the `if` takes its false arm and the leg records no failure. Here a non-integer read is
-# simply "not equal", so it fails closed. Pinned by `--selftest`.
+# simply "not equal", so it fails closed.
 h2_int_is() {
   [[ "${1:-}" =~ ^-?[0-9]+$ ]] || return 1
   case "$2" in
@@ -529,141 +542,10 @@ h2_int_is() {
 # (a verdict nobody can read is not a pass). It exits rather than returns so a rig that writes
 # `h2_verdict FAIL "..."` followed by anything else -- a cleanup line, a second check -- still ends
 # red; a `return` made every call site's exit status depend on the verdict being the script's last
-# command. The EXIT trap each rig sets (`h2_stop`) still runs. Pinned by `--selftest` (verdict-exits).
+# command. The EXIT trap each rig sets (`h2_stop`) still runs.
 h2_verdict() {
   local outcome="$1" detail="$2"
   printf '%s\t%s\n' "$outcome" "$detail"
   [ "$outcome" = PASS ] && exit 0
   exit 1
 }
-
-# ── --selftest ────────────────────────────────────────────────────────────────────────────────────
-# `./testing/mcp-conformance/mcp-subject/h2-lib.sh --selftest [case]` -- no busbar, no node, no network. Each rig case
-# copies the REAL rig script into a scratch dir beside a STUB h2-lib.sh (this file's own h2_verdict
-# and h2_int_is, plus canned answers for every reader the rig calls) and runs it, so what is judged is
-# the rig's own decision logic against a read it was never written for. Every case carries a control
-# the rig must PASS, so a stub that broke the rig outright cannot pass for a red.
-_h2_st_stub() {
-  local dir="$1"
-  {
-    echo 'set -uo pipefail'
-    declare -f h2_verdict h2_int_is 2>/dev/null
-    cat <<'STUB'
-_st_next() { local f="$H2_ST_DIR/n.$1" n v; n="$(cat "$f" 2>/dev/null || echo 0)"; echo $((n+1)) >"$f"; IFS='|' read -r -a v <<<"$2"; printf '%s\n' "${v[$n]:-}"; }
-# ARM 2 of unpriced-refuses is the one boot that writes a NON-BLANK card; with `H2_ST_BOOT_LOG` set
-# that boot refuses, leaving that text as its log, as the binary's refusal does.
-_st_carded() { [ -n "${H2_RATE_CARD_YAML:-}" ] && [ -n "${H2_RATE_CARD_YAML//[[:space:]]/}" ]; }
-h2_boot() { if _st_carded && [ -n "${H2_ST_BOOT_LOG:-}" ]; then mkdir -p "$1"; printf '%s\n' "$H2_ST_BOOT_LOG" >"$1/busbar.log"; return 1; fi; return 0; }
-h2_stop() { :; }
-h2_approve_server() { return 0; }
-h2_mint() { echo "kid-selftest tok-selftest"; }
-h2_bind() { echo "bound-selftest"; }
-h2_call() { if [ -n "${H2_RATE_CARD_YAML+x}" ] && ! _st_carded; then echo "200 {}"; else echo "${H2_ST_CALL:-200} {}"; fi; }
-h2_usage_field() { _st_next usage "${H2_ST_USAGE:-1}"; }
-h2_apply_plane_fee() { echo '{"applied":true}'; }
-h2_admin_usage_total() { echo 80000; }
-h2_meter_row_field() { case "$3" in requests) echo 1 ;; spend_micros) printf '%s\n' "${H2_ST_SPEND-10362}" ;; *) echo 10000 ;; esac; }
-h2_meter_row_quantity() { printf '%s\n' "${H2_ST_QTY-3}"; }
-h2_meter_row_class() { case "$3:$4" in tool_calls:count) printf '%s\n' "${H2_ST_TC-1}" ;; tool_calls:cost) printf '%s\n' "${H2_ST_TCC-2}" ;; bytes:count) printf '%s\n' "${H2_ST_BY-120}" ;; bytes:cost) printf '%s\n' "${H2_ST_BYC-360}" ;; esac; }
-h2_validate_card() { echo ok; }
-sleep() { :; }
-STUB
-  } >"${dir}/h2-lib.sh"
-}
-
-# _h2_st_rig <script> [VAR=value ...] -> prints the rig's exit status
-_h2_st_rig() {
-  local script="$1" d
-  shift
-  d="$(mktemp -d "${_H2_ST_TMP}/case.XXXXXX")"
-  cp "${H2_HERE}/${script}" "${d}/"
-  _h2_st_stub "$d"
-  env -u H2_RATE_CARD_YAML H2_ST_DIR="$d" H2_WORK="${d}/work" "$@" bash "${d}/${script}" >"${d}/out" 2>&1
-  echo "$?"
-}
-
-# _h2_st_want <label> <0|red> <got>
-_h2_st_want() {
-  local label="$1" want="$2" got="$3" ok=1
-  _H2_ST_RAN=$((_H2_ST_RAN+1))
-  case "$want" in
-    0) [ "$got" = "0" ] || ok=0 ;;
-    red) [ "$got" != "0" ] || ok=0 ;;
-  esac
-  if [ "$ok" = 1 ]; then
-    printf 'ok\t%s\n' "$label"
-  else
-    printf 'FAIL\t%s (want %s, got exit %s)\n' "$label" "$want" "$got"
-    _H2_ST_FAILED=$((_H2_ST_FAILED+1))
-  fi
-}
-
-_h2_st_case_verdict_exits() {
-  local out st
-  out="$( (h2_verdict FAIL "selftest" >/dev/null; echo REACHED) )"; st=$?
-  _h2_st_want "verdict-exits: FAIL ends the rig red" red "$st"
-  _h2_st_want "verdict-exits: nothing after a FAIL verdict runs" 0 "${#out}"
-  out="$( (h2_verdict PASS "selftest" >/dev/null; echo REACHED; exit 7) )"; st=$?
-  _h2_st_want "verdict-exits: PASS ends the rig green" 0 "$st"
-  _h2_st_want "verdict-exits: nothing after a PASS verdict runs" 0 "${#out}"
-  ( h2_verdict MAYBE "selftest" >/dev/null ); st=$?
-  _h2_st_want "verdict-exits: an unknown outcome word is red" red "$st"
-}
-
-_h2_st_case_card_epoch() {
-  _h2_st_want "card-epoch: control 1, 1, 8 passes" 0 "$(_h2_st_rig h2-card-epoch.sh H2_ST_USAGE='1|1|8')"
-  _h2_st_want "card-epoch: total 14 (newest-card reprice) is red" red "$(_h2_st_rig h2-card-epoch.sh H2_ST_USAGE='1|1|14')"
-  _h2_st_want "card-epoch: an EMPTY total read is red, not a pass" red "$(_h2_st_rig h2-card-epoch.sh H2_ST_USAGE='1|1|')"
-  _h2_st_want "card-epoch: a non-numeric total read is red, not a pass" red "$(_h2_st_rig h2-card-epoch.sh H2_ST_USAGE='1|1|8.0')"
-}
-
-_h2_st_case_class_price() {
-  _h2_st_want "class-price: control 1 call, 120 bytes, costs 2 + 360, spend 10362 passes" 0 "$(_h2_st_rig h2-class-price.sh)"
-  _h2_st_want "class-price: no metering row (-) is red" red "$(_h2_st_rig h2-class-price.sh H2_ST_TC=- H2_ST_BY=-)"
-  _h2_st_want "class-price: tool_calls count 0 (class absent) is red" red "$(_h2_st_rig h2-class-price.sh H2_ST_TC=0 H2_ST_TCC=0 H2_ST_SPEND=10360)"
-  _h2_st_want "class-price: bytes count 0 (class absent) is red" red "$(_h2_st_rig h2-class-price.sh H2_ST_BY=0 H2_ST_BYC=0 H2_ST_SPEND=10002)"
-  _h2_st_want "class-price: an EMPTY count read is red, not a pass" red "$(_h2_st_rig h2-class-price.sh H2_ST_BY=)"
-  _h2_st_want "class-price: a non-numeric count read is red, not a pass" red "$(_h2_st_rig h2-class-price.sh H2_ST_BY=None)"
-  _h2_st_want "class-price: a class cost that is not count x rate is red" red "$(_h2_st_rig h2-class-price.sh H2_ST_BYC=120 H2_ST_SPEND=10122)"
-  _h2_st_want "class-price: costs right but the row spend is the fee alone is red" red "$(_h2_st_rig h2-class-price.sh H2_ST_SPEND=10000)"
-  _h2_st_want "class-price: an EMPTY cost read is red, not a pass" red "$(_h2_st_rig h2-class-price.sh H2_ST_TCC=)"
-}
-
-_h2_st_case_unpriced_refuses() {
-  local named='busbar: config errors: tools.rate_card does not configure billable unit(s) bytes declared by this plane; add them (0 to make them free)'
-  _h2_st_want "unpriced-refuses: control arm 2 boot refused, named (#77(5)) passes" 0 "$(_h2_st_rig h2-unpriced-refuses.sh H2_ST_BOOT_LOG="$named" H2_ST_USAGE='1')"
-  _h2_st_want "unpriced-refuses: arm 2 boot refused for another reason is red" red "$(_h2_st_rig h2-unpriced-refuses.sh H2_ST_BOOT_LOG='busbar: listen: address in use' H2_ST_USAGE='1')"
-  _h2_st_want "unpriced-refuses: arm 2 refusal naming another class is red" red "$(_h2_st_rig h2-unpriced-refuses.sh H2_ST_BOOT_LOG="${named/bytes/tool_calls}" H2_ST_USAGE='1')"
-  _h2_st_want "unpriced-refuses: arm 2 booted and refused the call (400) is red: #77(5) refuses at boot" red "$(_h2_st_rig h2-unpriced-refuses.sh H2_ST_CALL=400 H2_ST_USAGE='1|0')"
-  _h2_st_want "unpriced-refuses: arm 2 served 200 is red" red "$(_h2_st_rig h2-unpriced-refuses.sh H2_ST_CALL=200 H2_ST_USAGE='1|1')"
-  _h2_st_want "unpriced-refuses: control arm 2 refused, but arm 1 billing 0 is red" red "$(_h2_st_rig h2-unpriced-refuses.sh H2_ST_BOOT_LOG="$named" H2_ST_USAGE='0')"
-  _h2_st_want "unpriced-refuses: arm 2 no connection (000) is red, not a refusal" red "$(_h2_st_rig h2-unpriced-refuses.sh H2_ST_CALL=000 H2_ST_USAGE='1|0')"
-  _h2_st_want "unpriced-refuses: arm 2 node failure (502) is red, not a refusal" red "$(_h2_st_rig h2-unpriced-refuses.sh H2_ST_CALL=502 H2_ST_USAGE='1|0')"
-  _h2_st_want "unpriced-refuses: arm 2 other success (202) is red, not a refusal" red "$(_h2_st_rig h2-unpriced-refuses.sh H2_ST_CALL=202 H2_ST_USAGE='1|0')"
-}
-
-h2_selftest() {
-  local only="${1:-}" c
-  _H2_ST_TMP="$(mktemp -d "${TMPDIR:-/tmp}/h2-selftest.XXXXXX")" || return 1
-  _H2_ST_RAN=0
-  _H2_ST_FAILED=0
-  for c in verdict_exits card_epoch class_price unpriced_refuses; do
-    [ -z "$only" ] || [ "$only" = "$c" ] || continue
-    "_h2_st_case_${c}"
-  done
-  rm -rf "$_H2_ST_TMP"
-  if [ "$_H2_ST_RAN" -eq 0 ]; then
-    printf 'FAIL\tno selftest case named %s\n' "$only"
-    return 1
-  fi
-  printf '%s\th2-lib selftest: %s checks, %s failed\n' \
-    "$([ "$_H2_ST_FAILED" -eq 0 ] && echo PASS || echo FAIL)" "$_H2_ST_RAN" "$_H2_ST_FAILED"
-  [ "$_H2_ST_FAILED" -eq 0 ]
-}
-
-if [ "${BASH_SOURCE[0]}" = "$0" ]; then
-  case "${1:-}" in
-    --selftest) h2_selftest "${2:-}"; exit $? ;;
-    *) echo "usage: $0 --selftest [case]  (this file is otherwise sourced by testing/mcp-conformance/mcp-subject/h2-*.sh)" >&2; exit 2 ;;
-  esac
-fi

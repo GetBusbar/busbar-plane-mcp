@@ -75,15 +75,34 @@ const _: () = assert!(PROGRAM_IDS > HANDSHAKE_REQUEST_ID);
 /// The JSON-RPC id unit `unit`'s call carries on a child, round `round`: the unit's own, so two
 /// units' calls on one child never share an id.
 #[must_use]
-pub const fn call_id(unit: u64, round: u32) -> u64 {
-    PROGRAM_IDS | ((unit & 0xFFFF_FFFF) << 7) | (round as u64 & 0x7F)
+pub fn call_id(unit: u64, round: u32) -> Value {
+    if unit <= u64::from(u32::MAX) && round <= 0x7F {
+        Value::from(PROGRAM_IDS | (unit << 7) | u64::from(round))
+    } else {
+        Value::String(format!("busbar-call:unit:{unit}:{round}"))
+    }
 }
 
-/// The JSON-RPC id a `tools/list` exchange carries: `key` its op's own number (a unit's, or an
-/// operator verb's ticket), `n` which of its fetches.
+/// A unit's `tools/list` id. Existing numeric ids stay byte-for-byte the same when the complete
+/// key and fetch fit; larger values use their full identity in a disjoint string namespace.
 #[must_use]
-pub const fn list_id(key: u64, n: u32) -> u64 {
-    PROGRAM_IDS | LIST_IDS | ((key & 0xFFFF_FFFF) << 7) | (n as u64 & 0x7F)
+pub fn unit_list_id(key: u64, n: u32) -> Value {
+    if key <= u64::from(u32::MAX) && n <= 0x7F {
+        Value::from(PROGRAM_IDS | LIST_IDS | (key << 7) | u64::from(n))
+    } else {
+        Value::String(format!("busbar-list:unit:{key}:{n}"))
+    }
+}
+
+/// An operator's `tools/list` id, with its complete slot, generation and fetch. Its string
+/// namespace is disjoint from unit list ids even for slot zero or the same numeric key.
+#[must_use]
+pub fn list_id(key: u64, n: u32) -> Value {
+    Value::String(format!(
+        "busbar-list:ticket:{}:{}:{n}",
+        key >> 32,
+        key & 0xFFFF_FFFF
+    ))
 }
 
 /// The sentence a child that ended its output mid-exchange fails the exchange with.
@@ -200,14 +219,65 @@ pub trait Peer {
     fn announced(&mut self, uri: &str) {
         let _ = uri;
     }
+
+    /// Claim this generation's initialization, or wait for its current owner.
+    fn greeting(&mut self, _: u64, _: Ticket) -> Poll<Greeting> {
+        Poll::Ready(Greeting::Start(None))
+    }
+
+    /// Initialization finished before any subsequent tool exchange can fail.
+    fn greeted(&mut self, _: u64) {}
+}
+
+/// Whether initialization is complete or this exchange owns its execution.
+#[derive(Debug)]
+pub enum Greeting {
+    /// Another exchange already finished this generation's initialization.
+    Done,
+    /// This exchange initializes it; an owned claim is released on cancellation or failure.
+    Start(Option<GreetingLease>),
+}
+
+/// A generation claim whose cancellation does not strand the exchanges waiting behind it.
+pub struct GreetingLease {
+    release: Option<Box<dyn FnOnce(bool) + Send + Sync>>,
+}
+
+impl std::fmt::Debug for GreetingLease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GreetingLease").finish_non_exhaustive()
+    }
+}
+
+impl GreetingLease {
+    /// A claim completed with `true`, or released with `false` if dropped unfinished.
+    pub fn new(release: impl FnOnce(bool) + Send + Sync + 'static) -> Self {
+        Self {
+            release: Some(Box::new(release)),
+        }
+    }
+
+    fn finish(mut self) {
+        if let Some(release) = self.release.take() {
+            release(true);
+        }
+    }
+}
+
+impl Drop for GreetingLease {
+    fn drop(&mut self) {
+        if let Some(release) = self.release.take() {
+            release(false);
+        }
+    }
 }
 
 /// Whose one of a child's granted asks is, as the exchange reading it is told.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AskOwner {
     /// The call relayed under this id: the call first in the child's line when the ask was first
     /// read. Its exchange takes the ask for its caller; every other passes it over.
-    Call(u64),
+    Call(Value),
     /// No call of the child's: this exchange read it first, and refuses it on the child's input.
     Refuse,
     /// No call of the child's, and an exchange that read it first refused it.
@@ -223,7 +293,10 @@ pub enum AskOwner {
 /// counts on every generation). An empty line, or one whose first call is on another generation's
 /// child, is `None`: the ask is refused, never handed to whichever exchange reads first (relayed
 /// down the session it belongs to, as-is).
-pub fn first_in_line(line: impl IntoIterator<Item = (u64, u64)>, generation: u64) -> Option<u64> {
+pub fn first_in_line(
+    line: impl IntoIterator<Item = (Value, u64)>,
+    generation: u64,
+) -> Option<Value> {
     let (call, on) = line.into_iter().next()?;
     (on == 0 || on == generation).then_some(call)
 }
@@ -326,11 +399,12 @@ impl Correlator {
     pub fn take(
         &mut self,
         bytes: &[u8],
-        wait: u64,
+        wait: impl Into<Value>,
         member: &str,
         generation: u64,
         peer: &mut dyn Peer,
     ) -> Result<Option<Vec<u8>>, String> {
+        let wait = wait.into();
         let mut answer = None;
         for message in self.frames.push(bytes) {
             let value = match message {
@@ -340,22 +414,13 @@ impl Correlator {
                 }
                 Message::Value(value) => value,
             };
-            let Some(own) = crate::client::peer::classify(&value) else {
-                // A response (or a value that is no message): ours by id, or another exchange's.
-                if value.get("id").and_then(Value::as_u64) == Some(wait) || !value.is_object() {
-                    answer.get_or_insert_with(|| serde_json::to_vec(&value).unwrap_or_default());
+            if let Value::Array(messages) = value {
+                for value in messages {
+                    self.take_value(value, &wait, member, generation, peer, &mut answer)?;
                 }
-                continue;
-            };
-            self.interleaved += 1;
-            if self.interleaved > MAX_INTERLEAVED_MESSAGES {
-                return Err(format!(
-                    "stdio MCP child sent more than {MAX_INTERLEAVED_MESSAGES} messages of its own \
-                     while busbar waited for one answer; the exchange is abandoned rather than \
-                     served at whatever rate the child chooses"
-                ));
+            } else {
+                self.take_value(value, &wait, member, generation, peer, &mut answer)?;
             }
-            self.own(&value, own, (wait, generation), member, peer);
         }
         if answer.is_none() && self.frames.overgrown() {
             return Err(format!(
@@ -366,12 +431,39 @@ impl Correlator {
         Ok(answer)
     }
 
+    fn take_value(
+        &mut self,
+        value: Value,
+        wait: &Value,
+        member: &str,
+        generation: u64,
+        peer: &mut dyn Peer,
+        answer: &mut Option<Vec<u8>>,
+    ) -> Result<(), String> {
+        let Some(own) = crate::client::peer::classify(&value) else {
+            if value.is_object() && value.get("id") == Some(wait) {
+                answer.get_or_insert_with(|| serde_json::to_vec(&value).unwrap_or_default());
+            }
+            return Ok(());
+        };
+        self.interleaved = self.interleaved.saturating_add(1);
+        if self.interleaved > MAX_INTERLEAVED_MESSAGES {
+            return Err(format!(
+                "stdio MCP child sent more than {MAX_INTERLEAVED_MESSAGES} messages of its own \
+                 while busbar waited for one answer; the exchange is abandoned rather than \
+                 served at whatever rate the child chooses"
+            ));
+        }
+        self.own(&value, own, (wait, generation), member, peer);
+        Ok(())
+    }
+
     /// One message of the child's own, handled.
     fn own(
         &mut self,
         value: &Value,
         message: ServerMessage,
-        (wait, generation): (u64, u64),
+        (wait, generation): (&Value, u64),
         member: &str,
         peer: &mut dyn Peer,
     ) {
@@ -380,13 +472,12 @@ impl Correlator {
                 match n.effect() {
                     NotificationEffect::BringRefreshForward => peer.notice(),
                     NotificationEffect::RelayResourceUpdate => {
-                        peer.notice();
                         if let Some(uri) = value.pointer("/params/uri").and_then(Value::as_str) {
                             peer.announced(uri);
                         }
                     }
                     NotificationEffect::RelayProgress => {
-                        let token = format!("busbar-{wait}");
+                        let token = crate::client::jsonrpc::progress_token(wait);
                         if value
                             .pointer("/params/progressToken")
                             .and_then(Value::as_str)
@@ -407,7 +498,7 @@ impl Correlator {
                 if verb.ask().is_some_and(|a| peer.grants().allows(a)) =>
             {
                 match peer.owner(generation, &id) {
-                    AskOwner::Call(call) if self.relays && call == wait => {
+                    AskOwner::Call(call) if self.relays && *wait == call => {
                         let mut request = value.as_object().cloned().unwrap_or_default();
                         request.remove("jsonrpc");
                         request.remove("id");
@@ -464,6 +555,7 @@ pub struct Exchanged {
 enum Step {
     Establish,
     Head,
+    Greeting,
     Next,
     Write(Vec<u8>),
     Read,
@@ -482,19 +574,21 @@ pub struct ProgramExchange {
     need: u32,
     step: Step,
     issued: u32,
+    service_limit: u32,
     stream: u64,
     buf: Box<[u8]>,
     slot: Box<ReplyPiece>,
     corr: Correlator,
     generation: u64,
     /// The messages still to send, each with the id whose answer it waits for.
-    queue: VecDeque<(Vec<u8>, Option<u64>)>,
+    queue: VecDeque<(Vec<u8>, Option<Value>)>,
     /// The answer being waited for.
-    waiting: Option<u64>,
+    waiting: Option<Value>,
     /// Write only on this generation (a reply owed to one child is never written to the next).
     only: Option<u64>,
     greet: bool,
     greeted: bool,
+    greeting: Option<GreetingLease>,
     answer: Option<Vec<u8>>,
     failed: Option<String>,
     /// The bound the lease is opened under, milliseconds (`0` = the need's own): the host holds the
@@ -598,20 +692,46 @@ impl ProgramExchange {
             need,
             step: Step::Establish,
             issued: 0,
+            service_limit: EXCHANGE_SERVICES,
             stream: 0,
             buf: vec![0; READ_CHUNK].into_boxed_slice(),
             slot: Box::default(),
             corr: Correlator::default(),
             generation: 0,
-            queue: messages.into(),
+            queue: messages
+                .into_iter()
+                .map(|(bytes, id)| (bytes, id.map(Value::from)))
+                .collect(),
             waiting: None,
             only: None,
             greet,
             greeted: false,
+            greeting: None,
             answer: None,
             failed: None,
             timeout_ms: 0,
         }
+    }
+
+    /// A tool-list exchange retaining the exact string or numeric id across every pending entry.
+    #[must_use]
+    pub fn listing(member: &str, need: u32, id: Value, greet: bool) -> Self {
+        Self::listing_page(member, need, id, greet, None)
+    }
+
+    /// One page of a tool-list exchange under its exact typed correlation id.
+    #[must_use]
+    pub fn listing_page(
+        member: &str,
+        need: u32,
+        id: Value,
+        greet: bool,
+        cursor: Option<&str>,
+    ) -> Self {
+        let request = crate::client::jsonrpc::tools_list_page_id("", &id, None, cursor).body;
+        let mut exchange = Self::new(member, need, Vec::new(), greet);
+        exchange.queue.push_back((request, Some(id)));
+        exchange
     }
 
     /// Opened under `timeout_ms`: the server's own `timeout:`.
@@ -628,6 +748,19 @@ impl ProgramExchange {
         self
     }
 
+    /// Restrict this exchange to the remainder of its caller's existing service range.
+    #[must_use]
+    pub fn within_services(mut self, remaining: u32) -> Self {
+        self.service_limit = remaining.min(EXCHANGE_SERVICES);
+        self
+    }
+
+    /// Completed services, including the cleanup CLOSE, consumed from that range.
+    #[must_use]
+    pub const fn services_used(&self) -> u32 {
+        self.issued
+    }
+
     /// Drive the exchange on `ticket`, its services numbered from `base`: READY with what it came
     /// to, PENDING (to be driven again on the op's next entry), or why it failed. `greeted` says
     /// whether the door already greeted a generation.
@@ -639,16 +772,22 @@ impl ProgramExchange {
         greeted: &dyn Fn(u64) -> bool,
         peer: &mut dyn Peer,
     ) -> Poll<Result<Exchanged, String>> {
+        if self.step == Step::Establish
+            && (self.service_limit < 2 || base.checked_add(self.service_limit - 1).is_none())
+        {
+            return Poll::Ready(Err(
+                "the exchange with the stdio MCP child has no complete service range left".into(),
+            ));
+        }
         loop {
-            if self.issued >= EXCHANGE_SERVICES {
+            if self.issued >= self.service_limit.saturating_sub(1)
+                && !matches!(self.step, Step::Close | Step::Next | Step::Greeting)
+            {
                 self.failed.get_or_insert_with(|| {
                     "the exchange with the stdio MCP child passed its bound".to_string()
                 });
-                if self.step != Step::Close {
-                    self.step = Step::Close;
-                } else {
-                    return Poll::Ready(Err(self.failed.take().unwrap_or_default()));
-                }
+                self.step = Step::Close;
+                self.greeting = None;
             }
             let seq = base.saturating_add(self.issued);
             match self.step.clone() {
@@ -660,7 +799,10 @@ impl ProgramExchange {
                             self.stream = stream;
                             self.step = Step::Head;
                         }
-                        Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                        Poll::Ready(Err(e)) => {
+                            self.issued += 1;
+                            return Poll::Ready(Err(e));
+                        }
                     }
                 }
                 Step::Head => {
@@ -677,15 +819,30 @@ impl ProgramExchange {
                             if self.only.is_some_and(|g| g != self.generation) {
                                 self.queue.clear();
                             }
-                            if self.greet && !greeted(self.generation) {
-                                self.queue.push_front((initialized_notification(), None));
-                                self.queue
-                                    .push_front((initialize(), Some(HANDSHAKE_REQUEST_ID)));
-                            }
-                            self.step = Step::Next;
+                            self.step = Step::Greeting;
                         }
-                        Poll::Ready(Err(e)) => self.fail(e),
+                        Poll::Ready(Err(e)) => {
+                            self.issued += 1;
+                            self.fail(e);
+                        }
                     }
+                }
+                Step::Greeting => {
+                    if self.greet && !greeted(self.generation) {
+                        match peer.greeting(self.generation, ticket) {
+                            Poll::Pending => return Poll::Pending,
+                            Poll::Ready(Greeting::Done) => {}
+                            Poll::Ready(Greeting::Start(claim)) => {
+                                self.greeting = claim;
+                                self.queue.push_front((initialized_notification(), None));
+                                self.queue.push_front((
+                                    initialize(),
+                                    Some(Value::from(HANDSHAKE_REQUEST_ID)),
+                                ));
+                            }
+                        }
+                    }
+                    self.step = Step::Next;
                 }
                 Step::Next => {
                     if let Some(reply) = self.corr.outbox.pop_front() {
@@ -705,10 +862,14 @@ impl ProgramExchange {
                         self.issued += 1;
                         if message == initialized_notification() {
                             self.greeted = true;
+                            self.completed_greeting(peer);
                         }
                         self.step = Step::Next;
                     }
-                    Poll::Ready(Err(e)) => self.fail(e),
+                    Poll::Ready(Err(e)) => {
+                        self.issued += 1;
+                        self.fail(e);
+                    }
                 },
                 Step::Read => {
                     match host.read_reply(ticket, seq, self.stream, &mut self.buf, &mut self.slot) {
@@ -717,10 +878,10 @@ impl ProgramExchange {
                             self.issued += 1;
                             match got.piece.kind {
                                 REPLY_BODY => {
-                                    let wait = self.waiting.unwrap_or_default();
+                                    let wait = self.waiting.clone().unwrap_or(Value::Null);
                                     let taken = self.corr.take(
                                         &self.buf[..got.len],
-                                        wait,
+                                        wait.clone(),
                                         &self.member,
                                         self.generation,
                                         peer,
@@ -728,8 +889,11 @@ impl ProgramExchange {
                                     match taken {
                                         Ok(Some(answer)) => {
                                             self.waiting = None;
-                                            if wait == HANDSHAKE_REQUEST_ID {
+                                            if wait.as_u64() == Some(HANDSHAKE_REQUEST_ID) {
                                                 self.greeted(&answer);
+                                                if self.greeted {
+                                                    self.completed_greeting(peer);
+                                                }
                                             } else {
                                                 self.answer = Some(answer);
                                             }
@@ -743,7 +907,10 @@ impl ProgramExchange {
                                 _ => {}
                             }
                         }
-                        Poll::Ready(Err(e)) => self.fail(e),
+                        Poll::Ready(Err(e)) => {
+                            self.issued += 1;
+                            self.fail(e);
+                        }
                     }
                 }
                 Step::Close => {
@@ -767,7 +934,15 @@ impl ProgramExchange {
     /// The exchange failed: the lease is closed, and the failure is its answer.
     fn fail(&mut self, why: String) {
         self.failed.get_or_insert(why);
+        self.greeting = None;
         self.step = Step::Close;
+    }
+
+    fn completed_greeting(&mut self, peer: &mut dyn Peer) {
+        peer.greeted(self.generation);
+        if let Some(claim) = self.greeting.take() {
+            claim.finish();
+        }
     }
 
     /// The handshake's answer: a result is acknowledged; a refusal (a child that does no handshake)

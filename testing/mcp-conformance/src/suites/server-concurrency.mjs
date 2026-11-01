@@ -6,11 +6,88 @@
 // once and no id is invented.
 
 import { test } from '../core/runner.mjs';
-import { request, notification, ERR } from '../core/jsonrpc.mjs';
+import { request, notification, ERR, SUBSCRIPTION_ID_KEY } from '../core/jsonrpc.mjs';
 
 async function withServer(ctx, fn) {
   const peer = ctx.target.spawnServer();
   try { return await fn(peer); } finally { await peer.stop(); }
+}
+
+// Optional adapter probes describe work and event publishers that the target
+// actually provides. They are not MCP methods every server must implement.
+// The focused controlled-peer cases supply these descriptors; the ordinary
+// target never gains a claimed started-work or event-publication observation.
+export async function probeStartedCancellation(ctx, peer, probe) {
+  const id = 'cancel-started';
+  const progressToken = 'cancel-started-progress';
+  peer.send(request(id, 'tools/call', probe.call, { progressToken }));
+  const started = await peer.waitFor((m) => m?.method === 'notifications/progress'
+    && m.params?.progressToken === progressToken, 'progress from the held request');
+  ctx.note('cancel.startedProgress', started);
+  if (peer.responsesFor(id).length !== 0) {
+    throw new Error('the held work completed before cancellation; started-work coverage was not established');
+  }
+  const afterStart = peer.messages.length;
+  peer.send(notification('notifications/cancelled', { requestId: id }));
+  // The adapter's release tool joins the held work and reports only after the
+  // cancel/release handlers have run. A discovery reply alone cannot do this.
+  peer.send(request('cancel-release', 'tools/call', probe.release));
+  const released = await peer.waitForId('cancel-release');
+  ctx.note('cancel.release', released);
+  if (!released.result || released.result.isError) {
+    throw new Error('the held-work release tool did not establish completion');
+  }
+  const afterCancel = peer.messages.slice(afterStart).filter((m) => m
+    && (m.id === id || (m.method === 'notifications/progress'
+      && m.params?.progressToken === progressToken)));
+  ctx.assert('CANCEL.NO-FURTHER-MESSAGES', afterCancel.length === 0,
+    `held request emitted messages after cancellation: ${JSON.stringify(afterCancel)}`);
+}
+
+function assertRequestedSubscriptionTypes(ctx, messages, id) {
+  const onSubscription = messages.filter((m) => m?.method?.startsWith('notifications/')
+    && m.params?._meta?.[SUBSCRIPTION_ID_KEY] === id);
+  const allowed = new Set([
+    'notifications/subscriptions/acknowledged',
+    'notifications/tools/list_changed',
+  ]);
+  const unrequested = onSubscription.filter((m) => !allowed.has(m.method));
+  ctx.assert('SUB.NO-UNREQUESTED-TYPES', unrequested.length === 0,
+    `unrequested types on subscription ${id}: ${JSON.stringify(unrequested)}`);
+}
+
+export async function probePublishedSubscription(ctx, peer, probe) {
+  // The second stream is the positive delivery control: publishing a resource
+  // update must be observable there, but must not leak to the tools-only stream.
+  peer.send(request(61, 'subscriptions/listen', {
+    notifications: { resourceSubscriptions: [probe.uri] },
+  }));
+  await peer.waitFor((m) => m?.method === 'notifications/subscriptions/acknowledged'
+    && m.params?._meta?.[SUBSCRIPTION_ID_KEY] === 61, 'resource subscription acknowledgement');
+  peer.send(request('subscription-publish', 'tools/call', probe.publish));
+  const published = await peer.waitForId('subscription-publish');
+  ctx.note('subscriptions.publisherReply', published);
+  if (!published.result || published.result.isError) {
+    throw new Error('the event-publisher tool did not establish publication');
+  }
+  const delivered = await peer.waitFor((m) => m?.method === 'notifications/resources/updated'
+    && m.params?.uri === probe.uri
+    && m.params?._meta?.[SUBSCRIPTION_ID_KEY] === 61, 'published resource update on its requested stream');
+  ctx.note('subscriptions.deliveredControlEvent', delivered);
+  if (peer.responsesFor(60).length || peer.messages.some((m) => m?.method === 'notifications/cancelled'
+    && m.params?.requestId === 60)) {
+    throw new Error('the tools-only subscription ended before the publication observation');
+  }
+  const subscriptionEvents = peer.messages.filter((m) => m?.method?.startsWith('notifications/')
+    && ['notifications/subscriptions/acknowledged', 'notifications/tools/list_changed',
+      'notifications/prompts/list_changed', 'notifications/resources/list_changed',
+      'notifications/resources/updated'].includes(m.method));
+  for (const event of subscriptionEvents) {
+    ctx.assert('SUB.ID-ON-EVERY-NOTIFICATION',
+      event.params?._meta?.[SUBSCRIPTION_ID_KEY] !== undefined,
+      `subscription notification lacks its subscription id: ${JSON.stringify(event)}`);
+  }
+  assertRequestedSubscriptionTypes(ctx, peer.messages, 60);
 }
 
 test({
@@ -62,33 +139,45 @@ test({
     // 1 and "1" are DIFFERENT ids in JSON-RPC. A server that stringifies its
     // id table will cross-deliver these two.
     peer.send(request(1, 'server/discover'));
-    peer.send(request('1', 'tools/list'));
+    peer.send(request('1', 'this/method/does/not/exist'));
     peer.send(request(0, 'server/discover'));
     peer.send(request(-7, 'server/discover'));
     peer.send(request('', 'server/discover'));
 
     const wanted = [1, '1', 0, -7, ''];
     for (const id of wanted) {
-      try { await peer.waitForId(id, 8000); } catch { /* recorded below */ }
+      try {
+        await peer.waitForId(id, 8000);
+      } catch (error) {
+        ctx.assert('BASE.RES.ID-MATCHES', false,
+          `waiting for ${typeof id} id ${JSON.stringify(id)} failed: ${error.message}`);
+      }
     }
     for (const id of wanted) {
       const replies = peer.messages.filter((m) => m
         && typeof m.id === typeof id && m.id === id
         && ('result' in m || 'error' in m));
-      ctx.assert('BASE.RES.ID-MATCHES', replies.length <= 1,
+      ctx.assert('BASE.RES.ID-MATCHES', replies.length === 1,
         `id ${JSON.stringify(id)} (${typeof id}) answered ${replies.length} times`);
       ctx.variance(`idTypes.${typeof id}.${JSON.stringify(id)}.answered`, replies.length === 1);
+      if (id !== '1') {
+        ctx.assert('VER.DISCOVER-REQUIRED',
+          Array.isArray(replies[0]?.result?.supportedVersions),
+          `discovery for ${typeof id} id ${JSON.stringify(id)} did not return supportedVersions`);
+      }
     }
-    // Cross-delivery check: the reply to integer 1 must not be the tools/list
-    // answer that belongs to string "1".
-    const intOne = peer.messages.find((m) => m && m.id === 1 && typeof m.id === 'number' && 'result' in m);
-    const strOne = peer.messages.find((m) => m && m.id === '1' && typeof m.id === 'string' && 'result' in m);
-    if (intOne && strOne) {
-      ctx.assert('BASE.RES.ID-MATCHES',
-        JSON.stringify(intOne.result) !== JSON.stringify(strOne.result)
-        || !('supportedVersions' in intOne.result && 'tools' in strOne.result),
-        'integer id 1 and string id "1" appear to have been conflated');
-    }
+    const invented = peer.messages.filter((m) => m && ('result' in m || 'error' in m)
+      && !wanted.some((id) => typeof m.id === typeof id && m.id === id));
+    ctx.assert('BASE.RES.ID-MATCHES', invented.length === 0,
+      `responses to ids never sent: ${JSON.stringify(invented)}`);
+    // Discovery and an unknown method have distinguishable answers even on a
+    // server with no tools capability. Swapping them must fail correlation.
+    const intOne = peer.responsesFor(1)[0];
+    const strOne = peer.responsesFor('1')[0];
+    ctx.assert('BASE.RES.ID-MATCHES',
+      Array.isArray(intOne?.result?.supportedVersions)
+        && strOne?.error?.code === ERR.METHOD_NOT_FOUND && !('result' in strOne),
+      'integer id 1 must carry discovery and string id "1" must carry Method not found');
   }),
 });
 
@@ -115,14 +204,18 @@ test({
 
 test({
   id: 'CONC.CANCEL-STOPS-RESPONSE',
-  title: 'a cancelled request either completes or goes silent, never both',
+  title: 'a request raced with cancellation receives at most one response',
   role: 'server', area: 'concurrency', tier: 'pr', peer: 'fake', timing: true,
-  catches: 'A cancellation path that stops the work but still emits a response, or emits two.',
+  catches: 'A request raced with cancellation is answered twice; this does not establish that cancellation stopped in-progress work.',
   run: (ctx) => withServer(ctx, async (peer) => {
+    if (!ctx.target.cancellationProbe) {
+      ctx.note('cancel.startedWorkCoverage',
+        'No held-work adapter is configured; this path measures only a completion/cancellation race.');
+    }
     peer.send(request('cancelme', 'tools/list'));
     peer.send(notification('notifications/cancelled', { requestId: 'cancelme' }));
-    // Barrier: a later request completing proves the earlier one was fully
-    // processed one way or the other.
+    // A later discovery answer establishes liveness after the cancellation.
+    // Concurrent dispatch may still leave the earlier request in progress.
     peer.send(request('barrier', 'server/discover'));
     await peer.waitForId('barrier');
     await peer.quiesce(300);
@@ -132,6 +225,9 @@ test({
     // Both 0 and 1 are legal: the spec permits ignoring a cancellation that
     // arrives after completion.
     ctx.variance('cancel.responseCount', replies.length);
+    if (ctx.target.cancellationProbe) {
+      await probeStartedCancellation(ctx, peer, ctx.target.cancellationProbe);
+    }
   }),
 });
 
@@ -141,12 +237,33 @@ test({
   role: 'server', area: 'concurrency', tier: 'pr', peer: 'fake',
   catches: 'A server reusing notifications/cancelled as a generic abort signal, which the 2026-07-28 spec forbids.',
   run: (ctx) => withServer(ctx, async (peer) => {
-    for (const [i, m] of ['server/discover', 'tools/list', 'prompts/list'].entries()) {
-      peer.send(request(i + 1, m));
-      try { await peer.waitForId(i + 1, 6000); } catch { /* optional */ }
+    const requests = [
+      [1, 'server/discover', {}],
+      [2, 'tools/list', {}],
+      [3, 'prompts/list', {}],
+      ['c1', 'tools/call', { name: '__nope__', arguments: {} }],
+    ];
+    for (const [id, method, params] of requests) {
+      peer.send(request(id, method, params));
+      try {
+        await peer.waitForId(id, 6000);
+      } catch (error) {
+        ctx.assert('BASE.RES.ID-MATCHES', false,
+          `${method} did not answer id ${JSON.stringify(id)}: ${error.message}`);
+      }
+      const replies = peer.responsesFor(id);
+      ctx.assert('BASE.RES.ID-MATCHES', replies.length === 1,
+        `${method} answered id ${JSON.stringify(id)} ${replies.length} times`);
+      for (const reply of replies) {
+        if ('error' in reply) {
+          ctx.assert('BASE.ERR.SHAPE',
+            typeof reply.error?.message === 'string' && !('result' in reply),
+            `${method} returned a malformed error: ${JSON.stringify(reply)}`);
+          ctx.assert('BASE.ERR.CODE-INTEGER', Number.isInteger(reply.error?.code),
+            `${method} error code=${JSON.stringify(reply.error?.code)}`);
+        }
+      }
     }
-    peer.send(request('c1', 'tools/call', { name: '__nope__', arguments: {} }));
-    try { await peer.waitForId('c1', 6000); } catch { /* fine */ }
     const cancels = peer.messages.filter((m) => m && m.method === 'notifications/cancelled');
     ctx.assert('CANCEL.SERVER-ONLY-SUBSCRIPTIONS', cancels.length === 0,
       `server sent notifications/cancelled with no subscription open: ${JSON.stringify(cancels)}`);
@@ -280,19 +397,29 @@ test({
 
 test({
   id: 'CONC.SUBSCRIPTION-NO-UNREQUESTED-TYPES',
-  title: 'the server sends only notification types the client asked for',
+  title: 'observed subscription notifications use requested types',
   role: 'server', area: 'concurrency', tier: 'prerelease', peer: 'real', timing: true,
-  catches: 'A server broadcasting every event to every stream, leaking activity between unrelated subscriptions.',
+  catches: 'Unrequested notification types observed while a tools-list subscription is open; no catalog-change stimulus is available on this target.',
   run: (ctx) => withServer(ctx, async (peer) => {
     peer.send(request(60, 'subscriptions/listen', {
       notifications: { toolsListChanged: true },
     }));
     try {
-      await peer.waitFor((m) => m && m.method === 'notifications/subscriptions/acknowledged',
+      await peer.waitFor((m) => m && m.method === 'notifications/subscriptions/acknowledged'
+        && m.params?._meta?.[SUBSCRIPTION_ID_KEY] === 60,
         'ack', 8000);
     } catch {
+      if (ctx.target.subscriptionProbe) {
+        throw new Error('the event-publisher probe could not open its tools-only subscription');
+      }
       ctx.skip('server did not acknowledge a subscriptions/listen request');
     }
+    if (ctx.target.subscriptionProbe) {
+      await probePublishedSubscription(ctx, peer, ctx.target.subscriptionProbe);
+      return;
+    }
+    ctx.note('subscriptions.publishedEventCoverage',
+      'No event publisher is configured; this path observes only naturally occurring notifications.');
     await peer.quiesce(600);
     const allowed = new Set([
       'notifications/subscriptions/acknowledged',
@@ -305,5 +432,8 @@ test({
       .filter((m) => !allowed.has(m.method));
     ctx.assert('SUB.NO-UNREQUESTED-TYPES', unrequested.length === 0,
       `unrequested notification types: ${JSON.stringify(unrequested.map((m) => m.method))}`);
+    // Progress/logging for other in-flight requests can share stdio. They are
+    // not exempt when explicitly stamped onto this tools-only subscription.
+    assertRequestedSubscriptionTypes(ctx, peer.messages, 60);
   }),
 });

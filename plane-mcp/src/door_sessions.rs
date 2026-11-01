@@ -37,11 +37,47 @@ use crate::codec::{
 use crate::framing::{CONTENT_LENGTH, CONTENT_TYPE, EVENT_STREAM};
 use crate::revision::{self, Revision};
 use crate::tool_arrival::{Disposition, Refusal};
-use crate::tool_sessions::{OpenRefused, Owner, Remembered, SessionTable, UpstreamTable};
+use crate::tool_sessions::{
+    OpenRefused, Owner, Remembered, ReplayData, ReplayTable, UpstreamTable,
+};
 use busbar_contract::abi::mechanism::call::{Outcome, SEVERITY_WARN};
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::plane::{OnPieceIn, OnPieceOut, FROM_CALLER, FROM_KERNEL, PIECE_LAST};
 use busbar_contract::abi::sdk::{Instance, Lent, Out};
+
+/// Local cursors enter history without expansion only when the existing quota will immediately
+/// trim them. Retainable answers become ordinary text, releasing original inputs and generation.
+#[derive(Clone, Debug)]
+pub(super) enum Data {
+    Text(String),
+    Local(crate::local_renderer::Local),
+}
+
+impl From<String> for Data {
+    fn from(text: String) -> Self {
+        Self::Text(text)
+    }
+}
+
+impl ReplayData for Data {
+    fn len(&self) -> usize {
+        match self {
+            Self::Text(text) => text.len(),
+            Self::Local(local) => local.len(),
+        }
+    }
+}
+
+pub(super) type Sessions = ReplayTable<Data>;
+
+fn history_data(table: &Sessions, data: Data) -> Result<Data, ()> {
+    match data {
+        Data::Local(local) if table.retained_event_fits(local.len()) => {
+            Ok(Data::Text(crate::local_output::buffered(local)?))
+        }
+        data => Ok(data),
+    }
+}
 
 /// THE INSTANCE'S DIAGNOSTIC that an ungoverned chain's sessions are unisolated, latched on its
 /// first `2024-11-05` stream (the index of its id in the Statement's diagnostic ids).
@@ -123,9 +159,13 @@ pub(super) enum SessionUnit {
         session: Option<String>,
         last_event_id: Option<String>,
         mount: String,
+        header: Option<String>,
     },
     /// DELETE of `session`.
-    Delete { session: String },
+    Delete {
+        session: String,
+        header: Option<String>,
+    },
     /// A line of a carrier session that negotiated a session revision: its answer is lowered.
     Line,
 }
@@ -206,10 +246,14 @@ pub(super) fn arrive(
                 session,
                 last_event_id: field(adapt::H_LAST_EVENT_ID),
                 mount: mount.to_string(),
+                header: field(H_PROTOCOL_VERSION),
             })
         }
         "DELETE" => match session {
-            Some(session) => local(SessionUnit::Delete { session }),
+            Some(session) => local(SessionUnit::Delete {
+                session,
+                header: field(H_PROTOCOL_VERSION),
+            }),
             None => SessionArrived::NotAllowed,
         },
         "POST" => {
@@ -288,6 +332,37 @@ fn message(
             mirror: Vec::new(),
         });
     };
+    let object = value.as_object();
+    let valid = object.is_some_and(|object| {
+        object.get("jsonrpc").and_then(Value::as_str) == Some("2.0")
+            && match object.get("method") {
+                Some(method) => method.is_string(),
+                None => {
+                    object
+                        .get("id")
+                        .is_some_and(|id| id.is_string() || id.is_number())
+                        && (object.contains_key("result") != object.contains_key("error"))
+                }
+            }
+    });
+    if !valid {
+        let id = value
+            .get("id")
+            .filter(|id| id.is_string() || id.is_number())
+            .cloned();
+        let refused = Refusal {
+            status: STATUS_BAD_REQUEST,
+            id,
+            code: CODE_INVALID_REQUEST,
+            message: "a session message must be one JSON-RPC 2.0 request, notification or response object".to_string(),
+            data: None,
+        };
+        return Box::new(Arrival {
+            unit: unit(Kind::Refused(Box::new(refused))),
+            dispatch: None,
+            mirror: Vec::new(),
+        });
+    }
     let method = value
         .get("method")
         .and_then(Value::as_str)
@@ -388,7 +463,7 @@ fn clocks(plane: &McpDoor, ticket: Ticket, unit: &mut CallUnit) -> Option<(u64, 
 }
 
 /// The session table.
-fn with_sessions<R>(plane: &McpDoor, f: impl FnOnce(&mut SessionTable) -> R) -> Option<R> {
+fn with_sessions<R>(plane: &McpDoor, f: impl FnOnce(&mut Sessions) -> R) -> Option<R> {
     plane.sessions.with(&(), |t| t.map(f))
 }
 
@@ -421,7 +496,7 @@ fn open_session(
                 return Err((
                     STATUS_UNAVAILABLE,
                     "the host's random source answered no entropy",
-                ))
+                ));
             }
             Some(Err(OpenRefused::OwnerFull)) => {
                 return Err((
@@ -429,14 +504,14 @@ fn open_session(
                     "this caller holds as many MCP sessions as this node keeps for one caller, \
                      each with a live stream: end one (DELETE it, or close its stream) and open \
                      again",
-                ))
+                ));
             }
             Some(Err(OpenRefused::Full)) | None => {
                 return Err((
                     STATUS_UNAVAILABLE,
                     "this node holds as many MCP sessions as it keeps, and none of this caller's \
                      is idle to give way",
-                ))
+                ));
             }
         }
     }
@@ -506,7 +581,24 @@ pub(super) fn answer(
         SessionUnit::Open { id, requested } => {
             open_endpoint(plane, ticket, unit, &owner, &id, requested.as_deref(), now)
         }
-        SessionUnit::Delete { session } => {
+        SessionUnit::Delete { session, header } => {
+            let revision = with_sessions(plane, |t| t.revision(&session, &owner, now)).flatten();
+            let Some(revision) = revision else {
+                return Some(written(unit, not_found(&Value::Null)));
+            };
+            if revision::header_disagrees(revision, header.as_deref()) {
+                return Some(written(
+                    unit,
+                    answer_of(
+                        STATUS_BAD_REQUEST,
+                        rpc_error(
+                            &Value::Null,
+                            CODE_INVALID_REQUEST,
+                            "The MCP-Protocol-Version header names another revision than this session's.",
+                        ),
+                    ),
+                ));
+            }
             if with_sessions(plane, |t| t.close(&session, &owner, now)) == Some(true) {
                 plane.session_state.remove(&session);
                 // Each of its streams ends at its next collection.
@@ -798,7 +890,9 @@ pub(super) fn list_changed(plane: &McpDoor, server: &str, now_ms: Option<u64>) {
     if let Some(now) = now_ms {
         plane.list_noticed.insert(key.clone(), now);
     }
-    plane.checked.remove(&key);
+    plane
+        .checked
+        .with_all(|m| m.retain(|(_, name), _| name != server));
 }
 
 /// WHAT AN UPSTREAM SAID ON ITS EVENT STREAM beside a relayed call's answer: its resource updates
@@ -812,11 +906,10 @@ pub(super) fn heard(
     session: Option<(&str, &Owner, u64)>,
     mono_ms: Option<u64>,
 ) {
-    for line in String::from_utf8_lossy(raw).lines() {
-        let Some(data) = line.strip_prefix("data:") else {
-            continue;
-        };
-        let Ok(frame) = serde_json::from_str::<Value>(data.trim()) else {
+    let mut reader = crate::client::compat::EventReader::new(raw.len());
+    for event in reader.feed(raw) {
+        let data = event.data;
+        let Ok(frame) = serde_json::from_str::<Value>(&data) else {
             continue;
         };
         match frame.get("method").and_then(Value::as_str) {
@@ -840,10 +933,15 @@ pub(super) fn heard(
                     .and_then(|s| s.level);
                 let level = frame.pointer("/params/level").and_then(Value::as_str);
                 let rank = crate::framing::severity_of;
-                let passes = match (floor.as_deref().and_then(rank), level.and_then(rank)) {
-                    (Some(floor), Some(level)) => level >= floor,
-                    (Some(_), None) => false,
-                    (None, _) => true,
+                let Some(level) = level.and_then(rank) else {
+                    tracing::warn!(
+                        "MCP upstream log notification carried no recognized severity; it was not relayed"
+                    );
+                    continue;
+                };
+                let passes = match floor.as_deref().and_then(rank) {
+                    Some(floor) => level >= floor,
+                    None => true,
                 };
                 // The record goes on as the upstream wrote it.
                 if passes {
@@ -887,10 +985,9 @@ pub(super) fn lower(plane: &McpDoor, ticket: Ticket, caller: &str, unit: &mut Ca
         Some(SessionUnit::Line) => (true, None),
         _ => return,
     };
-    let lowerable = unit
-        .pending
-        .as_ref()
-        .is_some_and(|p| !p.headed && p.request.is_none() && !p.bytes.is_empty());
+    let lowerable = unit.pending.as_ref().is_some_and(|p| {
+        !p.headed && p.request.is_none() && (p.local.is_some() || !p.bytes.is_empty())
+    });
     if !lowerable {
         return;
     }
@@ -907,6 +1004,45 @@ pub(super) fn lower(plane: &McpDoor, ticket: Ticket, caller: &str, unit: &mut Ca
         replace_wire_answer(pending, unavailable(&Value::Null, super::CLOCK_UNREAD));
         return;
     };
+    // Local results already have the revision's schema. A legacy POST buffers compact bytes only
+    // under the existing history quota; an oversized cursor follows the original self-trim path.
+    if pending.local.is_some() {
+        if let Some(session) = legacy {
+            let local = pending
+                .local
+                .take()
+                .and_then(|mut output| output.take_json());
+            let id = local
+                .as_ref()
+                .map(|local| local.id().clone())
+                .unwrap_or(Value::Null);
+            let delivered = match local
+                .map(|local| {
+                    deliver_data(plane, &session, &owner_of(caller), Data::Local(local), now)
+                })
+                .transpose()
+            {
+                Ok(delivered) => delivered.unwrap_or(false),
+                Err(()) => {
+                    replace_wire_answer(
+                        pending,
+                        unavailable(&id, "the local answer could not be buffered"),
+                    );
+                    return;
+                }
+            };
+            if delivered {
+                pending.bytes.clear();
+                pending.fields.clear();
+                pending.status = STATUS_ACCEPTED;
+            } else {
+                replace_wire_answer(pending, not_found(&id));
+            }
+        } else if !line {
+            pending.status = 200;
+        }
+        return;
+    }
     let Ok(v) = serde_json::from_slice::<Value>(&pending.bytes) else {
         return;
     };
@@ -972,6 +1108,7 @@ fn replace_wire_answer(pending: &mut Pending, answer: Pending) {
     pending.status = answer.status;
     pending.fields = answer.fields;
     pending.bytes = answer.bytes;
+    pending.local = answer.local;
     // Delivery failed; completed upstream work still reports its usage, records and audit.
     pending
         .units
@@ -1022,6 +1159,30 @@ fn deliver_frame(plane: &McpDoor, session: &str, owner: &Owner, data: &str, now:
         due(plane, session);
     }
     pushed
+}
+
+fn deliver_data(
+    plane: &McpDoor,
+    session: &str,
+    owner: &Owner,
+    data: Data,
+    now: u64,
+) -> Result<bool, ()> {
+    let target = plane
+        .streams
+        .with_all(|m| m.values().find(|s| s.session == session).map(|s| s.stream));
+    let Some(stream) = target else {
+        return Ok(false);
+    };
+    let pushed = with_sessions(plane, |t| {
+        t.push_prepared(session, owner, stream, data, history_data, now)
+            .map(|id| id.is_some())
+    })
+    .unwrap_or(Ok(false))?;
+    if pushed {
+        due(plane, session);
+    }
+    Ok(pushed)
 }
 
 /// Every stream of `session` named due, and the driver woken.
@@ -1193,16 +1354,33 @@ pub(super) fn piece(
     }
 }
 
-/// The events after a stream's cursor, framed: `(bytes, the last seq)`.
-fn frames(events: &[(String, String)], legacy: bool) -> (Vec<u8>, Option<u64>) {
-    let mut bytes = Vec::new();
+/// The events after a stream's cursor, framed without expanding local results.
+fn frames(events: Vec<(String, Data)>, legacy: bool) -> (crate::local_output::Output, Option<u64>) {
+    let mut output = crate::local_output::Output::default();
     let mut last = None;
     for (id, data) in events {
         let id_word = (!legacy).then_some(id.as_str());
-        bytes.extend_from_slice(adapt::frame(id_word, Some(adapt::EVENT_MESSAGE), data).as_bytes());
+        match data {
+            Data::Text(text) => {
+                output.bytes(adapt::frame(id_word, Some(adapt::EVENT_MESSAGE), &text).into_bytes())
+            }
+            Data::Local(local) => output.event(local, id_word),
+        }
         last = id.split_once('-').and_then(|(_, q)| q.parse().ok());
     }
-    (bytes, last)
+    (output, last)
+}
+
+fn stream_frame(output: crate::local_output::Output, headed: bool) -> Pending {
+    let mut pending = door_listen::frame(Vec::new(), false, headed);
+    pending.local = Some(output);
+    pending
+}
+
+fn stream_bytes(bytes: Vec<u8>) -> crate::local_output::Output {
+    let mut output = crate::local_output::Output::default();
+    output.bytes(bytes);
+    output
 }
 
 /// OPENS the stream the unit's GET asks for: `(wrote, an ungoverned 2024-11-05 stream)`.
@@ -1216,6 +1394,7 @@ fn open_stream(
         session,
         last_event_id,
         mount,
+        header,
     }) = unit.session.clone()
     else {
         return None;
@@ -1246,7 +1425,7 @@ fn open_stream(
         return Some((true, false));
     };
     let ungoverned = owner.principal == crate::ask::UNGOVERNED;
-    let (session, stream, delivered, legacy, bytes) = match session {
+    let (session, stream, delivered, legacy, output) = match session {
         None => {
             let opened = open_session(plane, ticket, unit, owner, Revision::R2024_11_05, now);
             let session = match opened {
@@ -1259,7 +1438,13 @@ fn open_stream(
             };
             let stream = with_sessions(plane, |t| t.open_stream(&session, owner, now)).flatten()?;
             let endpoint = adapt::endpoint_event(&mount, &session);
-            (session, stream, 0, true, endpoint.into_bytes())
+            (
+                session,
+                stream,
+                0,
+                true,
+                stream_bytes(endpoint.into_bytes()),
+            )
         }
         Some(session) => {
             let revision = with_sessions(plane, |t| t.revision(&session, owner, now)).flatten();
@@ -1267,21 +1452,37 @@ fn open_stream(
                 unit.pending = Some(not_found(&Value::Null));
                 return Some((true, false));
             }
+            if revision
+                .is_some_and(|revision| revision::header_disagrees(revision, header.as_deref()))
+            {
+                unit.pending = Some(answer_of(
+                    STATUS_BAD_REQUEST,
+                    rpc_error(
+                        &Value::Null,
+                        CODE_INVALID_REQUEST,
+                        "The MCP-Protocol-Version header names another revision than this session's.",
+                    ),
+                ));
+                return Some((true, false));
+            }
+            let cursor_seq = last_event_id
+                .as_deref()
+                .and_then(|cursor| cursor.split_once('-'))
+                .and_then(|(_, sequence)| sequence.parse::<u64>().ok());
             let resumed = last_event_id
-                .and_then(|cursor| {
-                    with_sessions(plane, |t| t.replay(&session, owner, &cursor, now))
-                })
+                .as_deref()
+                .and_then(|cursor| with_sessions(plane, |t| t.replay(&session, owner, cursor, now)))
                 .flatten();
             match resumed {
                 Some(replay) => {
-                    let (bytes, last) = frames(&replay.events, false);
-                    let delivered = last.unwrap_or(0);
-                    let bytes = if bytes.is_empty() {
-                        KEEPALIVE.to_vec()
+                    let (output, last) = frames(replay.events, false);
+                    let delivered = last.or(cursor_seq).unwrap_or(0);
+                    let output = if output.done() {
+                        stream_bytes(KEEPALIVE.to_vec())
                     } else {
-                        bytes
+                        output
                     };
-                    (session, replay.stream, delivered, false, bytes)
+                    (session, replay.stream, delivered, false, output)
                 }
                 None => {
                     let opened =
@@ -1302,7 +1503,7 @@ fn open_stream(
                             Some(Pending::answer(refusal.status, refusal.body(), None, &[]));
                         return Some((true, false));
                     };
-                    (session, stream, 0, false, KEEPALIVE.to_vec())
+                    (session, stream, 0, false, stream_bytes(KEEPALIVE.to_vec()))
                 }
             }
         }
@@ -1325,7 +1526,7 @@ fn open_stream(
             last_write_ns: mono,
         },
     );
-    unit.pending = Some(door_listen::frame(bytes, false, false));
+    unit.pending = Some(stream_frame(output, false));
     Some((true, legacy && ungoverned))
 }
 
@@ -1338,14 +1539,26 @@ fn step_stream(plane: &McpDoor, ticket: Ticket, unit: &mut CallUnit) -> Option<b
     let Some((now, mono)) = clocks(plane, ticket, unit) else {
         return Some(false);
     };
-    let updates: Vec<(String, String)> = plane
-        .session_state
-        .with(&held_stream.session, |s| {
-            s.map(|s| s.updates.drain(..).collect::<Vec<_>>())
-        })
-        .unwrap_or_default();
+    if door_listen::standing(plane, ticket, &held_stream.owner.principal, unit)
+        != crate::subscribe::Standing::Live
+    {
+        end_stream(plane, unit.key);
+        unit.pending = Some(door_listen::frame(Vec::new(), true, true));
+        return Some(true);
+    }
+    let held = plane.current().or_else(|| unit.held.clone());
+    let updates: Vec<(String, String)> = if held.is_some() {
+        plane
+            .session_state
+            .with(&held_stream.session, |s| {
+                s.map(|s| s.updates.drain(..).collect::<Vec<_>>())
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     if !updates.is_empty() {
-        if let Some(held) = plane.current().or_else(|| unit.held.clone()) {
+        if let Some(held) = held {
             door_listen::entitled_afresh(plane, ticket, unit, &held);
             let admit = admit(&unit.entitled);
             for (server, uri) in updates {
@@ -1383,11 +1596,11 @@ fn step_stream(plane: &McpDoor, ticket: Ticket, unit: &mut CallUnit) -> Option<b
         unit.pending = Some(door_listen::frame(Vec::new(), true, true));
         return Some(true);
     };
-    let (bytes, last) = frames(&replay.events, held_stream.legacy);
-    let bytes = if !bytes.is_empty() {
-        bytes
+    let (output, last) = frames(replay.events, held_stream.legacy);
+    let output = if !output.done() {
+        output
     } else if mono.saturating_sub(held_stream.last_write_ns) >= crate::subscribe::KEEPALIVE_NS {
-        KEEPALIVE.to_vec()
+        stream_bytes(KEEPALIVE.to_vec())
     } else {
         return Some(false);
     };
@@ -1399,7 +1612,7 @@ fn step_stream(plane: &McpDoor, ticket: Ticket, unit: &mut CallUnit) -> Option<b
             s.last_write_ns = mono;
         }
     });
-    unit.pending = Some(door_listen::frame(bytes, false, true));
+    unit.pending = Some(stream_frame(output, true));
     Some(true)
 }
 
@@ -1437,6 +1650,7 @@ pub(super) enum Negotiated {
 #[derive(Debug)]
 pub(super) struct Negotiating {
     negotiator: Negotiator,
+    list_pages: Option<crate::client::jsonrpc::ToolPages>,
     next: Option<Action>,
     hops: u32,
     /// The first hop is the stateless request, not yet answered.
@@ -1505,6 +1719,7 @@ impl Negotiating {
         let first = negotiator.start();
         Negotiating {
             negotiator,
+            list_pages: None,
             next: Some(first),
             hops: 0,
             probing,
@@ -1595,6 +1810,9 @@ impl Negotiating {
         loop {
             match self.next.take() {
                 Some(Action::Send { request }) => {
+                    if self.list_pages.is_some() && self.hops >= super::ROUND_SEQ_SPAN / HOP_SPAN {
+                        return Poll::Ready(Negotiated::Failed("the complete tool list exceeds this fetch's existing service-handle range".to_string()));
+                    }
                     let at = base.saturating_add(self.hops.saturating_mul(HOP_SPAN));
                     let polled = exchange_at(
                         instance,
@@ -1651,6 +1869,9 @@ impl Negotiating {
                 Some(Action::OpenStream)
                     if plane.host.as_ref().is_some_and(|h| h.lends_connector()) =>
                 {
+                    if self.list_pages.is_some() && self.hops >= super::ROUND_SEQ_SPAN / HOP_SPAN {
+                        return Poll::Ready(Negotiated::Failed("the complete tool list exceeds this fetch's existing service-handle range".to_string()));
+                    }
                     let at = base.saturating_add(self.hops.saturating_mul(HOP_SPAN));
                     let original = self.negotiator.original().clone();
                     let called = super::door_legacy::call(
@@ -1667,6 +1888,7 @@ impl Negotiating {
                             return Poll::Pending;
                         }
                         Poll::Ready(Ok((body, sse, id, dropped))) => {
+                            self.hops += 1;
                             self.dropped = dropped;
                             self.legacy_id = Some(id);
                             let legacy = Remembered {
@@ -1769,43 +1991,102 @@ pub(super) fn fetch_in(
     (base, member, binding, timeout_ms): (u32, &str, &str, u64),
     original: OutboundRequest,
 ) -> Poll<Result<busbar_contract::abi::sdk::exchange::ExchangeResponse, String>> {
-    // The id the fetch correlates its answer by: its own request's.
-    let original_id = serde_json::from_slice::<serde_json::Value>(&original.body)
+    use crate::client::jsonrpc::{parse_response_id, Paged, RpcOutcome, ToolPages};
+    let original_id = serde_json::from_slice::<Value>(&original.body)
         .ok()
-        .and_then(|v| v.get("id").cloned());
-    let negotiating =
-        slot.get_or_insert_with(|| Box::new(Negotiating::begin(plane, member, binding, original)));
-    let Poll::Ready(done) = negotiating.drive(instance, plane, base, member, timeout_ms) else {
-        return Poll::Pending;
-    };
-    // Replies dropped on the caller's held stream are audited on a relayed call's answer, which a
-    // fetch has none of: they stay counted on the stream for the next one.
-    super::door_legacy::recount(plane, &negotiating.key, negotiating.dropped);
-    *slot = None;
-    Poll::Ready(match done {
-        // A REDIRECT IS A FAILURE, NEVER FOLLOWED (security.md: the destination is the operator's
-        // `url:`, and nothing an upstream says may move it): whatever body rides a 3xx is not read.
-        Negotiated::Answer(status, ..) if (300..400).contains(&status) => Err(format!(
-            "the upstream answered HTTP {status}, a redirect; busbar never follows one, and \
-             nothing it carried is read"
-        )),
-        Negotiated::Answer(status, raw, sse, sent) => {
-            let body = if sse {
-                crate::call::last_sse_data(&raw)
-            } else {
-                raw
-            };
-            Ok(busbar_contract::abi::sdk::exchange::ExchangeResponse {
-                status,
-                body: match (sent, original_id) {
-                    (Some(sent), Some(id)) => with_id(body, sent, id),
-                    _ => body,
-                },
-                ..Default::default()
-            })
+        .and_then(|value| value.get("id").cloned())
+        .unwrap_or(Value::Null);
+    loop {
+        let negotiating = slot.get_or_insert_with(|| {
+            Box::new(Negotiating::begin(plane, member, binding, original.clone()))
+        });
+        negotiating
+            .list_pages
+            .get_or_insert_with(ToolPages::default);
+        let Poll::Ready(done) = negotiating.drive(instance, plane, base, member, timeout_ms) else {
+            return Poll::Pending;
+        };
+        super::door_legacy::recount(plane, &negotiating.key, negotiating.dropped);
+        let response = match done {
+            Negotiated::Answer(status, ..) if (300..400).contains(&status) => Err(format!(
+                "the upstream answered HTTP {status}, a redirect; busbar never follows one, and nothing it carried is read"
+            )),
+            Negotiated::Answer(status, raw, sse, sent) => {
+                let body = if sse {
+                    crate::call::last_sse_data(&raw)
+                } else {
+                    raw
+                };
+                Ok(busbar_contract::abi::sdk::exchange::ExchangeResponse {
+                    status,
+                    body: match sent {
+                        Some(sent) => with_id(body, sent, original_id.clone()),
+                        None => body,
+                    },
+                    ..Default::default()
+                })
+            }
+            Negotiated::Failed(reason) => Err(reason),
+        };
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => {
+                *slot = None;
+                return Poll::Ready(Err(error));
+            }
+        };
+        if !(200..300).contains(&response.status) {
+            *slot = None;
+            return Poll::Ready(Err(format!(
+                "the upstream answered HTTP {}; no complete tool list was received",
+                response.status
+            )));
         }
-        Negotiated::Failed(reason) => Err(reason),
-    })
+        if let RpcOutcome::Result(result) = parse_response_id(&response.body, &original_id) {
+            let mut pages = negotiating
+                .list_pages
+                .take()
+                .expect("a list fetch retains its pages");
+            match pages.take(result) {
+                Ok(Paged::Next(cursor)) => {
+                    let request =
+                        match crate::client::jsonrpc::next_list_request(&original, &cursor) {
+                            Ok(request) => request,
+                            Err(error) => {
+                                *slot = None;
+                                return Poll::Ready(Err(error));
+                            }
+                        };
+                    let hops = negotiating.hops;
+                    let mut next = Negotiating::begin(plane, member, binding, request);
+                    next.hops = hops;
+                    next.list_pages = Some(pages);
+                    **negotiating = next;
+                    continue;
+                }
+                Ok(Paged::Done(result)) => {
+                    let body = if pages.pages() == 1 {
+                        response.body
+                    } else {
+                        busbar_contract::jsonrpc::result_bytes(
+                            &crate::codec::json(&original_id),
+                            &crate::codec::json(&result),
+                        )
+                    };
+                    *slot = None;
+                    return Poll::Ready(Ok(
+                        busbar_contract::abi::sdk::exchange::ExchangeResponse { body, ..response },
+                    ));
+                }
+                Err(error) => {
+                    *slot = None;
+                    return Poll::Ready(Err(error));
+                }
+            }
+        }
+        *slot = None;
+        return Poll::Ready(Ok(response));
+    }
 }
 
 /// `request` with the progress token it carries (when it asks for progress at all) replaced by one
@@ -1891,3 +2172,7 @@ pub(super) fn original(url: &str, outbound: &crate::call::OutboundCall) -> Outbo
         body: outbound.body.clone(),
     }
 }
+
+#[cfg(test)]
+#[path = "tests/local_history.rs"]
+mod local_history;

@@ -172,7 +172,7 @@ pub struct ChildLeg {
     pub generation: u64,
     /// The id of the call in flight on the child.
     #[serde(rename = "w")]
-    pub wait: u64,
+    pub wait: Value,
     /// `(inputRequests key, the child's request id)`, in the order the child asked.
     #[serde(rename = "i")]
     pub asks: Vec<(String, Value)>,
@@ -601,10 +601,13 @@ pub fn decide(
     }
     let this_round = rounds.get(next_round as usize);
     if next_round > 0 {
+        let Some(previous_round) = rounds.get(next_round as usize - 1) else {
+            return AskDecision::Refuse(AskRefusal::StateRejected(Rejected::WrongRequest));
+        };
         let answered = retry
             .responses
             .and_then(Value::as_object)
-            .is_some_and(|m| !m.is_empty());
+            .is_some_and(|m| m.keys().any(|key| previous_round.contains_key(key)));
         if !answered {
             let previous = rounds
                 .get(next_round as usize - 1)
@@ -619,6 +622,13 @@ pub fn decide(
         // stands: a later retry cannot rewrite what an earlier confirmation was given for.
         if let Some(given) = retry.responses.and_then(Value::as_object) {
             for (key, value) in given {
+                // A later round's declared key is not an answer to this round. Undeclared
+                // keys still reach admission's existing explicit undeclared-answer refusal.
+                if !previous_round.contains_key(key)
+                    && rounds.iter().any(|round| round.contains_key(key))
+                {
+                    continue;
+                }
                 answers.entry(key.clone()).or_insert_with(|| value.clone());
             }
         }
@@ -702,7 +712,7 @@ fn unanswered(child: &ChildLeg, retry: Retry<'_>) -> Option<String> {
     (!missing.is_empty()).then(|| missing.join(", "))
 }
 
-/// [`relay_state`], standing `ttl_secs`: a task parked on its caller's answer waits as long as the
+/// A relayed state standing `ttl_secs`: a task parked on its caller's answer waits as long as the
 /// task may stay active ([`crate::tool_tasks::ACTIVE_TASK_ABANDON_MS`]), not a request's replay
 /// window.
 #[must_use]

@@ -167,7 +167,7 @@ pub fn call_suffix(
 /// THE RELAYED-CALL SCRIPT's server (the plugin crate's `tests/relayed_call.rs`): one server with
 /// one approved tool (its `path` argument mirrored in `Mcp-Param-Path`), one tool awaiting
 /// approval, and the `roots` grant with nothing declared to disclose.
-pub const RELAY_SECTION: &[u8] = br#"{"fs": {"url": "https://mcp.example/fs/rpc?v=1", "pin": {"mechanism": "pinned_pubkey", "key": "sha256/K="}, "grants": {"roots": true}, "tools_allow": {"read_file": {"schema_hash": "sha256:aa", "input_schema": {"type": "object", "properties": {"path": {"type": "string", "x-mcp-header": "Path"}}}}, "draft": {}}}}"#;
+pub const RELAY_SECTION: &[u8] = br#"{"fs": {"url": "https://mcp.example/fs/rpc?v=1", "pin": {"mechanism": "cert_spki", "key": "sha256/47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU="}, "grants": {"roots": true}, "tools_allow": {"read_file": {"schema_hash": "sha256:aa", "input_schema": {"type": "object", "properties": {"path": {"type": "string", "x-mcp-header": "Path"}}}}, "draft": {}}}}"#;
 
 /// `call::outbound` of [`RELAY_CALL`] admitted over [`RELAY_SECTION`], to `fs` under request id
 /// `0`: the request bound for the member, its body.

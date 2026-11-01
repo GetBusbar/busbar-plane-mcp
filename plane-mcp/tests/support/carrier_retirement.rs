@@ -226,3 +226,6 @@ fn carrier_negotiation_capacity_is_reclaimed_only_for_host_closed_ids() {
         "host-live sessions are never evicted to make room"
     );
 }
+
+#[path = "inspection_carrier_controls.rs"]
+mod inspection_controls;

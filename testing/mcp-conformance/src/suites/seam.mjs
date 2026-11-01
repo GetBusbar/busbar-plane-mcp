@@ -50,6 +50,7 @@ import { mkdtempSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
 import { test } from '../core/runner.mjs';
 import { request } from '../core/jsonrpc.mjs';
 
@@ -61,7 +62,7 @@ const FAKE = resolve(HERE, '../../fakepeer/fake-server.mjs');
  * upstream. Returns the front-door peer plus a reader for the back-door
  * transcript.
  */
-function startSeam(ctx, upstreamMode) {
+function startSeam(ctx, upstreamMode, extraEnv = {}) {
   const cmd = process.env.MCP_SUBJECT_UPSTREAM_CONFIG_CMD;
   if (!cmd) {
     ctx.skip(
@@ -82,11 +83,23 @@ function startSeam(ctx, upstreamMode) {
   // transcript satisfies four of these six assertions VACUOUSLY, because each of them is looking for
   // something that must NOT be in it. That is the worst possible failure for this suite, and it was
   // a defect in the battery rather than in any subject.
-  const peer = target.spawnServer(seamEnv(upstreamMode, transcript));
-  target.serverLaunch = saved;
+  let peer;
+  try { peer = target.spawnServer({ ...seamEnv(upstreamMode, transcript), ...extraEnv }); }
+  finally { target.serverLaunch = saved; }
   peer.__transcript = transcript;
   peer.__mode = upstreamMode;
   return peer;
+}
+
+async function waitForUpstream(peer, predicate, detail, timeout = 5000) {
+  const until = Date.now() + timeout;
+  do {
+    const entries = readUpstream(peer);
+    const found = entries.find(predicate);
+    if (found) return found;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  } while (Date.now() < until);
+  throw new Error(`VACUOUS: upstream did not observe ${detail}`);
 }
 
 /**
@@ -104,7 +117,7 @@ function startSeam(ctx, upstreamMode) {
  * it must never be is a pass.
  */
 function requireUpstreamWasReached(peer, entries) {
-  const outbound = entries.filter((e) => e.direction === 'client->server');
+  const outbound = entries.filter((e) => e.direction === 'client->server' && e.payload?.method === 'tools/call');
   if (outbound.length === 0) {
     throw new Error(
       `VACUOUS: the upstream transcript at ${peer.__transcript} recorded no request from the `
@@ -123,6 +136,11 @@ function requireUpstreamWasReached(peer, entries) {
       + 'fake server, and that the tool this test calls resolves to it rather than being answered '
       + '"unknown tool".',
     );
+  }
+  if (peer.__mode === 'server-request' || peer.__mode === 'half-answer') {
+    const sent = entries.some((entry) => entry.direction === 'server->client' && entry.payload?.method
+      || entry.direction === 'server->client-raw' && peer.__mode === 'half-answer');
+    if (!sent) throw new Error(`VACUOUS: mode ${peer.__mode} never delivered its hostile frame`);
   }
   return outbound;
 }
@@ -173,20 +191,34 @@ test({
   role: 'seam', area: 'seam', tier: 'pr', peer: 'real',
   catches: 'Token passthrough: the exact confused-deputy pattern the spec forbids, where a downstream token reaches an upstream server.',
   run: async (ctx) => {
-    const peer = startSeam(ctx, 'honest');
+    const credentialFile = process.env.MCP_SEAM_BEARER_FILE;
+    const frontTranscript = process.env.MCP_SEAM_FRONT_TRANSCRIPT;
+    if (!credentialFile || !frontTranscript) throw new Error('credential seam needs the booted subject credential and HTTP witness');
+    const token = readFileSync(credentialFile, 'utf8').trim();
+    if (!token) throw new Error('credential seam received an empty credential file');
+    const authorizationHash = createHash('sha256').update(`Bearer ${token}`).digest('hex');
+    const peer = startSeam(ctx, 'honest', { MCP_SEAM_CREDENTIAL_PROBE: '1' });
     try {
-      const secret = 'sentinel-token-4f9d2a7b1e';
+      const prior = existsSync(frontTranscript) ? readFileSync(frontTranscript, 'utf8').length : 0;
       peer.send(request(1, 'tools/call', {
         name: 'echo',
         arguments: { text: 'hello' },
-        _authProbe: secret,
-      }, { extraMeta: { 'com.example.battery/authorization': `Bearer ${secret}` } }));
+      }));
       try { await peer.waitForId(1, 15000); } catch { /* the call may legitimately fail */ }
       const entries = readUpstream(peer);
-      // The absence below is only evidence if there was a back door to be absent from.
       requireUpstreamWasReached(peer, entries);
-      const blob = JSON.stringify(entries);
-      ctx.assert('PAT.MRTR.STATE-UNTRUSTED', !blob.includes(secret),
+      const front = readFileSync(frontTranscript, 'utf8').slice(prior).split('\n').filter(Boolean).map((line) => JSON.parse(line));
+      const idHash = createHash('sha256').update(JSON.stringify(1)).digest('hex');
+      if (!front.some((entry) => entry.method === 'tools/call' && entry.requestIdSha256 === idHash
+        && entry.suppliedAuthorizationSha256 === authorizationHash)) {
+        throw new Error('VACUOUS: no real front-door Authorization header was observed');
+      }
+      const observed = entries.filter((entry) => entry.direction === 'http-client->server' && entry.payload?.method === 'tools/call');
+      if (!observed.length || observed.some((entry) => typeof entry.credentialMatches !== 'number')) {
+        throw new Error('VACUOUS: upstream credential/header observation is missing');
+      }
+      ctx.assert('AUTH.NO-TOKEN-PASSTHROUGH', observed.every((entry) => entry.credentialMatches === 0
+        && entry.headers.every((header) => header.sha256 !== authorizationHash)),
         'a credential presented at the front door was observed on the upstream connection');
     } finally { await peer.stop(); }
   },
@@ -230,9 +262,9 @@ test({
 
 test({
   id: 'SEAM.UPSTREAM-FAILURE-IS-TOOL-ERROR',
-  title: 'an upstream failure surfaces as a tool execution error, not a protocol error',
+  title: 'an upstream stall produces a terminal reply at the front door',
   role: 'seam', area: 'seam', tier: 'pr', peer: 'real',
-  catches: 'Upstream transport faults leaking out as JSON-RPC errors, so the model cannot see or retry them.',
+  catches: 'An incomplete run where the downstream wait expires after the upstream call started; the terminal error representation is recorded as variance.',
   run: async (ctx) => {
     const peer = startSeam(ctx, 'stall');
     try {
@@ -248,8 +280,7 @@ test({
         ctx.variance('seam.upstreamStall.answerKind',
           res.error ? `error:${res.error.code}` : `result:isError=${res.result && res.result.isError}`);
       }
-      ctx.assert('CANCEL.RACE-GRACEFUL', res !== null,
-        'the subject never answered its own client when its upstream stalled: a hung seam');
+      if (!res) throw new Error('INCOMPLETE: the driver wait expired without a terminal downstream reply after the upstream call started; no timeout conformance claim can be made');
     } finally { await peer.stop(); }
   },
 });
@@ -285,23 +316,44 @@ test({
       peer.send(request(1, 'tools/list'));
       const res = await peer.waitForId(1);
       const names = (res.result && res.result.tools || []).map((t) => t.name);
+      const left = process.env.MCP_SEAM_LEFT_TOOL || 'echo';
+      const right = process.env.MCP_SEAM_RIGHT_TOOL || 'seamright_echo';
+      ctx.assert('TOOLS.LIST-RESPONDS', left !== right && names.includes(left) && names.includes(right),
+        'both same-name upstream tools must remain separately addressable in the aggregate');
       const dupes = names.filter((n, i) => names.indexOf(n) !== i);
       ctx.assert('TOOLS.LIST-RESPONDS', dupes.length === 0,
         `duplicate tool names in the aggregated list: ${JSON.stringify(dupes)}`);
       ctx.variance('seam.exportedToolNames', names.sort());
+      const calls = [];
+      for (const [id, name, text] of [['collision-left', left, 'left-peer'], ['collision-right', right, 'right-peer']]) {
+        peer.send(request(id, 'tools/call', { name, arguments: { text } }));
+        const reply = await peer.waitForId(id, 15000);
+        ctx.assert('TOOLS.LIST-RESPONDS', reply.result?.content?.some((item) => item.type === 'text' && item.text === text),
+          'each exported name must call its own upstream tool successfully');
+        calls.push(await waitForUpstream(peer, (entry) => entry.direction === 'http-client->server'
+          && entry.payload?.method === 'tools/call' && entry.payload.params?.arguments?.text === text,
+        `the ${id} tools/call`));
+      }
+      ctx.assert('TOOLS.LIST-RESPONDS', calls[0].instance !== calls[1].instance
+        && calls.every((entry) => entry.payload.params.name === 'echo'),
+      'two independent upstream HTTP peers must each receive their bare, colliding echo tool name');
     } finally { await peer.stop(); }
   },
 });
 
 test({
   id: 'SEAM.DOWNSTREAM-CANCEL-PROPAGATES',
-  title: 'cancelling at the front door stops work at the back door',
+  title: 'observe whether cancellation of started work propagates to its mapped upstream id',
   role: 'seam', area: 'seam', tier: 'prerelease', peer: 'real', timing: true,
-  catches: 'A cancellation that stops the downstream reply but leaves the upstream call running, leaking work and cost.',
+  catches: 'Advisory observation of cancellation propagation after the upstream call actually starts, including wrong-id cancellation.',
   run: async (ctx) => {
     const peer = startSeam(ctx, 'stall');
     try {
       peer.send(request('cancel-seam', 'tools/call', { name: 'echo', arguments: { text: 'hi' } }));
+      const started = await waitForUpstream(peer, (entry) => entry.direction === 'client->server'
+        && entry.payload?.method === 'tools/call', 'the stalled tools/call before cancellation');
+      const upstreamId = started.payload.id;
+      if (upstreamId === undefined || upstreamId === null) throw new Error('upstream work has no correlatable request id');
       peer.send({
         jsonrpc: '2.0',
         method: 'notifications/cancelled',
@@ -313,13 +365,15 @@ test({
       const upstream = readUpstream(peer);
       const upstreamCancels = upstream.filter(
         (e) => e.direction === 'client->server'
-          && e.payload && e.payload.method === 'notifications/cancelled',
+          && e.payload && e.payload.method === 'notifications/cancelled'
+          && e.payload.params?.requestId === upstreamId,
       );
       // No spec clause requires propagation. It is our recommendation.
       ctx.recommend('seam.propagatesCancellation', upstreamCancels.length > 0,
         'RECOMMENDATION (this battery): a bidirectional implementation should propagate a '
         + 'downstream cancellation to its upstream call, or it pays for work nobody wants.');
       ctx.variance('seam.upstreamCancelSent', upstreamCancels.length > 0);
+      ctx.note('spec-status', 'Cross-role cancellation propagation is advisory; an absent or wrong-id notification is not a conformance pass for propagation.');
     } finally { await peer.stop(); }
   },
 });

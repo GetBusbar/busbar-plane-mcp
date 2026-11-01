@@ -61,9 +61,8 @@ TO ARM IT, SET ONE VARIABLE. That is the entire change:
 
     MCP_SUBJECT_CLIENT_CMD="/path/to/your-binary mcp connect"
 
-  In CI, set it as a repository variable or pass it via workflow_dispatch.
-  No code edit and no per-subject branch is ever required: the harness contains
-  no knowledge of any particular implementation.
+  The existing conformance entrypoint arms the built subject automatically.
+  For a manual run, export the launcher in this shell; no workflow change is needed.
 
 The moment that variable is set, this job starts gating for real.
 ================================================================================
@@ -137,11 +136,17 @@ if [ ! -f reports/subject.json ]; then
   echo "ARMED GUARD: a subject was configured but no report was produced." >&2
   exit 1
 fi
-EXECUTED=$(node -e '
-  const r = require("./reports/subject.json").results;
-  const ran = r.filter(x => x.verdict !== "SKIP").length;
-  process.stdout.write(String(ran));
-')
+if ! EXECUTED=$(node -e '
+  const report = require("./reports/subject.json");
+  const results = report.results;
+  if (!Array.isArray(results) || results.some(r => !r || !["PASS","FAIL","ERROR","SKIP"].includes(r.verdict))) {
+    throw new Error("subject report has no valid results array");
+  }
+  process.stdout.write(String(results.filter(r => r.verdict !== "SKIP").length));
+'); then
+  echo "ARMED GUARD: the subject report is unreadable or malformed." >&2
+  exit 1
+fi
 if [ "$EXECUTED" -eq 0 ]; then
   cat >&2 <<MSG
 ARMED GUARD FAILED: a subject IS configured but ZERO tests actually executed
@@ -162,6 +167,10 @@ echo "armed guard: $EXECUTED test(s) actually executed"
 # misattribution class as a leg that exits 0 while unarmed: the number was right and the verdict
 # was about something else entirely.
 if [ ! -f "$CONTROL_REPORT" ]; then
+  if [ "$RUN_STATUS" -ne 0 ]; then
+    echo "The subject run failed; a missing control report cannot replace that failure." >&2
+    exit 1
+  fi
   cat >&2 <<MSG
 no control report at $CONTROL_REPORT, so the differential did not run.
 

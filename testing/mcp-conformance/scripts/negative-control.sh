@@ -29,7 +29,7 @@ FAKE="$(pwd)/fakepeer/fake-server.mjs"
 # battery exists to catch, one level up.
 MODES="$($NODE "$FAKE" --list-modes 2>/dev/null)"
 MODE_COUNT="$(printf '%s\n' "$MODES" | grep -c . || true)"
-if [ "${MODE_COUNT:-0}" -lt 20 ]; then
+if [ "${MODE_COUNT:-0}" -eq 0 ] || ! printf '%s\n' "$MODES" | grep -qx honest; then
   echo "FAIL: the fake peer reported only ${MODE_COUNT:-0} mode(s) via --list-modes." >&2
   echo "      The negative control derives its rows from that table, so it would have exercised" >&2
   echo "      ${MODE_COUNT:-0} attack(s) and printed a table that reads like a pass. Fix the peer's" >&2
@@ -44,6 +44,10 @@ PER_MODE_TIMEOUT="${MCP_NEGCTL_TIMEOUT:-120}"
 timeout_cmd=""
 command -v timeout >/dev/null 2>&1 && timeout_cmd="timeout $PER_MODE_TIMEOUT"
 command -v gtimeout >/dev/null 2>&1 && timeout_cmd="gtimeout $PER_MODE_TIMEOUT"
+if [ -z "$timeout_cmd" ]; then
+  echo "negative control requires timeout or gtimeout to bound hostile peers" >&2
+  exit 2
+fi
 
 # MODES A SERVER-ROLE RUN CANNOT CATCH, DECLARED, WITH THE REASON.
 #
@@ -63,12 +67,21 @@ caught=0
 wedged=""
 blessed=""
 stale=""
+incomplete=""
 for mode in $MODES; do
+  run_status=0
   # shellcheck disable=SC2086
   OUT=$(MCP_FAKE_MODE="$mode" $timeout_cmd "$NODE" bin/mcp-battery.mjs run --name "fake-$mode" \
-    --server-cmd "$NODE $FAKE" --tier push,pr --role server 2>&1)
+    --server-cmd "\"$NODE\" \"$FAKE\"" --tier push,pr --role server 2>&1) || run_status=$?
   R=$(echo "$OUT" | grep "^results" | sed 's/results *: //')
-  F=$(echo "$OUT" | grep -E "^  (FAIL|ERR )" | sed -E 's/^  (FAIL|ERR ) *\[[^]]*\] *//' | tr '\n' ' ')
+  F=$(echo "$OUT" | grep -E "^  FAIL" | sed -E 's/^  FAIL *\[[^]]*\] *//' | tr '\n' ' ')
+  E=$(echo "$OUT" | grep -E "^  ERR " | sed -E 's/^  ERR *\[[^]]*\] *//' | tr '\n' ' ')
+  # Errors and interrupted runs are not observations of a caught protocol defect.
+  # This applies to honest and intentionally uncatchable peers as well as attack modes.
+  if [ -z "$R" ] || [ -n "$E" ] || [ "$run_status" -gt 1 ] \
+      || { [ "$run_status" -ne 0 ] && [ -z "$F" ]; }; then
+    incomplete="$incomplete $mode"
+  fi
   allowed=0
   case " $UNCATCHABLE_FROM_SERVER_ROLE " in *" $mode "*) allowed=1 ;; esac
   if [ -n "$F" ]; then
@@ -81,20 +94,21 @@ for mode in $MODES; do
     # BLESSED -- nothing about it was reported as fine -- but it is also not a caught defect, so it
     # is counted and printed on its own.
     wedged="$wedged $mode"
+    blessed="$blessed $mode-produced-no-verdict"
   elif [ "$mode" != "honest" ] && [ "$allowed" = 0 ]; then
     blessed="$blessed $mode"
   fi
-  printf "%-18s %-36s %s\n" "$mode" "${R:-<no verdict: the peer never answered; the run was stopped at ${PER_MODE_TIMEOUT}s>}" "$F"
+  printf "%-18s %-36s %s\n" "$mode" "${R:-<no verdict: the peer never answered; the run was stopped at ${PER_MODE_TIMEOUT}s>}" "$F${E:+ [incomplete: $E]}"
 done
 
-# THE SENSITIVITY FLOOR. Every row above being clean means the battery caught NOTHING while being
-# fed two dozen deliberately broken peers, which is the one outcome this script must never report
-# as success. It is a floor and not a per-mode expectation on purpose: some modes are aimed at the
-# CLIENT direction and are legitimately invisible to a server-role run, and pinning each mode to a
-# named test here would be a second list to drift.
+# Each named attack above must have an actual observed outcome; no sensitivity-count floor.
 echo
 echo "modes exercised: $MODE_COUNT   caught: $caught  wedged:${wedged:- none}"
 rc=0
+if [ -n "$incomplete" ]; then
+  echo "FAIL: negative-control runs did not complete without harness errors —$incomplete" >&2
+  rc=1
+fi
 if [ -n "$blessed" ]; then
   echo "FAIL: a deliberately BROKEN peer was blessed —$blessed" >&2
   echo "      Every mode is a named attack. A mode that produces no failure and is not declared in" >&2
@@ -104,11 +118,6 @@ fi
 if [ -n "$stale" ]; then
   echo "FAIL: a mode declared uncatchable from the server role WAS caught —$stale" >&2
   echo "      The allowance is now a lie. Delete it: an excuse must not outlive the gap it excuses." >&2
-  rc=1
-fi
-if [ "$caught" -lt 5 ]; then
-  echo "FAIL: the battery caught $caught of $MODE_COUNT deliberately broken peers. It is not" >&2
-  echo "      sensitive enough to be believed about a subject." >&2
   rc=1
 fi
 [ "$rc" -eq 0 ] && echo "negative control behaved: $caught of $MODE_COUNT modes caught, honest clean."

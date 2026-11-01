@@ -99,6 +99,20 @@ pub(super) struct Create {
     indexed: bool,
     left: Vec<Left>,
     struck: Vec<(Vec<u8>, Vec<u8>)>,
+    cleaning: Option<Vec<Clean>>,
+    cleaned_writes: usize,
+}
+
+pub(super) struct Strikes {
+    owner: String,
+    chunks: u32,
+    live_chunks: u32,
+}
+
+struct Clean {
+    reference: String,
+    find: Option<u32>,
+    done: bool,
 }
 
 /// A task left behind, being settled: its reference, the handle number its find was issued under,
@@ -108,6 +122,8 @@ pub(super) struct Left {
     find: Option<u32>,
     found: Option<(u64, WorkRow)>,
     live: Listing,
+    result: Listing,
+    absent: bool,
     done: bool,
 }
 
@@ -151,6 +167,12 @@ pub(super) struct Run {
     settle: Option<u32>,
     /// It holds the instance's own half of the one-time run.
     local: bool,
+    /// The run gate answered affirmatively, or the host explicitly leaves it to the local gate.
+    /// A later pending bind never reclaims the run under a second service invocation.
+    claim_done: bool,
+    /// The authenticated run's work.resume succeeded, including a relayed leg whose seal is its
+    /// run gate. Retained after Task.runner is cleared for a short refusal re-call.
+    bound: bool,
     handle: u64,
     /// The task ask round it is on.
     round: usize,
@@ -269,13 +291,13 @@ pub(super) fn creates_task(unit: &CallUnit) -> bool {
 }
 
 /// The refusal of a task-creating call by the caller's budget, in the served engine's words.
-pub(super) fn budget_refused(id: Option<Value>, message: &str) -> Refusal {
+pub(super) fn budget_refused(id: Option<Value>, status: u32, message: &str) -> Refusal {
     Refusal {
-        status: crate::tool_arrival::STATUS_NOT_FOUND,
+        status,
         id,
         code: crate::codec::CODE_REFUSED,
         message: format!("this task was refused by your budget: {message}"),
-        data: Some(json!({ "reason": busbar_contract::vocab::REASON_NOT_GRANTED })),
+        data: Some(json!({ "reason": "budget_exhausted" })),
     }
 }
 
@@ -433,18 +455,20 @@ fn lease_record(task: &Task, until: u64) -> (Vec<u8>, Vec<u8>) {
     (task.index_key(), lease.bytes())
 }
 
-/// THE RECORDS A SETTLED TASK LEAVES, struck: its live chunks and its caller's index row.
+/// A settled task's live chunks are struck. Its existing caller index remains as durable cleanup
+/// intent until an authorized lookup says the host no longer retains the task and all result
+/// chunks have been removed.
 fn struck_records(task: &Task) -> Vec<(Vec<u8>, Vec<u8>)> {
     let mut out: Vec<(Vec<u8>, Vec<u8>)> = (0..task.live_chunks.max(tasks::LIVE_STRIKES))
         .map(|n| (tasks::live_key(&task.id, n), Vec::new()))
         .collect();
-    out.push((task.index_key(), Vec::new()));
+    out.push(lease_record(task, task.stamps().1.max(1)));
     out
 }
 
 /// The records a terminal state leaves: `task`'s result chunks, written whether or not its settle `landed`, the count kept in
-/// hand. A settle that landed leaves its live chunks and index row to strike; one that is owed
-/// leaves its live state, terminal, and its index row with its run's lease lapsed at its last
+/// hand. A settle that landed strikes its live chunks and retains its cleanup index; one that is
+/// owed leaves its live state, terminal, and its index row with its run's lease lapsed at its last
 /// update: every node then answers its result from the records, and the next create of its caller
 /// on any node settles it with that state, a restart between them included.
 fn ended_records(plane: &McpDoor, task: &Task, landed: bool) -> tasks::Records {
@@ -540,7 +564,8 @@ fn list_records(
 /// A TASK LEFT BEHIND, settled: found (scoped to this caller) and its live state read from the
 /// plane's records; one whose run reached its terminal state but whose settle never landed (the
 /// process that ran it gone) is settled with that state, its result already in the records; any
-/// other is cancelled and settled. The records its settle leaves to strike; none while it is owed.
+/// other is cancelled and settled. Settled handles keep their index until actual absence permits
+/// chunk cleanup; read errors defer the check.
 fn settle_left(
     plane: &McpDoor,
     services: StaticServices,
@@ -553,7 +578,7 @@ fn settle_left(
     if left.done {
         return Poll::Ready(Vec::new());
     }
-    if left.found.is_none() {
+    if left.found.is_none() && !left.absent {
         let h = handle(ticket, issued, &mut left.find);
         let (mut buf, mut spans) = ([0u8; WORK_BYTES], [blank(); 1]);
         let found = match services.work_find(h, &left.reference, &mut buf, &mut spans) {
@@ -568,18 +593,73 @@ fn settle_left(
                     return Poll::Ready(Vec::new());
                 }
             },
-            // Settled, or past its retention: only its records are left.
-            Ok(_) => {
+            Ok(Some(_)) => {
                 left.done = true;
-                let gone = Task::new(&left.reference, principal, 0, "", now);
-                return Poll::Ready(struck_records(&gone));
+                return Poll::Ready(Vec::new());
             }
+            Ok(None) => left.absent = true,
             // The host could not say: the next create reads it again.
             Err(_) => {
                 left.done = true;
                 return Poll::Ready(Vec::new());
             }
         }
+    }
+    if left.absent {
+        let prefix = tasks::chunk_prefix(&left.reference);
+        match list_records(services, ticket, issued, &prefix, &mut left.result) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(false) => {
+                left.done = true;
+                return Poll::Ready(Vec::new());
+            }
+            Poll::Ready(true) => {}
+        }
+        let mut chunks = 0;
+        for (key, _) in &left.result.rows {
+            let Some(next) = key
+                .strip_prefix(prefix.as_slice())
+                .and_then(|n| std::str::from_utf8(n).ok())
+                .and_then(|n| n.parse::<u32>().ok())
+                .and_then(|n| n.checked_add(1))
+            else {
+                left.done = true;
+                return Poll::Ready(Vec::new());
+            };
+            chunks = chunks.max(next);
+        }
+        let live_prefix = tasks::live_prefix(&left.reference);
+        match list_records(services, ticket, issued, &live_prefix, &mut left.live) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(false) => {
+                left.done = true;
+                return Poll::Ready(Vec::new());
+            }
+            Poll::Ready(true) => {}
+        }
+        let mut live_chunks = 0;
+        for (key, _) in &left.live.rows {
+            let Some(next) = key
+                .strip_prefix(live_prefix.as_slice())
+                .and_then(|n| std::str::from_utf8(n).ok())
+                .and_then(|n| n.parse::<u32>().ok())
+                .and_then(|n| n.checked_add(1))
+            else {
+                left.done = true;
+                return Poll::Ready(Vec::new());
+            };
+            live_chunks = live_chunks.max(next);
+        }
+        plane.strikes.insert(
+            left.reference.clone(),
+            Strikes {
+                owner: principal.to_string(),
+                chunks,
+                live_chunks,
+            },
+        );
+        left.done = true;
+        return Poll::Ready(Vec::new());
     }
     let Some((work, row)) = left.found.clone() else {
         return Poll::Ready(Vec::new());
@@ -590,12 +670,13 @@ fn settle_left(
         Poll::Ready(listed) => listed,
     };
     left.done = true;
+    if !listed {
+        return Poll::Ready(Vec::new());
+    }
     let mut task = Task::from_row(&left.reference, principal, work, &row, None);
-    if listed {
-        let bytes: Vec<u8> = left.live.rows.iter().flat_map(|(_, v)| v.clone()).collect();
-        if let Some(live) = tasks::read_live(&bytes) {
-            task.take_live(&live);
-        }
+    let bytes: Vec<u8> = left.live.rows.iter().flat_map(|(_, v)| v.clone()).collect();
+    if let Some(live) = tasks::read_live(&bytes) {
+        task.take_live(&live);
     }
     if !task.status().is_terminal() {
         task.cancel(now);
@@ -688,7 +769,7 @@ fn creating(
     // with this settle, landed or not.
     if !st.swept {
         st.swept = true;
-        let swept = plane.tasks.with_all(|m| tasks::sweep(m, now));
+        let mut swept = plane.tasks.with_all(|m| tasks::sweep(m, now));
         if let Some(wake) = plane.wake {
             swept.wake.iter().for_each(|t| wake.wake(*t));
         }
@@ -705,7 +786,16 @@ fn creating(
         }
         plane.strikes.with_all(|m| {
             for (id, chunks) in swept.strike {
-                m.insert(id, chunks);
+                if let Some(owner) = swept.owners.remove(&id) {
+                    m.insert(
+                        id,
+                        Strikes {
+                            owner,
+                            chunks,
+                            live_chunks: tasks::LIVE_STRIKES,
+                        },
+                    );
+                }
             }
         });
     }
@@ -740,6 +830,8 @@ fn creating(
                 find: None,
                 found: None,
                 live: Listing::default(),
+                result: Listing::default(),
+                absent: false,
                 done: false,
             });
         }
@@ -796,6 +888,44 @@ fn creating(
     let Some((work, reference)) = st.opened.clone() else {
         return Step::Declined;
     };
+    let observed =
+        match super::door_inspection::work(plane, unit.key, ticket, principal, &reference) {
+            Poll::Pending => return Step::Pending,
+            Poll::Ready(Ok(observed)) => observed,
+            Poll::Ready(Err(words)) => {
+                if let Some(task) = plane.tasks.get(&reference) {
+                    st.struck.extend(fail_unrun(
+                        plane,
+                        (services, ticket, &mut unit.issued),
+                        &task,
+                        &words,
+                        now,
+                    ));
+                }
+                return unavailable(unit, &mut st.struck, &words);
+            }
+        };
+    let retained = plane.tasks.with(&reference, |task| {
+        task.map(|task| {
+            task.retain_at(
+                observed.observed_ms,
+                observed.retain_ms,
+                observed.settled_ms,
+            )
+        })
+    });
+    if let Some(Err(words)) = retained {
+        if let Some(task) = plane.tasks.get(&reference) {
+            st.struck.extend(fail_unrun(
+                plane,
+                (services, ticket, &mut unit.issued),
+                &task,
+                words,
+                now,
+            ));
+        }
+        return unavailable(unit, &mut st.struck, words);
+    }
     if !st.nested {
         let h = handle(ticket, &mut unit.issued, &mut st.nest);
         if !nest(services, h, &json!({ "taskId": reference, "params": run })) {
@@ -820,25 +950,12 @@ fn creating(
     let Some(created) = plane.tasks.get(&reference).map(|t| t.created()) else {
         return Step::Declined;
     };
-    // STALE RESULT CHUNKS, struck as this unit writes (a bounded few each time): the highest
-    // first, so what is left of a task's chunks is still keyed `0..left`.
-    let strikes: Vec<(u32, Vec<u8>, Vec<u8>)> = plane.strikes.with_all(|m| {
-        let mut out = Vec::new();
-        while out.len() < MAX_STRIKES {
-            let Some((id, chunks)) = m.pop_first() else {
-                break;
-            };
-            let room = u32::try_from(MAX_STRIKES - out.len()).unwrap_or(0);
-            let take = chunks.min(room);
-            for n in (chunks - take)..chunks {
-                out.push((RECORD_TASK, tasks::chunk_key(&id, n), Vec::new()));
-            }
-            if take < chunks {
-                m.insert(id, chunks - take);
-            }
-        }
-        out
-    });
+    // Cache eviction only queues result cleanup. The host's current scoped absence, after this
+    // create opened work and ran the host's sweep, is the authority to strike durable chunks.
+    match clean_chunks(plane, services, ticket, &mut unit.issued, principal, st) {
+        Poll::Pending => return Step::Pending,
+        Poll::Ready(()) => {}
+    }
     let ts = clock_s(plane.services, ticket, unit);
     let mut pending = Pending::answer(
         200,
@@ -855,7 +972,6 @@ fn creating(
         generation,
         ts,
     );
-    pending.records.extend(strikes);
     // ITS INDEX ROW, the run's lease taken: the continuation is nested at once.
     let lease = tasks::TaskLease {
         until_ms: now.saturating_add(tasks::RUN_LEASE_MS),
@@ -873,6 +989,78 @@ fn creating(
 
 // ── the continuation ──────────────────────────────────────────────────────────────────────────
 
+fn clean_chunks(
+    plane: &McpDoor,
+    services: StaticServices,
+    ticket: Ticket,
+    issued: &mut u32,
+    principal: &str,
+    st: &mut Create,
+) -> Poll<()> {
+    let Create {
+        cleaning,
+        cleaned_writes,
+        struck,
+        ..
+    } = st;
+    let queued = cleaning.get_or_insert_with(|| {
+        plane.strikes.with_all(|m| {
+            m.iter()
+                .filter(|(_, entry)| entry.owner == principal)
+                .map(|(reference, _)| Clean {
+                    reference: reference.clone(),
+                    find: None,
+                    done: false,
+                })
+                .collect()
+        })
+    });
+    for queued in queued {
+        if queued.done || *cleaned_writes >= MAX_STRIKES {
+            continue;
+        }
+        let h = handle(ticket, issued, &mut queued.find);
+        let (mut buf, mut spans) = ([0u8; WORK_BYTES], [blank(); 1]);
+        let absent = match services.work_find(h, &queued.reference, &mut buf, &mut spans) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Ok(None)) => true,
+            Poll::Ready(_) => false,
+        };
+        queued.done = true;
+        if !absent {
+            continue;
+        }
+        plane.strikes.with_all(|m| {
+            let Some(entry) = m
+                .get_mut(&queued.reference)
+                .filter(|e| e.owner == principal)
+            else {
+                return;
+            };
+            let room = u32::try_from(MAX_STRIKES - *cleaned_writes).unwrap_or(0);
+            let take = entry.chunks.min(room);
+            for n in (entry.chunks - take)..entry.chunks {
+                struck.push((tasks::chunk_key(&queued.reference, n), Vec::new()));
+            }
+            entry.chunks -= take;
+            *cleaned_writes += take as usize;
+            let room = u32::try_from(MAX_STRIKES - *cleaned_writes).unwrap_or(0);
+            let take = entry.live_chunks.min(room);
+            for n in (entry.live_chunks - take)..entry.live_chunks {
+                struck.push((tasks::live_key(&queued.reference, n), Vec::new()));
+            }
+            entry.live_chunks -= take;
+            *cleaned_writes += take as usize;
+            if entry.chunks == 0 && entry.live_chunks == 0 && *cleaned_writes < MAX_STRIKES {
+                m.remove(&queued.reference);
+                struck.push((tasks::index_key(principal, &queued.reference), Vec::new()));
+                *cleaned_writes += 1;
+            }
+        });
+    }
+    Poll::Ready(())
+}
+
 /// Whether `unit` is a continuation.
 pub(super) fn is_run(unit: &CallUnit) -> bool {
     matches!(unit.task, Some(TaskUnit::Run(_)))
@@ -889,18 +1077,15 @@ pub(super) fn begin(plane: &McpDoor, ticket: Ticket, principal: &str, unit: &mut
     } else {
         None
     };
-    let busy = match turn {
+    let refused = match turn {
         Some(Ok(step)) => return step,
-        Some(Err(())) => true,
-        None => false,
+        Some(Err(words)) => Some(words),
+        None => None,
     };
     if let Some(TaskUnit::Run(run)) = unit.task.as_mut() {
         run.begun = true;
-        if busy {
-            run.end = Some(End::Failed(format!(
-                "the MCP upstream call failed: {}",
-                super::door_program::BUSY
-            )));
+        if let Some(words) = refused {
+            run.end = Some(End::Failed(words));
             run.phase = Phase::Settle;
         } else if run.phase == Phase::Far {
             // Another member of the walk: the call is sent again, to it.
@@ -1132,6 +1317,22 @@ fn not_run(unit: &mut CallUnit, run: &mut Run) -> Step {
     Step::Write
 }
 
+fn claim_unavailable(unit: &mut CallUnit, run: &mut Run) -> Step {
+    run.phase = Phase::Done;
+    let refusal = Refusal {
+        status: 503,
+        id: None,
+        code: TASK_PROTOCOL_ERROR_CODE,
+        message: "the host's records.claim failed; this invocation could not confirm ownership of the task"
+            .to_string(),
+        data: None,
+    };
+    let mut pending = Pending::answer(refusal.status, refusal.body(), None, &[]);
+    pending.units.clear();
+    unit.pending = Some(pending);
+    Step::Write
+}
+
 /// THE RETRY'S STATE, opened ([`crate::ask::open_relayed`]): busbar's own, sealed for this
 /// principal and this task's tool over the arguments it sends (the admitted ones with busbar's own
 /// answers merged), nesting an upstream leg, and spent once. `None` for a state that is forged,
@@ -1194,7 +1395,22 @@ fn running(
                     let found = match services.work_find(h, &run.reference, &mut buf, &mut spans) {
                         Poll::Pending => return Step::Pending,
                         Poll::Ready(Ok(Some(found))) => found,
-                        Poll::Ready(_) => return not_run(unit, run),
+                        Poll::Ready(Ok(None)) => return not_run(unit, run),
+                        Poll::Ready(Err(_)) => {
+                            let work = plane.tasks.with(&run.reference, |task| {
+                                let task = task.filter(|t| t.owned_by(principal))?;
+                                let row = WorkRow::read(&task.row())?;
+                                (row.digest == run.digest).then_some(task.handle)
+                            });
+                            let Some(work) = work else {
+                                return not_run(unit, run);
+                            };
+                            run.handle = work;
+                            run.end = Some(End::Failed("the host's work.find failed".to_string()));
+                            // The known task must still pass the local take, any retry seal, and
+                            // the one-time host claim before this continuation may fail it.
+                            continue 'phases;
+                        }
                     };
                     let Some(row) = WorkRow::read(found.record) else {
                         return not_run(unit, run);
@@ -1268,7 +1484,7 @@ fn running(
                     }
                     run.local = true;
                 }
-                if run.leg.is_none() {
+                if run.leg.is_none() && !run.claim_done {
                     let h = handle(ticket, &mut unit.issued, &mut run.claim);
                     let key = match run.retry {
                         Some(Retry::Asked { round, .. }) => {
@@ -1291,9 +1507,14 @@ fn running(
                                 ServiceError::Declined(AbiOutcome::Refused)
                                 | ServiceError::Unserved,
                             ),
-                        ) => {}
-                        Poll::Ready(_) => return not_run(unit, run),
+                        ) => run.claim_done = true,
+                        Poll::Ready(Ok(false)) => return not_run(unit, run),
+                        Poll::Ready(Err(_)) => return claim_unavailable(unit, run),
                     }
+                }
+                if run.end.is_some() {
+                    run.phase = Phase::Settle;
+                    continue 'phases;
                 }
                 // THE HANDLE, BOUND to this unit (principal-checked).
                 let h = handle(ticket, &mut unit.issued, &mut run.resume);
@@ -1301,8 +1522,13 @@ fn running(
                 match services.work_resume(h, run.handle, &mut buf, &mut spans) {
                     Poll::Pending => return Step::Pending,
                     Poll::Ready(Ok(_)) => {}
-                    Poll::Ready(Err(_)) => return not_run(unit, run),
+                    Poll::Ready(Err(_)) => {
+                        run.end = Some(End::Failed("the host's work.resume failed".to_string()));
+                        run.phase = Phase::Settle;
+                        continue 'phases;
+                    }
                 }
+                run.bound = true;
                 let runner = (unit.key, ticket);
                 plane.tasks.with(&run.reference, |t| {
                     if let Some(t) = t {
@@ -1531,7 +1757,7 @@ fn call(
     held: &Held,
     unit: &mut CallUnit,
     run: &mut Run,
-    (services, answers): (StaticServices, &Map<String, Value>),
+    (_services, answers): (StaticServices, &Map<String, Value>),
 ) -> Result<Step, End> {
     let name = run.params.get("name").and_then(Value::as_str).unwrap_or("");
     let Some(entry) = held.catalogue.tool(name).cloned() else {
@@ -1546,17 +1772,6 @@ fn call(
             .unwrap_or_else(|| json!({})),
         answers,
     );
-    let schema = entry
-        .input_schema
-        .clone()
-        .unwrap_or_else(|| json!({ "type": "object" }));
-    let judged = crate::argguard::guard(&schema, &arguments, |dest| {
-        let h = handle(ticket, &mut unit.issued, &mut None);
-        super::dest_verdict(services, h, held, &entry, dest)
-    });
-    if let Err(refused) = judged {
-        return Err(End::Failed(refused.to_string()));
-    }
     let Some(member) = unit.member.clone() else {
         // No member to send it to: the walk's terminal is the kernel's to render.
         return Ok(Step::Taken);
@@ -1581,6 +1796,7 @@ fn call(
     if let super::Looked::Pending = super::door_program::ready(plane, ticket, unit, held, &member) {
         return Ok(Step::Pending);
     }
+    super::admit_task_send(plane, ticket, unit, held, &entry, &arguments).map_err(End::Failed)?;
     // THE RETRY: the caller's answers and the upstream's own state, verbatim, on the next round.
     let relay = run.leg.as_ref().map(|leg| {
         let mut continuation = Map::new();
@@ -1788,11 +2004,69 @@ fn verbing(
     params: Option<&Value>,
     st: &mut Verb,
 ) -> Step {
-    let task = match resolve(plane, services, ticket, principal, unit, task_id, st) {
+    let mut task = match resolve(plane, services, ticket, principal, unit, task_id, st) {
         Poll::Pending => return Step::Pending,
-        Poll::Ready(None) => return refuse(unit, &invalid(id, UNKNOWN_TASK)),
-        Poll::Ready(Some(task)) => *task,
+        Poll::Ready(Err(_)) => {
+            return refuse(
+                unit,
+                &Refusal {
+                    status: 503,
+                    id: Some(id.clone()),
+                    code: TASK_PROTOCOL_ERROR_CODE,
+                    message: "the host's work.find failed; retry reading the task".to_string(),
+                    data: None,
+                },
+            );
+        }
+        Poll::Ready(Ok(None)) => return refuse(unit, &invalid(id, UNKNOWN_TASK)),
+        Poll::Ready(Ok(Some(task))) => *task,
     };
+    if op == crate::tool_ops::OP_TASK_GET {
+        let observed =
+            match super::door_inspection::work(plane, unit.key, ticket, principal, task_id) {
+                Poll::Pending => return Step::Pending,
+                Poll::Ready(result) => result,
+            };
+        let retention = observed
+            .as_ref()
+            .map_err(Clone::clone)
+            .and_then(|observed| {
+                task.retain_at(
+                    observed.observed_ms,
+                    observed.retain_ms,
+                    observed.settled_ms,
+                )
+                .map_err(str::to_string)
+            });
+        if let Err(words) = retention {
+            return refuse(
+                unit,
+                &Refusal {
+                    status: 503,
+                    id: Some(id.clone()),
+                    code: TASK_PROTOCOL_ERROR_CODE,
+                    message: words,
+                    data: None,
+                },
+            );
+        }
+        plane.tasks.with(&task.id, |held| {
+            if let Some(held) = held {
+                if let Ok(observed) = observed {
+                    let _unchanged = held.retain_at(
+                        observed.observed_ms,
+                        observed.retain_ms,
+                        observed.settled_ms,
+                    );
+                }
+            }
+        });
+    }
+    if op == crate::tool_ops::OP_TASK_UPDATE && !task.status().is_terminal() {
+        plane.tasks.with_all(|m| {
+            m.entry(task.id.clone()).or_insert_with(|| task.clone());
+        });
+    }
     let at = match st.at {
         Some(at) => at,
         None => {
@@ -1931,6 +2205,9 @@ fn verbing(
         return Step::Pending;
     };
     if landed != Some(false) {
+        if landed.is_none() {
+            owe(plane, &cancelled);
+        }
         plane.tasks.with(&task.id, |t| {
             if let Some(t) = t {
                 if t.cancel(at) {
@@ -1960,21 +2237,22 @@ fn resolve(
     unit: &mut CallUnit,
     task_id: &str,
     st: &mut Verb,
-) -> Poll<Option<Box<Task>>> {
+) -> Poll<Result<Option<Box<Task>>, ServiceError>> {
     let h = handle(ticket, &mut unit.issued, &mut st.find);
     let (mut buf, mut spans) = ([0u8; WORK_BYTES], [blank(); 1]);
     let (state, work, row) = match services.work_find(h, task_id, &mut buf, &mut spans) {
         Poll::Pending => return Poll::Pending,
         Poll::Ready(Ok(Some(found))) => (found.state, found.handle, WorkRow::read(found.record)),
-        Poll::Ready(_) => return Poll::Ready(None),
+        Poll::Ready(Ok(None)) => return Poll::Ready(Ok(None)),
+        Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
     };
     let held = plane.tasks.get(&task_id.to_string());
     if held.as_ref().is_some_and(|t| !t.owned_by(principal)) {
-        return Poll::Ready(None);
+        return Poll::Ready(Ok(None));
     }
     if state != WORK_LIVE {
         if let Some(task) = held.as_ref().filter(|t| t.status().is_terminal()) {
-            return Poll::Ready(Some(Box::new(task.clone())));
+            return Poll::Ready(Ok(Some(Box::new(task.clone()))));
         }
     }
     // A TERMINAL STATE THIS INSTANCE HOLDS AND STILL OWES THE HOST (a continuation the kernel
@@ -1985,12 +2263,12 @@ fn resolve(
         .as_ref()
         .filter(|t| t.unsettled && t.status().is_terminal())
     {
-        return Poll::Ready(Some(Box::new(task.clone())));
+        return Poll::Ready(Ok(Some(Box::new(task.clone()))));
     }
     // A host that lists none of the plane's records: what the instance holds answers.
-    let unlisted = |held: Option<Task>| Poll::Ready(held.map(Box::new));
+    let unlisted = |held: Option<Task>| Poll::Ready(Ok(held.map(Box::new)));
     let Some(row) = row else {
-        return Poll::Ready(None);
+        return Poll::Ready(Ok(None));
     };
     // ITS LIVE STATE, read back from its chunks: on a live handle, what the task holds now; a
     // terminal one there is a run whose settle is still owed, its result already in the records.
@@ -2007,7 +2285,7 @@ fn resolve(
             task.take_live(&live);
         }
         if !matches!(task.status(), Status::Completed | Status::Failed) {
-            return hosted(plane, task_id, task);
+            return hosted(plane, task_id, task).map(Ok);
         }
         WorkRow {
             status: task.status(),
@@ -2032,7 +2310,7 @@ fn resolve(
         }
         _ => Task::from_row(task_id, principal, work, &row, None),
     };
-    hosted(plane, task_id, task)
+    hosted(plane, task_id, task).map(Ok)
 }
 
 /// The words of a task that ended but whose result the host's records do not hold.
@@ -2065,15 +2343,13 @@ fn ended_task(
 
 /// The task the host's rows and records made (`host`), laid over what the instance holds of
 /// `task_id`, the instance keeping its own halves ([`Task::hosted`]).
+/// A host-only view is returned without retaining it; an update retains the state it will mutate.
 fn hosted(plane: &McpDoor, task_id: &str, host: Task) -> Poll<Option<Box<Task>>> {
     let mut task = host.clone();
-    plane.tasks.with_all(|m| match m.get_mut(task_id) {
-        Some(t) => {
+    plane.tasks.with_all(|m| {
+        if let Some(t) = m.get_mut(task_id) {
             t.hosted(host);
             task = t.clone();
-        }
-        None => {
-            m.insert(task_id.to_string(), host);
         }
     });
     Poll::Ready(Some(Box::new(task)))
@@ -2106,9 +2382,33 @@ pub(super) fn cancelled(plane: &McpDoor, ticket: Ticket) -> Vec<String> {
     moved
 }
 
+pub(super) fn abandoned_create(
+    plane: &McpDoor,
+    unit: &CallUnit,
+) -> Option<(String, tasks::Records)> {
+    let Some(TaskUnit::Create(create)) = unit.task.as_ref() else {
+        return None;
+    };
+    if create.nested {
+        return None;
+    }
+    let (_, reference) = create.opened.as_ref()?;
+    let now = clock_now(plane);
+    let task = plane.tasks.with(reference, |task| {
+        let task = task.filter(|task| !task.started)?;
+        if !task.cancel(now.unwrap_or(task.stamps().1)) {
+            return None;
+        }
+        task.unsettled = true;
+        Some(task.clone())
+    })?;
+    Some((reference.clone(), ended_records(plane, &task, false)))
+}
+
 /// The kernel refused the continuation `unit` (`text`: its walk was exhausted, its budget said no)
 /// before it settled its task: the task fails, as the served engine's runner failed a call that
-/// could not be carried. A task another continuation took is not touched.
+/// could not be carried. Only an actually bound runner may change its task. A refusal before
+/// Bind has no principal or exclusive custody receipt and changes no task named by its body.
 ///
 /// Answers the records the refusal writes: the failure, its settle owed to the next create's sweep, is written at the refusal
 /// ([`ended_records`]), so every node answers it before that sweep and across a restart. A re-call
@@ -2117,13 +2417,25 @@ pub(super) fn continuation_refused(
     plane: &McpDoor,
     unit: u64,
     reference: &str,
+    receipt: Option<(u64, String, Ticket)>,
     text: &str,
 ) -> tasks::Records {
+    let Some((handle, digest, ticket)) = receipt else {
+        return Vec::new();
+    };
     let now = clock_now(plane);
     let owed = plane.tasks.with(&reference.to_string(), |t| {
         let t = t?;
-        let ran_here = t.runner.is_some_and(|(u, _)| u == unit);
-        if ran_here || !t.started {
+        if t.handle != handle || t.row().digest != digest {
+            return None;
+        }
+        let ran_here = t.runner == Some((unit, ticket));
+        // A different runner is never ours to end. The receipt remains on this CallUnit after
+        // the first refusal clears Task.runner, so only that bound unit can re-call short output.
+        if t.runner.is_some() && !ran_here {
+            return None;
+        }
+        if ran_here {
             let at = now.unwrap_or(t.stamps().1);
             if t.fail(
                 TASK_PROTOCOL_ERROR_CODE,
@@ -2138,6 +2450,18 @@ pub(super) fn continuation_refused(
         (t.unsettled && t.status() == Status::Failed).then(|| t.clone())
     });
     owed.map_or_else(Vec::new, |t| ended_records(plane, &t, false))
+}
+
+/// The run's retained bind receipt, including across a short refusal re-call after its runner was
+/// cleared. A body naming a task without a positive claim or successful authenticated bind
+/// carries no custody.
+pub(super) fn refusal_receipt(unit: &CallUnit) -> Option<(u64, String, Ticket)> {
+    let Some(TaskUnit::Run(run)) = unit.task.as_ref() else {
+        return None;
+    };
+    let ticket = unit.ticket?;
+    ((run.bound || (run.local && run.claim_done)) && run.handle != 0)
+        .then(|| (run.handle, run.digest.clone(), ticket))
 }
 
 /// The reference of the continuation `unit`, when it is one.

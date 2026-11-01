@@ -55,11 +55,17 @@ impl Peer for Door {
     fn owner(&mut self, generation: u64, id: &Value) -> AskOwner {
         let key = (generation, id.to_string());
         if let Some((_, owner)) = self.owners.iter().find(|(k, _)| *k == key) {
-            return owner.map_or(AskOwner::Refused, AskOwner::Call);
+            return owner.map_or(AskOwner::Refused, |owner| {
+                AskOwner::Call(Value::from(owner))
+            });
         }
-        let owner = first_in_line(self.open.iter().map(|&call| (call, 0)), generation);
+        let owner = first_in_line(
+            self.open.iter().map(|&call| (Value::from(call), 0)),
+            generation,
+        )
+        .and_then(|id| id.as_u64());
         self.owners.push((key, owner));
-        owner.map_or(AskOwner::Refuse, AskOwner::Call)
+        owner.map_or(AskOwner::Refuse, |owner| AskOwner::Call(Value::from(owner)))
     }
     fn notice(&mut self) {
         self.noticed += 1;
@@ -191,10 +197,69 @@ fn every_id_on_a_child_is_its_own() {
     assert_ne!(call_id(1, 0), call_id(2, 0));
     assert_ne!(call_id(1, 0), call_id(1, 1));
     assert_ne!(call_id(1, 0), list_id(1, 0));
-    assert!(call_id(0, 0) > HANDSHAKE_REQUEST_ID);
-    assert!(list_id(0, 0) > crate::client::jsonrpc::dispatch_request_id(u32::MAX));
+    assert!(call_id(0, 0).as_u64().unwrap() > HANDSHAKE_REQUEST_ID);
+    assert!(
+        unit_list_id(0, 0).as_u64().unwrap()
+            > crate::client::jsonrpc::dispatch_request_id(u32::MAX)
+    );
     assert_eq!(generation_of(b"generation: 12\r\n"), 12);
     assert_eq!(generation_of(b"other: 1\r\n"), 0);
+}
+
+#[test]
+fn list_ids_preserve_the_complete_key_and_fetch_and_legacy_numeric_ids() {
+    assert_eq!(
+        unit_list_id(7, 3),
+        Value::from(PROGRAM_IDS | LIST_IDS | (7 << 7) | 3)
+    );
+    let ids: std::collections::HashSet<_> = [
+        (7, 0),
+        ((1 << 32) | 7, 0),
+        ((2 << 32) | 7, 0),
+        ((1 << 32) | 8, 0),
+        ((1 << 32) | 7, 1),
+        (7, 128),
+        (u64::MAX, u32::MAX),
+    ]
+    .into_iter()
+    .map(|(key, fetch)| list_id(key, fetch).to_string())
+    .collect();
+    assert_eq!(ids.len(), 7);
+    assert_eq!(
+        list_id(u64::MAX, u32::MAX),
+        json!("busbar-list:ticket:4294967295:4294967295:4294967295")
+    );
+    assert_ne!(unit_list_id(7, 0), list_id(7, 0));
+    assert_ne!(unit_list_id((1 << 32) | 7, 0), list_id((1 << 32) | 7, 0));
+    assert_eq!(
+        unit_list_id(u64::MAX, u32::MAX),
+        json!("busbar-list:unit:18446744073709551615:4294967295")
+    );
+    let id = list_id((1 << 32) | 7, 0);
+    let request = crate::client::jsonrpc::tools_list_id("", &id, None);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&request.body).unwrap()["id"],
+        id
+    );
+    let response = bytes(&json!({"jsonrpc":"2.0", "id":id, "result":{ "tools":[] }}));
+    assert!(matches!(
+        crate::client::jsonrpc::parse_response_id(&response, &id),
+        crate::client::jsonrpc::RpcOutcome::Result(_)
+    ));
+    assert!(matches!(
+        crate::client::jsonrpc::parse_response_id(&response, &list_id((2 << 32) | 7, 0)),
+        crate::client::jsonrpc::RpcOutcome::Uncorrelated(_)
+    ));
+    let mut corr = Correlator::default();
+    let mut peer = Door::default();
+    assert!(corr
+        .take(&response, list_id((2 << 32) | 7, 0), "srv", 1, &mut peer)
+        .unwrap()
+        .is_none());
+    assert!(corr
+        .take(&response, id, "srv", 1, &mut peer)
+        .unwrap()
+        .is_some());
 }
 
 /// LAW 11: a GRANTED authority ask the
@@ -305,7 +370,7 @@ fn the_childs_asks_go_out_verbatim_and_the_answers_come_back_under_its_ids() {
     );
     let leg = crate::ask::ChildLeg {
         generation: 1,
-        wait: 9,
+        wait: json!(9),
         asks: keys,
         work: None,
     };
@@ -405,14 +470,17 @@ fn each_callers_ask_reaches_only_that_caller() {
 /// no call for it.
 #[test]
 fn the_call_an_ask_belongs_to() {
-    assert_eq!(first_in_line([(9, 1), (10, 1)], 1), Some(9));
     assert_eq!(
-        first_in_line([(9, 0), (10, 1)], 1),
-        Some(9),
+        first_in_line([(json!(9), 1), (json!(10), 1)], 1),
+        Some(json!(9))
+    );
+    assert_eq!(
+        first_in_line([(json!(9), 0), (json!(10), 1)], 1),
+        Some(json!(9)),
         "before its head"
     );
     assert_eq!(
-        first_in_line([(9, 2)], 1),
+        first_in_line([(json!(9), 2)], 1),
         None,
         "another generation's child"
     );
@@ -470,7 +538,7 @@ fn a_callers_answer_to_a_stdio_childs_ask_over_the_cap_is_refused() {
     .clone();
     let child = crate::ask::ChildLeg {
         generation: 1,
-        wait: 1,
+        wait: json!(1),
         asks: vec![("s".to_string(), json!(9))],
         work: None,
     };

@@ -512,6 +512,15 @@ const server = createServer((req, res) => {
     if (!meta?.["io.modelcontextprotocol/protocolVersion"]) {
       return rpcError(res, 400, id, -32602, "params._meta must carry the protocol version");
     }
+    const version = meta?.["io.modelcontextprotocol/protocolVersion"];
+    if (version !== "2026-07-28" || req.headers["mcp-protocol-version"] !== version) {
+      return rpcError(res, 400, id, -32020, "MCP-Protocol-Version does not mirror the supported body version");
+    }
+    const name = msg.method === "tools/call" || msg.method === "prompts/get" ? msg.params?.name
+      : msg.method === "resources/read" ? msg.params?.uri : undefined;
+    if (name !== undefined && req.headers["mcp-name"] !== name) {
+      return rpcError(res, 400, id, -32020, "Mcp-Name does not mirror the body");
+    }
     if (msg.method === "tools/list") {
       return send(res, 200, {
         jsonrpc: "2.0",

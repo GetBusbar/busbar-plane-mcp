@@ -31,6 +31,9 @@ fn opened(owner: &str, now_ns: u64) -> LineListen {
     let listen = Listen::open(Some(&params), json!("sub"), now_ns, |_| false).expect("opened");
     LineListen {
         listen: Box::new(listen),
+        opening_unit: 0,
+        opening_ticket: Ticket::NONE,
+        acknowledged: true,
         entitled: BTreeMap::new(),
         owner: owner.to_string(),
         standing: Standing::Live,
@@ -176,6 +179,7 @@ fn host_check_unit() -> CallUnit {
         verified: None,
         joined_fetch: None,
         program: None,
+        program_list: None,
         readied: None,
         task: None,
         line: None,
@@ -192,6 +196,38 @@ fn an_unavailable_host_does_not_claim_the_callers_identity_was_revoked() {
     if let Standing::Lapsed { reason, .. } = result {
         assert_ne!(reason, busbar_contract::vocab::REASON_IDENTITY_NOT_LIVE);
     }
+}
+
+#[test]
+fn an_old_opening_ticket_cannot_remove_a_reused_units_provisional_subscription() {
+    let plane = McpDoor::default();
+    let mut listen = opened("caller", 1);
+    listen.opening_unit = 7;
+    listen.opening_ticket = Ticket {
+        slot: 7,
+        generation: 2,
+    };
+    listen.acknowledged = false;
+    let key = (3, "s:sub".to_string());
+    plane.line_listens.insert(key.clone(), listen);
+    abandoned(
+        &plane,
+        Ticket {
+            slot: 7,
+            generation: 1,
+        },
+        7,
+    );
+    assert!(plane.line_listens.get(&key).is_some());
+    abandoned(
+        &plane,
+        Ticket {
+            slot: 7,
+            generation: 2,
+        },
+        7,
+    );
+    assert!(plane.line_listens.get(&key).is_none());
 }
 
 #[path = "reported_line.rs"]

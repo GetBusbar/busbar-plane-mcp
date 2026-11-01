@@ -124,7 +124,7 @@ impl SafeSlot for Probe {
                 .insert(INITIALIZE_ID.to_string(), instance.ticket());
             l.answers.insert(INITIALIZE_ID.to_string(),(instance.ticket(),crate::codec::json(&serde_json::json!({"jsonrpc":"2.0","id":INITIALIZE_ID,"error":{"code":-32001,"message":"unauthorized"}}))));
             plane.legacy.insert("binding".into(), l);
-            calling.as_mut().unwrap().init = 1;
+            calling.as_mut().unwrap().init = CallInit::Answer;
             let Poll::Ready(Err(why)) = super::super::call(
                 &instance,
                 &plane,

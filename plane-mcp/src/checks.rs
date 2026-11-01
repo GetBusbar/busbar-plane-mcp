@@ -144,7 +144,7 @@ pub fn check_request<'a>(
             .and_then(Value::as_str);
         let Some(header_name) = field(H_MCP_NAME) else {
             return Err(Refused::header_mismatch(
-                "The `Mcp-Name` header is required on tools/call, resources/read and prompts/get.",
+                "The `Mcp-Name` header is required on tools/call, resources/read, prompts/get, tasks/get, tasks/update and tasks/cancel.",
             ));
         };
         let Some(decoded) = decode_sentinel(header_name) else {

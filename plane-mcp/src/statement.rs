@@ -198,15 +198,13 @@ const RECORD_CHAINS: &[RecordChain] = &[RecordChain {
     _reserved: 0,
 }];
 
-/// The pin's four mechanisms; three are authenticity roots and `unpinned` is not. `cert_spki` and
-/// `mtls` pin the far end's KEY ([`MECHANISM_PEER_KEY`]): the host seals it into the registration's
-/// member route and the connector refuses a connection whose server presents another key.
-/// `pinned_pubkey` is a root whose key is a signed manifest's issuer key, kept for the plane and
-/// the kernel's judgement, never compared with the far end's key.
+/// Only `cert_spki` and `mtls` authenticate the far end: the host seals their peer key into
+/// the member route. `pinned_pubkey` verifies no manifest signature in this build and is refused
+/// by validation; `unpinned` remains explicitly unauthenticated and cannot approve tools.
 const PIN_MECHANISMS: &[PinMechanism] = &[
     PinMechanism {
         token: abi_str("pinned_pubkey"),
-        flags: MECHANISM_ROOT,
+        flags: 0,
         _reserved: 0,
     },
     PinMechanism {

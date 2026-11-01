@@ -22,19 +22,25 @@ fn key(member: &str, id: u64) -> AnsweredKey {
 #[test]
 fn the_memo_forgets_its_oldest_decision_first() {
     let mut memo = Answered::with_cap(2);
-    assert_eq!(memo.decide(key("zeta", 1), || Some(10)), (Some(10), true));
+    assert_eq!(
+        memo.decide(key("zeta", 1), || Some(serde_json::json!(10))),
+        (Some(serde_json::json!(10)), true)
+    );
     // Younger, and first in key order.
-    assert_eq!(memo.decide(key("alpha", 1), || Some(20)), (Some(20), true));
+    assert_eq!(
+        memo.decide(key("alpha", 1), || Some(serde_json::json!(20))),
+        (Some(serde_json::json!(20)), true)
+    );
     // The bound is reached: one decision goes, and it is the oldest.
     assert_eq!(memo.decide(key("mid", 1), || None), (None, true));
     assert_eq!(
-        memo.decide(key("alpha", 1), || Some(77)),
-        (Some(20), false),
+        memo.decide(key("alpha", 1), || Some(serde_json::json!(77))),
+        (Some(serde_json::json!(20)), false),
         "the younger decision is still the one made"
     );
     assert_eq!(
-        memo.decide(key("zeta", 1), || Some(99)),
-        (Some(99), true),
+        memo.decide(key("zeta", 1), || Some(serde_json::json!(99))),
+        (Some(serde_json::json!(99)), true),
         "the oldest decision was the one forgotten"
     );
 }

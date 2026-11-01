@@ -183,24 +183,24 @@ pub struct McpDoor {
     /// (verify-on-call's re-fetch, or `connect`), under its generation. What the trust views and the
     /// dispatch gate judge against the section's approval; replaced whole, in one swap
     /// ([`publish`]).
-    sightings: Keyed<String, PublishedList>,
+    sightings: Keyed<ListKey, PublishedList>,
     /// THE LOCAL HALF OF THE SPENT-APPROVAL LEDGER: each nonce this instance redeemed, until the
     /// state it records lapses. Consulted before the host's one-time claim, so a node refuses its
     /// own replay without a round trip, and the whole gate where the host binds no store.
     spent: Keyed<String, u64>,
     /// When each registered server's tool list was last fetched (Unix ms, the kernel's clock): what
     /// verify-on-call reads its `verify_ttl` against.
-    checked: Keyed<String, u64>,
+    checked: Keyed<ListKey, u64>,
     /// When each server's last ACCEPTED `list_changed` marked its list stale (the kernel's
     /// monotonic clock, ms): what the notifications' rate limit is read against
     /// ([`door_sessions::list_changed`]).
     list_noticed: Keyed<String, u64>,
     /// THE TOOL-LIST FETCH IN FLIGHT per server (single-flight): the one call fetching it, until
     /// when its lease holds, and the calls waiting on it.
-    list_fetch: Keyed<String, ListFetch>,
+    list_fetch: Keyed<ListKey, ListFetch>,
     /// How many of each server's verify-on-call fetches have landed: a call that joined a fetch
     /// goes on once this moves past the count it joined at.
-    list_landed: Keyed<String, u64>,
+    list_landed: Keyed<ListKey, u64>,
     /// The host's wake (`HostTables::wake`): a task's continuation and a held subscription are woken
     /// through it when what they wait for moves.
     wake: Option<busbar_contract::abi::sdk::StaticWake>,
@@ -220,8 +220,12 @@ pub struct McpDoor {
     relaying: door_program::Relaying,
     /// THE TASKS this instance holds, by `taskId` (SEP-2663, [`door_tasks`]).
     tasks: Keyed<String, crate::tool_tasks::Task>,
-    /// The result chunks of dropped tasks still to strike, by `taskId`: how many.
-    strikes: Keyed<String, u32>,
+    /// Cache-evicted results awaiting authorized host absence: their owner and remaining chunks.
+    strikes: Keyed<String, door_tasks::Strikes>,
+    inspection_leases: busbar_contract::abi::sdk::life::Leases,
+    inspection_serial: Keyed<(), u64>,
+    inspection_units: Keyed<u64, door_inspection::Unit>,
+    inspection_driver: Keyed<(), door_inspection::Maintenance>,
     /// THE LIVE ASK ROUNDS on carrier sessions, by `(session, ask number)` ([`door_line`]).
     live_asks: Keyed<(u64, u64), crate::line::LiveAsk>,
     /// The subscriptions kept on carrier sessions, by `(session, request id)` ([`door_line`]).
@@ -234,7 +238,7 @@ pub struct McpDoor {
     relays: Keyed<u64, u64>,
     /// THE SESSIONS of the session revisions and the `2024-11-05` stream: this process's, bounded
     /// per owner in count and bytes ([`crate::tool_sessions::SessionTable`], [`door_sessions`]).
-    sessions: Keyed<(), crate::tool_sessions::SessionTable>,
+    sessions: Keyed<(), door_sessions::Sessions>,
     /// Each session's own state beside its table row: its subscriptions, its log floor, the
     /// updates announced for it.
     session_state: Keyed<String, door_sessions::SessionState>,
@@ -246,17 +250,16 @@ pub struct McpDoor {
     /// THE HELD `2024-11-05` EVENT STREAMS busbar reaches legacy-only servers over, by member and
     /// caller binding ([`door_legacy`]).
     legacy: Keyed<String, door_legacy::Link>,
-    /// The tick cycle the held streams' driver-ticket handles are numbered in, and how many they
-    /// issued in it, all links together ([`door_legacy::drive`]).
-    legacy_seq: Keyed<(), (u64, u32)>,
+    /// Pending legacy handles and the SDK's confirmed completion-retirement state.
+    legacy_seq: Keyed<(), door_legacy::Driver>,
     /// Whether this instance said its ungoverned chain's sessions are unisolated (once).
     said_ungoverned: Keyed<(), ()>,
     /// The session revision each line-carrier session negotiated with `initialize`.
     line_revisions: Keyed<u64, crate::revision::Revision>,
     /// THE OPERATOR `connect`S UNDER WAY, by server: the ticket each runs on and its negotiated
     /// fetch, kept while it pends (an operator verb has no unit to keep it on). One per server: a
-    /// newer `connect` of the same server takes its place.
-    connecting: Keyed<String, (Ticket, Box<door_sessions::Negotiating>)>,
+    /// concurrent tickets keep independent negotiation state.
+    connecting: Keyed<(String, u32, u32), ConnectFetch>,
 }
 
 impl McpDoor {
@@ -294,6 +297,10 @@ impl PlaneLife for McpDoor {
         &self.generations
     }
 
+    fn leases(&self) -> Option<&busbar_contract::abi::sdk::life::Leases> {
+        Some(&self.inspection_leases)
+    }
+
     /// `validate`: the settings read as the section, or refused in the grammar's words.
     fn validate(settings: &[u8]) -> Result<(), Refusal> {
         statement::read_dealt_tools(settings)
@@ -325,7 +332,7 @@ impl PlaneLife for McpDoor {
         };
         plane.sessions.insert(
             (),
-            crate::tool_sessions::SessionTable::new(crate::tool_sessions::Bounds::default()),
+            door_sessions::Sessions::new(crate::tool_sessions::Bounds::default()),
         );
         plane.upstreams.insert(
             (),
@@ -379,6 +386,27 @@ impl PlaneLife for McpDoor {
         door_listen::wake_all(self);
     }
 
+    fn retire(&self, generation: u64) {
+        let waiters = self.list_fetch.with_all(|fetches| {
+            let keys: Vec<_> = fetches
+                .keys()
+                .filter(|(g, _)| *g == generation)
+                .cloned()
+                .collect();
+            keys.into_iter()
+                .filter_map(|key| fetches.remove(&key))
+                .flat_map(|lease| lease.waiters)
+                .collect::<Vec<_>>()
+        });
+        wake_fetches(self, waiters);
+        self.checked
+            .with_all(|m| m.retain(|(g, _), _| *g != generation));
+        self.sightings
+            .with_all(|m| m.retain(|(g, _), _| *g != generation));
+        self.list_landed
+            .with_all(|m| m.retain(|(g, _), _| *g != generation));
+    }
+
     /// `tick`: the clock of the subscriptions held as sessions ([`door_listen::tick`]), every
     /// [`door_listen::POLL_NS`].
     fn tick(
@@ -387,6 +415,32 @@ impl PlaneLife for McpDoor {
         mut out: Out<'_, TickOut>,
     ) -> Outcome {
         let given = input;
+        if let Some(plane) = instance.get() {
+            let existing = door_inspection::retained_bytes(given.head().extensions().bytes());
+            out.set(
+                |o| &o.next_tick_ns,
+                given.now_ns().saturating_add(door_listen::POLL_NS),
+            );
+            if let Err(error) = door_inspection::begin_maintenance(
+                plane,
+                given.head().ticket(),
+                given.now_ns(),
+                existing,
+            ) {
+                return out.fail(Refusal::refused(format!(
+                    "carrier-session inspection failed: {error:?}"
+                )));
+            }
+            match door_inspection::maintain(&instance, plane, input, &mut out, existing) {
+                std::task::Poll::Pending => return Outcome::Pending,
+                std::task::Poll::Ready(Err(error)) => {
+                    return out.fail(Refusal::refused(format!(
+                        "carrier-session inspection is unavailable: {error:?}"
+                    )))
+                }
+                std::task::Poll::Ready(Ok(_)) => {}
+            }
+        }
         let next = instance.get().map_or(0, |plane| {
             door_line::tick(plane, given.head().ticket(), given.now_ns());
             let next = door_listen::tick(plane, given.head().ticket(), given.now_ns());
@@ -405,10 +459,55 @@ impl PlaneLife for McpDoor {
     ) -> Outcome {
         match instance.get() {
             Some(plane) => {
+                let existing = door_inspection::retained_bytes(input.head().extensions().bytes());
+                match door_inspection::maintain(&instance, plane, input, &mut out, existing) {
+                    std::task::Poll::Pending => return Outcome::Pending,
+                    std::task::Poll::Ready(Err(error)) => {
+                        return out.fail(Refusal::refused(format!(
+                            "carrier-session inspection is unavailable: {error:?}"
+                        )))
+                    }
+                    std::task::Poll::Ready(Ok(Some(now_ns))) => {
+                        door_line::tick(plane, input.head().ticket(), now_ns);
+                        door_listen::tick(plane, input.head().ticket(), now_ns);
+                        door_sessions::tick(plane);
+                    }
+                    std::task::Poll::Ready(Ok(None)) => {}
+                }
                 // The held 2024-11-05 streams are read on this ticket first: what they hand on
                 // wakes the calls waiting for it.
-                door_legacy::drive(&instance, plane);
-                door_listen::drive(plane, input, &mut out)
+                let pending = door_legacy::drive(
+                    &instance,
+                    plane,
+                    input.head().host(),
+                    input.head().extensions().bytes(),
+                );
+                let pending = match pending {
+                    Ok(pending) => pending,
+                    Err(error) => {
+                        return out.fail(Refusal::refused(format!(
+                            "MCP legacy completion retirement is unavailable: {error:?}"
+                        )))
+                    }
+                };
+                match door_listen::drive(plane, input, &mut out) {
+                    Outcome::Ready => {
+                        let queued = match door_legacy::acknowledge(plane, &mut out) {
+                            Ok(queued) => queued,
+                            Err(error) => {
+                                return out.fail(Refusal::refused(format!(
+                                    "MCP legacy completion retirement is unavailable: {error:?}"
+                                )))
+                            }
+                        };
+                        if pending || queued {
+                            Outcome::Pending
+                        } else {
+                            Outcome::Ready
+                        }
+                    }
+                    outcome => outcome,
+                }
             }
             None => Outcome::Ready,
         }
@@ -424,6 +523,7 @@ impl PlaneLife for McpDoor {
         mut out: Out<'_, PlaneCancelOut>,
     ) -> Outcome {
         let mut stopped = Vec::new();
+        let mut creating_records = Vec::new();
         let mut answered = false;
         if let Some(plane) = instance.get() {
             // THE UNIT THE HOST NAMES, or the units on the cancelled ticket: a unit cancelled
@@ -438,9 +538,40 @@ impl PlaneLife for McpDoor {
                 &plane.units,
                 Ending::Remove,
                 |u| u.ticket,
-                |u| u.relay.as_ref().is_some_and(|r| r.status != 0),
+                |u| {
+                    if let Some((reference, records)) = door_tasks::abandoned_create(plane, u) {
+                        stopped.push(reference);
+                        creating_records.extend(records);
+                    }
+                    u.relay.as_ref().is_some_and(|r| r.status != 0)
+                },
             );
+            door_inspection::cancelled(plane, ticket, named.unit);
+            // Removal waits for any on_piece holding the units table to finish: its last
+            // join/install must precede this cleanup, and no cancelled unit can install after it.
+            abandon_fetches(plane, |lease| {
+                lease.ticket == ticket || lease.owner == named.unit
+            });
+            let abandoned = plane.connecting.with_all(|fetches| {
+                let keys: Vec<_> = fetches
+                    .keys()
+                    .filter(|(_, slot, generation)| {
+                        *slot == ticket.slot && *generation == ticket.generation
+                    })
+                    .cloned()
+                    .collect();
+                keys.into_iter()
+                    .filter_map(|key| fetches.remove(&key))
+                    .collect::<Vec<_>>()
+            });
+            drop(abandoned);
+            plane.list_fetch.with_all(|fetches| {
+                for lease in fetches.values_mut() {
+                    lease.waiters.retain(|waiting| *waiting != ticket);
+                }
+            });
             door_listen::cancelled(plane, ticket);
+            door_line::abandoned(plane, ticket, named.unit);
             door_sessions::cancelled(plane, ticket);
             door_legacy::cancelled(plane, ticket);
         }
@@ -452,6 +583,14 @@ impl PlaneLife for McpDoor {
                 &mut arena,
                 &crate::call::AuditRow::task_cancel(id),
             ));
+        }
+        for (key, value) in &creating_records {
+            records.push(RecordWrite {
+                kind: crate::statement::RECORD_TASK,
+                op: RECORD_PUT,
+                key: arena.span(key),
+                value: arena.span(value),
+            });
         }
         if !(records.fits() && arena.fits()) {
             return Outcome::Fault;
@@ -513,8 +652,27 @@ fn roots_epoch(plane: &McpDoor, principal: &str) -> u64 {
 #[derive(Debug, Clone)]
 struct ListFetch {
     owner: u64,
-    until_ms: u64,
+    ticket: Ticket,
+    attempt: u32,
+    until_ms: Option<u64>,
     waiters: Vec<Ticket>,
+}
+
+type ListKey = (u64, String);
+
+fn list_key(held: &Held, server: &str) -> ListKey {
+    (held.catalogue.generation(), server.to_string())
+}
+
+struct ConnectFetch {
+    held: Arc<Held>,
+    negotiating: Option<Box<door_sessions::Negotiating>>,
+}
+
+struct Verified {
+    sighting: crate::trust::Sighting,
+    sight_seq: u32,
+    receipt: Option<Result<(), String>>,
 }
 
 /// One unit's state, from its arrival to its end.
@@ -551,13 +709,14 @@ struct CallUnit {
     /// called again after the claim pended.
     claim: Option<(String, u32, u64)>,
     /// Verify-on-call's sighting, kept while the kernel's trust book stamps it.
-    verified: Option<crate::trust::Sighting>,
+    verified: Option<Verified>,
     /// THE FETCH THIS CALL JOINED (single-flight): the server's landed-fetch count when it found
     /// another call's `tools/list` of the same server in flight and waited on it instead of
     /// sending its own ([`ListFetch`]).
-    joined_fetch: Option<u64>,
+    joined_fetch: Option<(ListKey, u32, u64)>,
     /// The door's own exchange with a stdio member's child, while it pends ([`door_program`]).
     program: Option<(door_program::Purpose, crate::tool_program::ProgramExchange)>,
+    program_list: Option<door_program::ProgramList>,
     /// The attempt whose stdio member the door greeted ([`door_program::ready`]).
     readied: Option<u32>,
     /// What the unit is to the tasks extension ([`door_tasks`]).
@@ -625,6 +784,7 @@ struct Pending {
     /// For the far end: the verb and the target.
     request: Option<(&'static str, String)>,
     bytes: Vec<u8>,
+    local: Option<crate::local_output::Output>,
     sent: usize,
     /// The head is written.
     headed: bool,
@@ -704,6 +864,32 @@ fn timed_out(services: Option<StaticServices>, ticket: Ticket, unit: &mut CallUn
 }
 
 impl Pending {
+    fn local(local: crate::local_renderer::Local, framing: Option<&Framing>) -> Self {
+        let len = local.len();
+        let output = match framing {
+            Some(framing) => {
+                let mut output = crate::local_output::Output::default();
+                output.bytes(framing.local_prefix());
+                output.event(local, None);
+                output
+            }
+            None => crate::local_output::Output::json(local),
+        };
+        let mut pending = Self::answer(200, Vec::new(), None, &[]);
+        pending.fields = match framing {
+            Some(_) => vec![
+                (CONTENT_TYPE.to_string(), EVENT_STREAM.to_string()),
+                (CACHE_CONTROL.to_string(), NO_STORE.to_string()),
+            ],
+            None => vec![
+                (CONTENT_TYPE.to_string(), JSON.to_string()),
+                (CONTENT_LENGTH.to_string(), len.to_string()),
+            ],
+        };
+        pending.local = Some(output);
+        pending
+    }
+
     /// With the call log's record of `line`, under `scope` and `generation`, at `ts` (the host
     /// clock's reading; none, no record).
     fn logged(
@@ -833,6 +1019,28 @@ impl Pending {
     }
 }
 
+/// Session revisions carry complete local results without stateless-only members. Their own
+/// lowering and stream delivery run before any framing is written.
+fn local_revision(unit: &CallUnit) -> bool {
+    matches!(
+        unit.session,
+        Some(door_sessions::SessionUnit::Message { checked: true, .. })
+            | Some(door_sessions::SessionUnit::Line)
+    )
+}
+
+fn local_answer(
+    framing: Option<&Framing>,
+    revision: bool,
+    answer: Result<crate::local_renderer::Local, crate::tool_arrival::Refusal>,
+) -> Pending {
+    let framing = if revision { None } else { framing };
+    match answer {
+        Ok(local) => Pending::local(local, framing),
+        Err(refusal) => Pending::answer(refusal.status, refusal.body(), framing, &[]),
+    }
+}
+
 /// The operation class a disposition is counted under: its row's, or the notification class. A
 /// refused arrival is counted under none.
 fn op_class(disposition: &Disposition) -> Option<u32> {
@@ -920,8 +1128,15 @@ slot!(
         // The origin first (who may speak at all, one field read): a
         // browser origin that is neither loopback nor on the operator's allowlist is refused, the
         // DNS-rebinding defence. A request with no `Origin` is not a browser's, and goes on.
-        let origin = head(fields, "origin");
-        if origin.is_some_and(|o| !busbar_contract::jsonrpc::origin_admitted(o, &plane.origins)) {
+        let mut origins = fields.iter().filter(|field| {
+            field.field(|f| &f.name).as_str().is_ok_and(|name| name.eq_ignore_ascii_case("origin"))
+        });
+        let origin = origins.next();
+        if origins.next().is_some() || origin.is_some_and(|field| {
+            !field.field(|f| &f.value).as_str().is_ok_and(|value| {
+                busbar_contract::jsonrpc::origin_admitted(value, &plane.origins)
+            })
+        }) {
             return refused_arrival(
                 &mut out,
                 statement::STATUS_FORBIDDEN_ORIGIN,
@@ -1195,6 +1410,7 @@ slot!(
             verified: None,
             joined_fetch: None,
             program: None,
+            program_list: None,
             readied: None,
             task: task_run.map(|(reference, params, _, retry)| {
                 door_tasks::TaskUnit::run(reference, params, retry)
@@ -1336,6 +1552,7 @@ impl DoorSeal<'_> {
         self.services
             .sign(handle, data, &mut buf, &mut spans)
             .ok()
+            .filter(|s| s.signature.len() == crate::seal::SIGNATURE_LEN)
             .map(|s| s.signature.to_vec())
     }
 
@@ -1443,14 +1660,14 @@ struct PublishedList {
 
 /// PUBLISH `sighting` as `server`'s tool list, under its next generation, in ONE swap: a reader
 /// holds either the list before it or this one, whole. Answers the generation published.
-fn publish(plane: &McpDoor, server: &str, sighting: crate::trust::Sighting) -> u64 {
+fn publish(plane: &McpDoor, key: &ListKey, sighting: crate::trust::Sighting) -> u64 {
     plane.sightings.with_all(|lists| {
         let generation = lists
-            .get(server)
+            .get(key)
             .map_or(0, |list| list.generation)
             .saturating_add(1);
         lists.insert(
-            server.to_string(),
+            key.clone(),
             PublishedList {
                 generation,
                 sighting,
@@ -1460,9 +1677,11 @@ fn publish(plane: &McpDoor, server: &str, sighting: crate::trust::Sighting) -> u
     })
 }
 
-/// `server`'s published tool list, as one copy.
-fn published(plane: &McpDoor, server: &str) -> PublishedList {
-    plane.sightings.get(&server.to_string()).unwrap_or_default()
+fn published_in(plane: &McpDoor, held: &Held, server: &str) -> PublishedList {
+    plane
+        .sightings
+        .get(&list_key(held, server))
+        .unwrap_or_default()
 }
 
 /// The answer to the caller's body: from what the plane holds, or the relayed call admitted.
@@ -1472,6 +1691,8 @@ enum Looked {
     Fresh,
     /// A host service pended (the fetch, or the stamp): called again on its wake.
     Pending,
+    /// A joined fetch also wakes at its lease boundary if its owner never returns.
+    Wait(u64),
 }
 
 /// VERIFY-ON-CALL (the rug-pull defence, before the call): the called server's live tool list is
@@ -1491,7 +1712,6 @@ fn verify_on_call(
     held: &Held,
     (server, caller): (&str, &str),
 ) -> Looked {
-    use crate::trust::Sighting;
     let Some(def) = held.section.servers.get(server) else {
         return Looked::Fresh;
     };
@@ -1506,8 +1726,25 @@ fn verify_on_call(
     // A failed read is never a time: the cached list is then stale and
     // fetched again, and what that fetch landed is not stamped.
     let now_ms = wall_ms(Some(services), ticket, &mut unit.issued);
-    let sighting = match unit.verified.take() {
-        Some(kept) => kept,
+    let key = list_key(held, server);
+    abandon_fetches(plane, |lease| {
+        lease.owner == unit.key && lease.attempt != unit.attempt
+    });
+    let mut verified = match unit.verified.take() {
+        Some(kept) => {
+            let mono =
+                clock(Some(services), ticket, &mut unit.issued).map(|r| r.mono_ns / 1_000_000);
+            match join_fetch(plane, &key, ticket, unit, mono, def.timeout_ms()) {
+                FetchTurn::Landed => return Looked::Fresh,
+                FetchTurn::Wait(until) => {
+                    unit.verified = Some(kept);
+                    return until.map_or(Looked::Pending, |until| {
+                        Looked::Wait(until.saturating_mul(1_000_000))
+                    });
+                }
+                FetchTurn::Owner => kept,
+            }
+        }
         None => {
             let ttl_ms = busbar_contract::duration::parse_duration_secs(
                 def.verify_ttl
@@ -1516,61 +1753,29 @@ fn verify_on_call(
             )
             .unwrap_or(0)
             .saturating_mul(1000);
-            let fresh = now_ms.is_some_and(|now_ms| {
+            let fresh = now_ms.is_some_and(|now| {
                 plane
                     .checked
-                    .get(&server.to_string())
-                    // A clock that reads earlier than the fetch went backwards: stale, never fresh.
-                    .is_some_and(|at| ttl_ms > 0 && now_ms >= at && now_ms - at < ttl_ms)
+                    .get(&key)
+                    .is_some_and(|at| ttl_ms > 0 && now >= at && now - at < ttl_ms)
             });
             if fresh {
-                return Looked::Fresh;
-            }
-            // SINGLE-FLIGHT: a call that finds this server's fetch already in flight waits on it
-            // and goes on with what it landed, even strict-live; it never sends its own.
-            let key = server.to_string();
-            let landed_count = plane.list_landed.get(&key).unwrap_or(0);
-            if unit
-                .joined_fetch
-                .is_some_and(|joined| landed_count > joined)
-            {
                 unit.joined_fetch = None;
                 return Looked::Fresh;
             }
             let mono =
                 clock(Some(services), ticket, &mut unit.issued).map(|r| r.mono_ns / 1_000_000);
-            let me = unit.key;
-            let joined = plane.list_fetch.with(&key, |lease| match lease {
-                Some(lease)
-                    if lease.owner != me && mono.is_some_and(|now| now < lease.until_ms) =>
-                {
-                    if !lease.waiters.contains(&ticket) {
-                        lease.waiters.push(ticket);
-                    }
-                    true
+            match join_fetch(plane, &key, ticket, unit, mono, def.timeout_ms()) {
+                FetchTurn::Landed => return Looked::Fresh,
+                FetchTurn::Wait(until) => {
+                    return until.map_or(Looked::Pending, |until| {
+                        Looked::Wait(until.saturating_mul(1_000_000))
+                    })
                 }
-                _ => false,
-            });
-            if joined {
-                unit.joined_fetch.get_or_insert(landed_count);
-                return Looked::Pending;
-            }
-            if plane
-                .list_fetch
-                .get(&key)
-                .is_none_or(|lease| lease.owner != me)
-            {
-                plane.list_fetch.insert(
-                    key,
-                    ListFetch {
-                        owner: me,
-                        until_ms: mono.unwrap_or(0).saturating_add(def.timeout_ms()),
-                        waiters: Vec::new(),
-                    },
-                );
+                FetchTurn::Owner => {}
             }
             let base = VERIFY_SEQ.saturating_add(unit.attempt.saturating_mul(ROUND_SEQ_SPAN));
-            if program {
+            let sighting = if program {
                 let std::task::Poll::Ready(answer) =
                     door_program::tools_listed(plane, ticket, unit, def, server, base)
                 else {
@@ -1600,74 +1805,195 @@ fn verify_on_call(
                     return Looked::Pending;
                 };
                 sighting_of(answer, CONNECT_REQUEST_ID)
+            };
+            let seq = door_tasks::handle(ticket, &mut unit.issued, &mut None).seq;
+            Verified {
+                sighting,
+                sight_seq: seq,
+                receipt: None,
             }
         }
     };
     // An unreachable re-fetch is reported as such: the kernel keeps its last
     // verdict, and the call fails as an upstream failure (`trust_of`).
-    if record_sighting(
-        &services,
-        ticket,
-        &mut unit.issued,
-        &held.catalogue,
-        server,
-        &sighting,
-    ) {
-        unit.verified = Some(sighting);
-        return Looked::Pending;
-    }
-    // THE FRESHNESS CLOCK starts only on a list that LANDED, read at a time the clock gave: an
-    // unreachable server is fetched again on its next call, and a failed
-    // clock read stamps nothing.
-    let landed = matches!(sighting, Sighting::Seen(_));
-    publish(plane, server, sighting);
-    match now_ms {
-        Some(now_ms) if landed => {
-            plane.checked.insert(server.to_string(), now_ms);
-        }
-        _ => {
-            plane.checked.remove(&server.to_string());
+    if verified.receipt.is_none() {
+        match record_sighting(
+            &services,
+            ticket,
+            verified.sight_seq,
+            &mut unit.issued,
+            &held.catalogue,
+            server,
+            &verified.sighting,
+        ) {
+            std::task::Poll::Pending => {
+                unit.verified = Some(verified);
+                return Looked::Pending;
+            }
+            std::task::Poll::Ready(receipt) => verified.receipt = Some(receipt),
         }
     }
-    landed_fetch(plane, server, unit.key);
-    Looked::Fresh
+    match landed_fetch(plane, &key, unit.key, unit.attempt, verified, now_ms) {
+        Ok(()) => {
+            unit.joined_fetch = None;
+            Looked::Fresh
+        }
+        Err(verified) => {
+            // The owner changed while a host receipt was pending. Recheck that lease before
+            // recording or publishing again; keep the completed exchange, never replay its handles.
+            unit.verified = Some(verified);
+            let mono = clock(Some(services), ticket, &mut unit.issued).map(|r| r.mono_ns);
+            Looked::Wait(mono.unwrap_or(0).saturating_add(1))
+        }
+    }
 }
 
-/// THE FETCH `owner` MADE OF `server` LANDED (or failed, which the calls waiting on it read the
-/// same way: the sighting is what they judge): its lease is released, the landed count moves, and
-/// every call that joined it is woken to go on with it.
-fn landed_fetch(plane: &McpDoor, server: &str, owner: u64) {
-    let key = server.to_string();
-    let waiters = plane.list_fetch.with(&key, |lease| match lease {
-        Some(lease) if lease.owner == owner => Some(std::mem::take(&mut lease.waiters)),
-        _ => None,
+enum FetchTurn {
+    Owner,
+    Landed,
+    Wait(Option<u64>),
+}
+
+fn join_fetch(
+    plane: &McpDoor,
+    key: &ListKey,
+    ticket: Ticket,
+    unit: &mut CallUnit,
+    mono: Option<u64>,
+    timeout: u64,
+) -> FetchTurn {
+    plane.list_fetch.with_all(|fetches| {
+        let count = plane.list_landed.get(key).unwrap_or(0);
+        if unit
+            .joined_fetch
+            .as_ref()
+            .is_some_and(|(joined, attempt, at)| {
+                joined == key && *attempt == unit.attempt && count > *at
+            })
+        {
+            unit.joined_fetch = None;
+            return FetchTurn::Landed;
+        }
+        let mut waiters = Vec::new();
+        if let Some(lease) = fetches.get_mut(key) {
+            if lease.owner == unit.key && lease.attempt == unit.attempt {
+                return FetchTurn::Owner;
+            }
+            // A missing clock reading is no evidence that another owner's lease expired.
+            if mono
+                .zip(lease.until_ms)
+                .is_none_or(|(now, until)| now < until)
+            {
+                if !lease.waiters.contains(&ticket) {
+                    lease.waiters.push(ticket);
+                }
+                unit.joined_fetch = Some((key.clone(), unit.attempt, count));
+                return FetchTurn::Wait(lease.until_ms);
+            }
+            waiters = std::mem::take(&mut lease.waiters);
+            if !waiters.contains(&lease.ticket) {
+                waiters.push(lease.ticket);
+            }
+        }
+        waiters.retain(|waiting| *waiting != ticket);
+        unit.joined_fetch = Some((key.clone(), unit.attempt, count));
+        fetches.insert(
+            key.clone(),
+            ListFetch {
+                owner: unit.key,
+                ticket,
+                attempt: unit.attempt,
+                until_ms: mono.map(|now| now.saturating_add(timeout)),
+                waiters,
+            },
+        );
+        FetchTurn::Owner
+    })
+}
+
+/// Publication, completion count and lease removal share the join lock. A join can see either
+/// the complete old lease or its landed result, and cannot be drained out of a replacement.
+fn landed_fetch(
+    plane: &McpDoor,
+    key: &ListKey,
+    owner: u64,
+    attempt: u32,
+    mut verified: Verified,
+    now_ms: Option<u64>,
+) -> Result<(), Verified> {
+    let waiters = plane.list_fetch.with_all(|fetches| {
+        if !fetches
+            .get(key)
+            .is_some_and(|lease| lease.owner == owner && lease.attempt == attempt)
+        {
+            return None;
+        }
+        let sighting = match verified.receipt.as_ref()? {
+            Ok(()) => std::mem::take(&mut verified.sighting),
+            Err(reason) => crate::trust::Sighting::Failed(reason.clone()),
+        };
+        let landed = matches!(sighting, crate::trust::Sighting::Seen(_));
+        publish(plane, key, sighting);
+        match now_ms {
+            Some(now) if landed => {
+                plane.checked.insert(key.clone(), now);
+            }
+            _ => {
+                plane.checked.remove(key);
+            }
+        }
+        plane.list_landed.with_all(|counts| {
+            let count = counts.entry(key.clone()).or_default();
+            *count = count.saturating_add(1);
+        });
+        fetches.remove(key).map(|lease| lease.waiters)
     });
     let Some(waiters) = waiters else {
-        return;
+        return Err(verified);
     };
-    plane.list_fetch.remove(&key);
-    let count = plane.list_landed.get(&key).unwrap_or(0).saturating_add(1);
-    plane.list_landed.insert(key, count);
+    wake_fetches(plane, waiters);
+    Ok(())
+}
+
+fn wake_fetches(plane: &McpDoor, waiters: Vec<Ticket>) {
     if let Some(wake) = plane.wake {
-        waiters.iter().for_each(|t| wake.wake(*t));
+        for ticket in waiters {
+            wake.wake(ticket);
+        }
     }
+}
+
+fn abandon_fetches(plane: &McpDoor, mut abandoned: impl FnMut(&ListFetch) -> bool) {
+    let waiters = plane.list_fetch.with_all(|fetches| {
+        let keys: Vec<_> = fetches
+            .iter()
+            .filter(|(_, lease)| abandoned(lease))
+            .map(|(key, _)| key.clone())
+            .collect();
+        keys.into_iter()
+            .filter_map(|key| fetches.remove(&key))
+            .flat_map(|lease| lease.waiters)
+            .collect::<Vec<_>>()
+    });
+    wake_fetches(plane, waiters);
 }
 
 /// THE SIGHTING ON THE KERNEL'S TRUST BOOK (`trust.sight` of the observed catalogue, or
-/// `trust.unreachable`, on [`SIGHT_SEQ`]); `true` when it pended. A landed list then sights EACH TOOL
+/// `trust.unreachable`, on its retained completion handle). A landed list then sights EACH TOOL
 /// The digest it offers each of `server`'s catalogue tools at, under the tool's
 /// trust key, on fresh handles from `seq`; never pends, and an unserved book leaves the item
 /// unsighted, which `trust.serves` refuses.
 fn record_sighting(
     services: &Services,
     ticket: Ticket,
+    sight_seq: u32,
     seq: &mut u32,
     catalogue: &Catalogue,
     server: &str,
     sighting: &crate::trust::Sighting,
-) -> bool {
+) -> std::task::Poll<Result<(), String>> {
     use crate::trust::Sighting;
-    let handle = handle_at(ticket, SIGHT_SEQ);
+    let handle = handle_at(ticket, sight_seq);
     let sighted = match sighting {
         Sighting::Seen(obs) => {
             services.trust_sight(handle, server, &crate::trust::catalogue_hash(obs))
@@ -1675,18 +2001,26 @@ fn record_sighting(
         Sighting::Failed(_) => services.trust_unreachable(handle, server),
         Sighting::Never => std::task::Poll::Ready(Ok(0)),
     };
-    if sighted.is_pending() {
-        return true;
+    match sighted {
+        std::task::Poll::Pending => return std::task::Poll::Pending,
+        std::task::Poll::Ready(Err(error)) => {
+            return std::task::Poll::Ready(Err(format!(
+                "the kernel could not record server `{server}`'s trust sighting: {error:?}"
+            )))
+        }
+        std::task::Poll::Ready(Ok(_)) => {}
     }
     if let Sighting::Seen(obs) = sighting {
         for entry in catalogue.tools_of(server) {
             if let Some(digest) = obs.capabilities.get(&entry.tool) {
                 let handle = door_tasks::handle(ticket, seq, &mut None);
-                let _ = services.trust_sight_item(handle, server, &entry.tool, digest);
+                if let Err(error) = services.trust_sight_item(handle, server, &entry.tool, digest) {
+                    return std::task::Poll::Ready(Err(format!("the kernel could not record server `{server}` tool `{}`'s trust sighting: {error:?}", entry.tool)));
+                }
             }
         }
     }
-    false
+    std::task::Poll::Ready(Ok(()))
 }
 
 /// The completion handle `seq` on `ticket`.
@@ -1700,10 +2034,14 @@ fn handle_at(ticket: Ticket, seq: u32) -> CompletionHandle {
 
 /// THE KERNEL'S TRUST STATE of registration `server` (`trust.state`), item by item, as the admin
 /// views render it. A host that answers no trust service holds nothing.
-fn kernel_items(plane: &McpDoor, ticket: Ticket, server: &str) -> Vec<crate::trust::KernelItem> {
+fn kernel_items(
+    plane: &McpDoor,
+    ticket: Ticket,
+    server: &str,
+) -> Result<Vec<crate::trust::KernelItem>, String> {
     use busbar_contract::abi::sdk::services::ServiceError;
     let Some(services) = plane.services else {
-        return Vec::new();
+        return Err("the kernel lends no trust-state service".to_string());
     };
     let handle = handle_at(ticket, SIGHT_SEQ + 2);
     let read = |bytes: usize, spans: usize| {
@@ -1723,14 +2061,18 @@ fn kernel_items(plane: &McpDoor, ticket: Ticket, server: &str) -> Vec<crate::tru
             })
     };
     match read(16 * 1024, 128) {
-        Ok(items) => items,
+        Ok(items) => Ok(items),
         // The short-buffer rule: once more, at the size the host asked for.
         Err(ServiceError::Short { bytes, items }) => read(
             usize::try_from(bytes).unwrap_or(usize::MAX),
             usize::try_from(items).unwrap_or(usize::MAX),
         )
-        .unwrap_or_default(),
-        Err(_) => Vec::new(),
+        .map_err(|error| {
+            format!("the kernel could not read server `{server}`'s trust state: {error:?}")
+        }),
+        Err(error) => Err(format!(
+            "the kernel could not read server `{server}`'s trust state: {error:?}"
+        )),
     }
 }
 
@@ -1776,29 +2118,96 @@ fn trust_of(
     }
 }
 
+/// Recheck a task's selected entry at its actual send boundary, including after a pending greeting
+/// or a wait in its child's line. These two grants are fresh; other cached unit grants are retained.
+fn admit_task_send(
+    plane: &McpDoor,
+    ticket: Ticket,
+    unit: &mut CallUnit,
+    held: &Held,
+    entry: &crate::catalogue::ToolEntry,
+    arguments: &Value,
+) -> Result<(), String> {
+    let grants = [
+        (crate::statement::SCOPE, entry.server.as_str()),
+        (crate::statement::SCOPE_TOOL, entry.namespaced.as_str()),
+    ];
+    for (kind, name) in grants {
+        unit.entitled.remove(&format!("{kind}:{name}"));
+    }
+    ask_entitlements(plane.services, ticket, unit, &grants);
+    let mut list = published_in(plane, held, &entry.server);
+    // This continuation performs no list fetch: the kernel's book supplies its current verdict.
+    if matches!(list.sighting, crate::trust::Sighting::Failed(_)) {
+        list.sighting = crate::trust::Sighting::Never;
+    }
+    let trust = trust_of(plane, ticket, &mut unit.issued, entry, &list);
+    crate::call::admits_entry(entry, &admit(&unit.entitled), trust)?;
+    let schema = entry
+        .input_schema
+        .clone()
+        .unwrap_or_else(|| json!({"type":"object"}));
+    crate::argguard::guard(&schema, arguments, |dest| {
+        let h = door_tasks::handle(ticket, &mut unit.issued, &mut None);
+        plane
+            .services
+            .and_then(|services| dest_verdict(services, h, held, entry, dest))
+    })
+    .map(|_| ())
+    .map_err(|refused| refused.to_string())
+}
+
 /// A QUEUED STDIO CALL'S TURN, the synchronous call's and a task's continuation's alike: `Ok` the
 /// step it takes (sent once it is first in line, else waiting on within its deadline); `Err` its
-/// deadline passed while it waited, and it was never sent. `None` for a unit that is not waiting.
-fn queued_turn(plane: &McpDoor, ticket: Ticket, unit: &mut CallUnit) -> Option<Result<Step, ()>> {
+/// deadline passed or a task lost authorization before its turn, and it was never sent. `None`
+/// for a unit that is not waiting.
+fn queued_turn(
+    plane: &McpDoor,
+    ticket: Ticket,
+    unit: &mut CallUnit,
+) -> Option<Result<Step, String>> {
     let deadline = unit.relay.as_ref()?.queued.as_ref()?.1;
     let now = mono_ms(plane.services, ticket, unit);
-    let relay = unit.relay.as_mut()?;
+    if deadline != 0 && now.is_some_and(|now| now >= deadline) {
+        let relay = unit.relay.as_mut()?;
+        relay.queued = None;
+        relay.program = None;
+        return Some(Err(format!(
+            "the MCP upstream call failed: {}",
+            door_program::BUSY
+        )));
+    }
+    let relay = unit.relay.as_ref()?;
     let first = relay
         .program
         .as_ref()
         .is_none_or(|p| door_program::in_line(plane, p, now, ticket));
     if first {
+        if door_tasks::is_run(unit) {
+            let held = unit.held.as_ref()?.clone();
+            let entry = relay.admitted.entry.clone();
+            let arguments = relay.admitted.arguments.clone();
+            if let Err(words) = admit_task_send(plane, ticket, unit, &held, &entry, &arguments) {
+                let relay = unit.relay.as_mut()?;
+                relay.queued = None;
+                relay.program = None;
+                return Some(Err(words));
+            }
+        }
+        let relay = unit.relay.as_mut()?;
         let (outbound, _) = relay.queued.take()?;
         relay.dispatched_ms = now;
         unit.pending = Some(Pending::far(outbound).laned(&relay.admitted.entry.server));
         return Some(Ok(Step::Write));
     }
-    if deadline == 0 || now.is_none_or(|now| now < deadline) {
-        return Some(Ok(Step::Wait(deadline.saturating_mul(1_000_000))));
-    }
-    relay.queued = None;
-    relay.program = None;
-    Some(Err(()))
+    let wake_at = unit
+        .relay
+        .as_ref()
+        .and_then(|relay| relay.program.as_ref())
+        .map_or(deadline, |program| {
+            door_program::queue_wake_at(plane, program, deadline, now)
+        });
+    Some(Ok(Step::Wait(wake_at.saturating_mul(1_000_000))))
 }
 
 /// A stdio call waiting its turn, called again on the wake of the call ahead of it
@@ -1896,6 +2305,7 @@ fn answer_body(
         }
     }
     let held = unit.held.clone()?;
+    let local_revision = local_revision(unit);
     if let Some(step) = take_turn(plane, ticket, principal, held.catalogue.generation(), unit) {
         return Some(step);
     }
@@ -1953,10 +2363,10 @@ fn answer_body(
         let admit = admit(&unit.entitled);
         admit(statement::SCOPE, &t.server) && admit(statement::SCOPE_TOOL, &t.namespaced)
     }) {
-        if let Looked::Pending =
-            verify_on_call(instance, plane, ticket, unit, &held, (&t.server, caller))
-        {
-            return Some(Step::Pending);
+        match verify_on_call(instance, plane, ticket, unit, &held, (&t.server, caller)) {
+            Looked::Pending => return Some(Step::Pending),
+            Looked::Wait(until) => return Some(Step::Wait(until)),
+            Looked::Fresh => {}
         }
         // A stdio member's child is greeted (once per generation) before the call.
         if let Some(member) = unit.member.clone() {
@@ -1973,7 +2383,7 @@ fn answer_body(
     let mut list_of = |server: &str| {
         lists
             .entry(server.to_string())
-            .or_insert_with(|| published(plane, server))
+            .or_insert_with(|| published_in(plane, &held, server))
             .clone()
     };
     let verdict = called.map(|entry| {
@@ -1985,7 +2395,7 @@ fn answer_body(
     });
     use busbar_contract::abi::host::service::{DISTRUST_CHANGED, DISTRUST_QUARANTINED};
     let listing = matches!(&disposition, Disposition::Request { row, .. }
-        if row.op == crate::tool_ops::OP_TOOLS_LIST);
+        if row.op == crate::tool_ops::OP_TOOLS_LIST || row.op == crate::tool_ops::OP_DISCOVER);
     let mut hidden = std::collections::BTreeSet::new();
     if listing {
         let listed: Vec<crate::catalogue::ToolEntry> = held
@@ -2124,6 +2534,58 @@ fn answer_body(
         });
         return Some(Step::Write);
     }
+    // Local content is selected under the same grants, but kept as its original inputs and a
+    // cursor. No repeated placeholder is expanded before the caller lends output space.
+    if let Disposition::Request { row, id } = &disposition {
+        if row.op == crate::tool_ops::OP_RESOURCE_READ {
+            let rendered = crate::local_renderer::Local::resource(
+                held.clone(),
+                id.clone(),
+                params.take(),
+                &admit,
+                local_revision,
+            );
+            unit.pending = Some(local_answer(
+                unit.framing.as_ref(),
+                local_revision,
+                rendered,
+            ));
+            return Some(Step::Write);
+        }
+        if row.op == crate::tool_ops::OP_PROMPT_GET {
+            let retried = params.as_ref().is_some_and(|p| {
+                p.get("inputResponses").is_some() || p.get("requestState").is_some()
+            });
+            match crate::reads::prompt_named(&held.catalogue, id, params.as_ref(), &admit) {
+                Ok(prompt) if prompt.ask_caller.is_empty() && !retried => {
+                    let published = prompt.namespaced.clone();
+                    let rendered = crate::local_renderer::Local::prompt(
+                        held.clone(),
+                        published,
+                        id.clone(),
+                        params.take(),
+                        local_revision,
+                    );
+                    unit.pending = Some(local_answer(
+                        unit.framing.as_ref(),
+                        local_revision,
+                        rendered,
+                    ));
+                    return Some(Step::Write);
+                }
+                Err(refusal) => {
+                    unit.pending = Some(Pending::answer(
+                        refusal.status,
+                        refusal.body(),
+                        unit.framing.as_ref(),
+                        &[],
+                    ));
+                    return Some(Step::Write);
+                }
+                _ => {}
+            }
+        }
+    }
     // A tool the kernel's verdict hides is gone from the listing.
     let answer = crate::answer::answer(
         &disposition,
@@ -2160,7 +2622,20 @@ fn answer_body(
                 }
                 match decided {
                     AskDecision::Proceed | AskDecision::Answered(_) => {
-                        (200, crate::reads::prompts_get(prompt, id, params.as_ref()))
+                        let published = prompt.namespaced.clone();
+                        let rendered = crate::local_renderer::Local::prompt(
+                            held.clone(),
+                            published,
+                            id.clone(),
+                            params.take(),
+                            local_revision,
+                        );
+                        unit.pending = Some(local_answer(
+                            unit.framing.as_ref(),
+                            local_revision,
+                            rendered,
+                        ));
+                        return Some(Step::Write);
                     }
                     AskDecision::Refuse(refusal) => {
                         audit = Some(crate::call::AuditRow::prompt_ask(&prompt.namespaced, false));
@@ -2451,6 +2926,13 @@ fn open_child_work(
     (result, round, mut c): (&Value, u32, crate::ask::ChildLeg),
 ) -> ChildOpened {
     *asked = Some((result.clone(), round, c.clone()));
+    // Free lapsed custody before asking a full host for another handle. Keep a pending open's
+    // original handle untouched; the sweep uses the unit's separately numbered services.
+    if work_slot.is_none() {
+        if let Some(now_ms) = wall_ms(Some(services), ticket, issued) {
+            sweep_relays(plane, services, ticket, issued, now_ms);
+        }
+    }
     let h = door_tasks::handle(ticket, issued, work_slot);
     let record = child_record(member, &c);
     let (mut buf, mut spans) = ([0u8; 64], [door_tasks::blank(); 2]);
@@ -2479,7 +2961,6 @@ fn open_child_work(
                     },
                 );
             };
-            sweep_relays(plane, services, ticket, issued, now_ms);
             plane.relays.insert(
                 opened.handle,
                 now_ms.saturating_add(crate::ask::DEFAULT_TTL_SECS.saturating_mul(1000)),
@@ -2753,7 +3234,7 @@ fn send_to_member(
         relay.program = Some(door_program::ProgramRelay::retrying(
             plane,
             member,
-            child.wait,
+            child.wait.clone(),
             child.generation,
             replies,
         ));
@@ -2766,7 +3247,11 @@ fn send_to_member(
     } else if door_program::is_program(def) {
         // A stdio member: the call carries the unit's own id on the child.
         let id = crate::tool_program::call_id(unit.key, round);
-        relay.program = Some(door_program::ProgramRelay::waiting(plane, member, id));
+        relay.program = Some(door_program::ProgramRelay::waiting(
+            plane,
+            member,
+            id.clone(),
+        ));
         crate::call::outbound_program(&relay.admitted, member, def, continuation.as_ref(), id)?
     } else {
         crate::call::outbound(&relay.admitted, member, def, round, continuation.as_ref())?
@@ -2799,10 +3284,13 @@ fn send_to_member(
             .is_some_and(|p| !door_program::in_line(plane, p, now, ticket))
     {
         let deadline = now.map_or(0, |now| now.saturating_add(def.timeout_ms()));
+        let wake_at = relay.program.as_ref().map_or(deadline, |program| {
+            door_program::queue_wake_at(plane, program, deadline, now)
+        });
         relay.queued = Some((outbound, deadline));
         unit.relay = Some(relay);
         return Some(MemberSend::Step(Step::Wait(
-            deadline.saturating_mul(1_000_000),
+            wake_at.saturating_mul(1_000_000),
         )));
     }
     relay.dispatched_ms = now;
@@ -2832,7 +3320,7 @@ fn exchange_scope(
         .catalogue
         .tool_on(member, &admitted.entry.tool)
         .map_or_else(
-            || format!("{member}_{}", admitted.entry.tool),
+            || crate::tools_config::namespaced(member, &admitted.entry.tool),
             |t| t.namespaced.clone(),
         );
     let mut names = vec![String::new()];
@@ -2890,7 +3378,12 @@ slot!(
         let key = piece.unit();
         let ticket = piece.head().ticket();
         let member = input.member().as_str().unwrap_or_default().to_string();
-        let caller = input.caller_ref().as_str().unwrap_or_default().to_string();
+        let mut caller = input.caller_ref().as_str().unwrap_or_default().to_string();
+        let inspected = match door_inspection::poll_unit(&instance, plane, input, &mut out, key) {
+            std::task::Poll::Pending => return Outcome::Pending,
+            std::task::Poll::Ready(Some(retained)) => { caller = retained; true },
+            std::task::Poll::Ready(None) => false,
+        };
         let bytes = input.bytes().bytes();
         let far_type = head(input.head_fields(), CONTENT_TYPE);
         // A session revision's far end names its session in its head.
@@ -2898,12 +3391,15 @@ slot!(
         // A stdio member's lease names the generation of the child it reached in its head.
         let far_generation = head(input.head_fields(), busbar_contract::conn::PROGRAM_GENERATION_FIELD)
             .and_then(|v| v.trim().parse::<u64>().ok());
-        let step = plane.units.with(&key, |unit| {
+        let mut step = plane.units.with(&key, |unit| {
             let unit = unit?;
             unit.ticket = Some(ticket);
             // A re-call after `more = 1` carries nothing new: write what is still pending.
             if unit.pending.is_some() {
                 return Some(Step::Write);
+            }
+            if inspected {
+                return answer_body(&instance, plane, ticket, &caller, unit);
             }
             // A task's continuation, called again part way through a phase that waits.
             let principal = principal_of(&caller);
@@ -2917,6 +3413,7 @@ slot!(
                     unit.verified = None;
                     // A new attempt negotiates afresh with its own member.
                     unit.negotiating = None;
+                    unit.program_list = None;
                     Some(Step::Taken)
                 }
                 FROM_KERNEL => Some(Step::Taken),
@@ -2934,6 +3431,7 @@ slot!(
                     // Replies no call waited for on this caller's held stream: audited on this
                     // answer, rejected (never delivered).
                     let mut dropped_replies = 0_u32;
+                    let mut response_id = Value::from(crate::client::jsonrpc::dispatch_request_id(relay.round));
                     let settled = match () {
                         // A child's ask held while its work handle opened: taken up where it was.
                         () if relay.asked.is_some() => {
@@ -2955,7 +3453,7 @@ slot!(
                             let far = door_program::far(
                                 plane, ticket, member, def, program, head, bytes, last,
                             );
-                            let wait = program.wait;
+                            let wait = program.wait.clone();
                             relay.frames.extend(std::mem::take(&mut program.corr.progress));
                             match far {
                                 door_program::Far::Taken => return Some(Step::Taken),
@@ -3012,6 +3510,7 @@ slot!(
                                 door_program::Far::Settled(Ok(answer)) => {
                                     relay.status = 200;
                                     relay.far = answer;
+                                    response_id = wait.clone();
                                     crate::call::settle_call_as(
                                         &relay.admitted,
                                         Some(def),
@@ -3108,6 +3607,9 @@ slot!(
                                     }
                                 }
                                 unit.negotiating = None;
+                                if let Some(sent) = sent.as_ref() {
+                                    response_id = Value::from(*sent);
+                                }
                                 match failed {
                                     Some(reason) => {
                                         crate::call::upstream_failed(&relay.admitted, &reason)
@@ -3207,9 +3709,6 @@ slot!(
                     };
                     if relay.sse {
                         frames.extend(crate::call::progress_frames(&relay.far));
-                        // A progress stream is untrusted upstream input: at most 256 frames across
-                        // every round of one call.
-                        frames.truncate(256);
                         // What the upstream said beside its answer: its resource updates reach the
                         // sessions watching them, its log records the caller's own session.
                         let server = unit.member.clone().unwrap_or_default();
@@ -3230,13 +3729,12 @@ slot!(
                             mono,
                         );
                     }
+                    let task_leg = task_run.then(|| crate::call::leg_of(&settled, &relay.far, relay.sse, response_id));
                     let Settled::Answer { status, body, line } = settled else {
                         return None;
                     };
                     // A TASK'S CONTINUATION ends in its task, never in a caller's answer.
-                    if task_run {
-                        let leg =
-                            crate::call::leg_of(relay.status, &relay.far, relay.sse, relay.round);
+                    if let Some(leg) = task_leg {
                         let answered = (relay.status != 0).then_some(relay.far.len());
                         return Some(door_tasks::continuation_answered(
                             plane, ticket, principal, unit, leg, answered, &body,
@@ -3265,10 +3763,21 @@ slot!(
                 _ => Some(Step::Declined),
             }
         });
+        if matches!(step, Some(Step::Pending)) {
+            match door_inspection::poll_unit(&instance, plane, input, &mut out, key) {
+                std::task::Poll::Pending => return Outcome::Pending,
+                std::task::Poll::Ready(None) => {},
+                std::task::Poll::Ready(Some(retained)) => {
+                    caller = retained;
+                    step = plane.units.with(&key, |unit| unit.and_then(|unit| answer_body(&instance, plane, ticket, &caller, unit)));
+                }
+            }
+        }
         match step {
             // A piece the plane refuses ends the unit: its state is dropped with it.
             None | Some(Step::Declined) => {
                 plane.units.remove(&key);
+                plane.inspection_units.remove(&key);
                 Outcome::Refused
             }
             Some(Step::Taken) => Outcome::Ready,
@@ -3310,7 +3819,10 @@ slot!(
                         Outcome::Ready
                     }
                     Some(Ok(Written::Done)) => {
-                        plane.units.remove(&key);
+                        plane.inspection_units.remove(&key);
+                        if let Some(unit) = plane.units.remove(&key) {
+                            door_line::completed(plane, &unit);
+                        }
                         Outcome::Ready
                     }
                 }
@@ -3325,6 +3837,8 @@ fn relay_progress(admitted: &AdmittedCall, mut frames: Vec<Value>) -> Vec<Value>
     let Some(token) = admitted.progress_token.clone() else {
         return Vec::new();
     };
+    // The same existing progress bound applies to HTTP and stdio output.
+    frames.truncate(256);
     for f in &mut frames {
         if let Some(p) = f.get_mut("params").and_then(Value::as_object_mut) {
             p.insert("progressToken".to_string(), token.clone());
@@ -3424,14 +3938,24 @@ fn write(
         pending.headed = true;
     }
     let mut reply = input.reply_buf();
-    let n = reply.stream(pending.bytes.get(pending.sent..).unwrap_or_default());
-    pending.sent += n;
+    let n = match pending.local.as_mut() {
+        Some(local) => local.write_with(|bytes| reply.stream(bytes)),
+        None => {
+            let n = reply.stream(pending.bytes.get(pending.sent..).unwrap_or_default());
+            pending.sent += n;
+            n
+        }
+    };
     out.set(|o| &o.emitted, n as u64);
     let mut flags = 0;
     if pending.request.is_some() {
         flags |= EMIT_TO_FAR_END;
     }
-    if pending.sent < pending.bytes.len() {
+    let more = pending
+        .local
+        .as_ref()
+        .map_or(pending.sent < pending.bytes.len(), |local| !local.done());
+    if more {
         out.set(|o| &o.more, 1);
         out.set(|o| &o.flags, flags);
         return Ok(Written::More);
@@ -3457,7 +3981,7 @@ slot!(
         // what it is to the tasks extension: a call that would have created a task (its budget
         // refusal is the task-path words), or a task's continuation (its task
         // fails).
-        let (unit_id, called, creates_task, run_reference) = instance
+        let (unit_id, called, creates_task, run_reference, called_server, run_receipt) = instance
             .get()
             .and_then(|plane| {
                 plane.units.with(&given.unit(), |unit| {
@@ -3471,7 +3995,10 @@ slot!(
                         ),
                         _ => (None, None),
                     };
-                    Some((id, called, door_tasks::creates_task(unit), door_tasks::run_reference(unit)))
+                    let server = called.as_deref().and_then(|name| {
+                        unit.held.as_ref()?.catalogue.tool(name).map(|entry| entry.server.clone())
+                    });
+                    Some((id, called, door_tasks::creates_task(unit), door_tasks::run_reference(unit), server, door_tasks::refusal_receipt(unit)))
                 })
             })
             .unwrap_or_default();
@@ -3487,16 +4014,14 @@ slot!(
         } else {
             input.text().bytes()
         };
-        // The registration the refused call resolved to (its server), where the catalogue holds it.
-        let called_server = instance.get().and_then(|plane| {
-            let held = plane.current()?;
-            Some(held.catalogue.tool(called.as_deref()?)?.server.clone())
-        });
+        if let Some(plane) = instance.get() {
+            abandon_fetches(plane, |lease| lease.owner == given.unit());
+        }
         // Its failure is written to the host's records here, at the refusal.
         let mut task_records = Vec::new();
         if let (Some(plane), Some(reference)) = (instance.get(), run_reference.as_deref()) {
             let message = std::str::from_utf8(text).unwrap_or_default();
-            task_records = door_tasks::continuation_refused(plane, given.unit(), reference, message);
+            task_records = door_tasks::continuation_refused(plane, given.unit(), reference, run_receipt, message);
         }
         let mut audit: Option<crate::call::AuditRow> = None;
         let mut retry_after: Option<u32> = None;
@@ -3599,7 +4124,7 @@ slot!(
                 retry_after = Some(given.retry_after_s());
             }
             let refusal = if budget && creates_task {
-                door_tasks::budget_refused(unit_id.clone(), message)
+                door_tasks::budget_refused(unit_id.clone(), given.status(), message)
             } else if budget {
                 crate::tool_arrival::Refusal {
                     status: given.status(),
@@ -3697,7 +4222,7 @@ fn verb_subject(target: &[u8]) -> Option<String> {
 }
 
 /// A `connect` paused on the kernel's trust book: the sighting its fetch landed.
-struct Sighted(crate::trust::Sighting);
+struct Sighted(Arc<Held>, crate::trust::Sighting);
 
 /// The completion handle `trust.sight` is issued on: past every handle the connect's exchange
 /// issues on the request's ticket. Past it: a `connect`'s clock reading at `+1`, an admin view's
@@ -3778,16 +4303,16 @@ fn list_request(
 /// contact failed.
 fn sighting_of(
     answer: Result<busbar_contract::abi::sdk::exchange::ExchangeResponse, String>,
-    sent_id: u64,
+    sent_id: impl Into<Value>,
 ) -> crate::trust::Sighting {
-    use crate::client::jsonrpc::{parse_response, RpcOutcome};
+    use crate::client::jsonrpc::{parse_response_id, RpcOutcome};
     use crate::trust::Sighting;
     let response = match answer {
         Ok(r) => r,
         Err(reason) => return Sighting::Failed(reason),
     };
     let failed = Sighting::Failed;
-    match parse_response(&response.body, sent_id) {
+    match parse_response_id(&response.body, &sent_id.into()) {
         RpcOutcome::Result(value) => match crate::trust::observe(&value) {
             Ok(obs) => Sighting::Seen(obs),
             Err(reason) => failed(reason),
@@ -3828,8 +4353,14 @@ slot!(
             return Outcome::Failed;
         };
         let route = input.route() as usize;
-        let held = plane.current();
         let name = verb_subject(input.target().bytes());
+        let ticket = instance.ticket();
+        let connect_key = name.as_ref().map(|name| (name.clone(), ticket.slot, ticket.generation));
+        let connecting = connect_key.as_ref().and_then(|key| plane.connecting.remove(key));
+        let sighted = instance.resume::<Sighted>();
+        let held = sighted.as_ref().map(|s| s.0.clone())
+            .or_else(|| connecting.as_ref().map(|fetch| fetch.held.clone()))
+            .or_else(|| plane.current());
         let verb = statement::ADMIN_VERBS.get(route).map_or("", |(_, t)| t.rsplit('/').next().unwrap_or(""));
         let found = held
             .as_ref()
@@ -3841,8 +4372,11 @@ slot!(
             return out.answer(&input, not_found, &[(CONTENT_TYPE, "text/plain")], b"", 0);
         };
         if verb != "connect" {
-            let last = published(plane, name).sighting;
-            let items = kernel_items(plane, instance.ticket(), name);
+            let last = published_in(plane, held, name).sighting;
+            let items = match kernel_items(plane, instance.ticket(), name) {
+                Ok(items) => items,
+                Err(reason) => return out.answer(&input, 503, &[(CONTENT_TYPE, "text/plain")], reason.as_bytes(), 0),
+            };
             let view = if verb == "changes" {
                 crate::trust::trust_view(name, &def, &last, &items)
             } else {
@@ -3862,13 +4396,16 @@ slot!(
             return out.answer(&input, 400, &plain, message.as_bytes(), AUDIT_REJECTED);
         }
         // THE FETCH, unless a pause on the trust book already holds what it landed.
-        let sighting = match instance.resume::<Sighted>() {
-            Some(sighted) => sighted.0,
+        let sighting = match sighted {
+            Some(sighted) => sighted.1,
             // A `transport: stdio` server is fetched from its own child.
             None if door_program::is_program(&def) => {
                 let std::task::Poll::Ready((answer, id)) =
                     door_program::connect_child(&instance, plane, &def, name)
                 else {
+                    if let Some(key) = connect_key {
+                        plane.connecting.insert(key, ConnectFetch { held: held.clone(), negotiating: None });
+                    }
                     return Outcome::Pending;
                 };
                 sighting_of(
@@ -3893,11 +4430,7 @@ slot!(
                 // gets killed and retried). The conversation is the operator's own binding, never a
                 // caller's.
                 let request = list_request(held, name, &def);
-                let mut slot = plane
-                    .connecting
-                    .remove(name)
-                    .filter(|(ticket, _)| *ticket == instance.ticket())
-                    .map(|(_, negotiating)| negotiating);
+                let mut slot = connecting.and_then(|fetch| fetch.negotiating);
                 let answer = door_sessions::fetch_in(
                     &instance,
                     plane,
@@ -3908,8 +4441,8 @@ slot!(
                     request,
                 );
                 let std::task::Poll::Ready(answer) = answer else {
-                    if let Some(negotiating) = slot {
-                        plane.connecting.insert(name.clone(), (instance.ticket(), negotiating));
+                    if let Some(key) = connect_key {
+                        plane.connecting.insert(key, ConnectFetch { held: held.clone(), negotiating: slot });
                     }
                     return Outcome::Pending;
                 };
@@ -3918,25 +4451,37 @@ slot!(
         };
         // THE KERNEL'S TRUST BOOK records the observed catalogue (it stamps the re-verification
         // clock); the answer is the plane's comparison, which is what the operator is looking at.
-        if let Some(services) = plane.services {
-            let mut seq = SIGHT_SEQ + 3;
-            if record_sighting(&services, instance.ticket(), &mut seq, &held.catalogue, name, &sighting) {
-                instance.park(Sighted(sighting));
+        let key = list_key(held, name);
+        let Some(services) = plane.services else {
+            return out.answer(&input, 503, &[(CONTENT_TYPE, "text/plain")], b"the kernel lends no trust-sighting service", AUDIT_REJECTED);
+        };
+        let mut seq = SIGHT_SEQ + 3;
+        match record_sighting(&services, instance.ticket(), SIGHT_SEQ, &mut seq, &held.catalogue, name, &sighting) {
+            std::task::Poll::Pending => {
+                instance.park(Sighted(held.clone(), sighting));
                 return Outcome::Pending;
             }
+            std::task::Poll::Ready(Err(reason)) => {
+                plane.checked.remove(&key);
+                return out.answer(&input, 503, &[(CONTENT_TYPE, "text/plain")], reason.as_bytes(), AUDIT_REJECTED);
+            }
+            std::task::Poll::Ready(Ok(())) => {}
         }
-        publish(plane, name, sighting.clone());
+        publish(plane, &key, sighting.clone());
         // THE FRESHNESS CLOCK records that the operator's connect SAW the list: a call within
         // `verify_ttl` of it reuses this sighting rather than fetching the list again. A contact
         // that failed stamps nothing: the next call fetches again, never
         // answered "never sent" off the operator's failed refresh for `verify_ttl`.
-        plane.checked.remove(name);
-        if let (Some(services), Sighting::Seen(_)) = (plane.services, &sighting) {
+        plane.checked.remove(&key);
+        if let Sighting::Seen(_) = &sighting {
             if let Ok(now) = services.clock_now(handle_at(instance.ticket(), SIGHT_SEQ + 1)) {
-                plane.checked.insert(name.clone(), now.wall_ns / 1_000_000);
+                plane.checked.insert(key, now.wall_ns / 1_000_000);
             }
         }
-        let items = kernel_items(plane, instance.ticket(), name);
+        let items = match kernel_items(plane, instance.ticket(), name) {
+            Ok(items) => items,
+            Err(reason) => return out.answer(&input, 503, &[(CONTENT_TYPE, "text/plain")], reason.as_bytes(), AUDIT_REJECTED),
+        };
         let view = crate::trust::trust_view(name, &def, &sighting, &items);
         out.answer(&input, 200, &[(CONTENT_TYPE, JSON)], view.as_bytes(), AUDIT_APPLIED)
     }
@@ -3954,6 +4499,10 @@ slot!(
     Start, GenIn, OutHead, |_, _, _| { Outcome::Ready }
 );
 
+busbar_contract::own_seal!(ProjectionOwner);
+type ProjectionBytes = busbar_contract::Secret<Vec<u8>, ProjectionOwner>;
+type ProjectionText = busbar_contract::Secret<String, ProjectionOwner>;
+
 slot!(
     /// `project`: a `tools/call` as the hook kind's request view: one turn of tool arguments
     /// ([`crate::call::invocation`]), named by the plane's key, the `{tool, arguments}` body, and the
@@ -3961,7 +4510,7 @@ slot!(
     /// A request-stage hook's rewrite
     /// ([`crate::call::rewritten`]) is applied first: the rewritten request is answered in
     /// `rewritten` (the body the kernel keeps and re-pushes from then on) and is the body projected.
-    /// Any other request carries no invocation for a hook to read: REFUSED.
+    /// Any other request carries an empty view (absent body) for the hook.
     Project, ProjectIn, ProjectOut, |instance, input, mut out| {
         // THE BODY IS PARSED ONCE: rewritten in place, its params kept, its arguments projected.
         let mut request = serde_json::from_slice::<Value>(input.body().bytes()).ok();
@@ -3971,11 +4520,16 @@ slot!(
             .filter(|_| !rewrite.is_empty())
             .and_then(|r| {
                 crate::call::rewritten(r, rewrite).and_then(|()| serde_json::to_vec(&*r).ok())
-            });
+            })
+            .map(ProjectionBytes::held);
         // The rewritten params, kept before the arguments are moved into the invocation.
-        let params = rewritten
+        let mut params = rewritten
             .is_some()
-            .then(|| request.as_ref().and_then(|v| v.get("params").cloned()));
+            .then(|| request.as_ref().and_then(|v| v.get("params").cloned()))
+            .flatten()
+            .map(|arguments| busbar_contract::ir::invoke::InvokeReq {
+                tool: String::new(), arguments, extra: Default::default(),
+            });
         let Some(invocation) = request.and_then(crate::call::invocation) else {
             // Any other request carries no invocation for a hook to read, and names no entry its
             // hooks are attached to: an empty view, never a
@@ -3991,10 +4545,10 @@ slot!(
         };
         // AN APPLIED REWRITE IS THE UNIT'S REQUEST FROM NOW ON (`ProjectIn::unit`): the call the
         // door admits and relays is decided from the rewritten params, never the caller's.
-        if let (Some(params), Some(plane)) = (params, instance.get()) {
+        if let (Some(params), Some(plane)) = (params.as_mut(), instance.get()) {
             plane.units.with(&input.unit(), |unit| {
                 if let Some(unit) = unit {
-                    unit.params = params;
+                    unit.params = Some(Value::take(&mut params.arguments));
                 }
             });
         }
@@ -4011,25 +4565,26 @@ slot!(
         let session = head(input.fields(), "x-session-id")
             .filter(|v| !v.is_empty())
             .map(str::to_string);
-        let turns: Vec<(&str, String)> = busbar_contract::ir::facts::IrFacts::content(&invocation)
+        let turns: Vec<(&str, ProjectionText)> = busbar_contract::ir::facts::IrFacts::content(&invocation)
             .iter()
-            .map(|item| (item.author(), item.screenable_text().into_owned()))
+            .map(|item| (item.author(), ProjectionText::held(item.screenable_text().into_owned())))
             .collect();
-        // The `{tool, arguments}` body, the invocation moved into it (never copied).
-        let mut projected = serde_json::Map::new();
-        projected.insert("tool".to_string(), Value::String(invocation.tool));
-        projected.insert("arguments".to_string(), invocation.arguments);
-        let projected = serde_json::to_vec(&projected).unwrap_or_default();
+        #[derive(serde::Serialize)]
+        struct Projection<'a> { arguments: &'a Value, tool: &'a str }
+        let projected = ProjectionBytes::held(serde_json::to_vec(&Projection {
+            arguments: &invocation.arguments, tool: &invocation.tool,
+        }).unwrap_or_default());
         let (mut arena, signals, mut messages) =
             (input.arena_buf(), input.signals_buf(), input.messages_buf());
         let pool = arena.span(entry.as_bytes());
         let session = session.as_deref().map(|s| arena.span(s.as_bytes()));
         let dialect = arena.span(crate::PLANE_KEY.as_bytes());
-        let body = arena.span(&projected);
-        let rewritten = rewritten.as_deref().map(|r| arena.span(r));
+        let seal = ProjectionOwner::here();
+        let body = arena.span(projected.expose_own(&seal));
+        let rewritten = rewritten.as_ref().map(|r| arena.span(r.expose_own(&seal)));
         let turns: Vec<_> = turns
             .iter()
-            .map(|(role, text)| (arena.span(role.as_bytes()), arena.span(text.as_bytes())))
+            .map(|(role, text)| (arena.span(role.as_bytes()), arena.span(text.expose_own(&seal).as_bytes())))
             .collect();
         for (role, text) in turns {
             messages.push_turn(&arena, role, text);
@@ -4085,6 +4640,8 @@ mod door_listen;
 #[path = "door_legacy.rs"]
 mod door_legacy;
 
+#[path = "door_inspection.rs"]
+mod door_inspection;
 /// The line carrier's units: a process's own stdin/stdout, one carrier session, one unit per line.
 #[path = "door_line.rs"]
 mod door_line;

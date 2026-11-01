@@ -27,7 +27,7 @@
 //! connector holds every connection to, refusing one whose server presents another key before a
 //! request byte is written. A contact that met a substituted key is a failed contact (`error`),
 //! never a sighting, so every sighting this view renders was made against the pinned key.
-//! `pinned_pubkey` names a manifest issuer's key, not the far end's, so it has no identity axis.
+//! `pinned_pubkey` verifies no manifest signature in this build and is refused at validation.
 
 use std::collections::BTreeMap;
 
@@ -114,15 +114,25 @@ pub fn observe(result: &Value) -> Result<Observation, String> {
         if name.trim().is_empty() {
             return Err("a `tools/list` entry carries an empty `name`".to_string());
         }
-        let description = item
-            .get("description")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
+        let description = match item.get("description") {
+            None => "",
+            Some(Value::String(description)) => description,
+            Some(_) => {
+                return Err(
+                    "a `tools/list` entry carries a `description` that is not a string".to_string(),
+                );
+            }
+        };
         let schema = item
             .get("inputSchema")
             .cloned()
             .unwrap_or_else(|| serde_json::json!({}));
-        capabilities.insert(name.to_string(), tool_digest(name, description, &schema));
+        if capabilities
+            .insert(name.to_string(), tool_digest(name, description, &schema))
+            .is_some()
+        {
+            return Err("a `tools/list` result repeats a tool name".to_string());
+        }
     }
     Ok(Observation { capabilities })
 }

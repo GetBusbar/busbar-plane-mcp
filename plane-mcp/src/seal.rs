@@ -27,7 +27,7 @@ pub fn seal_state(
     sign: &mut dyn FnMut(&[u8]) -> Option<Vec<u8>>,
 ) -> Option<String> {
     let payload = serde_json::to_vec(state).ok()?;
-    let signature = sign(&payload)?;
+    let signature = sign(&payload).filter(|signature| signature.len() == SIGNATURE_LEN)?;
     Some(format!(
         "{}.{}",
         URL_SAFE_NO_PAD.encode(&payload),
@@ -58,7 +58,7 @@ pub fn unseal_state(
 /// THE PLANE'S SEAL OVER `data`: the host's signature of it, `base64url`, unpadded; `None` when it
 /// cannot be signed. What `data` is says what the seal binds (a task's resume, `door_tasks`).
 pub fn seal_bytes(data: &[u8], sign: &mut dyn FnMut(&[u8]) -> Option<Vec<u8>>) -> Option<String> {
-    Some(URL_SAFE_NO_PAD.encode(sign(data)?))
+    Some(URL_SAFE_NO_PAD.encode(sign(data).filter(|signature| signature.len() == SIGNATURE_LEN)?))
 }
 
 /// Whether `presented` is the seal over `data` ([`seal_bytes`]): the signature re-made by `sign` and

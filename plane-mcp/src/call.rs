@@ -245,9 +245,9 @@ pub struct RelayedRetry {
 /// What [`admit`] decided.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Admission {
-    /// AdmittedCall: the call goes to the far end.
+    /// The call goes to the far end.
     Go(AdmittedCall),
-    /// Refused: the answer, and the call-log line (none for a name too long to record).
+    /// The refusal and its call-log line, with an overlong name rendered within the log's bound.
     Refused(Refusal, Option<CallLine>),
     /// Busbar asks its own caller first: the `input_required` answer and the call-log line.
     Asked(Vec<u8>, CallLine),
@@ -343,10 +343,9 @@ pub fn missing_tasks_capability(id: &Value) -> Refusal {
     )
 }
 
-/// A TASKS VERB (`tasks/get`, `tasks/update`, `tasks/cancel`) on this plane: behind the `-32021`
-/// gate, then `params.taskId`, then the task itself. The plane answers every call as a result and
-/// holds no task (QUESTIONS FOLD-MCP-2-4), so every id names no task of this caller's: `-32602`, the one
-/// answer for an id that does not exist and one that is another caller's.
+/// The pure dispatch's fallback refusal for a task verb after the extension gate. The served
+/// door routes task verbs through `door_tasks::verb` before this fallback, resolving the caller's
+/// task from the host's work and records. Unknown and foreign ids have the same fallback words.
 #[must_use]
 pub fn task_verb(id: &Value, params: Option<&Value>) -> Refusal {
     if !client_declares_tasks(&client_capabilities(params)) {
@@ -377,7 +376,20 @@ pub fn custom_param_mismatch(
     // Every annotation, nested ones through their chain of `properties` too, each compared with
     // the argument at its path rendered as the header carries it (a string, a decimal integer,
     // `true`/`false`).
+    let mut suffixes = std::collections::BTreeSet::new();
     for (path, suffix) in crate::adapt::annotated_params(entry.input_schema.as_ref()) {
+        if !crate::adapt::param_suffix_valid(&suffix) {
+            return Some(
+                "The tool's `x-mcp-header` annotation is not a nonempty HTTP field-name token."
+                    .to_string(),
+            );
+        }
+        if !suffixes.insert(suffix.to_ascii_lowercase()) {
+            return Some(
+                "The tool's `x-mcp-header` annotations repeat a header name after case folding."
+                    .to_string(),
+            );
+        }
         let property = path.join(".");
         // The reader takes the lower-case name; the engine's head lookup was case-insensitive.
         let header_name = format!("mcp-param-{}", suffix.to_ascii_lowercase());
@@ -469,7 +481,11 @@ fn trust_answer(id: &Value, name: &str, entry: &ToolEntry, trust: Trust) -> Opti
         DISTRUST_NONE => return None,
         DISTRUST_UNKNOWN_ITEM => Admission::Refused(
             catalogue_refusal(STATUS_NOT_FOUND, id, not_exposed(name), REASON_UNKNOWN_TOOL),
-            Some(CallLine::asked(name, REASON_UNKNOWN_TOOL)),
+            Some(CallLine::resolved(
+                entry,
+                vocab::OUTCOME_REFUSED,
+                REASON_UNKNOWN_TOOL,
+            )),
         ),
         DISTRUST_NOT_APPROVED => Admission::Refused(
             catalogue_refusal(
@@ -478,7 +494,11 @@ fn trust_answer(id: &Value, name: &str, entry: &ToolEntry, trust: Trust) -> Opti
                 format!("`{name}` is registered but has not been approved, so it does not serve"),
                 "not_approved",
             ),
-            Some(CallLine::asked(name, "not_approved")),
+            Some(CallLine::resolved(
+                entry,
+                vocab::OUTCOME_REFUSED,
+                "not_approved",
+            )),
         ),
         // A tool offered at another digest than the one approved is the rug-pull: its server is
         // quarantined (changed digest -> quarantined).
@@ -498,6 +518,34 @@ fn trust_answer(id: &Value, name: &str, entry: &ToolEntry, trust: Trust) -> Opti
             vocab::REASON_NOT_SERVING,
         ),
     })
+}
+
+/// THE GRANT AND THE KERNEL'S VERDICT of an entry already resolved, as [`admit_trusted`] asks
+/// them and in its words: what a task's continuation asks again of the entry it actually sends (a
+/// pool's twin included) at the moment it sends it. `Err` the refusal's words.
+pub(crate) fn admits_entry(
+    entry: &ToolEntry,
+    admit: &impl Fn(&str, &str) -> bool,
+    trust: Trust,
+) -> Result<(), String> {
+    if !granted(admit, &entry.server, &entry.namespaced) {
+        return Err(not_exposed(&entry.namespaced));
+    }
+    if let Trust::Unreached(reason) = &trust {
+        return Err(format!(
+            "The MCP server `{}` did not complete this tool call: busbar could not reach it to \
+             verify its tool list: {reason}",
+            entry.server
+        ));
+    }
+    match trust_answer(&Value::Null, &entry.namespaced, entry, trust) {
+        None => Ok(()),
+        Some(Admission::Refused(refusal, _)) => Err(refusal.message),
+        Some(_) => Err(format!(
+            "MCP server `{}` is not one this door may trust, so it serves nothing",
+            entry.server
+        )),
+    }
 }
 
 /// [`admit`], with THE KERNEL'S TRUST VERDICT: `trust` answers, for the named tool, what the
@@ -578,6 +626,18 @@ pub fn admit_trusted(
     }
 
     let line = |reason: &str| Some(CallLine::resolved(entry, vocab::OUTCOME_REFUSED, reason));
+    if !arguments.is_object() {
+        return Admission::Refused(
+            error(
+                STATUS_BAD_REQUEST,
+                id,
+                CODE_INVALID_PARAMS,
+                "`params.arguments` must be an object when present.".to_string(),
+                None,
+            ),
+            line(vocab::REASON_MALFORMED).map(CallLine::unaudited),
+        );
+    }
     let header_mismatch =
         |message: String| error(STATUS_BAD_REQUEST, id, CODE_HEADER_MISMATCH, message, None);
     if let Some(message) = custom_param_mismatch(entry, &arguments, header) {
@@ -777,7 +837,13 @@ fn advertised(admitted: &AdmittedCall, def: &McpServerDefCfg) -> AdvertisedCaps 
 /// the published name and the arguments as the caller sent them, moved out of the parsed request.
 /// `None` for any other body.
 #[must_use]
-pub fn invocation(mut request: Value) -> Option<busbar_contract::ir::invoke::InvokeReq> {
+pub fn invocation(request: Value) -> Option<busbar_contract::ir::invoke::InvokeReq> {
+    let mut document = busbar_contract::ir::invoke::InvokeReq {
+        tool: String::new(),
+        arguments: request,
+        extra: Default::default(),
+    };
+    let request = &mut document.arguments;
     if request.get("method")?.as_str()? != crate::codec::METHOD_TOOLS_CALL {
         return None;
     }
@@ -851,6 +917,7 @@ pub struct OutboundCall {
 /// The path and query of `url`: everything from the first `/` after the authority, or `/`.
 #[must_use]
 pub fn path_of(url: &str) -> String {
+    let url = url.split('#').next().unwrap_or(url);
     let rest = url.split_once("://").map_or(url, |(_, r)| r);
     match rest.find(['/', '?']) {
         Some(at) if rest[at..].starts_with('/') => rest[at..].to_string(),
@@ -905,7 +972,7 @@ pub fn outbound_program(
     member: &str,
     def: &McpServerDefCfg,
     continuation: Option<&Value>,
-    id: u64,
+    id: impl Into<Value>,
 ) -> Option<OutboundCall> {
     if !def
         .transport
@@ -927,15 +994,15 @@ fn call_request(
     member: &str,
     def: &McpServerDefCfg,
     url: &str,
-    id: u64,
+    id: impl Into<Value>,
     continuation: Option<&Value>,
 ) -> Option<wire::OutboundRequest> {
     let key = ToolKey::new(ServerId::new(member).ok()?, &admitted.entry.tool).ok()?;
-    Some(wire::tools_call(
+    Some(wire::tools_call_id(
         url,
         &key,
         &admitted.arguments,
-        id,
+        &id.into(),
         None,
         advertised(admitted, def),
         continuation,
@@ -1003,6 +1070,7 @@ pub fn last_sse_data(raw: &[u8]) -> Vec<u8> {
 /// The `data` of every event in a complete event-stream body that carries any, in arrival order:
 /// its `data:` lines joined with `\n`, an event ending at a blank line or at the end of the body.
 fn event_stream_data(text: &str) -> Vec<String> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut events = Vec::new();
     let mut current: Option<Vec<&str>> = None;
     for line in event_stream_lines(text) {
@@ -1256,7 +1324,7 @@ pub fn settle_call_as(
     raw: &[u8],
     sse: bool,
     round: u32,
-    sent_id: u64,
+    sent_id: impl Into<Value>,
 ) -> Settled {
     // A REDIRECT IS A FAILURE, NEVER FOLLOWED: whatever body rides a 3xx is not read.
     if (300..400).contains(&status) {
@@ -1268,8 +1336,9 @@ pub fn settle_call_as(
             ),
         );
     }
-    let body = answer_body(raw, sse);
-    match wire::parse_response(&body, sent_id) {
+    let sent_id = sent_id.into();
+    let body = answer_body(raw, sse, &sent_id);
+    match wire::parse_response_id(&body, &sent_id) {
         RpcOutcome::Result(value) => completed(admitted, &value, &body),
         failure @ (RpcOutcome::Error { .. }
         | RpcOutcome::Malformed(_)
@@ -1290,10 +1359,25 @@ pub fn settle_call_as(
     }
 }
 
-/// The answer's JSON-RPC body: the last event of an event stream, else the body itself.
-fn answer_body(raw: &[u8], sse: bool) -> Vec<u8> {
+/// The correlated response of an event stream, else the body itself. Notifications may follow
+/// the response; they do not replace it. With no correlated response, retain the last event so
+/// the ordinary reader reports the malformed or uncorrelated upstream answer.
+fn answer_body(raw: &[u8], sse: bool, sent_id: &Value) -> Vec<u8> {
     if sse {
-        last_sse_data(raw)
+        let events = event_stream_data(&String::from_utf8_lossy(raw));
+        events
+            .iter()
+            .rev()
+            .find(|event| {
+                matches!(
+                    wire::parse_response_id(event.as_bytes(), sent_id),
+                    RpcOutcome::Result(_)
+                        | RpcOutcome::InputRequired { .. }
+                        | RpcOutcome::Error { .. }
+                )
+            })
+            .or_else(|| events.last())
+            .map_or_else(Vec::new, |event| event.as_bytes().to_vec())
     } else {
         raw.to_vec()
     }
@@ -1331,19 +1415,30 @@ pub enum Leg {
     Asked,
 }
 
-/// The far end's answer to round `round` (`status`, the raw answer, `sse` = an event stream), as a
-/// task reads it ([`Leg`]).
+/// A task reads the synchronous settlement's verdict, which already checked the actual wire id,
+/// redirects and upstream ask fields. Only an accepted result is taken from the upstream verbatim.
+/// `sent_id` selects that same response when an event stream also carries other messages.
 #[must_use]
-pub fn leg_of(status: u32, raw: &[u8], sse: bool, round: u32) -> Leg {
-    let body = answer_body(raw, sse);
-    let outcome = wire::parse_response(&body, wire::dispatch_request_id(round));
-    if let Some(reason) = failure_reason(status, &outcome) {
-        return Leg::Failed(reason);
+pub fn leg_of(settled: &Settled, raw: &[u8], sse: bool, sent_id: impl Into<Value>) -> Leg {
+    let Settled::Answer { body, line, .. } = settled else {
+        return Leg::Asked;
+    };
+    if line.outcome == vocab::OUTCOME_DISPATCHED && line.reason.is_empty() {
+        if let Some(result) =
+            serde_json::from_slice::<Value>(&answer_body(raw, sse, &sent_id.into()))
+                .ok()
+                .and_then(|v| v.get("result").cloned())
+        {
+            return Leg::Done(result);
+        }
     }
-    match outcome {
-        RpcOutcome::Result(value) => Leg::Done(value),
-        _ => Leg::Asked,
-    }
+    let answer = serde_json::from_slice::<Value>(body).unwrap_or(Value::Null);
+    let words = answer
+        .pointer("/error/message")
+        .or_else(|| answer.pointer("/result/content/0/text"))
+        .and_then(Value::as_str)
+        .unwrap_or(&line.reason);
+    Leg::Failed(words.to_string())
 }
 
 /// The call-log line of a call answered on the task path under `reason`: `refused`, because at the
@@ -1461,10 +1556,19 @@ pub fn judge_sampling_bounds<'a>(
         if request.get("method").and_then(Value::as_str) != Some("sampling/createMessage") {
             continue;
         }
-        let params = request.get("params");
-        let messages = params
-            .and_then(|p| p.get("messages"))
-            .and_then(Value::as_array);
+        let malformed = |reason: &str| AskRefusal::Malformed {
+            server: server.to_string(),
+            reason: reason.to_string(),
+        };
+        let params = request
+            .get("params")
+            .and_then(Value::as_object)
+            .ok_or_else(|| malformed("sampling params is not an object"))?;
+        let messages = match params.get("messages") {
+            None => None,
+            Some(Value::Array(messages)) => Some(messages),
+            Some(_) => return Err(malformed("sampling messages is not an array")),
+        };
         let count = messages.map_or(0, Vec::len);
         if count as u64 > u64::from(bounds.max_messages) {
             return Err(refuse(
@@ -1473,11 +1577,15 @@ pub fn judge_sampling_bounds<'a>(
                 format!("{count} messages"),
             ));
         }
-        let mut prompt_bytes = params
-            .and_then(|p| p.get("systemPrompt"))
-            .and_then(Value::as_str)
-            .map_or(0usize, str::len);
+        let mut prompt_bytes = match params.get("systemPrompt") {
+            None => 0,
+            Some(Value::String(prompt)) => prompt.len(),
+            Some(_) => return Err(malformed("sampling systemPrompt is not a string")),
+        };
         for message in messages.into_iter().flatten() {
+            if !message.is_object() {
+                return Err(malformed("a sampling message is not an object"));
+            }
             let content = message.get("content");
             let parts: &[Value] = match content {
                 Some(Value::Array(parts)) => parts,
@@ -1502,10 +1610,13 @@ pub fn judge_sampling_bounds<'a>(
                 format!("{prompt_bytes} prompt bytes"),
             ));
         }
-        if let Some(stops) = params
-            .and_then(|p| p.get("stopSequences"))
-            .and_then(Value::as_array)
-        {
+        if let Some(stops) = params.get("stopSequences") {
+            let stops = stops
+                .as_array()
+                .ok_or_else(|| malformed("sampling stopSequences is not an array"))?;
+            if stops.iter().any(|stop| !stop.is_string()) {
+                return Err(malformed("a sampling stop sequence is not a string"));
+            }
             if stops.len() as u64 > u64::from(bounds.max_stop_sequences) {
                 return Err(refuse(
                     "max_stop_sequences",
@@ -1527,7 +1638,7 @@ pub fn judge_sampling_bounds<'a>(
                 ));
             }
         }
-        if let Some(t) = params.and_then(|p| p.get("temperature")) {
+        if let Some(t) = params.get("temperature") {
             let temperature =
                 t.as_f64()
                     .filter(|v| v.is_finite())

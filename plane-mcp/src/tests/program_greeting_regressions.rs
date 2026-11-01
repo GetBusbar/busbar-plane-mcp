@@ -111,27 +111,22 @@ fn drive(
     exchange: &mut ProgramExchange,
     slot: u32,
 ) -> Poll<Result<Exchanged, String>> {
-    let mut peer = DoorPeer {
+    let def = serde_json::from_value(serde_json::json!({
+        "transport":"stdio", "command":"/usr/bin/child", "pin":{"mechanism":"unpinned"}
+    }))
+    .unwrap();
+    exchange_child_on(
         plane,
-        member: "srv",
-        grants: Default::default(),
-    };
-    let result = exchange.drive(
         conn,
         Ticket {
             slot,
             generation: 1,
         },
         0,
-        &|g| plane.greeted.get(&"srv".to_string()) == Some(g),
-        &mut peer,
-    );
-    if let Poll::Ready(Ok(done)) = &result {
-        if done.greeted {
-            plane.greeted.insert("srv".into(), done.generation);
-        }
-    }
-    result
+        "srv",
+        &def,
+        exchange,
+    )
 }
 
 fn initializes(conn: &Conn) -> usize {
@@ -270,6 +265,45 @@ fn a_child_request_memo_keeps_identity_without_retaining_the_far_ends_large_id()
         (None, true),
         "generation remains part of identity"
     );
+}
+
+#[test]
+fn exact_generations_and_stale_completions_do_not_regreet_the_latest_child() {
+    let plane = McpDoor::default();
+    let conn = Conn(Mutex::new(Child {
+        generation: 7,
+        hold_initialized: true,
+        ..Default::default()
+    }));
+    let mut older = list_exchange(7);
+    assert!(drive(&plane, &conn, &mut older, 1).is_pending());
+    {
+        let mut child = conn.0.lock().unwrap();
+        child.generation = 3;
+        child.hold_initialized = false;
+    }
+    assert!(matches!(
+        drive(&plane, &conn, &mut list_exchange(8), 2),
+        Poll::Ready(Ok(_))
+    ));
+    assert_eq!(plane.greeted.get(&"srv".to_string()), Some(3));
+    assert!(matches!(
+        drive(&plane, &conn, &mut older, 1),
+        Poll::Ready(Ok(_))
+    ));
+    assert_eq!(plane.greeted.get(&"srv".to_string()), Some(3));
+    let greeted = initializes(&conn);
+    assert!(matches!(
+        drive(&plane, &conn, &mut list_exchange(9), 3),
+        Poll::Ready(Ok(_))
+    ));
+    assert_eq!(initializes(&conn), greeted);
+    conn.0.lock().unwrap().generation = 7;
+    assert!(matches!(
+        drive(&plane, &conn, &mut list_exchange(10), 4),
+        Poll::Ready(Ok(_))
+    ));
+    assert_eq!(initializes(&conn), greeted + 1);
 }
 
 #[test]

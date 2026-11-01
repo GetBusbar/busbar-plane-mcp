@@ -53,7 +53,7 @@ pub fn caller_downscope(
 }
 
 /// The scope of the door's own fetch from the registration `server` (`def`): every tool it approves
-/// at a digest, `{server}_{tool}`.
+/// at a digest, under its `publish_as` name or its canonical `{server}_{tool}` default.
 #[must_use]
 pub fn registration_scope(server: &str, def: &McpServerDefCfg) -> String {
     let mut scopes: Vec<String> = def
@@ -65,7 +65,12 @@ pub fn registration_scope(server: &str, def: &McpServerDefCfg) -> String {
                 .as_deref()
                 .is_some_and(|h| !h.trim().is_empty())
         })
-        .map(|(tool, _)| format!("{server}_{tool}"))
+        .map(|(tool, allow)| {
+            allow
+                .publish_as
+                .clone()
+                .unwrap_or_else(|| crate::tools_config::namespaced(server, tool))
+        })
         .collect();
     scopes.sort_unstable();
     scopes.dedup();

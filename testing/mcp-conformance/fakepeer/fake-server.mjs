@@ -113,6 +113,10 @@ function modeFires(mode, method) {
 }
 
 const MODE = process.env.MCP_FAKE_MODE || 'honest';
+if (!Object.hasOwn(MODE_METHODS, MODE)) {
+  process.stderr.write(`unknown MCP_FAKE_MODE: ${MODE}\n`);
+  process.exit(2);
+}
 
 // The fake server is also the OBSERVER. Everything the client under test sends
 // is appended here as JSONL, so the battery can assert on the client's
@@ -122,7 +126,10 @@ function record(direction, payload) {
   if (!TRANSCRIPT) return;
   try {
     appendFileSync(TRANSCRIPT, `${JSON.stringify({ direction, mode: MODE, payload })}\n`);
-  } catch { /* observation must never break the peer */ }
+  } catch (error) {
+    process.stderr.write(`cannot record fake-peer transcript: ${error}\n`);
+    process.exit(2);
+  }
 }
 const REVISION = '2026-07-28';
 const SERVER_INFO_KEY = 'io.modelcontextprotocol/serverInfo';
@@ -398,6 +405,10 @@ rl.on('line', (line) => {
   let msg;
   try { msg = JSON.parse(line); } catch { record('client->server-unparseable', line); return; }
   record('client->server', msg);
+  if (!msg || typeof msg !== 'object' || Array.isArray(msg)) {
+    out({ jsonrpc: '2.0', id: null, error: { code: -32600, message: 'request must be an object' } });
+    return;
+  }
   if (msg.id === undefined) return;      // notification: no response
   // MCP forbids id: null. A success result for it would be uncorrelatable, so
   // an honest server must not produce one.

@@ -2,8 +2,8 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE ARGUMENT HALF OF THE DISPATCH SSRF GUARD: a value-driven walk of `tools/call` arguments
-//! against the pinned input schema, asking the host's one destination judge (`dest.judge`,
-//!) about every host they carry. Declared URL-ish formats
+//! against the pinned input schema, asking the host's one destination judge (`dest.judge`)
+//! about every host they carry. Declared URL-ish formats
 //! are judged in full; an undeclared string is judged when the whole value is a URL a WHATWG reader
 //! reads as naming a host. No DNS, no `$ref`, no mid-string URLs: the verdict is `dest.judge`'s.
 
@@ -12,6 +12,7 @@ use busbar_contract::abi::host::service::{
 };
 use busbar_contract::net::{extract_normalized_host, url_host_to_ascii};
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 /// THE HOST'S JUDGE, as the walk asks it: one host an argument names (an IPv6 literal bracketed,
 /// as `dest.judge` reads a `host[:port]`), answered with the host's `DEST_*` verdict, or `None`
@@ -64,6 +65,8 @@ pub enum ArgWhy {
     Unjudged(String),
     /// The argument nested deeper than the walk will follow.
     DepthExceeded,
+    /// A schema property pattern could not be compiled or reliably evaluated.
+    SchemaPattern,
 }
 
 impl std::fmt::Display for ArgWhy {
@@ -106,6 +109,10 @@ impl std::fmt::Display for ArgWhy {
                 "the tool arguments nest deeper than {MAX_VALUE_DEPTH} levels, which is refused \
                  rather than walked partially"
             ),
+            ArgWhy::SchemaPattern => write!(
+                f,
+                "a schema `patternProperties` expression could not be checked, so the argument is refused"
+            ),
         }
     }
 }
@@ -137,6 +144,9 @@ impl std::fmt::Display for ArgRefusal {
                 "tool argument {at} (schema format `{fmt}`) was refused: {}",
                 self.why
             ),
+            None if self.why == ArgWhy::SchemaPattern => {
+                write!(f, "tool argument {at} was refused: {}", self.why)
+            }
             None => write!(
                 f,
                 "tool argument {at} carries a URL the schema does not declare, and it was refused: \
@@ -176,7 +186,16 @@ pub fn guard(
 ) -> Result<ArgScan, ArgRefusal> {
     let mut scan = ArgScan::default();
     let mut pointer = String::new();
-    walk(&[schema], arguments, &mut pointer, 0, &mut judge, &mut scan)?;
+    let mut patterns = BTreeMap::new();
+    walk(
+        &[schema],
+        arguments,
+        &mut pointer,
+        0,
+        &mut judge,
+        &mut scan,
+        &mut patterns,
+    )?;
     Ok(scan)
 }
 
@@ -190,6 +209,7 @@ fn walk(
     depth: usize,
     judge: &mut Judge<'_>,
     scan: &mut ArgScan,
+    patterns: &mut BTreeMap<String, jsonschema::Validator>,
 ) -> Result<(), ArgRefusal> {
     if depth > MAX_VALUE_DEPTH {
         return Err(ArgRefusal {
@@ -204,14 +224,12 @@ fn walk(
                 let mark = pointer.len();
                 pointer.push('/');
                 pointer.push_str(&escape_token(k));
-                walk(
-                    &child_for_key(schemas, k),
-                    v,
-                    pointer,
-                    depth + 1,
-                    judge,
-                    scan,
-                )?;
+                let children = child_for_key(schemas, k, patterns).map_err(|why| ArgRefusal {
+                    pointer: pointer.clone(),
+                    declared_format: None,
+                    why,
+                })?;
+                walk(&children, v, pointer, depth + 1, judge, scan, patterns)?;
                 pointer.truncate(mark);
             }
             Ok(())
@@ -228,6 +246,7 @@ fn walk(
                     depth + 1,
                     judge,
                     scan,
+                    patterns,
                 )?;
                 pointer.truncate(mark);
             }
@@ -255,9 +274,13 @@ fn judge_string(
             why,
         }
     };
-    if let Some((format, kind)) = first_urlish(schemas) {
+    let declared = urlish_formats(schemas);
+    if !declared.is_empty() {
         scan.declared_judged += 1;
-        return judge_argument(kind, trimmed, judge).map_err(refused(Some(format)));
+        for (format, kind) in declared {
+            judge_argument(kind, trimmed, judge).map_err(refused(Some(format)))?;
+        }
+        return Ok(());
     }
     if starts_with_http(trimmed) {
         scan.undeclared_judged += 1;
@@ -455,7 +478,8 @@ fn judge_argument(kind: Urlish, value: &str, judge: &mut Judge<'_>) -> Result<()
             if value.contains("://") || http_scheme(&whatwg_cleaned(value)) {
                 return judge_absolute(value, judge);
             }
-            judge_host(value, judge)
+            judge_host(value, judge)?;
+            judge_rfc_authority(&format!("//{}", whatwg_cleaned(value)), judge)
         }
     }
 }
@@ -511,7 +535,7 @@ fn judge_rfc_authority(cleaned: &str, judge: &mut Judge<'_>) -> Result<(), ArgWh
 ///
 /// The judge is asked about the name a client dials ([`dial_host`], UTS-46), never the spelling
 /// written; a host that name cannot be read from is refused unjudged. That name is asked, and then,
-/// when it differs, the one form a fetching client dials ([`whatwg_dialled`]): `0x` as `0.0.0.0`,
+/// when it differs, the one form a fetching client dials: `0x` as `0.0.0.0`,
 /// `0x7f.1` as `127.0.0.1`. Both must be admitted; a host the WHATWG host parser refuses is refused
 /// (fail closed), because the guard cannot say what a client would dial for it.
 fn judge_host(raw: &str, judge: &mut Judge<'_>) -> Result<(), ArgWhy> {
@@ -599,9 +623,10 @@ fn escape_token(key: &str) -> String {
     key.replace('~', "~0").replace('/', "~1")
 }
 
-/// The first URL-ish `format` declared for this position, in declaration order across the expanded
-/// schema nodes.
-fn first_urlish(schemas: &[&Value]) -> Option<(String, Urlish)> {
+/// Every URL-ish `format` declared for this position, in declaration order. Overlapping property
+/// patterns apply together, so a relative-reference declaration cannot mask a hostname declaration.
+fn urlish_formats(schemas: &[&Value]) -> Vec<(String, Urlish)> {
+    let mut out = Vec::new();
     for node in expanded(schemas) {
         let Some(format) = node.get("format").and_then(Value::as_str) else {
             continue;
@@ -613,9 +638,9 @@ fn first_urlish(schemas: &[&Value]) -> Option<(String, Urlish)> {
             "uri" | "iri" | "url" => Urlish::AbsoluteUrl,
             _ => continue,
         };
-        return Some((format.to_string(), kind));
+        out.push((format.to_string(), kind));
     }
-    None
+    out
 }
 
 /// A schema node plus every `allOf`/`anyOf`/`oneOf` branch reachable from it, so a URL-ish format
@@ -644,24 +669,73 @@ fn expand_into<'a>(schemas: &[&'a Value], out: &mut Vec<&'a Value>, budget: usiz
     }
 }
 
-/// The schema(s) governing object member `key`: `properties` where it is named, otherwise the
-/// object's `additionalProperties` schema where there is one.
-fn child_for_key<'a>(schemas: &[&'a Value], key: &str) -> Vec<&'a Value> {
+/// Named properties and every matching property pattern apply together. `additionalProperties`
+/// applies only when neither names the member, as JSON Schema requires.
+fn child_for_key<'a>(
+    schemas: &[&'a Value],
+    key: &str,
+    patterns: &mut BTreeMap<String, jsonschema::Validator>,
+) -> Result<Vec<&'a Value>, ArgWhy> {
     let mut out = Vec::new();
     for node in expanded(schemas) {
+        let mut covered = false;
         if let Some(named) = node
             .get("properties")
             .and_then(Value::as_object)
             .and_then(|m| m.get(key))
         {
             out.push(named);
-        } else if let Some(extra) = node.get("additionalProperties") {
-            if extra.is_object() {
+            covered = true;
+        }
+        if let Some(entries) = node.get("patternProperties").and_then(Value::as_object) {
+            for (pattern, child) in entries {
+                if pattern_matches(pattern, key, patterns)? {
+                    out.push(child);
+                    covered = true;
+                }
+            }
+        }
+        if !covered {
+            if let Some(extra) = node
+                .get("additionalProperties")
+                .filter(|extra| extra.is_object())
+            {
                 out.push(extra);
             }
         }
     }
-    out
+    Ok(out)
+}
+
+/// Use the fleet's JSON Schema engine's ECMA-262 translation, not Rust regex syntax. Compile each
+/// distinct expression once for this walk; no tool arguments or matchers survive the call.
+fn pattern_matches(
+    pattern: &str,
+    key: &str,
+    patterns: &mut BTreeMap<String, jsonschema::Validator>,
+) -> Result<bool, ArgWhy> {
+    let matcher = match patterns.entry(pattern.to_string()) {
+        std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+        std::collections::btree_map::Entry::Vacant(entry) => {
+            let schema = serde_json::json!({"pattern": pattern});
+            let matcher = jsonschema::validator_for(&schema).map_err(|_| ArgWhy::SchemaPattern)?;
+            entry.insert(matcher)
+        }
+    };
+    let key = Value::String(key.to_string());
+    let matched = matcher.validate(&key);
+    match matched {
+        Ok(()) => Ok(true),
+        Err(error)
+            if matches!(
+                error.kind(),
+                jsonschema::error::ValidationErrorKind::Pattern { .. }
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(_) => Err(ArgWhy::SchemaPattern),
+    }
 }
 
 /// The schema(s) governing array element `index`: the tuple position where the schema gives one
@@ -679,6 +753,11 @@ fn child_for_index<'a>(schemas: &[&'a Value], index: usize) -> Vec<&'a Value> {
             Some(Value::Array(tuple)) => {
                 if let Some(at) = tuple.get(index) {
                     out.push(at);
+                } else if let Some(extra) = node
+                    .get("additionalItems")
+                    .filter(|extra| extra.is_object())
+                {
+                    out.push(extra);
                 }
             }
             Some(single) if single.is_object() => out.push(single),

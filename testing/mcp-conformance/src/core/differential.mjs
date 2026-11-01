@@ -65,6 +65,7 @@ export function compare(controlResults, subjectResults, opts = {}) {
   const failures = [];
   const divergences = [];
   const regressions = [];
+  const incomplete = [];
   const missing = [];
   const explained = [];
 
@@ -72,18 +73,10 @@ export function compare(controlResults, subjectResults, opts = {}) {
     const c = control.get(id);
     const s = subject.get(id);
 
-    if (!s || !c) {
-      const side = s ? 'control' : 'subject';
-      const present = s || c;
-      const audit = side === 'subject' ? opts.subjectRoleAudit : opts.controlRoleAudit;
-      const reason = explainMissing(present.role, side, audit);
-      const row = { id, side, title: present.title, role: present.role, reason };
-      if (reason) explained.push(row); else missing.push(row);
-      continue;
-    }
-
-    // 1. MUST-level failures on the subject, cited.
-    for (const a of failedAssertions(s)) {
+    // A missing control can explain why no comparison exists. It cannot excuse
+    // an assertion failure or incomplete exchange that the subject actually observed.
+    const subjectFailures = s ? failedAssertions(s) : [];
+    for (const a of subjectFailures) {
       failures.push({
         testId: id,
         title: s.title,
@@ -93,8 +86,24 @@ export function compare(controlResults, subjectResults, opts = {}) {
         specUrl: a.url,
         specQuote: a.quote,
         detail: a.detail,
-        controlSatisfiedSameClause: !failedAssertions(c).some((x) => x.clause === a.clause),
+        controlSatisfiedSameClause: c
+          ? !failedAssertions(c).some((x) => x.clause === a.clause) : null,
       });
+    }
+
+    // A subject error or unevaluated failure remains unresolved even if the control also failed.
+    if (s && (s.verdict === 'ERROR' || s.verdict === 'FAIL') && subjectFailures.length === 0) {
+      incomplete.push({ testId: id, title: s.title, verdict: s.verdict, error: s.error });
+    }
+
+    if (!s || !c) {
+      const side = s ? 'control' : 'subject';
+      const present = s || c;
+      const audit = side === 'subject' ? opts.subjectRoleAudit : opts.controlRoleAudit;
+      const reason = explainMissing(present.role, side, audit);
+      const row = { id, side, title: present.title, role: present.role, reason };
+      if (reason) explained.push(row); else missing.push(row);
+      continue;
     }
 
     // 2. Regression: control green, subject not.
@@ -141,6 +150,7 @@ export function compare(controlResults, subjectResults, opts = {}) {
       regressions: regressions.length,
       divergences: divergences.length,
       missing: missing.length,
+      incomplete: incomplete.length,
       explainedMissing: explained.length,
     },
     failures,
@@ -148,6 +158,7 @@ export function compare(controlResults, subjectResults, opts = {}) {
     divergences,
     missing,
     explainedMissing: explained,
+    incomplete,
   };
 }
 
@@ -159,6 +170,7 @@ export function renderDifferential(report) {
   L.push('');
   L.push(`  spec failures : ${report.counts.failures}`);
   L.push(`  regressions   : ${report.counts.regressions}  (control passed, subject did not)`);
+  L.push(`  incomplete    : ${report.counts.incomplete || 0}  (subject errors or unverified failures)`);
   L.push(`  divergences   : ${report.counts.divergences}  (both legal, behaviour differs)`);
   L.push(`  missing tests : ${report.counts.missing}  (ran on one side only, UNEXPLAINED — blocking)`);
   L.push(`  explained     : ${report.counts.explainedMissing || 0}  (absent because that side did not measure the role)`);
@@ -176,7 +188,9 @@ export function renderDifferential(report) {
       L.push(`    spec says    : "${f.specQuote}"`);
       L.push(`    spec url     : ${f.specUrl}`);
       L.push(`    detail       : ${f.detail}`);
-      L.push(`    control ok?  : ${f.controlSatisfiedSameClause ? 'YES - the control satisfies this clause, so the test is satisfiable' : 'NO - the control fails it too; suspect the TEST or the SPEC READING'}`);
+      L.push(`    control ok?  : ${f.controlSatisfiedSameClause === null
+        ? 'NOT MEASURED - this role has no control result'
+        : f.controlSatisfiedSameClause ? 'YES - the control satisfies this clause, so the test is satisfiable' : 'NO - the control fails it too; suspect the TEST or the SPEC READING'}`);
     }
     L.push('');
   }
@@ -234,7 +248,8 @@ export function renderDifferential(report) {
   }
 
   L.push('='.repeat(78));
-  const gate = report.counts.failures + report.counts.regressions + report.counts.missing;
+  for (const row of report.incomplete || []) L.push(`  [${row.testId}] ${row.verdict}: ${row.error || 'subject did not complete verification'}`);
+  const gate = report.counts.failures + report.counts.regressions + report.counts.missing + (report.counts.incomplete || 0);
   L.push(gate === 0
     ? 'RESULT: no spec failures, no regressions, and every scenario ran on both sides.'
     : `RESULT: ${gate} blocking finding(s). See SPEC FAILURES, REGRESSIONS and MISSING above.`);

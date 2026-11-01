@@ -39,7 +39,7 @@ new_rows="$(h2_audit_rows_since "$seq_before" "mcp_tool.call" "mcp_tool:probe_pi
 
 # And that the ONE new row is specifically `applied`, not `rejected` -- a dispatched call must audit
 # as a success, not merely exist.
-applied_check="$(curl -sS -m 10 -H "Authorization: Bearer $H2_ADMIN_TOKEN" \
+applied_check="$(curl -sS -m 10 -H @/dev/fd/3 3<<<"Authorization: Bearer $H2_ADMIN_TOKEN" \
   "http://127.0.0.1:${H2_ADMIN_PORT}/api/v1/admin/audit?limit=5" \
   | python3 -c "import json,sys
 d=json.load(sys.stdin)

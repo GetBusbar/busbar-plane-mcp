@@ -178,6 +178,14 @@ pub fn annotated_params(input_schema: Option<&Value>) -> Vec<(Vec<String>, Strin
     found
 }
 
+/// A header suffix is a nonempty HTTP token, since it becomes part of a field name.
+pub(crate) fn param_suffix_valid(suffix: &str) -> bool {
+    !suffix.is_empty()
+        && suffix
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
+}
+
 fn annotations(schema: &Value, path: &mut Vec<String>, found: &mut Vec<(Vec<String>, String)>) {
     if path.len() >= MAX_PARAM_DEPTH {
         return;
@@ -228,9 +236,12 @@ pub fn param_mirror(
     annotated_params(input_schema)
         .into_iter()
         .filter_map(|(path, suffix)| {
+            if !param_suffix_valid(&suffix) {
+                return None;
+            }
             let text = param_text(argument_at(arguments, &path)?)?;
             Some((
-                format!("mcp-param-{suffix}"),
+                format!("mcp-param-{}", suffix.to_ascii_lowercase()),
                 crate::client::jsonrpc::encode_sentinel(&text),
             ))
         })
@@ -263,7 +274,7 @@ pub enum Lowered {
     Unchanged,
     /// The answer's own bytes with only the stateless-only members' spans cut out of its result.
     Spliced(Vec<u8>),
-    /// The result is not a complete one ([`NotExpressible`]): the caller answers an error instead.
+    /// The result is not a complete one: the caller answers an error instead.
     Inexpressible,
 }
 
@@ -384,10 +395,19 @@ pub fn frame(id: Option<&str>, event: Option<&str>, data: &str) -> String {
         out.push_str(i);
         out.push('\n');
     }
-    for line in data.split('\n') {
+    let mut lines = data.split(['\r', '\n']).peekable();
+    let mut start = 0;
+    while let Some(line) = lines.next() {
         out.push_str("data: ");
-        out.push_str(line.strip_suffix('\r').unwrap_or(line));
+        out.push_str(line);
         out.push('\n');
+        let end = start + line.len();
+        if data.as_bytes().get(end..end.saturating_add(2)) == Some(b"\r\n") {
+            lines.next();
+            start = end + 2;
+        } else {
+            start = end.saturating_add(1);
+        }
     }
     out.push('\n');
     out

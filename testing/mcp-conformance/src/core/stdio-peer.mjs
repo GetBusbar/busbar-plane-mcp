@@ -16,9 +16,13 @@
 // is marked TIMING in its definition.
 
 import { spawn } from 'node:child_process';
+import { StringDecoder } from 'node:string_decoder';
 import { classify } from './jsonrpc.mjs';
 
 const FAILSAFE_MS = Number(process.env.MCP_BATTERY_FAILSAFE_MS || 15000);
+if (!Number.isFinite(FAILSAFE_MS) || FAILSAFE_MS <= 0) {
+  throw new Error('MCP_BATTERY_FAILSAFE_MS must be a positive finite duration');
+}
 
 export class StdioPeer {
   constructor(command, args = [], opts = {}) {
@@ -34,19 +38,26 @@ export class StdioPeer {
     this.exitCode = null;
     this.exitSignal = null;
     this._buf = '';
+    this._decoder = new StringDecoder('utf8');
+    this.httpTransport = false;
+    this.httpStatuses = [];
+    this.httpObservationError = null;
+    this._httpBuf = '';
+    this._httpDecoder = new StringDecoder('utf8');
     this._waiters = [];
     this._exitWaiters = [];
   }
 
   start() {
     this.proc = spawn(this.command, this.args, {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, ...(this.opts.env || {}) },
+      stdio: ['pipe', 'pipe', 'pipe', 'pipe'],
+      detached: process.platform !== 'win32',
+      env: { ...process.env, ...(this.opts.env || {}), MCP_BATTERY_HTTP_STATUS_FD: '3' },
       cwd: this.opts.cwd,
     });
     this.proc.stdout.on('data', (chunk) => {
       this.stdoutBytes = Buffer.concat([this.stdoutBytes, chunk]);
-      this._buf += chunk.toString('utf8');
+      this._buf += this._decoder.write(chunk);
       let idx;
       while ((idx = this._buf.indexOf('\n')) >= 0) {
         const line = this._buf.slice(0, idx);
@@ -55,7 +66,29 @@ export class StdioPeer {
       }
     });
     this.proc.stderr.on('data', (c) => { this.stderr += c.toString('utf8'); });
-    this.proc.on('exit', (code, signal) => {
+    this.proc.stdio[3].on('data', (chunk) => {
+      this._httpBuf += this._httpDecoder.write(chunk);
+      let idx;
+      while ((idx = this._httpBuf.indexOf('\n')) >= 0) {
+        const line = this._httpBuf.slice(0, idx);
+        this._httpBuf = this._httpBuf.slice(idx + 1);
+        this._onHttpLine(line);
+      }
+    });
+    this.proc.stdio[3].on('error', (error) => { this.httpObservationError = error; });
+    this.proc.stdin.on('error', (err) => {
+      this.writeError = err;
+      for (const w of this._waiters.splice(0)) w.reject(err);
+    });
+    // `close` follows stdout/stderr/status drain; `exit` may precede the final pipe data.
+    this.proc.on('close', (code, signal) => {
+      this._buf += this._decoder.end();
+      if (this._buf !== '') { this._onLine(this._buf); this._buf = ''; }
+      this._httpBuf += this._httpDecoder.end();
+      if (this._httpBuf !== '') {
+        this.httpObservationError = new Error('HTTP observation ended inside a record');
+        this._httpBuf = '';
+      }
       this.exited = true;
       this.exitCode = code;
       this.exitSignal = signal;
@@ -95,15 +128,44 @@ export class StdioPeer {
     }
   }
 
+  _onHttpLine(line) {
+    try {
+      const observed = JSON.parse(line);
+      if (!this.httpTransport && observed?.transport === 'http'
+        && Object.keys(observed).length === 1) {
+        this.httpTransport = true;
+        return;
+      }
+      if (!this.httpTransport || !observed || !Number.isSafeInteger(observed.sequence)
+        || observed.sequence <= 0 || !Number.isInteger(observed.status)
+        || observed.status < 100 || observed.status > 599 || !Object.hasOwn(observed, 'id')
+        || (observed.id !== null && !['string', 'number'].includes(typeof observed.id))
+        || Object.keys(observed).length !== 3
+        || this.httpStatuses.some((record) => record.sequence === observed.sequence)) {
+        throw new Error('invalid HTTP observation record');
+      }
+      this.httpStatuses.push(observed);
+    } catch { this.httpObservationError = new Error('invalid HTTP observation record'); }
+  }
+
+  // Inspect after stop()/waitForExit(): independent pipes can drain in either order.
+  httpStatusesFor(id) {
+    return this.httpStatuses.filter((record) => record.id === id);
+  }
+
   /** Exact bytes. No newline appended. Tests append their own framing. */
   sendRaw(text) {
+    if (this.writeError) throw this.writeError;
+    if (this.exited || !this.proc || this.proc.stdin.destroyed || this.proc.stdin.writableEnded) {
+      throw new Error('peer exited or its input is no longer writable');
+    }
     this.proc.stdin.write(text);
     return this;
   }
 
   /** One JSON object as one newline-delimited frame. */
   send(obj) {
-    this.proc.stdin.write((typeof obj === 'string' ? obj : JSON.stringify(obj)) + '\n');
+    this.sendRaw((typeof obj === 'string' ? obj : JSON.stringify(obj)) + '\n');
     return this;
   }
 
@@ -121,6 +183,8 @@ export class StdioPeer {
     for (const m of this.messages) {
       if (predicate(m)) return Promise.resolve(m);
     }
+    if (this.spawnError || this.writeError) return Promise.reject(this.spawnError || this.writeError);
+    if (this.exited) return Promise.reject(new Error(`peer exited while waiting for: ${label}`));
     return new Promise((resolve, reject) => {
       const w = { predicate, resolve, reject, label };
       this._waiters.push(w);
@@ -186,14 +250,49 @@ export class StdioPeer {
     try {
       await this.waitForExit(2000);
     } catch {
-      try { this.proc.kill('SIGKILL'); } catch { /* gone */ }
+      try {
+        if (process.platform === 'win32') this.proc.kill('SIGKILL');
+        else process.kill(-this.proc.pid, 'SIGKILL');
+      } catch { /* the owned process group is gone */ }
+      await this.waitForExit(2000);
     }
   }
 }
 
 /** Parse a target spec like "python control_server.py" into command+args. */
 export function parseLaunch(launch) {
-  const parts = launch.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || [];
-  const clean = parts.map((p) => p.replace(/^["']|["']$/g, ''));
-  return { command: clean[0], args: clean.slice(1) };
+  const parts = [];
+  let word = '', quote = null, active = false;
+  for (let i = 0; i < launch.length; i += 1) {
+    const c = launch[i];
+    if (quote === "'") {
+      if (c === "'") quote = null; else word += c;
+      continue;
+    }
+    if (c === '\\') {
+      const next = launch[i + 1];
+      if (next === undefined) throw new Error('launch command ends in an escape');
+      if (quote === '"' && !['"', '\\', '$', '`', '\n'].includes(next)) {
+        word += c;
+      } else {
+        i += 1;
+        if (next !== '\n') word += next;
+      }
+      active = true;
+      continue;
+    }
+    if (quote === '"') {
+      if (c === '"') quote = null; else word += c;
+    } else if (c === '"' || c === "'") {
+      quote = c; active = true;
+    } else if (/\s/.test(c)) {
+      if (active) { parts.push(word); word = ''; active = false; }
+    } else {
+      word += c; active = true;
+    }
+  }
+  if (quote) throw new Error('launch command has an unterminated quote');
+  if (active) parts.push(word);
+  if (!parts[0]) throw new Error('launch command is empty');
+  return { command: parts[0], args: parts.slice(1) };
 }

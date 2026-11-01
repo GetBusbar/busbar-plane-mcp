@@ -520,7 +520,10 @@ impl ResourceEntry {
     /// The entry as `resources/list` writes it: the resource's own uri.
     #[must_use]
     pub fn render(&self) -> Value {
-        let (name, description) = (self.name.as_deref(), self.description.as_deref());
+        let (name, description) = (
+            Some(self.name.as_deref().unwrap_or(&self.uri)),
+            self.description.as_deref(),
+        );
         listed(
             ("uri", &self.uri),
             name,
@@ -534,7 +537,10 @@ impl ResourceTemplateEntry {
     /// The entry as `resources/templates/list` writes it: the operator's own template.
     #[must_use]
     pub fn render(&self) -> Value {
-        let (name, description) = (self.name.as_deref(), self.description.as_deref());
+        let (name, description) = (
+            Some(self.name.as_deref().unwrap_or(&self.uri_template)),
+            self.description.as_deref(),
+        );
         let key = ("uriTemplate", self.uri_template.as_str());
         listed(key, name, description, self.mime_type.as_ref())
     }

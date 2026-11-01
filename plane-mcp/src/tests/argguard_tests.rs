@@ -1679,3 +1679,6 @@ mod reported;
 
 #[path = "argguard_pattern_tests.rs"]
 mod pattern_tests;
+
+#[path = "argguard_pattern_engine_tests.rs"]
+mod pattern_engine_tests;

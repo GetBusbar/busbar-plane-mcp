@@ -33,7 +33,7 @@
 // signature computed over the payload BYTES, and the payload the compact JSON
 // `{ sub, exp, kid, g?, a?, cid? }` where `a` is the audience and `g` the binding generation.
 //
-// Usage: node mint-audience-token.mjs <signing-key-file> <plain-token> <audience>
+// Usage: node mint-audience-token.mjs <signing-key-file> <audience> 3<<<"$plain_token"
 //   <signing-key-file>  64 hex characters: the ed25519 secret busbar was configured with.
 //   <plain-token>       a token from `POST /api/v1/admin/keys`. Read, never trusted: its payload
 //                       supplies the `sub` and the binding `g`, both of which must match a real
@@ -42,11 +42,14 @@
 //   <audience>          the deployment's `mcp.canonical_uri`.
 
 import { createPrivateKey, sign } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readFileSync, closeSync } from 'node:fs';
 
-const [keyPath, plainToken, audience] = process.argv.slice(2);
+const [keyPath, audience] = process.argv.slice(2);
+let plainToken;
+try { plainToken = readFileSync(3, 'utf8').trim(); closeSync(3); }
+catch { console.error('provide the plain token on descriptor 3'); process.exit(2); }
 if (!keyPath || !plainToken || !audience) {
-  console.error('usage: mint-audience-token.mjs <signing-key-file> <plain-token> <audience>');
+  console.error('usage: mint-audience-token.mjs <signing-key-file> <audience> 3<<<"$plain_token"');
   process.exit(2);
 }
 
@@ -77,8 +80,8 @@ if (!plainToken.startsWith(PREFIX)) {
 const payload = JSON.parse(
   Buffer.from(plainToken.slice(PREFIX.length).split('.')[0], 'base64url').toString('utf8'),
 );
-if (!payload.sub || !payload.exp || !payload.kid) {
-  console.error(`the plain token's payload is missing sub/exp/kid: ${JSON.stringify(payload)}`);
+if (!payload.sub || payload.exp === undefined || !payload.kid) {
+  console.error("the plain token's payload is missing sub/exp/kid");
   process.exit(2);
 }
 
@@ -87,7 +90,7 @@ if (!payload.sub || !payload.exp || !payload.kid) {
 // refused, and a generation this script OMITTED would be refused too. Copying the one the mint
 // returned is the only value that can be correct.
 const claims = { sub: payload.sub, exp: payload.exp, kid: payload.kid, a: audience };
-if (payload.g) claims.g = payload.g;
+if (payload.g !== undefined) claims.g = payload.g;
 
 const body = Buffer.from(JSON.stringify(claims), 'utf8');
 process.stdout.write(`${PREFIX}${body.toString('base64url')}.${sign(null, body, key).toString('base64url')}`);

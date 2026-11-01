@@ -462,7 +462,7 @@ fn child_leg() -> UpstreamLeg {
         round: 1,
         child: Some(ChildLeg {
             generation: 3,
-            wait: 77,
+            wait: serde_json::json!(77),
             asks: vec![("srv-1".into(), json!("srv-1")), ("9".into(), json!(9))],
             work: Some("ab".repeat(16)),
         }),

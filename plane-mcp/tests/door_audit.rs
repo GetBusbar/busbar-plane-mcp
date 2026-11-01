@@ -24,8 +24,17 @@
 #[allow(dead_code)]
 mod door_facts;
 
+#[path = "support/invoke_projection_custody.rs"]
+mod invoke_projection_custody;
+
+#[path = "support/completion_retirement_host.rs"]
+mod completion_retirement_host;
+
 #[path = "support/legacy_reconnect.rs"]
 mod legacy_reconnect;
+
+#[path = "support/legacy_driver_custody.rs"]
+mod legacy_driver_custody;
 
 #[path = "support/cache_receipts.rs"]
 mod cache_receipts;
@@ -826,7 +835,7 @@ unsafe impl Sync for Tables {}
 static TABLES: Tables = Tables(HostTables {
     size: std::mem::size_of::<HostTables>() as u32,
     _reserved: 0,
-    ctx: HostCtx::NONE,
+    ctx: HostCtx { handle: 71 },
     wake: Some(cache_receipts::wake),
     conns: &CONN_SLOTS,
     io: std::ptr::null(),
@@ -857,6 +866,7 @@ fn head<T>(op: u32, ticket: Ticket) -> InHead {
     InHead {
         size: std::mem::size_of::<T>() as u32,
         op,
+        host: HostCtx { handle: 71 },
         ticket,
         ..z()
     }
@@ -881,6 +891,7 @@ fn lifecycle() -> &'static OpsHead {
 /// One opened instance of the door.
 struct Door {
     instance: *mut c_void,
+    retirement: std::cell::RefCell<completion_retirement_host::Host>,
 }
 
 /// The section: a registration that requires a session, and one that speaks the stateless revision.
@@ -939,6 +950,10 @@ fn opens(section: &str) -> Option<Door> {
     };
     (ret.outcome() == Outcome::Ready).then_some(Door {
         instance: o.open.instance,
+        retirement: std::cell::RefCell::new(completion_retirement_host::Host::new(
+            HostCtx { handle: 71 },
+            DRIVER,
+        )),
     })
 }
 
@@ -985,7 +1000,8 @@ impl Door {
     /// The driver ticket woke: `drive`.
     fn drive(&self) {
         let mut sessions = [0_u64; 16];
-        let i = PlaneDriveIn {
+        let extensions = self.retirement.borrow().input();
+        let mut i = PlaneDriveIn {
             drive: DriveIn {
                 head: head::<PlaneDriveIn>(life::DRIVE, DRIVER),
                 driver: DRIVER,
@@ -993,6 +1009,7 @@ impl Door {
             sessions_buf: sessions.as_mut_ptr(),
             sessions_cap: sessions.len(),
         };
+        i.drive.head.extensions = octets(&extensions);
         let mut o: PlaneDriveOut = z();
         o.head = out_head::<PlaneDriveOut>();
         let f = lifecycle().drive.expect("drive");
@@ -1005,7 +1022,11 @@ impl Door {
                 std::ptr::from_mut(&mut o).cast(),
             )
         };
-        assert_eq!(ret.outcome(), Outcome::Ready);
+        assert!(matches!(ret.outcome(), Outcome::Ready | Outcome::Pending));
+        busbar_contract::abi::plane::check::check_drive(ret.outcome(), &o, sessions.len() as u64)
+            .unwrap();
+        self.retirement.borrow_mut().acknowledge(&o.head);
+        completion_retirement_host::release(self.instance, &o.head, lifecycle());
     }
 
     /// A tick and the drive it wakes: every held stream read as far as it goes.
@@ -1719,7 +1740,13 @@ fn a_reader_beside_a_re_fetch_judges_one_published_list_never_a_mix() {
     let shared = Shared(d.instance);
     let publisher = std::thread::spawn(move || {
         let shared = shared;
-        let d = Door { instance: shared.0 };
+        let d = Door {
+            instance: shared.0,
+            retirement: std::cell::RefCell::new(completion_retirement_host::Host::new(
+                HostCtx { handle: 71 },
+                DRIVER,
+            )),
+        };
         d.connect(402, "tw").status
     });
     half_way

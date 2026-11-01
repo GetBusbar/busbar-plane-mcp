@@ -32,6 +32,8 @@ busbar-contract = { workspace = true }
 # (owner PLUGIN LIBRARIES ruling, 2026-09-28).
 base64 = { workspace = true }
 indexmap = { workspace = true }
+# The fleet's ECMA-262 property-pattern matcher; no schema/format validation of tool arguments.
+jsonschema = { workspace = true }
 serde = { workspace = true }
 # The object notation the codec speaks. The adapter hands values across the seam and never invents
 # a second parser.

@@ -37,8 +37,8 @@ read -r s2 _ <<<"$(h2_call "$bound" "exit-2")"
 [ "$s1" = "200" ] && [ "$s2" = "200" ] || { failures=$((failures+1)); detail="${detail}call statuses: ${s1} ${s2} (want 200 200); "; }
 
 usage_after="$(h2_usage "$kid")"
-req_before="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("requests") or 0)' <<<"$usage_before")"
-req_after="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("requests") or 0)' <<<"$usage_after")"
+req_before="$(h2_read_usage_field requests <<<"$usage_before")"
+req_after="$(h2_read_usage_field requests <<<"$usage_after")"
 req_delta="$((req_after - req_before))"
 [ "$req_delta" -eq 2 ] || { failures=$((failures+1)); detail="${detail}usage_requests_delta=${req_delta}(want exactly 2 for two calls -- no double-post, no drop); "; }
 

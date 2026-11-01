@@ -51,12 +51,6 @@ export function test(def) {
     peer: 'fake',
     timing: false,
     transports: ['stdio'],
-    // WHICH SCENARIOS OWE POSITIVE EVIDENCE. The client role is observed ENTIRELY through what the
-    // subject volunteers onto the wire — nothing in it is a request/response exchange the harness
-    // can force — so a client scenario's row is meaningless without a recorded observation that the
-    // subject acted. Server and seam scenarios drive the subject and assert on its answers, so
-    // their absence rows already cannot be satisfied by silence. Any scenario may opt in.
-    requiresEvidence: def.role === 'client',
     ...def,
   });
 }
@@ -109,29 +103,17 @@ class Ctx {
     this._record.notes.push({ key, value });
   }
 
-  // A SCENARIO MUST ASSERT SOMETHING THE SUBJECT DID.
-  //
-  // THE DEFECT THIS REPLACES. `/usr/bin/true` — a subject that connects to nothing, sends nothing
-  // and exits — scored 9 PASS out of 14 in the client role. Every one of those nine was an ABSENCE
-  // row: "the client sent no forbidden responses", "the client answered no server-initiated
-  // request", "the client emitted no unparseable frames". All true of a program that did nothing at
-  // all, so the row's verdict was a statement about the subject's silence and rendered as a
-  // statement about its conformance. Two more rows recommended on a literal `true`.
-  //
-  // THE RULE NOW. Every scenario declares, with this call, the OBSERVATION that makes its absence
-  // row mean anything: the stimulus reached the subject, and the subject acted. A scenario that
-  // records no satisfied evidence cannot pass — it FAILS as vacuous, by name, with the same
-  // reasoning as `MCP_NO_SKIPS`: a row nobody could have failed is not a row anybody passed.
-  //
-  // It is recorded as an assertion so it travels into the report, the differential and the
-  // regression comparison exactly like every other assertion, and so a reader of a red sees the
-  // sentence "the stimulus was never delivered" rather than a bare count.
+  // A scenario supplies the exact observation required for its claimed exchange.
+  // Missing that observation is an incomplete run, not a protocol violation by the subject.
   evidence(key, condition, detail) {
     this._record.evidence.push({
       key,
       ok: Boolean(condition),
       detail: detail === undefined ? null : detail,
     });
+    if (!condition) {
+      throw new Error(`Required observation ${key} was not recorded${detail ? `: ${detail}` : ''}`);
+    }
   }
 
   // A SKIPPING TEST IS NOT A PASSING TEST.
@@ -177,7 +159,6 @@ export async function runOne(t, target) {
     recommendations: [],
     notes: [],
     evidence: [],
-    requiresEvidence: Boolean(t.requiresEvidence),
     failed: false,
     verdict: VERDICT.PASS,
     error: null,
@@ -185,17 +166,6 @@ export async function runOne(t, target) {
   const ctx = new Ctx(target, record);
   try {
     await t.run(ctx);
-    // THE VACUITY GATE. See Ctx.evidence. A scenario that requires evidence and satisfied none of
-    // it did not observe the subject doing anything, so its verdict is about silence.
-    const unmet = record.evidence.filter((e) => !e.ok);
-    if (record.requiresEvidence && (record.evidence.length === 0 || unmet.length > 0)) {
-      record.failed = true;
-      record.error = 'VACUOUS: a PASS here would be a statement about silence, not about the '
-        + 'subject. ' + (record.evidence.length
-          ? `Evidence not satisfied: ${unmet.map((e) => `${e.key}${e.detail ? ` — ${e.detail}` : ''}`).join('; ')}`
-          : 'The scenario declared NO evidence at all, which is a defect in the SCENARIO, not in '
-            + 'the subject: it can be passed by a subject that does nothing.');
-    }
     record.verdict = record.failed ? VERDICT.FAIL : VERDICT.PASS;
   } catch (err) {
     if (err && err.__unavailable) {
@@ -206,7 +176,7 @@ export async function runOne(t, target) {
       record.failed = true;
       record.error = err.message;
     } else if (err && err.__skip) {
-      record.verdict = VERDICT.SKIP;
+      record.verdict = record.failed ? VERDICT.FAIL : VERDICT.SKIP;
       record.error = err.message;
     } else {
       record.verdict = VERDICT.ERROR;

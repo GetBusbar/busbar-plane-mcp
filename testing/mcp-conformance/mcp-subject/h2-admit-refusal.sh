@@ -54,8 +54,9 @@ egress_delta_on_refusal="$((egress_after - egress_mid))"
 [ "$egress_delta_on_refusal" -eq 0 ] || { failures=$((failures+1)); detail="${detail}egress_delta_on_refusal=${egress_delta_on_refusal}(want 0); "; }
 
 usage_after="$(h2_usage "$kid")"
-req_mid="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("requests") or 0)' <<<"$usage_mid")"
-req_after="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("requests") or 0)' <<<"$usage_after")"
+req_mid="$(h2_read_usage_field requests <<<"$usage_mid")"
+req_after="$(h2_read_usage_field requests <<<"$usage_after")"
+h2_int_is "$req_mid" -gt 0 || { failures=$((failures+1)); detail="${detail}the admitted first call produced no positive usage witness; "; }
 [ "$req_mid" -eq "$req_after" ] || { failures=$((failures+1)); detail="${detail}usage_requests_delta_on_refusal=$((req_after-req_mid))(want 0); "; }
 
 if [ "$failures" -eq 0 ]; then

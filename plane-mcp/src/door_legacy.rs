@@ -7,8 +7,8 @@
 //! * ONE HELD STREAM per member AND caller binding: its `GET`, its `endpoint` event, the message
 //!   address, the `initialize` handshake and correlation by JSON-RPC id are the plane's.
 //! * The connector holds the connection; the stream is read on the instance's ONE driver ticket
-//!   ([`drive`]), whose handles are numbered by one counter per tick cycle shared by every link, so
-//!   a handle that answered is never re-issued in that cycle.
+//!   ([`drive`]). Each pending operation retains its handle and its own read buffers across ticks;
+//!   completed handles are recycled only after negotiated host retirement confirms their receipt.
 //! * A call POSTs its own request on its own ticket, its id registered BEFORE the POST leaves, and
 //!   waits for the driver to hand it the answer under that id.
 //! * A reply whose id no call waits for is dropped and counted: the next answer on that link
@@ -28,9 +28,11 @@ use busbar_contract::abi::host::conn::connector::{
     ReplyPiece, RequestPiece, REPLY_ACK, REPLY_BODY, REPLY_END, REPLY_HEAD, REQUEST_BODY,
     REQUEST_END, REQUEST_HEAD,
 };
-use busbar_contract::abi::mechanism::ticket::Ticket;
+use busbar_contract::abi::mechanism::ticket::{HostCtx, Ticket};
+use busbar_contract::abi::plane::PlaneDriveOut;
+use busbar_contract::abi::sdk::completion_retirement::{Domain, Error, Handle, Retirement};
 use busbar_contract::abi::sdk::conn::{Connector, Host};
-use busbar_contract::abi::sdk::Instance;
+use busbar_contract::abi::sdk::{Instance, Out};
 use busbar_contract::abi::transport::{fields, FrameSpan};
 use serde_json::Value;
 
@@ -77,8 +79,37 @@ const READ_CHUNK: usize = 1 << 16;
 /// The handle seq the instance's stream services are numbered from on the driver ticket.
 const LINK_SEQ: u32 = 1 << 27;
 
-/// How many handles the instance's streams number in one tick cycle, all links together.
+/// The existing legacy handle namespace. Confirmed retirement recycles its slots.
 const CYCLE_SPAN: u32 = 1 << 26;
+
+#[derive(Debug, Default)]
+pub(super) struct Driver {
+    retirement: Retirement,
+    issued: u32,
+    reusable: Vec<u32>,
+    failure: Option<Error>,
+}
+
+impl Driver {
+    fn begin(&mut self, owner: HostCtx, ticket: Ticket, extensions: &[u8]) -> Result<(), Error> {
+        let reusable = self.retirement.begin(owner, ticket, extensions)?;
+        self.reusable
+            .extend(reusable.into_iter().map(|handle| handle.seq));
+        Ok(())
+    }
+
+    fn consumed(&mut self, pending: &mut Option<u32>) {
+        if let Some(seq) = *pending {
+            match self.retirement.consumed(Handle {
+                domain: Domain::Connector,
+                seq,
+            }) {
+                Ok(()) => *pending = None,
+                Err(error) => self.failure = Some(error),
+            }
+        }
+    }
+}
 
 /// The most replies to the server's own requests a link holds unsent.
 const MAX_OUTBOX: usize = 64;
@@ -135,6 +166,10 @@ struct Reply {
     head_piece: Box<RequestPiece>,
     body: Box<[u8]>,
     sent: usize,
+    /// Its current service's reserved handle, retained until that service completes.
+    handle: Option<u32>,
+    buf: Box<[u8]>,
+    slot: Box<ReplyPiece>,
 }
 
 /// ONE HELD STREAM: one member's `2024-11-05` conversation for one caller binding.
@@ -184,10 +219,13 @@ pub(super) struct Link {
     /// Progress frames for the call each id names, and log records, for the next answer.
     notes: BTreeMap<String, Vec<Value>>,
     logs: Vec<Value>,
+    notes_bytes: BTreeMap<String, usize>,
+    logs_bytes: usize,
     /// The tick clock a call last used the link at (`0`: not yet stamped).
     last_used: u64,
     buf: Box<[u8]>,
     slot: Box<ReplyPiece>,
+    handle: Option<u32>,
 }
 
 /// What a drive heard that the instance acts on outside the link's lock: the resource updates
@@ -240,9 +278,12 @@ impl Link {
             replying: None,
             notes: BTreeMap::new(),
             logs: Vec::new(),
+            notes_bytes: BTreeMap::new(),
+            logs_bytes: 0,
             last_used: 0,
             buf: vec![0; READ_CHUNK].into_boxed_slice(),
             slot: Box::default(),
+            handle: None,
         }
     }
 
@@ -255,6 +296,13 @@ impl Link {
             && self.init != Init::Running
             && self.outbox.is_empty()
             && self.replying.is_none()
+    }
+
+    fn retiring(&self) -> bool {
+        self.stream.is_some()
+            || self.handle.is_some()
+            || !self.stale.is_empty()
+            || self.replying.is_some()
     }
 
     /// Registers the call on `ticket` as waiting for `id`: `false` when the link already waits on
@@ -272,7 +320,9 @@ impl Link {
         if self.dead.is_none() {
             self.dead = Some(why.to_string());
         }
-        woken.extend(self.waiters.values().copied());
+        woken.extend(std::mem::take(&mut self.waiters).into_values());
+        self.answers.remove(&INITIALIZE_ID.to_string());
+        self.init_by = None;
         woken.append(&mut self.parked);
     }
 
@@ -285,17 +335,8 @@ impl Link {
         announced: &mut Announced,
     ) {
         for event in self.reader.feed(chunk) {
-            // A REPLY NO CALL WAITS FOR is dropped and counted, never handed to the link's
-            // correlation (which would hand nothing) and never to another call.
-            if let Ok(v) = serde_json::from_str::<Value>(&event.data) {
-                if v.get("method").is_none() {
-                    if let Some(id) = v.get("id").map(Value::to_string) {
-                        if !self.waiters.contains_key(&id) {
-                            self.dropped = self.dropped.saturating_add(1).min(MAX_DROPPED_AUDITED);
-                            continue;
-                        }
-                    }
-                }
+            if self.dead.is_some() {
+                break;
             }
             // The `endpoint` event names the message address, once; a path joins the endpoint's
             // origin, and another origin is refused.
@@ -325,16 +366,21 @@ impl Link {
                 continue;
             };
             if v.get("method").is_some() {
-                self.peer_message(&v, grants, woken, announced);
+                self.peer_message(&v, event.data.len(), grants, woken, announced);
             } else if let Some(id) = v.get("id").map(Value::to_string) {
                 if let Some(t) = self.waiters.remove(&id) {
                     self.answers.insert(id, (t, event.data.into_bytes()));
                     woken.push(t);
+                } else {
+                    self.dropped = self.dropped.saturating_add(1).min(MAX_DROPPED_AUDITED);
                 }
             }
         }
         if self.reader.overflowed() {
-            self.die(STREAM_CLOSED, woken);
+            self.die(
+                &format!("the MCP server's 2024-11-05 event exceeded busbar's {MAX_EVENT}-byte event limit"),
+                woken,
+            );
         }
     }
 
@@ -344,6 +390,7 @@ impl Link {
     fn peer_message(
         &mut self,
         v: &Value,
+        encoded_bytes: usize,
         grants: ServerRequestGrants,
         woken: &mut Vec<Ticket>,
         announced: &mut Announced,
@@ -365,16 +412,24 @@ impl Link {
                             .filter(|id| self.waiters.contains_key(*id))
                             .map(str::to_string);
                         if let Some(id) = id {
-                            let notes = self.notes.entry(id).or_default();
-                            if notes.len() < MAX_NOTES {
-                                notes.push(v.clone());
+                            if self
+                                .notes
+                                .get(&id)
+                                .is_none_or(|notes| notes.len() < MAX_NOTES)
+                                && self.keep_note(encoded_bytes, woken)
+                            {
+                                *self.notes_bytes.entry(id.clone()).or_default() += encoded_bytes;
+                                self.notes.entry(id).or_default().push(v.clone());
                             }
                         }
                     }
                     NotificationEffect::Log
                         if n == ServerNotification::Message && self.logs.len() < MAX_NOTES =>
                     {
-                        self.logs.push(v.clone());
+                        if self.keep_note(encoded_bytes, woken) {
+                            self.logs_bytes += encoded_bytes;
+                            self.logs.push(v.clone());
+                        }
                     }
                     NotificationEffect::Log | NotificationEffect::BringRefreshForward => {}
                 }
@@ -409,13 +464,32 @@ impl Link {
         }
     }
 
+    fn keep_note(&mut self, bytes: usize, woken: &mut Vec<Ticket>) -> bool {
+        let used = self
+            .notes_bytes
+            .values()
+            .copied()
+            .sum::<usize>()
+            .saturating_add(self.logs_bytes);
+        let max = busbar_contract::abi::sdk::exchange::REPLY_MAX;
+        if used.saturating_add(bytes) > max {
+            self.die(
+                &format!("the MCP server's retained 2024-11-05 notifications exceeded busbar's existing {max}-byte reply limit"),
+                woken,
+            );
+            false
+        } else {
+            true
+        }
+    }
+
     /// DRIVES the link on the driver ticket, its services numbered on from `issued` (the
     /// instance's one counter for this tick cycle): an idle stream let go, the replies it owes
     /// POSTed, and the stream dialled, its `GET` written, and its reply read until it pends or ends.
     fn drive(
         &mut self,
         (host, driver, now): (&Host, Ticket, u64),
-        issued: &mut u32,
+        issued: &mut Driver,
         grants: ServerRequestGrants,
         woken: &mut Vec<Ticket>,
         announced: &mut Announced,
@@ -428,40 +502,115 @@ impl Link {
         self.post_replies(host, driver, issued);
         self.read_stream((host, driver), issued, grants, woken, announced);
         self.post_replies(host, driver, issued);
+        if self.dead.is_some() && !self.retiring() && self.answers.is_empty() {
+            woken.append(&mut self.parked);
+        }
     }
 
-    /// The connector for the next handle of the cycle, or none once the cycle's span is spent.
-    fn next<'h>(host: &'h Host, driver: Ticket, issued: u32) -> Option<Connector<'h>> {
-        (issued < CYCLE_SPAN).then(|| host.connector_from(driver, LINK_SEQ.saturating_add(issued)))
+    /// Reserve the current operation's handle before invoking the host. A pending service owns
+    /// it across links and ticks; a completed service clears it before starting its next step.
+    fn next<'h>(
+        host: &'h Host,
+        driver: Ticket,
+        issued: &mut Driver,
+        pending: &mut Option<u32>,
+    ) -> Option<Connector<'h>> {
+        if issued.failure.is_some() || !issued.retirement.can_consume(0) {
+            return None;
+        }
+        let seq = match *pending {
+            Some(seq) => seq,
+            None if !issued.reusable.is_empty() => {
+                let seq = issued.reusable.pop().expect("a confirmed retired handle");
+                *pending = Some(seq);
+                seq
+            }
+            None if issued.issued < CYCLE_SPAN => {
+                let seq = LINK_SEQ + issued.issued;
+                issued.issued += 1;
+                *pending = Some(seq);
+                seq
+            }
+            None => return None,
+        };
+        Some(host.connector_from(driver, seq))
     }
 
     /// The stream: dialled, its `GET` written, and its reply read until it pends or ends.
     fn read_stream(
         &mut self,
         (host, driver): (&Host, Ticket),
-        issued: &mut u32,
+        issued: &mut Driver,
         grants: ServerRequestGrants,
         woken: &mut Vec<Ticket>,
         announced: &mut Announced,
     ) {
-        while let Some(mut c) = Self::next(host, driver, *issued) {
+        loop {
+            // Establish may have pended before the link died. Redeem its stream before closing
+            // it; a dead link keeps all of the operation's inputs until that result arrives.
+            if self.dead.is_some()
+                && self.stream.is_none()
+                && self.step == Step::Establish
+                && self.handle.is_some()
+            {
+                let Some(mut c) = Self::next(host, driver, issued, &mut self.handle) else {
+                    return;
+                };
+                match c.establish_as(
+                    crate::statement::NEED_UPSTREAM,
+                    Some(&self.url),
+                    "",
+                    0,
+                    Some(&self.member),
+                ) {
+                    Poll::Pending => return,
+                    Poll::Ready(answer) => {
+                        issued.consumed(&mut self.handle);
+                        self.stream = answer.ok();
+                    }
+                }
+            }
             // A dead stream is closed at the connector before anything else.
             if self.dead.is_some() {
-                if let Some(stream) = self.stream.take() {
-                    self.stale.push(stream);
+                if let Some(stream) = self.stream {
+                    if host.connector(Ticket::NONE).close(stream).is_pending() {
+                        return;
+                    }
+                    if self.handle.is_some() {
+                        let Some(mut c) = Self::next(host, driver, issued, &mut self.handle) else {
+                            return;
+                        };
+                        let pending = match self.step {
+                            Step::Head => c
+                                .write_request(stream, &self.head_piece, &self.head)
+                                .is_pending(),
+                            Step::End => c.write_request(stream, &self.end_piece, &[]).is_pending(),
+                            Step::Read => c
+                                .read_reply(stream, &mut self.buf, &mut self.slot)
+                                .is_pending(),
+                            Step::Establish => false,
+                        };
+                        if pending {
+                            return;
+                        }
+                        issued.consumed(&mut self.handle);
+                    }
+                    self.stream = None;
                 }
             }
             if let Some(&stream) = self.stale.last() {
-                if c.close(stream).is_pending() {
+                if host.connector(Ticket::NONE).close(stream).is_pending() {
                     return;
                 }
-                *issued += 1;
                 self.stale.pop();
                 continue;
             }
             if self.dead.is_some() {
                 return;
             }
+            let Some(mut c) = Self::next(host, driver, issued, &mut self.handle) else {
+                return;
+            };
             match self.step {
                 Step::Establish => {
                     let dialled = c.establish_as(
@@ -474,12 +623,12 @@ impl Link {
                     match dialled {
                         Poll::Pending => return,
                         Poll::Ready(Ok(stream)) => {
-                            *issued += 1;
+                            issued.consumed(&mut self.handle);
                             self.stream = Some(stream);
                             self.step = Step::Head;
                         }
                         Poll::Ready(Err(e)) => {
-                            *issued += 1;
+                            issued.consumed(&mut self.handle);
                             self.die(&e.to_string(), woken);
                         }
                     }
@@ -494,7 +643,7 @@ impl Link {
                     match written {
                         Poll::Pending => return,
                         Poll::Ready(Ok(_)) => {
-                            *issued += 1;
+                            issued.consumed(&mut self.handle);
                             self.step = if self.step == Step::Head {
                                 Step::End
                             } else {
@@ -502,7 +651,7 @@ impl Link {
                             };
                         }
                         Poll::Ready(Err(e)) => {
-                            *issued += 1;
+                            issued.consumed(&mut self.handle);
                             self.die(&e.to_string(), woken);
                         }
                     }
@@ -512,15 +661,17 @@ impl Link {
                     match c.read_reply(stream, &mut self.buf, &mut self.slot) {
                         Poll::Pending => return,
                         Poll::Ready(Ok(got)) => {
-                            *issued += 1;
+                            issued.consumed(&mut self.handle);
                             match got.piece.kind {
                                 REPLY_HEAD => {
                                     let block = spanned(&self.buf[..got.len], got.piece.fields);
                                     let streams = fields::lines(block).any(|(n, v)| {
                                         n.eq_ignore_ascii_case(b"content-type")
-                                            && v.starts_with(
-                                                crate::framing::EVENT_STREAM.as_bytes(),
-                                            )
+                                            && v.split(|b| *b == b';').next().is_some_and(|mime| {
+                                                mime.trim_ascii().eq_ignore_ascii_case(
+                                                    crate::framing::EVENT_STREAM.as_bytes(),
+                                                )
+                                            })
                                     });
                                     if got.piece.code != 200 || !streams {
                                         self.die(
@@ -541,7 +692,7 @@ impl Link {
                             }
                         }
                         Poll::Ready(Err(e)) => {
-                            *issued += 1;
+                            issued.consumed(&mut self.handle);
                             self.die(&e.to_string(), woken);
                         }
                     }
@@ -552,12 +703,65 @@ impl Link {
 
     /// THE REPLIES the link owes the server, POSTed one after another to the message address on the
     /// driver ticket, each service numbered on from `issued`; a dead stream owes nothing more.
-    fn post_replies(&mut self, host: &Host, driver: Ticket, issued: &mut u32) {
+    fn post_replies(&mut self, host: &Host, driver: Ticket, issued: &mut Driver) {
         if self.dead.is_some() {
             self.outbox.clear();
-            if let Some(stream) = self.replying.take().and_then(|r| r.stream) {
-                self.stale.push(stream);
+            if let Some(r) = self.replying.as_mut() {
+                if r.stream.is_none() && r.handle.is_some() {
+                    let Some(address) = self.address.as_deref() else {
+                        return;
+                    };
+                    let Some(mut c) = Self::next(host, driver, issued, &mut r.handle) else {
+                        return;
+                    };
+                    match c.establish_as(
+                        crate::statement::NEED_UPSTREAM,
+                        Some(address),
+                        "",
+                        0,
+                        Some(&self.member),
+                    ) {
+                        Poll::Pending => return,
+                        Poll::Ready(answer) => {
+                            issued.consumed(&mut r.handle);
+                            r.stream = answer.ok();
+                        }
+                    }
+                }
+                // CLOSE never pends on a conforming connector. Keep the reply and its parked
+                // buffers alive until this close has released any pending read or write.
+                if let Some(stream) = r.stream {
+                    if host.connector(Ticket::NONE).close(stream).is_pending() {
+                        return;
+                    }
+                    if r.handle.is_some() {
+                        let Some(mut c) = Self::next(host, driver, issued, &mut r.handle) else {
+                            return;
+                        };
+                        let pending = match r.step {
+                            ReplyStep::Head => {
+                                c.write_request(stream, &r.head_piece, &r.head).is_pending()
+                            }
+                            ReplyStep::Body => c
+                                .write_request(stream, &self.body_piece, &r.body[r.sent..])
+                                .is_pending(),
+                            ReplyStep::End => {
+                                c.write_request(stream, &self.end_piece, &[]).is_pending()
+                            }
+                            ReplyStep::Read => {
+                                c.read_reply(stream, &mut r.buf, &mut r.slot).is_pending()
+                            }
+                            ReplyStep::Close => c.close(stream).is_pending(),
+                            ReplyStep::Establish => false,
+                        };
+                        if pending {
+                            return;
+                        }
+                        issued.consumed(&mut r.handle);
+                    }
+                }
             }
+            self.replying = None;
             return;
         }
         let Some(address) = self.address.clone() else {
@@ -570,10 +774,17 @@ impl Link {
                 };
                 self.replying = Some(self.reply_to(&address, body));
             }
-            let Some(mut c) = Self::next(host, driver, *issued) else {
+            let Some(r) = self.replying.as_mut() else {
                 return;
             };
-            let Some(r) = self.replying.as_mut() else {
+            if r.step == ReplyStep::Body && r.sent >= r.body.len() {
+                r.step = ReplyStep::End;
+            }
+            if r.step == ReplyStep::Close && r.stream.is_none() {
+                self.replying = None;
+                continue;
+            }
+            let Some(mut c) = Self::next(host, driver, issued, &mut r.handle) else {
                 return;
             };
             let stream = r.stream.unwrap_or_default();
@@ -599,11 +810,6 @@ impl Link {
                     Poll::Ready(Ok(_)) => ReplyStep::Body,
                     Poll::Ready(Err(_)) => ReplyStep::Close,
                 },
-                ReplyStep::Body if r.sent >= r.body.len() => {
-                    // Nothing left of the body: no service made.
-                    r.step = ReplyStep::End;
-                    continue;
-                }
                 ReplyStep::Body => {
                     match c.write_request(stream, &self.body_piece, &r.body[r.sent..]) {
                         Poll::Pending => return,
@@ -619,8 +825,15 @@ impl Link {
                     Poll::Ready(Ok(_)) => ReplyStep::Read,
                     Poll::Ready(Err(_)) => ReplyStep::Close,
                 },
-                ReplyStep::Read => match c.read_reply(stream, &mut self.buf, &mut self.slot) {
+                ReplyStep::Read => match c.read_reply(stream, &mut r.buf, &mut r.slot) {
                     Poll::Pending => return,
+                    // Interim heads are followed; the unused final response body need not end.
+                    Poll::Ready(Ok(got))
+                        if got.piece.kind == REPLY_HEAD
+                            && (got.piece.code >= 200 || got.piece.code == 101) =>
+                    {
+                        ReplyStep::Close
+                    }
                     Poll::Ready(Ok(got)) if matches!(got.piece.kind, REPLY_END | REPLY_ACK) => {
                         ReplyStep::Close
                     }
@@ -631,14 +844,12 @@ impl Link {
                     if r.stream.is_some() && c.close(stream).is_pending() {
                         return;
                     }
-                    if r.stream.is_some() {
-                        *issued += 1;
-                    }
+                    issued.consumed(&mut r.handle);
                     self.replying = None;
                     continue;
                 }
             };
-            *issued += 1;
+            issued.consumed(&mut r.handle);
             r.step = done;
         }
     }
@@ -653,6 +864,9 @@ impl Link {
             head_piece,
             body: body.into_boxed_slice(),
             sent: 0,
+            handle: None,
+            buf: vec![0; READ_CHUNK].into_boxed_slice(),
+            slot: Box::default(),
         }
     }
 }
@@ -711,24 +925,31 @@ fn spanned(buf: &[u8], span: FrameSpan) -> &[u8] {
 /// Whether the instance holds any stream (the tick wakes the driver for them).
 pub(super) fn any(plane: &McpDoor) -> bool {
     !plane.legacy.is_empty()
+        || plane.legacy_seq.with_all(|state| {
+            state
+                .get(&())
+                .is_some_and(|driver| driver.retirement.queued())
+        })
 }
 
 /// THE DRIVER'S PART, on the instance's driver ticket (`drive`): every held stream read as far as
 /// it goes, and every call an answer (or the stream's end) reached woken. A dead stream no call
-/// waits on any more is let go. Every link's services are numbered by the instance's ONE counter
-/// for the tick cycle, so no two links (and no link replaced or removed within the cycle) ever
-/// issue the same handle.
-pub(super) fn drive(instance: &Instance<'_, McpDoor>, plane: &McpDoor) {
+/// waits on any more is let go. Pending operations retain their handles. A terminal handle is
+/// acknowledged through the SDK and reused only after the host confirms its result was retired.
+pub(super) fn drive(
+    instance: &Instance<'_, McpDoor>,
+    plane: &McpDoor,
+    owner: HostCtx,
+    extensions: &[u8],
+) -> Result<bool, Error> {
+    if !any(plane) {
+        return Ok(false);
+    }
     let Some(host) = plane.host.as_ref() else {
-        return;
+        return Ok(false);
     };
     let driver = instance.ticket();
     let cycle = plane.driver.get(&()).map_or(0, |(_, now)| now);
-    let mut issued = plane
-        .legacy_seq
-        .get(&())
-        .filter(|(at, _)| *at == cycle)
-        .map_or(0, |(_, n)| n);
     let held = plane.current();
     let grants_of = |member: &str| {
         held.as_ref()
@@ -738,30 +959,63 @@ pub(super) fn drive(instance: &Instance<'_, McpDoor>, plane: &McpDoor) {
     };
     let mut woken = Vec::new();
     let mut announced = Announced::new();
-    plane.legacy.with_all(|m| {
-        for link in m.values_mut() {
-            let grants = grants_of(&link.member);
-            link.drive(
-                (host, driver, cycle),
-                &mut issued,
-                grants,
-                &mut woken,
-                &mut announced,
-            );
-        }
-        m.retain(|_, l| {
-            l.dead.is_none()
-                || !l.stale.is_empty()
-                || l.replying.is_some()
-                || !l.waiters.is_empty()
-                || !l.answers.is_empty()
+    let result = plane.legacy_seq.with_all(|states| {
+        let state = states.entry(()).or_default();
+        state.begin(owner, driver, extensions)?;
+        plane.legacy.with_all(|m| {
+            for link in m.values_mut() {
+                let grants = grants_of(&link.member);
+                link.drive(
+                    (host, driver, cycle),
+                    state,
+                    grants,
+                    &mut woken,
+                    &mut announced,
+                );
+            }
+            m.retain(|_, l| {
+                l.dead.is_none() || l.retiring() || !l.waiters.is_empty() || !l.answers.is_empty()
+            });
         });
+        if let Some(error) = state.failure {
+            return Err(error);
+        }
+        Ok(pending(plane) || state.retirement.queued())
     });
-    plane.legacy_seq.insert((), (cycle, issued));
     for (server, uri) in announced {
         super::door_sessions::announce(plane, &server, &uri);
     }
     wake_all(plane, woken);
+    result
+}
+
+pub(super) fn acknowledge(
+    plane: &McpDoor,
+    out: &mut Out<'_, PlaneDriveOut>,
+) -> Result<bool, Error> {
+    plane.legacy_seq.with_all(|states| {
+        let Some(state) = states.get_mut(&()) else {
+            return Ok(false);
+        };
+        // Only a successful session-buffer answer reaches this point. A short answer retains
+        // consumed results for its retry and never exposes an ACK on Failed/SHORT.
+        if let Some(ack) = state.retirement.acknowledgement(0)? {
+            out.completion_ack(&plane.inspection_leases, &ack)?;
+        }
+        Ok(state.retirement.queued())
+    })
+}
+
+fn pending(plane: &McpDoor) -> bool {
+    plane.legacy.with_all(|links| {
+        links.values().any(|link| {
+            link.handle.is_some()
+                || link
+                    .replying
+                    .as_ref()
+                    .is_some_and(|reply| reply.handle.is_some())
+        })
+    })
 }
 
 /// `dropped` replies a call took from the stream of `key` but has no answer to audit them on: counted
@@ -794,11 +1048,13 @@ pub(super) fn cancelled(plane: &McpDoor, ticket: Ticket) {
             for id in gone {
                 l.waiters.remove(&id);
                 l.notes.remove(&id);
+                l.notes_bytes.remove(&id);
             }
             l.answers.retain(|id, (t, _)| {
                 let mine = *t == ticket;
                 if mine {
                     l.notes.remove(id);
+                    l.notes_bytes.remove(id);
                 }
                 !mine
             });
@@ -808,10 +1064,24 @@ pub(super) fn cancelled(plane: &McpDoor, ticket: Ticket) {
                 l.init_by = None;
                 woken.append(&mut l.parked);
             }
+            if l.dead.is_some() && l.answers.is_empty() {
+                woken.append(&mut l.parked);
+            }
         }
         woken
     });
     wake_all(plane, woken);
+}
+
+/// The initialization work owned by one call, retained before a POST can pend.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum CallInit {
+    #[default]
+    Waiting,
+    Posting,
+    Answer,
+    Notifying,
+    Done,
 }
 
 /// One call's place on a held stream, parked on its unit across PENDING entries.
@@ -823,9 +1093,8 @@ pub(super) struct Calling {
     id: Option<u64>,
     /// Its own POST was taken.
     posted: bool,
-    /// This call runs the link's `initialize`: 1 its POST taken, 2 its answer read, 3 the
-    /// notification taken.
-    init: u8,
+    /// This call's owned initialization phase, including a pending first POST.
+    init: CallInit,
 }
 
 /// What a call came to: the answer under the id it carried (an event stream, its progress and the
@@ -861,7 +1130,23 @@ pub(super) fn call(
     let ticket = instance.ticket();
     if state.is_none() {
         let now = plane.driver.get(&()).map_or(0, |(_, now)| now);
+        let mut retired = Vec::new();
         let opened = plane.legacy.with_all(|m| {
+            if let Some(link) = m.get_mut(key).filter(|link| link.url != original.url) {
+                link.die(
+                    "the registered MCP endpoint changed; this legacy stream is no longer used",
+                    &mut retired,
+                );
+            }
+            if let Some(previous) = m
+                .get_mut(key)
+                .filter(|link| link.dead.is_some() && (!link.answers.is_empty() || link.retiring()))
+            {
+                if !previous.parked.contains(&ticket) {
+                    previous.parked.push(ticket);
+                }
+                return Ok(None);
+            }
             let usable = m.get(key).is_some_and(|l| l.dead.is_none());
             if !usable {
                 // ADMISSION BOUNDS THE TABLE: past its bound an idle stream (no call on it) is let
@@ -877,7 +1162,7 @@ pub(super) fn call(
                                 "MCP server `{member}`: busbar already holds {MAX_LINKS} \
                                  2024-11-05 event streams, each in use by a call, and opens no \
                                  more until one is let go"
-                            ))
+                            ));
                         }
                     }
                 }
@@ -892,15 +1177,20 @@ pub(super) fn call(
                 link.stale = stale;
                 m.insert(key.to_string(), link);
             }
-            Ok(m.get_mut(key).map_or(0, |l| {
+            Ok(m.get_mut(key).map(|l| {
                 if now != 0 {
                     l.last_used = now;
                 }
                 l.generation
             }))
         });
+        wake_all(plane, retired);
         let generation = match opened {
-            Ok(generation) => generation,
+            Ok(Some(generation)) => generation,
+            Ok(None) => {
+                super::door_listen::wake_driver(plane);
+                return Poll::Pending;
+            }
             Err(why) => return Poll::Ready(Err(why)),
         };
         *state = Some(Calling {
@@ -921,8 +1211,15 @@ pub(super) fn call(
                 if let Some((_, body)) = l.answers.remove(&text) {
                     // The call's own progress, and the link's log records, ride its answer.
                     let mut frames = l.notes.remove(&text).unwrap_or_default();
+                    l.notes_bytes.remove(&text);
                     frames.append(&mut l.logs);
-                    return Next::Answered(body, frames, id, std::mem::take(&mut l.dropped));
+                    l.logs_bytes = 0;
+                    let woken = if l.dead.is_some() && l.answers.is_empty() {
+                        std::mem::take(&mut l.parked)
+                    } else {
+                        Vec::new()
+                    };
+                    return Next::Answered(body, frames, id, std::mem::take(&mut l.dropped), woken);
                 }
             }
             if let Some(why) = &l.dead {
@@ -932,29 +1229,39 @@ pub(super) fn call(
                 return Next::Fail(why.clone());
             }
             let Some(address) = l.address.clone() else {
-                l.parked.push(ticket);
+                if !l.parked.contains(&ticket) {
+                    l.parked.push(ticket);
+                }
                 return Next::Wait;
             };
             match (l.init, st.init) {
-                (Init::Idle, 0) => {
+                (Init::Idle, CallInit::Waiting) => {
                     // This call runs the link's `initialize`: its answer is waited for under its id,
                     // registered before the POST leaves.
                     l.init = Init::Running;
                     l.init_by = Some(ticket);
+                    st.init = CallInit::Posting;
                     l.waiters
                         .insert(Value::from(INITIALIZE_ID).to_string(), ticket);
                     Next::PostInit(address)
                 }
-                (Init::Running, 1) => {
+                (Init::Running, CallInit::Posting) if l.init_by == Some(ticket) => {
+                    Next::PostInit(address)
+                }
+                (Init::Running, CallInit::Answer) if l.init_by == Some(ticket) => {
                     let text = Value::from(INITIALIZE_ID).to_string();
                     match l.answers.remove(&text) {
                         Some((_, body)) => Next::Initialized(body),
                         None => Next::Wait,
                     }
                 }
-                (Init::Running, 2) => Next::PostInitialized(address),
+                (Init::Running, CallInit::Notifying) if l.init_by == Some(ticket) => {
+                    Next::PostInitialized(address)
+                }
                 (Init::Running, _) | (Init::Idle, _) => {
-                    l.parked.push(ticket);
+                    if !l.parked.contains(&ticket) {
+                        l.parked.push(ticket);
+                    }
                     Next::Wait
                 }
                 (Init::Done, _) if st.posted => Next::Wait,
@@ -979,7 +1286,8 @@ pub(super) fn call(
             }
         });
         match next {
-            Next::Answered(body, frames, id, dropped) => {
+            Next::Answered(body, frames, id, dropped, woken) => {
+                wake_all(plane, woken);
                 *state = None;
                 let (body, sse) = framed_answer(body, frames);
                 return Poll::Ready(Ok((body, sse, id, dropped)));
@@ -994,19 +1302,33 @@ pub(super) fn call(
                     initialize_request(original, &address, Revision::R2024_11_05, super::VERSION);
                 match post(instance, plane, (base, member), &request, timeout_ms) {
                     Poll::Pending => return Poll::Pending,
-                    Poll::Ready(Ok(())) => st.init = 1,
-                    Poll::Ready(Err(why)) => return Poll::Ready(Err(fail_link(plane, key, &why))),
+                    Poll::Ready(Ok(())) => st.init = CallInit::Answer,
+                    Poll::Ready(Err(why)) => {
+                        *state = None;
+                        return Poll::Ready(Err(fail_link(plane, key, &why)));
+                    }
                 }
             }
             Next::Initialized(body) => {
+                if let crate::client::jsonrpc::RpcOutcome::Error { code, message } =
+                    crate::client::jsonrpc::parse_response(&body, INITIALIZE_ID)
+                {
+                    let why = format!(
+                        "MCP server `{member}` refused legacy `initialize` with JSON-RPC {code}: {}",
+                        message.escape_debug()
+                    );
+                    *state = None;
+                    return Poll::Ready(Err(fail_link(plane, key, &why)));
+                }
                 if offered_revision(&body) != Some(Revision::R2024_11_05) {
                     let why = format!(
                         "MCP server `{member}` answered `initialize` on its 2024-11-05 event \
                          stream with a revision busbar does not carry there"
                     );
+                    *state = None;
                     return Poll::Ready(Err(fail_link(plane, key, &why)));
                 }
-                st.init = 2;
+                st.init = CallInit::Notifying;
             }
             Next::PostInitialized(address) => {
                 let request =
@@ -1020,7 +1342,7 @@ pub(super) fn call(
                 ) {
                     Poll::Pending => return Poll::Pending,
                     Poll::Ready(Ok(())) => {
-                        st.init = 3;
+                        st.init = CallInit::Done;
                         let woken = plane.legacy.with(&key.to_string(), |l| {
                             l.map(|l| {
                                 l.init = Init::Done;
@@ -1031,25 +1353,20 @@ pub(super) fn call(
                         });
                         wake_all(plane, woken);
                     }
-                    Poll::Ready(Err(why)) => return Poll::Ready(Err(fail_link(plane, key, &why))),
+                    Poll::Ready(Err(why)) => {
+                        *state = None;
+                        return Poll::Ready(Err(fail_link(plane, key, &why)));
+                    }
                 }
             }
             Next::PostCall(address, id) => {
-                let mut request =
+                let request =
                     lower_request(original, &address, Revision::R2024_11_05, None, Some(id));
-                // A progress token the request carries names this call on the stream, so the
-                // server's progress reaches this call and no other.
-                if let Ok(mut body) = serde_json::from_slice::<Value>(&request.body) {
-                    if let Some(token) = body
-                        .pointer_mut("/params/_meta/progressToken")
-                        .filter(|t| !t.is_null())
-                    {
-                        *token = Value::from(format!("{PROGRESS_PREFIX}{id}"));
-                        if let Ok(bytes) = serde_json::to_vec(&body) {
-                            request.body = bytes;
-                        }
+                plane.legacy.with(&key.to_string(), |link| {
+                    if let Some(link) = link.filter(|link| link.generation == st.generation) {
+                        link.fields.clone_from(&request.headers);
                     }
-                }
+                });
                 match post(
                     instance,
                     plane,
@@ -1076,7 +1393,7 @@ pub(super) fn call(
 
 /// What a call does next, decided under the link's lock.
 enum Next {
-    Answered(Vec<u8>, Vec<Value>, u64, u32),
+    Answered(Vec<u8>, Vec<Value>, u64, u32, Vec<Ticket>),
     Fail(String),
     Wait,
     PostInit(String),

@@ -3,6 +3,80 @@
 
 use super::*;
 
+#[derive(Clone, Debug)]
+struct Deferred(usize);
+
+impl From<String> for Deferred {
+    fn from(text: String) -> Self {
+        Self(text.len())
+    }
+}
+
+impl ReplayData for Deferred {
+    fn len(&self) -> usize {
+        self.0
+    }
+}
+
+#[test]
+fn deferred_events_have_the_same_replay_and_eviction_charge_as_their_encoded_bytes() {
+    let bounds = Bounds {
+        max_session_bytes: 256,
+        ..Bounds::default()
+    };
+    let mut eager = SessionTable::new(bounds);
+    let mut lazy = ReplayTable::<Deferred>::new(bounds);
+    let who = owner("alice");
+    let id = eager
+        .open(entropy(900), who.clone(), Revision::R2025_06_18, 0)
+        .unwrap();
+    assert_eq!(
+        lazy.open(entropy(900), who.clone(), Revision::R2025_06_18, 0)
+            .unwrap(),
+        id
+    );
+    let stream = eager.open_stream(&id, &who, 0).unwrap();
+    assert_eq!(lazy.open_stream(&id, &who, 0), Some(stream));
+    let cursor = format!("{stream}-0");
+    for (caller, stream) in [(owner("mallory"), stream), (who.clone(), stream + 1)] {
+        assert!(lazy
+            .push_prepared(
+                &id,
+                &caller,
+                stream,
+                Deferred(10),
+                |_, _| -> Result<Deferred, ()> {
+                    panic!("unowned history cannot prepare output storage")
+                },
+                1
+            )
+            .unwrap()
+            .is_none());
+    }
+    for length in [80, 120, 20, 400, 15] {
+        assert_eq!(
+            eager.push(&id, &who, stream, &"x".repeat(length), 1),
+            lazy.push_data(&id, &who, stream, Deferred(length), 1)
+        );
+        assert_eq!(eager.total_bytes, lazy.total_bytes);
+        assert_eq!(eager.owners, lazy.owners);
+        let eager = eager.replay(&id, &who, &cursor, 1).unwrap();
+        let lazy = lazy.replay(&id, &who, &cursor, 1).unwrap();
+        assert_eq!(eager.complete, lazy.complete);
+        assert_eq!(
+            eager
+                .events
+                .iter()
+                .map(|(id, text)| (id, text.len()))
+                .collect::<Vec<_>>(),
+            lazy.events
+                .iter()
+                .map(|(id, text)| (id, text.len()))
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
 fn owner(p: &str) -> Owner {
     Owner {
         principal: p.to_string(),

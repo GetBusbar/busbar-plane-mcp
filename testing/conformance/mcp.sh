@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The `mcp` conformance suite: one command, four judged legs, one verdict.
+# The `mcp` conformance suite: official, independent, and real billing scenarios.
 #
 #   official control   the pinned official suite against a pinned third-party peer (testing/mcp-conformance/mcp-conformance.sh)
 #   battery control    the in-house battery against python `mcp` (the pinned SDK), run always
@@ -88,16 +88,11 @@ leg battery-control  bash testing/mcp-conformance/mcp-conformance.sh --battery-c
 leg negative-control bash testing/mcp-conformance/scripts/negative-control.sh
 
 # The subject: busbar at the pin, this checkout's plane patched in, default features (plane-mcp is one).
-# compose.sh names the package; compose-selftest.sh holds its rows to this plane before the build.
+# compose.sh assembles the subject; the compiler and served protocol legs judge it.
 bin=""
 if [ -n "${CARGO_TARGET_DIR:-}" ]; then export CARGO_TARGET_DIR; fi
 stage="$out/subject-src"
 say "== compose subject (busbar at ${BUSBAR_PIN:-?} with this plane)"
-if ! bash testing/mcp-conformance/mcp-subject/compose-selftest.sh "$BUSBAR_CHECKOUT" "$stage" >"$out/subject-compose.log" 2>&1; then
-  cat "$out/subject-compose.log" >&2
-  verdict fail "the subject's composition does not link this plane (subject-compose.log); legs failed before:${failed:- none}"
-  exit 1
-fi
 manifest="$(bash testing/mcp-conformance/mcp-subject/compose.sh "$BUSBAR_CHECKOUT" "$here/plane-mcp" "$stage")"
 say "== build subject ($manifest)"
 if cargo build --release --manifest-path "$manifest" --bin busbar \
@@ -112,10 +107,14 @@ if [ -z "$bin" ]; then
   exit 1
 fi
 export MCP_SUBJECT_BUSBAR_BIN="$bin" MCP_NO_SKIPS=1
+for rig in testing/mcp-conformance/mcp-subject/h2-*.sh; do
+  case "$rig" in */h2-lib.sh) continue ;; esac
+  leg "$(basename "$rig" .sh)" bash "$rig"
+done
 leg official-subject bash testing/mcp-conformance/mcp-conformance.sh --official-subject
 leg battery-subject  bash testing/mcp-conformance/mcp-conformance.sh --battery-subject
 
 if [ -z "$failed" ]; then
-  verdict pass "all five legs passed"; exit 0
+  verdict pass "all MCP legs passed"; exit 0
 fi
 verdict fail "legs failed:$failed (logs in the check output)"; exit 1

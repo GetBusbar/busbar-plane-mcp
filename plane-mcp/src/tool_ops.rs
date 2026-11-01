@@ -6,11 +6,9 @@
 //!
 //! ## Why the table is written here rather than read from the codec
 //!
-//! The codec crate holds this list too, in the constant its dispatch is checked against. That
-//! constant is visible to its own crate only, and this crate may not widen it. So the table is
-//! written once more here and then PINNED — the tests read the codec's own source and the
-//! conformance battery's own suites and assert that neither of them names a method this table does
-//! not. A copy that is checked is not a second opinion; a copy that is not checked is.
+//! The sibling `codec` module carries the accepted wire methods; this table additionally assigns
+//! their operation classes and sender roles. Tests compare those wire names and the battery's
+//! methods with this table so the two responsibilities cannot silently drift.
 //!
 //! ## Three kinds of row
 //!
@@ -106,7 +104,7 @@ pub const OP_CLASSES: &[OpClassId] = &[
 pub enum Sender {
     /// A caller sends it and this node answers.
     Client,
-    /// An upstream sends it back mid-call, opening a unit of its own.
+    /// An upstream sends it back mid-call, relayed inside the call's unit without opening one.
     Provider,
 }
 

@@ -68,8 +68,8 @@ pub fn probe_outcome(status: u16, body: &[u8]) -> StepOutcome {
 ///   earlier revisions are tried before the upstream is taken for a stateless one, and the `4xx`
 ///   never reaches the caller as the call's answer;
 /// - a JSON-RPC error `-32022` (the revision is unsupported), at any status;
-/// - a JSON-RPC error whose message names the session or the initialization the request skipped
-///   (`Bad Request: No valid session ID provided`, `Server not initialized`), at any status.
+/// - an invalid-request/params or generic server error with a recognised missing-session or
+///   uninitialized-server message; an application error mentioning a session is still its answer.
 ///
 /// A `5xx`, or no answer, says nothing about the revision.
 #[must_use]
@@ -92,7 +92,20 @@ pub fn stateless_outcome(status: u16, body: &[u8]) -> StepOutcome {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_ascii_lowercase();
-    let names_session = message.contains("session") || message.contains("initializ");
+    let names_session = matches!(
+        code,
+        Some(CODE_INVALID_REQUEST | CODE_INVALID_PARAMS | -32000)
+    ) && matches!(
+        message.trim().trim_end_matches('.'),
+        "server not initialized"
+            | "server is not initialized"
+            | "not initialized"
+            | "bad request: no valid session id provided"
+            | "no valid session id provided"
+            | "missing session id"
+            | "session id is required"
+            | "invalid session id"
+    );
     if code == Some(CODE_UNSUPPORTED_PROTOCOL_VERSION) || names_session {
         StepOutcome::Refused4xx
     } else {
@@ -250,7 +263,12 @@ fn origin_of(url: &str) -> Option<(&str, &str)> {
 /// [`AddressRefused`] for another origin or an unreadable address.
 pub fn message_address(base: &str, event_data: &str) -> Result<String, AddressRefused> {
     let data = event_data.trim();
-    if data.is_empty() || data.chars().any(char::is_whitespace) || data.starts_with("//") {
+    if data.is_empty()
+        || data
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || c == '\\')
+        || data.starts_with("//")
+    {
         return Err(AddressRefused::Malformed);
     }
     let (scheme, authority) = origin_of(base).ok_or(AddressRefused::Malformed)?;
@@ -291,8 +309,10 @@ pub struct EventReader {
     line: Vec<u8>,
     /// The unfinished event's `event:` name.
     event: Option<String>,
-    /// The unfinished event's `data:` lines.
-    data: Vec<String>,
+    /// The unfinished event's joined `data:` lines, with their trailing newline until dispatch.
+    data: String,
+    has_data: bool,
+    first_line: bool,
     /// The bytes read since the last event ended: what the bound counts.
     held: usize,
     /// The last byte ended a line with a CR: an LF next is the rest of that CRLF.
@@ -308,7 +328,9 @@ impl EventReader {
         Self {
             line: Vec::new(),
             event: None,
-            data: Vec::new(),
+            data: String::new(),
+            has_data: false,
+            first_line: true,
             held: 0,
             after_cr: false,
             max_pending,
@@ -326,11 +348,23 @@ impl EventReader {
     /// neither a name nor data are skipped.
     pub fn feed(&mut self, chunk: &[u8]) -> Vec<StreamEvent> {
         let mut out = Vec::new();
+        if self.overflowed {
+            return out;
+        }
         for &b in chunk {
             if std::mem::take(&mut self.after_cr) && b == b'\n' {
                 continue;
             }
-            self.held += 1;
+            self.held = self.held.saturating_add(1);
+            if self.held > self.max_pending {
+                self.line.clear();
+                self.event = None;
+                self.data.clear();
+                self.has_data = false;
+                self.held = 0;
+                self.overflowed = true;
+                break;
+            }
             match b {
                 b'\r' => {
                     self.after_cr = true;
@@ -340,23 +374,23 @@ impl EventReader {
                 _ => self.line.push(b),
             }
         }
-        if self.held > self.max_pending {
-            self.line.clear();
-            self.event = None;
-            self.data.clear();
-            self.held = 0;
-            self.overflowed = true;
-        }
         out
     }
 
     /// The current line ended: a blank line ends the event (handed on when it named or carried
     /// anything), any other line is read as a field.
     fn end_line(&mut self, out: &mut Vec<StreamEvent>) {
+        if std::mem::take(&mut self.first_line) && self.line.starts_with(&[0xef, 0xbb, 0xbf]) {
+            drop(self.line.drain(..3));
+        }
         if self.line.is_empty() {
             let event = self.event.take();
-            let data = std::mem::take(&mut self.data).join("\n");
-            if event.is_some() || !data.is_empty() {
+            let mut data = std::mem::take(&mut self.data);
+            let has_data = std::mem::take(&mut self.has_data);
+            if has_data {
+                data.pop();
+            }
+            if event.is_some() || has_data {
                 out.push(StreamEvent { event, data });
             }
             self.held = 0;
@@ -371,7 +405,11 @@ impl EventReader {
         let value = value.strip_prefix(' ').unwrap_or(value);
         match field {
             "event" => self.event = Some(value.to_string()),
-            "data" => self.data.push(value.to_string()),
+            "data" => {
+                self.data.push_str(value);
+                self.data.push('\n');
+                self.has_data = true;
+            }
             _ => {}
         }
     }

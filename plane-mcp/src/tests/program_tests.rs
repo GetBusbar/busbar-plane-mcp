@@ -187,15 +187,9 @@ impl Peer for Door {
 }
 
 /// A `tools/list` exchange with the member, under `id`, driven to its end.
-fn list(door: &mut Door, id: u64, ticket: u32) -> Exchanged {
+fn list(door: &mut Door, id: Value, ticket: u32) -> Exchanged {
     let host = ChildConn;
-    let request = crate::client::jsonrpc::tools_list("", id, None).body;
-    let mut exchange = ProgramExchange::new(
-        "srv",
-        crate::statement::NEED_PROGRAM,
-        vec![(request, Some(id))],
-        true,
-    );
+    let mut exchange = ProgramExchange::listing("srv", crate::statement::NEED_PROGRAM, id, true);
     let ticket = Ticket {
         slot: ticket,
         generation: 1,
@@ -297,7 +291,7 @@ fn an_exchange_takes_its_own_answer_and_handles_the_childs_messages() {
         ..Door::default()
     };
     let id = list_id(7, 0);
-    let done = list(&mut door, id, 7);
+    let done = list(&mut door, id.clone(), 7);
     let answer: Value = serde_json::from_slice(&done.answer.expect("an answer")).unwrap();
     assert_eq!(answer["id"], json!(id), "its own id, not 424242");
     assert_eq!(answer["result"]["tools"][0]["name"], json!("echo"));

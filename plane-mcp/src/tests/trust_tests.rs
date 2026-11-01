@@ -28,7 +28,7 @@ fn schema() -> Value {
 fn rooted(hash: &str) -> McpServerDefCfg {
     def(json!({
         "url": "https://fs.example/rpc",
-        "pin": { "mechanism": "pinned_pubkey", "key": "sha256/K=" },
+        "pin": { "mechanism": "cert_spki", "key": "sha256/47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=" },
         "tools_allow": { "read": { "schema_hash": hash }, "write": {} }
     }))
 }
@@ -133,7 +133,7 @@ fn the_views_render_the_served_engines_fields_in_its_order() {
     assert_eq!(
         view,
         json!({
-            "name": "fs", "state": "approved", "pin_mechanism": "pinned_pubkey",
+            "name": "fs", "state": "approved", "pin_mechanism": "cert_spki",
             "pin_changed": false, "added": [], "changed": [], "removed": [],
             "observed_tools": 1, "failure": null,
             "capabilities": [

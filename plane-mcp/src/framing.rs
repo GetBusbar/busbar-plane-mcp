@@ -228,6 +228,14 @@ impl Framing {
         if status != 200 {
             return (body, false);
         }
+        let frames = self.frames(status, progress);
+        match event_stream(&body, &frames) {
+            Some(stream) => (stream, true),
+            None => (body, false),
+        }
+    }
+
+    fn frames(&self, status: u32, progress: &[Value]) -> Vec<Value> {
         let logs = [
             (
                 "debug",
@@ -247,10 +255,11 @@ impl Framing {
                 frames.push(json!({ "jsonrpc": "2.0", "method": "notifications/message", "params": params }));
             }
         }
-        match event_stream(&body, &frames) {
-            Some(stream) => (stream, true),
-            None => (body, false),
-        }
+        frames
+    }
+
+    pub(super) fn local_prefix(&self) -> Vec<u8> {
+        events(&self.frames(200, &[]))
     }
 }
 

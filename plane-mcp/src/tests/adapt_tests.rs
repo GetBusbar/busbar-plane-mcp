@@ -204,10 +204,10 @@ fn the_param_mirror_names_every_annotated_string_integer_and_boolean_argument() 
     assert_eq!(
         mirror,
         vec![
-            ("mcp-param-Count".to_string(), "3".to_string()),
-            ("mcp-param-Dry".to_string(), "false".to_string()),
-            ("mcp-param-Region".to_string(), "eu-west".to_string()),
-            ("mcp-param-Zone".to_string(), "b".to_string()),
+            ("mcp-param-count".to_string(), "3".to_string()),
+            ("mcp-param-dry".to_string(), "false".to_string()),
+            ("mcp-param-region".to_string(), "eu-west".to_string()),
+            ("mcp-param-zone".to_string(), "b".to_string()),
         ]
     );
     assert!(param_mirror(None, Some(&args)).is_empty());

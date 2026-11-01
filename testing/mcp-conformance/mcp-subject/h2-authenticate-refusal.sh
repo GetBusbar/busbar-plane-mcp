@@ -39,10 +39,10 @@ detail=""
 probe() {
   local bearer="$1"
   local -a auth=()
-  [ -n "$bearer" ] && auth=(-H "authorization: Bearer $bearer")
+  [ -n "$bearer" ] && auth=(-H @/dev/fd/3)
   curl -sS -o /dev/null -w '%{http_code}' -m 15 -X POST "$H2_CANON" \
     -H 'content-type: application/json' -H 'mcp-method: tools/call' \
-    -H 'mcp-protocol-version: 2026-07-28' -H 'Mcp-Name: probe_ping' "${auth[@]}" \
+    -H 'mcp-protocol-version: 2026-07-28' -H 'Mcp-Name: probe_ping' ${auth[@]+"${auth[@]}"} 3<<<"authorization: Bearer $bearer" \
     -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"probe_ping","arguments":{"label":"probe"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}'
 }
 
@@ -60,7 +60,7 @@ read -r kid tok <<<"$(h2_mint h2-oracle)"
 if [ -z "$tok" ]; then
   failures=$((failures+1)); detail="${detail}mint failed; "
 else
-  wrong_bound="$(node "${here}/mint-audience-token.mjs" "$H2_SIGNING_KEY" "$tok" "http://127.0.0.1:${H2_DATA_PORT}/mcp-not-this-resource")"
+  wrong_bound="$(node "${here}/mint-audience-token.mjs" "$H2_SIGNING_KEY" "http://127.0.0.1:${H2_DATA_PORT}/mcp-not-this-resource" 3<<<"$tok")"
   got_wrong="$(probe "$wrong_bound")"
   [ "$got_wrong" = "401" ] || { failures=$((failures+1)); detail="${detail}wrong-audience->${got_wrong}(want 401); "; }
 

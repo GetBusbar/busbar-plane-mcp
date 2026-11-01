@@ -227,3 +227,6 @@ fn a_pending_cleanup_lookup_keeps_its_state_and_preserves_retained_results() {
     assert_eq!(d.piece(3, &Given::caller(ALICE, &body)).status, 200);
     assert_completed(&get(&d, 4, &task), "pending cleanup");
 }
+
+#[path = "inspection_task_controls.rs"]
+mod inspection_controls;

@@ -55,7 +55,7 @@ pub struct McpCfg {
 /// half-configured is worse than one that is absent, because it answers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct McpResource {
-    /// The canonical URI verbatim, as configured. THE audience.
+    /// The configured canonical URI after trimming surrounding whitespace. THE audience.
     canonical_uri: String,
     /// The absolute RFC 9728 section 3.1 metadata URL (the well-known prefix, then the resource's
     /// path), which is what goes in the challenge.

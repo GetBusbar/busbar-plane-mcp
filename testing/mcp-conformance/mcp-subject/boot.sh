@@ -88,28 +88,15 @@ subject_free_ports() {
 # with an empty registry answers every content scenario with "is not a tool this server exposes",
 # which is the CORRECT answer for a gateway fronting nothing and tells nobody anything about
 # busbar's conformance. The registration goes through the ordinary path in full: a server id, a
-# declared authenticity root, and a per-tool approved digest. Nothing here is bypassed — a tool the
+# pin declaration, and a per-tool approved digest. The plaintext fixtures below have no root. A tool the
 # operator has not approved a digest for is catalogued and refuses to dispatch, so an approval had
 # to be written for each one, exactly as an operator would.
 #
-# THE AUTHENTICITY ROOT IS `pinned_pubkey`, NOT `cert_spki`, AND THAT IS DELIBERATE — the same class
-# of fix as the digest one below, applied to the identity axis. The fixtures are reached over
-# PLAINTEXT loopback `http://` (they are internal node servers; `allow_private: true` says so out
-# loud), so there is no TLS hop and therefore no peer certificate to walk. busbar 1.6.0 now ENFORCES
-# `cert_spki`/`mtls` by re-hashing the SPKI the live hop actually presented and comparing it against
-# the operator's pin — the fix for a real bug where the declared pin was fed back as its own
-# "observed" value and `pin_changed` could never be true. On a plaintext hop that enforced
-# observation is `None`, which is a demotion (`connect.rs`: "we could not look" and "it matched" are
-# the two answers a pin exists to keep apart), so a `cert_spki` registration here QUARANTINES on its
-# first boot connect — busbar's defence working exactly as built, against a rig that declared a
-# transport-cert pin on a transport that carries no cert. `pinned_pubkey` is the honest root for this
-# hop: it names an MCP-native manifest signature busbar does not independently attest, so it has no
-# observation source of its own and correctly degrades to the declared value (`observed_pin`'s `_`
-# arm). The first honest connect therefore lands `approved`, while the security property this rig
-# actually exercises — the per-tool digest rug-pull on the CAPABILITY axis — still quarantines a
-# changed tool set exactly as before (see the `probe` registration's note). The `cert_spki`/`mtls`
-# enforcement itself is unchanged and stays under test in `crates/busbar-mcp` (`transport_pin_tests`,
-# which drive a REAL TLS handshake against the throw-away `test_ca`).
+# These fixtures use plaintext loopback and authenticate no far-end key. They are explicitly
+# unpinned, so they cannot become approved: the existing boot-time connect assertion below must
+# fail until this harness serves trusted HTTPS fixtures with cert_spki or mtls. A pinned_pubkey
+# declaration is not a substitute; this build verifies no MCP manifest signature. No passing
+# conformance or signing claim may be derived from this unauthenticated fixture configuration.
 #
 # The server id is `test` and the tools are named without that prefix, because busbar's routing key
 # is `{server}_{tool}`: `test` + `simple_text` is the `test_simple_text` the suite asks for, produced
@@ -158,6 +145,9 @@ can be trusted. Re-align it with mcp::client::catalogue::tool_digest and the pin
     node testing/mcp-conformance/mcp-subject/tool-digest.mjs "$MCP_SEAM_UPSTREAM_URL" \
       | sed "s/^/probe /" >> "$SUBJECT_DIGESTS" \
       || die "could not digest the seam peer's honest tool list for the probe registration."
+    node testing/mcp-conformance/mcp-subject/tool-digest.mjs "$MCP_SEAM_RIGHT_UPSTREAM_URL" \
+      | sed "s/^/seamright /" >> "$SUBJECT_DIGESTS" \
+      || die "could not digest the independent seam peer's honest tool list."
   fi
   say "   fixture digests recorded: $(wc -l < "$SUBJECT_DIGESTS" | tr -d ' ') approvals in $SUBJECT_DIGESTS"
 }
@@ -205,10 +195,8 @@ tools:
     url: "http://127.0.0.1:$upstream_port/mcp/json"
     allow_private: true
     pin:
-      # pinned_pubkey, NOT cert_spki: this hop is plaintext loopback, so there is no served cert to
-      # observe an SPKI from. See the header — cert_spki here quarantines under 1.6.0 enforcement.
-      mechanism: pinned_pubkey
-      key: "sha256/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      # Plaintext fixture: no authenticity root, never approved. See the harness header.
+      mechanism: unpinned
     tools_allow:
         # \`json-schema-2020-12\`. THE SCHEMA IS THE POINT: the scenario reads \`inputSchema\` off
         # \`tools/list\` and asserts the 2020-12 keywords survived. Declared here in full because busbar
@@ -258,10 +246,8 @@ tools:
     # refuses a private address by default and this registration genuinely is an internal one.
     allow_private: true
     pin:
-      # pinned_pubkey, NOT cert_spki: this hop is plaintext loopback, so there is no served cert to
-      # observe an SPKI from. See the header — cert_spki here quarantines under 1.6.0 enforcement.
-      mechanism: pinned_pubkey
-      key: "sha256/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      # Plaintext fixture: no authenticity root, never approved. See the harness header.
+      mechanism: unpinned
     # A DESCRIPTION PER TOOL, because busbar publishes the OPERATOR's description rather than the
     # upstream's: what an approval means is that this operator vouched for this tool, and echoing
     # text the upstream can rewrite at will would let it edit its own approval. The suite requires
@@ -670,7 +656,7 @@ tools:
   #     confirm  + delete     = confirm_delete
   #     multi    + input      = multi_input
   #
-  # Every one goes through the REAL registration path in full — a declared authenticity root and a
+  # Every one goes through the ordinary registration path with no authenticity root and a
   # per-tool approved digest — exactly as \`test\` and \`json\` do, and for the reason this file's
   # header gives: a tool the operator has not approved a digest for is catalogued and refuses to
   # dispatch, so an approval had to be written for each.
@@ -685,10 +671,8 @@ tools:
     url: "http://127.0.0.1:$upstream_port/mcp/slow"
     allow_private: true
     pin:
-      # pinned_pubkey, NOT cert_spki: this hop is plaintext loopback, so there is no served cert to
-      # observe an SPKI from. See the header — cert_spki here quarantines under 1.6.0 enforcement.
-      mechanism: pinned_pubkey
-      key: "sha256/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      # Plaintext fixture: no authenticity root, never approved. See the harness header.
+      mechanism: unpinned
     tools_allow:
       # \`optional\`, NOT \`required\`, and the difference is asserted directly:
       # sep-2663-server-rejects-undeclared-client calls this tool from a session that declared
@@ -717,10 +701,8 @@ tools:
     url: "http://127.0.0.1:$upstream_port/mcp/failing"
     allow_private: true
     pin:
-      # pinned_pubkey, NOT cert_spki: this hop is plaintext loopback, so there is no served cert to
-      # observe an SPKI from. See the header — cert_spki here quarantines under 1.6.0 enforcement.
-      mechanism: pinned_pubkey
-      key: "sha256/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      # Plaintext fixture: no authenticity root, never approved. See the harness header.
+      mechanism: unpinned
     tools_allow:
       # \`required\` HERE, and it is what tasks-required-task-error reads. That scenario calls this
       # tool from a client that declared no extension and requires -32021 with
@@ -744,10 +726,8 @@ tools:
     url: "http://127.0.0.1:$upstream_port/mcp/protocol"
     allow_private: true
     pin:
-      # pinned_pubkey, NOT cert_spki: this hop is plaintext loopback, so there is no served cert to
-      # observe an SPKI from. See the header — cert_spki here quarantines under 1.6.0 enforcement.
-      mechanism: pinned_pubkey
-      key: "sha256/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      # Plaintext fixture: no authenticity root, never approved. See the harness header.
+      mechanism: unpinned
     tools_allow:
       # The OTHER half of the error-semantics pair: this upstream answers a JSON-RPC error, so
       # nothing ran and there is no tool output to report. The task settles \`failed\` with an
@@ -765,10 +745,8 @@ tools:
     url: "http://127.0.0.1:$upstream_port/mcp/confirm"
     allow_private: true
     pin:
-      # pinned_pubkey, NOT cert_spki: this hop is plaintext loopback, so there is no served cert to
-      # observe an SPKI from. See the header — cert_spki here quarantines under 1.6.0 enforcement.
-      mechanism: pinned_pubkey
-      key: "sha256/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      # Plaintext fixture: no authenticity root, never approved. See the harness header.
+      mechanism: unpinned
     tools_allow:
       # \`task_ask_caller:\` RATHER THAN \`ask_caller:\`, and the two are not interchangeable.
       # \`ask_caller:\` is the SEP-2322 synchronous exchange — busbar answers tools/call with an
@@ -808,10 +786,8 @@ tools:
     url: "http://127.0.0.1:$upstream_port/mcp/multi"
     allow_private: true
     pin:
-      # pinned_pubkey, NOT cert_spki: this hop is plaintext loopback, so there is no served cert to
-      # observe an SPKI from. See the header — cert_spki here quarantines under 1.6.0 enforcement.
-      mechanism: pinned_pubkey
-      key: "sha256/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      # Plaintext fixture: no authenticity root, never approved. See the harness header.
+      mechanism: unpinned
     tools_allow:
       # TWO KEYS IN ONE ROUND, which is what makes partial fulfilment testable at all: the scenario
       # answers one key, requires the task to STAY \`input_required\` with only the other still
@@ -859,8 +835,8 @@ tools:
   # registration is exactly as safe as the five above and it fails loudly, at boot, if it ever stops
   # being.
   #
-  # THE REAL PATH, with nothing bypassed: a declared authenticity root and a per-tool approved
-  # digest, like every other fixture here. No \`task_support\`, because all four checks that call this
+  # This plaintext fixture has no authenticity root. Its per-tool approved
+  # digest cannot make it approvable without an authenticated endpoint. No \`task_support\`, because all four checks that call this
   # tool require a plain synchronous ToolResult with a non-empty content[] — a tool that could
   # answer with a task would make the sync baseline depend on which branch ran.
   #
@@ -874,10 +850,8 @@ tools:
     url: "http://127.0.0.1:$upstream_port/mcp/greeter"
     allow_private: true
     pin:
-      # pinned_pubkey, NOT cert_spki: this hop is plaintext loopback, so there is no served cert to
-      # observe an SPKI from. See the header — cert_spki here quarantines under 1.6.0 enforcement.
-      mechanism: pinned_pubkey
-      key: "sha256/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      # Plaintext fixture: no authenticity root, never approved. See the harness header.
+      mechanism: unpinned
     tools_allow:
       greet:
         publish_as: greet
@@ -915,8 +889,8 @@ YAML
   # constant tuned to the battery.
   #
   # Everything else goes through the ordinary path in full, exactly as the six registrations above
-  # do: a declared authenticity root, a per-tool approved digest, and `allow_private` said out loud
-  # because the peer is on loopback.
+  # do: an explicitly unpinned registration, a per-tool approved digest, and `allow_private`
+  # because the peer is on loopback. It cannot become approved without an authenticated endpoint.
   if [ -n "${MCP_SEAM_UPSTREAM_URL:-}" ]; then
     cat >> "$dir/config.yaml" <<YAML
 
@@ -929,14 +903,32 @@ YAML
     # busbar makes against THAT scenario's peer, not on a verdict latched by the previous attack.
     verify_ttl: ${SEAM_VERIFY_TTL_S}s
     pin:
-      # pinned_pubkey, NOT cert_spki: this hop is plaintext loopback, so there is no served cert to
-      # observe an SPKI from. See the header — cert_spki here quarantines under 1.6.0 enforcement.
-      mechanism: pinned_pubkey
-      key: "sha256/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      # Plaintext fixture: no authenticity root, never approved. See the harness header.
+      mechanism: unpinned
     tools_allow:
       echo:
         publish_as: echo
         schema_hash: "$(dg seam echo)"
+        description: "Returns the string it was given."
+        input_schema:
+          type: object
+          properties:
+            text:
+              type: string
+              description: "The text to echo."
+
+  # A separate HTTP process exposes the SAME bare tool name. The aggregate must
+  # keep it reachable independently of seam/echo; sharing one peer cannot prove it.
+  seamright:
+    url: "$MCP_SEAM_RIGHT_UPSTREAM_URL"
+    allow_private: true
+    timeout: 10s
+    verify_ttl: ${SEAM_VERIFY_TTL_S}s
+    pin:
+      mechanism: unpinned
+    tools_allow:
+      echo:
+        schema_hash: "$(dg seamright echo)"
         description: "Returns the string it was given."
         input_schema:
           type: object
@@ -972,10 +964,8 @@ YAML
     allow_private: true
     timeout: 10s
     pin:
-      # pinned_pubkey, NOT cert_spki: this hop is plaintext loopback, so there is no served cert to
-      # observe an SPKI from. See the header — cert_spki here quarantines under 1.6.0 enforcement.
-      mechanism: pinned_pubkey
-      key: "sha256/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      # Plaintext fixture: no authenticity root, never approved. See the harness header.
+      mechanism: unpinned
     tools_allow:
       echo:
         schema_hash: "$(dg probe echo)"
@@ -998,13 +988,13 @@ YAML
 subject_probe_status() {
   local url="$1" bearer="${2:-}"
   local -a auth=()
-  [ -n "$bearer" ] && auth=(-H "authorization: Bearer $bearer")
+  [ -n "$bearer" ] && auth=(-H @/dev/fd/3)
   curl -s -o /dev/null -w '%{http_code}' --max-time 15 -X POST "$url" \
     -H 'content-type: application/json' \
     -H 'mcp-method: tools/list' \
     -H 'mcp-protocol-version: 2026-07-28' \
-    "${auth[@]}" \
-    -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}'
+    ${auth[@]+"${auth[@]}"} 3<<<"authorization: Bearer $bearer" \
+    -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}' || :
 }
 
 # THE DISPROOF. Four tokens, one process, one endpoint. Three of them MUST be refused.
@@ -1026,12 +1016,14 @@ prove_the_boundary_is_intact() {
   if [ "$got" = "401" ]; then say "     ok:  token, WRONG audience    -> 401"
   else say "     BAD: token, WRONG audience    -> $got (expected 401)"; failures=$((failures+1)); fi
 
-  # The signature, altered by one character. Flipped to a DIFFERENT character deliberately, so the
+  # Alter the first signature character, whose six bits are signature data (never padding). Flipped to a DIFFERENT character deliberately, so the
   # token stays the same length and still base64url-decodes -- a truncated token would be refused as
   # malformed, which proves the parser works and says nothing about the signature check.
-  local tampered last
-  last="${bound: -1}"
-  if [ "$last" = "A" ]; then tampered="${bound%?}B"; else tampered="${bound%?}A"; fi
+  local tampered signature first replacement
+  signature="${bound##*.}"
+  first="${signature:0:1}"
+  if [ "$first" = A ]; then replacement=B; else replacement=A; fi
+  tampered="${bound%.*}.${replacement}${signature:1}"
   got=$(subject_probe_status "$direct" "$tampered")
   if [ "$got" = "401" ]; then say "     ok:  flipped signature        -> 401"
   else say "     BAD: flipped signature        -> $got (expected 401)"; failures=$((failures+1)); fi
@@ -1077,10 +1069,28 @@ busbar built FROM THIS COMMIT; if the build step did not produce one, that is th
   SUBJECT_PIDS="$!"
   say "   diagnostic upstream on $upstream_port"
 
+  if [ -n "${MCP_SEAM_UPSTREAM_URL:-}" ]; then
+    local right_port unused_data unused_admin unused_upstream
+    read -r right_port unused_data unused_admin unused_upstream <<<"$(subject_free_ports)"
+    export MCP_SEAM_RIGHT_CONTROL="$dir/seam-right-control.json"
+    printf '%s\n' '{"mode":"honest","transcript":null}' > "$MCP_SEAM_RIGHT_CONTROL"
+    export MCP_SEAM_RIGHT_UPSTREAM_URL="http://127.0.0.1:$right_port/mcp"
+    node testing/mcp-conformance/fakepeer/http-fake-server.mjs "$right_port" "$MCP_SEAM_RIGHT_CONTROL" \
+      >"$dir/seam-right-upstream.log" 2>&1 &
+    local right_pid=$!
+    SUBJECT_PIDS="$SUBJECT_PIDS $right_pid"
+    local right_started=$SECONDS
+    until [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 "$MCP_SEAM_RIGHT_UPSTREAM_URL")" != "000" ]; do
+      kill -0 "$right_pid" 2>/dev/null || die "independent seam peer exited during boot"
+      [ "$((SECONDS-right_started))" -lt 30 ] || die "independent seam peer did not listen"
+      sleep 1
+    done
+  fi
+
   # Listening, before anything asks it for a tool list. `000` is curl's "no connection".
-  local upstream_waited=0
+  local upstream_started=$SECONDS upstream_waited=0
   until [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 "http://127.0.0.1:$upstream_port/mcp")" != "000" ]; do
-    upstream_waited=$((upstream_waited+1))
+    upstream_waited=$((SECONDS-upstream_started))
     [ "$upstream_waited" -lt 30 ] || { tail -20 "$dir/upstream.log" >&2; die "the diagnostic upstream did not come up."; }
     sleep 1
   done
@@ -1107,10 +1117,10 @@ with an empty approval."
   # READINESS BY OBSERVATION. The wait ends when `/mcp` answers ANYTHING -- and here it will answer
   # `401`, which is a perfectly good proof that a resource server is listening. Waiting for a `200`
   # would make readiness depend on the very credential path this function has not built yet.
-  local direct="http://127.0.0.1:$data_port/mcp" waited=0
+  local direct="http://127.0.0.1:$data_port/mcp" started=$SECONDS waited=0
   until [ "$(subject_probe_status "$direct")" != "000" ]; do
     kill -0 "$busbar_pid" 2>/dev/null || { tail -40 "$dir/busbar.log" >&2; die "busbar exited during boot."; }
-    waited=$((waited+1))
+    waited=$((SECONDS-started))
     [ "$waited" -lt 60 ] || { tail -40 "$dir/busbar.log" >&2; die "busbar did not become ready within 60s."; }
     sleep 1
   done
@@ -1121,7 +1131,7 @@ with an empty approval."
   # never minted and a generation that does not match the durable row are both refused -- correctly.
   local plain
   plain=$(curl -s --max-time 15 -X POST "http://127.0.0.1:$admin_port/api/v1/admin/keys" \
-            -H "authorization: Bearer $admin_token" -H 'content-type: application/json' \
+            -H @/dev/fd/3 3<<<"authorization: Bearer $admin_token" -H 'content-type: application/json' \
             -d '{"name":"mcp-conformance-subject"}' \
           | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const t=JSON.parse(s).token; if(!t){console.error(s);process.exit(1);} process.stdout.write(t);})') \
     || die "the admin API did not mint a key. Without a real binding there is no subject to bind a \
@@ -1129,10 +1139,10 @@ token to, and a made-up one would be refused."
 
   local minter="testing/mcp-conformance/mcp-subject/mint-audience-token.mjs"
   local bound wrong
-  bound=$(node "$minter" "$dir/signing.key" "$plain" "$canonical") || die "could not mint the audience-bound token."
+  bound=$(node "$minter" "$dir/signing.key" "$canonical" 3<<<"$plain") || die "could not mint the audience-bound token."
   # The counterfactual, minted for an audience this deployment is not. Used only to prove the check
   # is live; if it were ever admitted, the plane boundary would be gone.
-  wrong=$(node "$minter" "$dir/signing.key" "$plain" "${canonical}-not-this-resource") \
+  wrong=$(node "$minter" "$dir/signing.key" "${canonical}-not-this-resource" 3<<<"$plain") \
     || die "could not mint the wrong-audience counterfactual."
 
   prove_the_boundary_is_intact "$direct" "$plain" "$bound" "$wrong"
@@ -1157,11 +1167,12 @@ token to, and a made-up one would be refused."
   #      weakened: the same sweep runs, the same comparison bites, and a real drift on an operator's
   #      deployment quarantines exactly as before.
   local connect_subjects="test json slow failing protocol confirm multi greeter"
-  [ -n "${MCP_SEAM_UPSTREAM_URL:-}" ] && connect_subjects="$connect_subjects seam probe"
+  [ -n "${MCP_SEAM_UPSTREAM_URL:-}" ] && connect_subjects="$connect_subjects seam seamright probe"
   local s view
   for s in $connect_subjects; do
     view=$(curl -s --max-time 45 -X POST "http://127.0.0.1:$admin_port/api/v1/admin/tools/$s/connect" \
-             -H "authorization: Bearer $admin_token")
+             -H @/dev/fd/3 3<<<"authorization: Bearer $admin_token") \
+      || die "the boot-time connect of '$s' did not complete"
     case "$view" in
       *'"state":"approved"'*) ;;
       *) die "the boot-time connect of '$s' did not land approved — the rig's approvals disagree \
@@ -1170,7 +1181,12 @@ with what the fixture actually serves: $view" ;;
   done
   say "   all $(echo "$connect_subjects" | wc -w | tr -d ' ') registrations connected and approved; next unattended re-check is refresh_ttl away"
 
-  node testing/mcp-conformance/mcp-subject/credential-shim.mjs "$mcp_port" "$data_port" "$bound" \
+  # The seam credential probe uses this boot's admitted token. Only the protected
+  # local file carries its bytes; observations retain hashes and match counts.
+  export MCP_SEAM_BEARER_FILE="$dir/seam-bearer"
+  export MCP_SEAM_FRONT_TRANSCRIPT="$dir/seam-front-headers.jsonl"
+  ( umask 077; printf '%s' "$bound" > "$MCP_SEAM_BEARER_FILE"; : > "$MCP_SEAM_FRONT_TRANSCRIPT" )
+  node testing/mcp-conformance/mcp-subject/credential-shim.mjs "$mcp_port" "$data_port" 3<<<"$bound" \
     >"$dir/credential-shim.log" 2>&1 &
   SUBJECT_PIDS="$SUBJECT_PIDS $!"
 
@@ -1202,47 +1218,3 @@ same token directly. That is a finding about the shim, not about busbar."
   # shellcheck disable=SC2034
   SUBJECT_ADMIN_TOKEN="$admin_token"
 }
-
-# ── --selftest ─────────────────────────────────────────────────────────────────────────────────────
-# `./testing/mcp-conformance/mcp-subject/boot.sh --selftest` -- no busbar, no node, no network. Sources this file into
-# a fresh shell with every option OFF and proves it leaves errexit, nounset and pipefail ON, and that
-# a failing producer in a pipeline is then a failure the `|| die` guards can see.
-boot_selftest() {
-  local self="${BASH_SOURCE[0]}" opts pipe failed=0
-  opts="$(bash -c 'set +e +u +o pipefail; . "$1"; o=""; [[ -o errexit ]] && o="${o}e"; [[ -o nounset ]] && o="${o}u"; [[ -o pipefail ]] && o="${o}p"; echo "$o"' _ "$self")"
-  if [ "$opts" = "eup" ]; then
-    printf 'ok\tsourcing boot.sh sets errexit, nounset and pipefail\n'
-  else
-    printf 'FAIL\tsourcing boot.sh left the options as [%s] (want e, u and p)\n' "$opts"
-    failed=1
-  fi
-  pipe="$(bash -c 'set +e +u +o pipefail; . "$1"; set +e; false | cat >/dev/null || { echo guarded; exit 0; }; echo unguarded' _ "$self")"
-  if [ "$pipe" = "guarded" ]; then
-    printf 'ok\ta failing producer trips the pipeline || die guard\n'
-  else
-    printf 'FAIL\ta failing producer did NOT trip the pipeline guard (got %s)\n' "$pipe"
-    failed=1
-  fi
-  # The config is written through an EXPANDING heredoc, so a backtick in one of its comments is a
-  # command substitution: bash runs the quoted word and prints "command not found" into the leg's
-  # log. Render the config once and refuse any stderr at all.
-  local cfgdir cfgerr
-  cfgdir="$(mktemp -d)"
-  cfgerr="$(bash -c 'set +e +u +o pipefail; . "$1"; SUBJECT_DIGESTS=/dev/null; subject_write_config "$2" 1 2 3 4 2>&1 >/dev/null' _ "$self" "$cfgdir")"
-  rm -rf "$cfgdir"
-  if [ -z "$cfgerr" ]; then
-    printf 'ok\trendering config.yaml writes nothing to stderr (no command substitution in its heredoc)\n'
-  else
-    printf 'FAIL\trendering config.yaml wrote to stderr: %s\n' "$(printf '%s' "$cfgerr" | head -3)"
-    failed=1
-  fi
-  [ "$failed" -eq 0 ] && printf 'PASS\tboot.sh selftest\n' || printf 'FAIL\tboot.sh selftest\n'
-  [ "$failed" -eq 0 ]
-}
-
-if [ "${BASH_SOURCE[0]}" = "$0" ]; then
-  case "${1:-}" in
-    --selftest) boot_selftest; exit $? ;;
-    *) echo "usage: $0 --selftest  (this file is otherwise sourced by testing/mcp-conformance/mcp-conformance.sh)" >&2; exit 2 ;;
-  esac
-fi

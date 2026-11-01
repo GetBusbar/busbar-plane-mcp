@@ -86,7 +86,7 @@ post() {
     -H 'accept: application/json, text/event-stream' \
     -H "mcp-method: $method" \
     -H 'mcp-protocol-version: 2026-07-28' \
-    "${namehdr[@]}" \
+    ${namehdr[@]+"${namehdr[@]}"} \
     -d "$body" >&2 || true
   printf '\n' >&2
 }
@@ -152,7 +152,7 @@ if [ "${MCP_ARM_LISTING:-}" = "1" ] && [ -n "${MCP_SUBJECT_ADMIN_URL:-}" ] && [ 
   for attempt in 1 2 3 4 5 6 7; do
     printf 'client-arm: POST admin tools/probe/connect, attempt %s (drives busbar'"'"'s own tools/list at the back door)\n' "$attempt" >&2
     view=$(curl -s --max-time 15 -X POST "$MCP_SUBJECT_ADMIN_URL/api/v1/admin/tools/probe/connect" \
-             -H "authorization: Bearer $MCP_SUBJECT_ADMIN_TOKEN" || true)
+             -H @/dev/fd/3 3<<<"authorization: Bearer $MCP_SUBJECT_ADMIN_TOKEN" || true)
     printf '%s\n' "$view" >&2
     landed && { printf 'client-arm: tools/list confirmed at the peer (attempt %s)\n' "$attempt" >&2; break; }
     case "$view" in
@@ -200,8 +200,8 @@ fi
 # taken as it stands" always meant. In a mode contracted to break the request, a retry cannot tell
 # the pooled-connection race from the attack -- it can only multiply the attack.
 case "$mode" in
-  stall|half-answer) call_attempt_limit=1 ;;
-  *) call_attempt_limit=3 ;;
+  honest) call_attempt_limit=3 ;;
+  *) call_attempt_limit=1 ;;
 esac
 for call_attempt in $(seq 1 "$call_attempt_limit"); do
   answer=$(curl -s --max-time 45 -X POST "$url" \

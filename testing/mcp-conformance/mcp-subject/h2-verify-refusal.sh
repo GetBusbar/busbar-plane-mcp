@@ -32,12 +32,22 @@ h2_boot "$WORK" "$H2_GROUPS_YAML" || { echo "FAIL	boot failed, see $WORK/busbar.
 failures=0
 detail=""
 
+# First prove this observer reads a real admitted request, before trusting a zero delta.
+read -r witness_kid witness_tok <<<"$(h2_mint h2-oracle)"
+[ -n "$witness_kid" ] && [ -n "$witness_tok" ] || h2_verdict FAIL "positive-control mint failed"
+witness_bound="$(h2_bind "$witness_tok")"
+read -r witness_status _ <<<"$(h2_call "$witness_bound" "usage-witness")"
+[ "$witness_status" = 200 ] || h2_verdict FAIL "positive-control call was not admitted"
+witness_usage="$(h2_usage "$witness_kid")"
+witness_requests="$(h2_read_usage_field requests <<<"$witness_usage")"
+h2_int_is "$witness_requests" -gt 0 || h2_verdict FAIL "positive-control usage was not observed"
+
 # A key that AUTHENTICATEs (a real, signed, audience-bound token) but is minted with NO scope grant
 # of any kind -- see the header. Force the field with a manual mint body so h2_mint's convenience
 # `{"name":...,"group":...}` shape is not in the way.
 mint_body="{\"name\":\"h2-noscope\",\"group\":\"h2-oracle\",\"allowed_pools\":[]}"
 mint_resp="$(curl -sS -m 10 -X POST "http://127.0.0.1:${H2_ADMIN_PORT}/api/v1/admin/keys" \
-  -H "Authorization: Bearer $H2_ADMIN_TOKEN" -H 'Content-Type: application/json' -d "$mint_body")"
+  -H @/dev/fd/3 3<<<"Authorization: Bearer $H2_ADMIN_TOKEN" -H 'Content-Type: application/json' -d "$mint_body")"
 kid="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("id") or "")' <<<"$mint_resp")"
 tok="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("token") or "")' <<<"$mint_resp")"
 if [ -z "$kid" ] || [ -z "$tok" ]; then
@@ -60,8 +70,8 @@ egress_after="$(h2_egress_count)"
 [ "$egress_after" -eq "$egress_before" ] || { failures=$((failures+1)); detail="${detail}egress_delta=$((egress_after-egress_before))(want 0); "; }
 
 usage_after="$(h2_usage "$kid")"
-req_before="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("requests") or 0)' <<<"$usage_before")"
-req_after="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("requests") or 0)' <<<"$usage_after")"
+req_before="$(h2_read_usage_field requests <<<"$usage_before")"
+req_after="$(h2_read_usage_field requests <<<"$usage_after")"
 [ "$req_before" -eq "$req_after" ] || { failures=$((failures+1)); detail="${detail}usage_requests_delta=$((req_after-req_before))(want 0); "; }
 
 if [ "$failures" -eq 0 ]; then

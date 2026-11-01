@@ -26,14 +26,9 @@ use serde_json::{json, Map, Value};
 
 use crate::ask::CallerAsk;
 
-/// How long a task stays readable through `tasks/get` after it settles (the `ttlMs` every task
-/// shape states): the work handles' retention, which the plane's `work: {retain_s}` bounds and
-/// whose default is this.
-///
-/// A POSITIVE value, unlike the catalogue's `ttlMs: 0`, and the difference is not an
-/// inconsistency: the catalogue's zero says "this answer may already be stale", a claim about
-/// freshness; this one says "the server keeps this row for at least this long", a claim about
-/// RETENTION.
+/// The local terminal cache's age, and the default used by pure task construction. Served task
+/// shapes replace this with the host's observed, creation-relative retention horizon. Dropping
+/// this cache never authorizes deleting durable result chunks.
 pub const TASK_TTL_MS: u64 = 300_000;
 
 /// The poll cadence busbar suggests. Advisory — a client that polls faster is not refused.
@@ -191,8 +186,13 @@ pub struct Task {
     /// runs, taken once. A `resume` no update nested (the task-run claim is a credentialed route)
     /// finds none, so it can neither skip the operator's rounds nor run the call again.
     resumed: Option<usize>,
+    /// A local `tasks/update` accepted this state. Equal-clock live records cannot undo that
+    /// receipt, including after a resume takes its round and while binding is pending.
+    local_update: bool,
     /// How many live-state chunks this instance wrote for it.
     pub live_chunks: u32,
+    /// The latest creation-relative retention horizon the host observation established.
+    ttl_ms: u64,
 }
 
 /// A TASK PARKED ON ITS UPSTREAM'S ASK: busbar's sealed state (bound to the principal, the tool and
@@ -234,7 +234,9 @@ impl Task {
             relay: None,
             asked: None,
             resumed: None,
+            local_update: false,
             live_chunks: 0,
+            ttl_ms: TASK_TTL_MS,
         }
     }
 
@@ -349,10 +351,18 @@ impl Task {
         });
     }
 
-    /// THE HOST'S WORD over what the instance holds of this task: `host` (read from its rows and
-    /// records) replaces it, the instance keeping only its own halves — the run taken here, the unit
-    /// running it, a settle still owed, the chunks it wrote.
+    /// The host's rows and records replace the held view when they have caught up with local
+    /// progress. A terminal host row stands immediately. Older live records cannot undo an
+    /// acknowledged update, a running continuation, or a local terminal state.
     pub fn hosted(&mut self, host: Task) {
+        if !host.status.is_terminal()
+            && (self.status.is_terminal()
+                || host.updated_ms < self.updated_ms
+                || (host.updated_ms == self.updated_ms
+                    && (self.local_update || self.resumed.is_some() || self.runner.is_some())))
+        {
+            return;
+        }
         let kept = (
             self.started,
             self.runner,
@@ -407,6 +417,27 @@ impl Task {
         (self.created_ms, self.updated_ms)
     }
 
+    /// Set the creation-relative wire TTL from the host's current work observation. A live
+    /// handle has no established expiry; observation plus retention is its earliest horizon.
+    pub fn retain_at(
+        &mut self,
+        observed_ms: u64,
+        retain_ms: u64,
+        settled_ms: Option<u64>,
+    ) -> Result<(), &'static str> {
+        if i64::try_from(self.created_ms).is_err() {
+            return Err("the task's creation time cannot be represented by its declared timestamp");
+        }
+        let horizon = settled_ms
+            .unwrap_or(observed_ms)
+            .checked_add(retain_ms)
+            .ok_or("the host's task retention horizon overflows integer milliseconds")?;
+        self.ttl_ms = horizon
+            .checked_sub(self.created_ms)
+            .ok_or("the host's task retention horizon precedes the task's creation")?;
+        Ok(())
+    }
+
     /// The `DetailedTask` a `tasks/get` answers with, minus the `resultType` the response builder
     /// stamps. `requestState` is ABSENT and its absence is load-bearing: SEP-2663 removed it from
     /// the v2 wire.
@@ -443,7 +474,7 @@ impl Task {
             ("status", json!(self.status.token())),
             ("createdAt", json!(iso8601_ms(self.created_ms))),
             ("lastUpdatedAt", json!(iso8601_ms(self.updated_ms))),
-            ("ttlMs", json!(TASK_TTL_MS)),
+            ("ttlMs", json!(self.ttl_ms)),
             ("pollIntervalMs", json!(TASK_POLL_INTERVAL_MS)),
         ]
         .into_iter()
@@ -550,6 +581,7 @@ impl Task {
         self.input_requests
             .retain(|(k, _)| !responses.contains_key(k));
         self.updated_ms = now_ms;
+        self.local_update = true;
         if self.input_requests.is_empty() && self.status == Status::InputRequired {
             self.status = Status::Working;
         }
@@ -653,16 +685,19 @@ impl Task {
     }
 }
 
-/// What one sweep did: the continuations to wake (each saw its task cancelled), the tasks whose
-/// handles must be settled with the state they hold, and the result chunks to strike.
+/// What one cache sweep did: continuations to wake, owed settles, and result chunks queued for an
+/// authorized host-absence check before durable deletion.
 #[derive(Debug, Default, PartialEq)]
 pub struct Swept {
     /// The tickets of continuations whose task the sweep cancelled.
     pub wake: Vec<Ticket>,
     /// `(handle, task)` of every task that reached its terminal state in hand and is not settled.
     pub settle: Vec<(u64, Task)>,
-    /// `(taskId, chunks)` of every dropped task that wrote a result.
+    /// `(taskId, chunks)` of every dropped cache entry whose durable result needs a later check.
     pub strike: Vec<(String, u32)>,
+    /// The actual task owners of queued cleanup, so a later unit checks absence only within its
+    /// own principal. Cache eviction alone never authorizes deleting durable result chunks.
+    pub owners: BTreeMap<String, String>,
 }
 
 /// THE SWEEP, run when a task is created: an ACTIVE task past the abandonment ceiling is first
@@ -685,6 +720,7 @@ pub fn sweep(tasks: &mut BTreeMap<String, Task>, now_ms: u64) -> Swept {
     let gone = |t: &Task, swept: &mut Swept| {
         if t.chunks > 0 {
             swept.strike.push((t.id.clone(), t.chunks));
+            swept.owners.insert(t.id.clone(), t.principal.clone());
         }
     };
     tasks.retain(|_, t| {
@@ -972,3 +1008,7 @@ mod tests;
 #[cfg(test)]
 #[path = "tests/task_hosted.rs"]
 mod task_hosted_tests;
+
+#[cfg(test)]
+#[path = "tests/inspection_retention.rs"]
+mod inspection_retention_tests;

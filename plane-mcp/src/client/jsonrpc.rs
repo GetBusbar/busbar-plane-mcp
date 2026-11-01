@@ -56,13 +56,34 @@ pub fn tools_call(
     advertise: AdvertisedCaps,
     continuation: Option<&serde_json::Value>,
 ) -> OutboundRequest {
+    tools_call_id(
+        url,
+        key,
+        arguments,
+        &serde_json::Value::from(request_id),
+        authorization,
+        advertise,
+        continuation,
+    )
+}
+
+/// A call whose complete stdio identity may be a JSON-RPC string instead of a legacy number.
+pub fn tools_call_id(
+    url: &str,
+    key: &ToolKey,
+    arguments: &serde_json::Value,
+    request_id: &serde_json::Value,
+    authorization: Option<&str>,
+    advertise: AdvertisedCaps,
+    continuation: Option<&serde_json::Value>,
+) -> OutboundRequest {
     let name = key.tool();
     // BUSBAR'S OWN TOKEN, never the caller's, and only when the caller asked for progress. Written
     // here from `request_id`, which is NOT unique across calls (on the HTTP carrier it is the round):
     // the relayed call's negotiation replaces it with a token no other request of the instance
     // carries (`door_sessions::Negotiating::begin`, or the id a session sends it under), and a stdio
     // child's call carries the unit's own id.
-    let progress_token: Option<String> = advertise.progress.then(|| format!("busbar-{request_id}"));
+    let progress_token: Option<String> = advertise.progress.then(|| progress_token(request_id));
     let mut capabilities = serde_json::Map::new();
     for (on, cap) in [
         (advertise.roots, "roots"),
@@ -73,14 +94,17 @@ pub fn tools_call(
             capabilities.insert(cap.to_string(), serde_json::json!({}));
         }
     }
+    let mut meta = serde_json::json!({
+        META_PROTOCOL_VERSION: PROTOCOL_VERSION,
+        META_CLIENT_CAPABILITIES: capabilities,
+    });
+    if let (Some(meta), Some(token)) = (meta.as_object_mut(), progress_token) {
+        meta.insert("progressToken".to_string(), token.into());
+    }
     let mut params = serde_json::json!({
         "name": name,
         "arguments": arguments,
-        "_meta": {
-            META_PROTOCOL_VERSION: PROTOCOL_VERSION,
-            "progressToken": progress_token,
-            META_CLIENT_CAPABILITIES: capabilities,
-        },
+        "_meta": meta,
     });
     // EXACTLY TWO members of the continuation cross, by name.
     if let (Some(params), Some(responses)) = (
@@ -93,29 +117,167 @@ pub fn tools_call(
         }
     }
     let body = busbar_contract::jsonrpc::request_bytes(
-        &json(&request_id),
+        &json(request_id),
         "tools/call",
         Some(&json(&params)),
     );
     envelope(url, "tools/call", Some(name), body, authorization)
 }
 
+/// The progress token corresponding to the exact typed id sent to a child.
+pub fn progress_token(id: &serde_json::Value) -> String {
+    match id {
+        serde_json::Value::String(id) => format!("busbar-{}", id.as_str()),
+        id => format!("busbar-{id}"),
+    }
+}
+
 /// Build a `tools/list` for one server: the request an operator `connect` and a call's
 /// verify-on-call fetch send a member over HTTP (`crate::plane_door`), and the one a stdio child is
 /// asked over its pipe (`crate::plane_door`'s program leg).
 pub fn tools_list(url: &str, request_id: u64, authorization: Option<&str>) -> OutboundRequest {
-    let params = serde_json::json!({
+    tools_list_id(url, &serde_json::Value::from(request_id), authorization)
+}
+
+/// A `tools/list` whose correlation id may be a full ticket's JSON-RPC string id.
+pub fn tools_list_id(
+    url: &str,
+    request_id: &serde_json::Value,
+    authorization: Option<&str>,
+) -> OutboundRequest {
+    tools_list_page_id(url, request_id, authorization, None)
+}
+
+/// Build one page of a tool-list request under its exact typed correlation id.
+pub fn tools_list_page_id(
+    url: &str,
+    request_id: &serde_json::Value,
+    authorization: Option<&str>,
+    cursor: Option<&str>,
+) -> OutboundRequest {
+    let mut params = serde_json::json!({
         "_meta": {
             META_PROTOCOL_VERSION: PROTOCOL_VERSION,
             META_CLIENT_CAPABILITIES: {},
         },
     });
+    if let Some(cursor) = cursor {
+        params["cursor"] = serde_json::Value::String(cursor.to_string());
+    }
     let body = busbar_contract::jsonrpc::request_bytes(
-        &json(&request_id),
+        &json(request_id),
         "tools/list",
         Some(&json(&params)),
     );
     envelope(url, "tools/list", None, body, authorization)
+}
+
+/// A completed tool-list page, or the cursor needed before the list is complete.
+#[derive(Debug)]
+pub enum Paged {
+    /// Fetch this cursor; no partial catalogue may be published yet.
+    Next(String),
+    /// Every page has been collected and validated.
+    Done(serde_json::Value),
+}
+
+/// A logical `tools/list` reply collected across pages within the existing reply-byte bound.
+#[derive(Debug, Default)]
+pub struct ToolPages {
+    first: Option<serde_json::Value>,
+    cursors: std::collections::HashSet<String>,
+    names: std::collections::HashSet<String>,
+    bytes: usize,
+    pages: u32,
+}
+
+impl ToolPages {
+    /// The pages already accepted, used to distinguish sequential requests on a stdio stream.
+    pub fn pages(&self) -> u32 {
+        self.pages
+    }
+
+    /// Validate and retain one page, refusing loops, duplicate tools and malformed lists.
+    pub fn take(&mut self, mut result: serde_json::Value) -> Result<Paged, String> {
+        crate::trust::observe(&result)?;
+        let next = match result.get("nextCursor") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(cursor)) => Some(cursor.clone()),
+            Some(_) => {
+                return Err("the tool list has a nextCursor that is not a string".to_string());
+            }
+        };
+        let bytes = json(&result).len();
+        self.bytes = self
+            .bytes
+            .checked_add(bytes)
+            .ok_or_else(|| "the paginated tool list exceeds the reply byte range".to_string())?;
+        if self.bytes > busbar_contract::abi::sdk::exchange::REPLY_MAX {
+            return Err(
+                "the paginated tool list exceeds the existing reply byte bound".to_string(),
+            );
+        }
+        self.pages = self
+            .pages
+            .checked_add(1)
+            .ok_or_else(|| "the tool-list page identity is exhausted".to_string())?;
+        let tools = result
+            .get("tools")
+            .and_then(serde_json::Value::as_array)
+            .expect("observe checked tools");
+        for tool in tools {
+            let name = tool
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .expect("observe checked names");
+            if !self.names.insert(name.to_string()) {
+                return Err(format!("the tool list names `{name}` more than once"));
+            }
+        }
+        if self.first.is_none() && next.is_none() {
+            return Ok(Paged::Done(result));
+        }
+        let tools = result
+            .get_mut("tools")
+            .and_then(serde_json::Value::as_array_mut)
+            .map(std::mem::take)
+            .expect("observe checked tools");
+        if let Some(object) = result.as_object_mut() {
+            object.remove("nextCursor");
+        }
+        self.first
+            .get_or_insert(result)
+            .get_mut("tools")
+            .and_then(serde_json::Value::as_array_mut)
+            .expect("a validated first page")
+            .extend(tools);
+        match next {
+            Some(cursor) if self.cursors.insert(cursor.clone()) => Ok(Paged::Next(cursor)),
+            Some(_) => Err(
+                "the tool list repeated a cursor, so no complete catalogue can be read".to_string(),
+            ),
+            None => Ok(Paged::Done(
+                self.first.take().expect("a retained first page"),
+            )),
+        }
+    }
+}
+
+/// Copy an existing list request with its next cursor, preserving routing and credential headers.
+pub fn next_list_request(
+    template: &OutboundRequest,
+    cursor: &str,
+) -> Result<OutboundRequest, String> {
+    let mut body: serde_json::Value = serde_json::from_slice(&template.body)
+        .map_err(|_| "the outgoing tools/list is not JSON".to_string())?;
+    let params = body
+        .get_mut("params")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or_else(|| "the outgoing tools/list has no params object".to_string())?;
+    params.insert("cursor".to_string(), cursor.into());
+    let mut request = template.clone();
+    request.body = json(&body);
+    Ok(request)
 }
 
 /// The shared envelope: the mirrored headers this revision REQUIRES, written from the same values
@@ -241,18 +403,23 @@ const _: () = assert!(HANDSHAKE_REQUEST_ID > dispatch_request_id(u32::MAX));
 /// (the `jsonrpc` member, the `id` cases, exactly one of `result`/`error`) are
 /// [`busbar_contract::jsonrpc::read_response`]'s.
 pub fn parse_response(body: &[u8], sent_id: u64) -> RpcOutcome {
+    parse_response_id(body, &serde_json::Value::from(sent_id))
+}
+
+/// Parse the response under the exact JSON-RPC id sent, including its string/number type.
+pub fn parse_response_id(body: &[u8], sent_id: &serde_json::Value) -> RpcOutcome {
     use busbar_contract::jsonrpc::{read_response, NotAnAnswerKind, Reply};
 
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
         return RpcOutcome::Malformed("upstream response is not valid JSON".to_string());
     };
-    let reply = match read_response(&value, &serde_json::Value::from(sent_id)) {
+    let reply = match read_response(&value, sent_id) {
         Ok(reply) => reply,
         Err(e) => {
             return match e.kind {
                 NotAnAnswerKind::Uncorrelated => RpcOutcome::Uncorrelated(e.reason),
                 NotAnAnswerKind::NotAResponse => RpcOutcome::Malformed(e.reason),
-            }
+            };
         }
     };
     match reply {

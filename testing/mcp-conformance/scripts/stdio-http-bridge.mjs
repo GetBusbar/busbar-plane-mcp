@@ -41,6 +41,17 @@
 //         MCP_BRIDGE_BEARER=<token>                 optional; the official leg's shim usually
 //                                                   supplies the credential instead.
 
+import { createWriteStream } from 'node:fs';
+
+// A harness-owned pipe, separate from both MCP stdout and diagnostic stderr. Standalone
+// launches do not open it. Only status and the caller's id/line ordinal cross this pipe.
+const statusPipe = process.env.MCP_BATTERY_HTTP_STATUS_FD === '3'
+  ? createWriteStream(null, { fd: 3, autoClose: false }) : null;
+if (statusPipe) {
+  statusPipe.on('error', fail);
+  statusPipe.write(`${JSON.stringify({ transport: 'http' })}\n`);
+}
+
 const url = process.argv[2] || process.env.MCP_BRIDGE_URL;
 if (!url) {
   process.stderr.write('usage: stdio-http-bridge.mjs <mcp-endpoint-url>\n');
@@ -110,74 +121,72 @@ function emit(obj) {
  * to whoever reads the run.
  */
 function deliver(status, contentType, text) {
-  if (text === '') return;                       // e.g. an accepted notification. Nothing to frame.
-  const frames = [];
-  if (/text\/event-stream/i.test(contentType || '')) {
-    for (const line of text.split('\n')) {
-      const m = /^data:\s?(.*)$/.exec(line.replace(/\r$/, ''));
-      if (m) frames.push(m[1]);
-    }
-  } else {
-    frames.push(text);
-  }
-  for (const f of frames) deliverFrame(status, f);
-}
-
-/** One frame's worth of body: a JSON-RPC message to stdout, anything else to stderr. */
-function deliverFrame(status, f) {
-  if (f.trim() === '') return;
-  let parsed;
-  try { parsed = JSON.parse(f); } catch {
-    process.stderr.write(`bridge: non-JSON body (HTTP ${status}): ${f.slice(0, 400)}\n`);
+  if (text === '') {
+    if (status >= 400) throw new Error(`HTTP ${status} returned no JSON-RPC body`);
     return;
   }
-  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && 'jsonrpc' in parsed) {
-    emit(parsed);
-  } else {
-    process.stderr.write(
-      `bridge: HTTP ${status} body is not a JSON-RPC message: ${f.slice(0, 400)}\n`,
-    );
+  if (/text\/event-stream/i.test(contentType || '')) {
+    const events = sseReader(status);
+    if (events(text, true) === 0 && status >= 400) throw new Error(`HTTP ${status} returned no JSON-RPC body`);
+  } else if (!deliverFrame(status, text) && status >= 400) {
+    throw new Error(`HTTP ${status} returned no JSON-RPC body`);
   }
 }
 
-/**
- * An SSE body, unpacked AS IT ARRIVES rather than after it ends — because some of them never end.
- *
- * `subscriptions/listen` answers with a stream that stays open for the subscription's whole
- * lifetime (busbar's bound is five minutes), whose FIRST frame is the acknowledgement the
- * ordering MUST is about. This function used to be `await res.text()`, which resolves only when
- * the body ends — so the acknowledgement busbar had put on the wire within milliseconds sat in
- * this process's buffer until the battery's 8-second wait expired, and CONC.SUBSCRIPTION-ACK-FIRST
- * reported "no acknowledgement and no error response" against a subject that had answered
- * correctly. A transcript defect in the adapter, reading exactly like a defect in the subject —
- * the same class of finding this file's header records for the missing `Mcp-Name`.
- *
- * The parse is the same one `deliver` applies to a buffered stream: `data:` lines become frames,
- * everything else is SSE furniture (`event:`, comments, blank separators) and is dropped. Bytes
- * are decoded incrementally so a UTF-8 sequence split across two chunks survives.
- */
+function deliverFrame(status, frame) {
+  if (frame.trim() === '') return false;
+  let parsed;
+  try { parsed = JSON.parse(frame); }
+  catch { throw new Error(`non-JSON body (HTTP ${status}): ${frame.slice(0, 400)}`); }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || !('jsonrpc' in parsed)) {
+    throw new Error(`HTTP ${status} body is not a JSON-RPC message: ${frame.slice(0, 400)}`);
+  }
+  emit(parsed);
+  return true;
+}
+
+// One SSE event joins all of its data fields. CR, LF and CRLF are line separators, including
+// a CRLF split between two transport chunks. UTF-8 is decoded before this incremental parser.
+function sseReader(status) {
+  let pending = '', data = [], delivered = 0;
+  const line = (value) => {
+    if (value === '') {
+      if (data.length && deliverFrame(status, data.join('\n'))) delivered += 1;
+      data = [];
+    } else if (value === 'data') data.push('');
+    else if (value.startsWith('data:')) data.push(value.slice(value[5] === ' ' ? 6 : 5));
+  };
+  return (chunk, final = false) => {
+    pending += chunk;
+    for (;;) {
+      const at = pending.search(/[\r\n]/);
+      if (at < 0 || (!final && pending[at] === '\r' && at + 1 === pending.length)) break;
+      const width = pending[at] === '\r' && pending[at + 1] === '\n' ? 2 : 1;
+      line(pending.slice(0, at));
+      pending = pending.slice(at + width);
+    }
+    if (final) {
+      if (pending !== '') line(pending);
+      if (data.length) throw new Error('SSE stream ended before its event separator');
+    }
+    return delivered;
+  };
+}
+
 async function deliverStreaming(status, body) {
   const decoder = new TextDecoder();
-  let pending = '';
-  const takeLine = (line) => {
-    const m = /^data:\s?(.*)$/.exec(line.replace(/\r$/, ''));
-    if (m) deliverFrame(status, m[1]);
-  };
-  try {
-    for await (const chunk of body) {
-      pending += decoder.decode(chunk, { stream: true });
-      let i;
-      while ((i = pending.indexOf('\n')) >= 0) {
-        takeLine(pending.slice(0, i));
-        pending = pending.slice(i + 1);
-      }
-    }
-  } catch (e) {
-    // A stream that dies mid-flight is the peer's fact to report, not this file's to repair.
-    process.stderr.write(`bridge: SSE stream from ${url} ended abnormally: ${e}\n`);
+  const events = sseReader(status);
+  for await (const chunk of body) events(decoder.decode(chunk, { stream: true }));
+  if (events(decoder.decode(), true) === 0 && status >= 400) {
+    throw new Error(`HTTP ${status} returned no JSON-RPC body`);
   }
-  pending += decoder.decode();
-  if (pending !== '') takeLine(pending);
+}
+
+let failed = false;
+function fail(error) {
+  if (failed) return;
+  failed = true;
+  process.stderr.write(`bridge: ${error.stack || error}\n`, () => process.exit(1));
 }
 
 /**
@@ -185,7 +194,7 @@ async function deliverStreaming(status, body) {
  * several requests in flight before reading any answer, and a bridge that serialised them would
  * make every one of those tests a statement about this file.
  */
-async function forward(raw) {
+async function forward(raw, sequence) {
   let parsed = null;
   try { parsed = JSON.parse(raw.toString('utf8')); } catch { /* forwarded verbatim; see header */ }
   let res;
@@ -193,8 +202,16 @@ async function forward(raw) {
     res = await fetch(url, { method: 'POST', headers: headersFor(parsed), body: raw });
   } catch (e) {
     // A dead endpoint must look like a dead endpoint, never like a conformance verdict.
-    process.stderr.write(`bridge: POST ${url} failed: ${e}\n`);
-    return;
+    throw new Error(`POST ${url} failed: ${e}`);
+  }
+  if (statusPipe) {
+    const value = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed.id : null;
+    const id = typeof value === 'string' || typeof value === 'number' ? value : null;
+    await new Promise((resolve, reject) => statusPipe.write(
+      `${JSON.stringify({ sequence, id, status: res.status })}\n`,
+      (error) => error ? reject(error) : resolve(),
+    ));
   }
   const contentType = res.headers.get('content-type') || '';
   if (/text\/event-stream/i.test(contentType) && res.body) {
@@ -209,6 +226,16 @@ async function forward(raw) {
 // the battery sends lone surrogates and NUL bytes on purpose, and a round trip through a JS string
 // would sanitise exactly the input under test.
 let buf = Buffer.alloc(0);
+const inFlight = new Set();
+let inputEnded = false;
+let sequence = 0;
+function forwarded(raw) {
+  const work = forward(raw, ++sequence).catch(fail).finally(() => {
+    inFlight.delete(work);
+    if (inputEnded && inFlight.size === 0 && !failed) process.exitCode = 0;
+  });
+  inFlight.add(work);
+}
 process.stdin.on('data', (chunk) => {
   buf = Buffer.concat([buf, chunk]);
   let i;
@@ -218,13 +245,13 @@ process.stdin.on('data', (chunk) => {
     // A blank or whitespace-only line carries no message. Not an error, not a POST: the stdio
     // framing says a frame is a line, and an empty line is not a frame.
     if (line.toString('utf8').trim() === '') continue;
-    void forward(Buffer.from(line));
+    forwarded(Buffer.from(line));
   }
 });
 
 // EOF on stdin is the shutdown signal for a stdio server, and this adapter is what stands in for
 // one. Exiting keeps `SHUTDOWN`-shaped tests honest instead of hanging them to a failsafe.
 process.stdin.on('end', () => {
-  // A short grace so an answer already in flight is still written; the reader is closed either way.
-  setTimeout(() => process.exit(0), 250).unref();
+  inputEnded = true;
+  if (inFlight.size === 0 && !failed) process.exitCode = 0;
 });

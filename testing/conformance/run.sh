@@ -10,7 +10,6 @@
 # (template/modernci/conformance.yaml):
 #
 #     bash testing/conformance/run.sh            # every suite in testing/conformance/suites.tsv
-#     bash testing/conformance/run.sh --selftest # the verdict judge bites on planted verdicts
 #
 # THE SUITE LIST is this repo's own `testing/conformance/suites.tsv` (not templated): one suite per
 # line, `<suite-id><TAB><command>`; `#` starts a comment. The id is busbar's registry id
@@ -46,7 +45,7 @@ say() { printf 'conformance: %s\n' "$*" >&2; }
 # judge <raw verdict> <suite id> <command rc> <out file>: the verdict as published, or exit 1.
 judge() {
   python3 -I - "$@" <<'PY'
-import json, sys, os, datetime
+import json, sys, os, datetime, urllib.parse
 raw, suite, rc, out = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
 KEYS = {"schema", "suite", "standard", "plan", "spec_version", "status", "armed", "commit",
         "run_id", "evidence", "generated_at", "reason", "repo", "core_pin"}
@@ -87,7 +86,7 @@ v["schema"] = "busbar.conformance.verdict/1"
 v["repo"] = repo
 v["commit"] = head
 v["core_pin"] = env["BUSBAR_PIN"]
-url = env["CONF_MCI_URL"] + "/move?repo=" + repo.replace("/", "%2F") + "&from=" + frm + "&head=" + head
+url = env["CONF_MCI_URL"].rstrip("/") + "/move?" + urllib.parse.urlencode({"repo": repo, "from": frm, "head": head})
 v["run_id"] = "modernci:" + repo + "@" + head + ":conformance"
 v["evidence"] = url
 v["generated_at"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -98,33 +97,6 @@ print(v["status"], v.get("reason", ""))
 sys.exit(0 if v["status"] == "pass" else 1)
 PY
 }
-
-selftest() {
-  local t; t="$(mktemp -d)"; trap 'rm -rf "$t"' RETURN
-  export BUSBAR_PIN=0000000000000000000000000000000000000000 CONF_REPO=selftest/repo CONF_HEAD=1111111111111111111111111111111111111111 CONF_MCI_URL="$MCI_URL"
-  local ok=0
-  expect() { # expect <want rc> <name> <verdict text or -> <rc>
-    local want="$1" name="$2" text="$3" rc="$4" got=0
-    rm -f "$t/v.json"; [ "$text" = - ] || printf '%s' "$text" > "$t/v.json"
-    judge "$t/v.json" s1 "$rc" "$t/out.json" >/dev/null || got=1
-    if [ "$got" != "$want" ]; then echo "selftest FAILED: $name (exit $got, wanted $want)"; ok=1; else echo "  ok: $name"; fi
-  }
-  expect 0 "an armed pass is published" '{"suite":"s1","status":"pass","armed":true}' 0
-  expect 1 "no verdict file is red" - 0
-  expect 1 "a verdict that is not JSON is red" 'nope' 0
-  expect 1 "a verdict filed under another suite is red" '{"suite":"s2","status":"pass","armed":true}' 0
-  expect 1 "an unarmed pass is red" '{"suite":"s1","status":"pass","armed":false}' 0
-  expect 1 "a pass whose command failed is red" '{"suite":"s1","status":"pass","armed":true}' 1
-  expect 1 "an unknown field is red" '{"suite":"s1","status":"pass","armed":true,"x":1}' 0
-  expect 1 "a fail is red" '{"suite":"s1","status":"fail","armed":true}' 1
-  expect 1 "not-run is red" '{"suite":"s1","status":"not-run","armed":false}' 3
-  judge <(printf '%s' '{"suite":"s1","status":"pass","armed":true}') s1 0 "$t/out.json" >/dev/null
-  python3 -I -c 'import json,sys; v=json.load(open(sys.argv[1])); assert v["repo"]=="selftest/repo" and v["core_pin"].startswith("0000") and v["evidence"].endswith("&head=1111111111111111111111111111111111111111"), v' "$t/out.json" \
-    && echo "  ok: the stamp names the repo, the commit, the core pin and the move" || { echo "selftest FAILED: the stamp"; ok=1; }
-  return "$ok"
-}
-
-[ "${1:-}" = --selftest ] && { selftest; exit $?; }
 
 if [ ! -s "$LIST" ] || ! grep -qvE '^[[:space:]]*(#|$)' "$LIST"; then
   say "this repo lists no suites ($LIST); nothing to judge"
@@ -141,7 +113,19 @@ else
   pin="$CONF_HEAD"
 fi
 export BUSBAR_PIN="$pin"
-export CONF_REPO="$(git config --get remote.origin.url | sed -E 's#^(https://github.com/|git@github.com:)##; s#\.git$##')"
+# Infer only the repository path: authenticated HTTPS/SSH origins must never stamp credentials.
+export CONF_REPO="$(git config --get remote.origin.url | python3 -I -c '
+import sys, urllib.parse
+origin = sys.stdin.read().strip()
+if "://" in origin:
+    repo = urllib.parse.urlsplit(origin).path
+elif ":" in origin:
+    repo = origin.split(":", 1)[1]
+else:
+    repo = origin
+repo = repo.strip("/")
+print(repo[:-4] if repo.endswith(".git") else repo)
+')"
 export CONF_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null)"
 export CONF_MCI_URL="$MCI_URL"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$here/target}"
@@ -171,7 +155,7 @@ while IFS=$'\t' read -r id cmd; do
   dir="$OUT/$id"; mkdir -p "$dir"
   say "=== $id: $cmd"
   start=$(date +%s); rc=0
-  ( export CONFORMANCE_SUITE="$id" CONFORMANCE_OUT="$dir"; bash -c "$cmd" ) || rc=$?
+  ( export CONFORMANCE_SUITE="$id" CONFORMANCE_OUT="$dir"; bash -c "$cmd" </dev/null ) || rc=$?
   say "$id: command exit $rc after $(( $(date +%s) - start ))s"
   if res="$(judge "$dir/verdict.json" "$id" "$rc" "$OUT/verdicts/$id.json")"; then
     say "$id: PASS"

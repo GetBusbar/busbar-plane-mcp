@@ -26,7 +26,9 @@ Off by default: a document that writes neither section below never uses the plan
 - `tools:` (the section the plane declares): one entry per registered MCP server, keyed by its id,
   and two reserved keys.
   - `<id>.url` or `<id>.transport: stdio` with `command`, `args`, `env`, `cwd`: where the server is.
-  - `<id>.pin`: the server's authenticity root (`pinned_pubkey`, `cert_spki`, `mtls` or `unpinned`).
+  - `<id>.pin`: `cert_spki` or `mtls` authenticates the server's certificate key. `unpinned`
+    declares no authenticity root and cannot approve tools. `pinned_pubkey` is refused because
+    this build verifies no MCP manifest signature; use `cert_spki` or `mtls` instead.
   - `<id>.client_identity`: busbar's client certificate and key for that server (secret references).
   - `<id>.tools_allow`, `prompts_allow`, `resources_allow`, `resource_templates_allow`: what it may
     publish.

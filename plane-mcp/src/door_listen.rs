@@ -82,8 +82,10 @@ pub(super) fn hold_update(updates: &mut Vec<(String, String)>, server: &str, uri
 pub(super) fn announced(plane: &McpDoor, server: &str, uri: &str) {
     let any = plane.listens.with_all(|m| {
         for l in m.values_mut() {
-            hold_update(&mut l.updates, server, uri);
-            l.due = true;
+            if l.listen.watches_resource(uri) {
+                hold_update(&mut l.updates, server, uri);
+                l.due = true;
+            }
         }
         !m.is_empty()
     });
@@ -199,13 +201,14 @@ fn open(plane: &McpDoor, ticket: Ticket, principal: &str, unit: &mut CallUnit) -
     // THE QUOTA REFUSES THE NEW STREAM, never evicts a held one.
     let admitted = plane.listens.with_all(|held| {
         let full = quota_full(held.values().map(|l| &l.owner), principal);
-        if !full {
-            held.insert(unit.key, listening);
+        if full {
+            return Err(held.len() >= MAX_UNITS);
         }
-        !full
+        held.insert(unit.key, listening);
+        Ok(())
     });
-    if !admitted {
-        let refusal = quota_refusal(id);
+    if let Err(instance_full) = admitted {
+        let refusal = quota_refusal_for(id, instance_full);
         unit.pending = Some(Pending::answer(refusal.status, refusal.body(), None, &[]));
         return Some(true);
     }
@@ -264,16 +267,23 @@ pub(super) fn quota_full<'a>(
 
 /// THE QUOTA'S REFUSAL of subscription `id`, on either carrier: its caller holds the most open
 /// subscriptions one caller may, or the instance its total.
-pub(super) fn quota_refusal(id: Value) -> crate::tool_arrival::Refusal {
+pub(super) fn quota_refusal_for(id: Value, instance_full: bool) -> crate::tool_arrival::Refusal {
     crate::tool_arrival::Refusal {
         status: 429,
         id: Some(id),
         code: crate::codec::CODE_REFUSED,
-        message: format!(
-            "this caller holds {MAX_LISTENS_PER_OWNER} open subscriptions, the most one caller may \
+        message: if instance_full {
+            "this node holds as many open subscriptions as it can serve; close one and open again"
+                .to_string()
+        } else {
+            format!(
+                "this caller holds {MAX_LISTENS_PER_OWNER} open subscriptions, the most one caller may \
              hold; close one and open again"
+            )
+        },
+        data: Some(
+            serde_json::json!({ "reason": if instance_full { "subscription_capacity" } else { "subscription_quota" } }),
         ),
-        data: Some(serde_json::json!({ "reason": "subscription_quota" })),
     }
 }
 
@@ -464,21 +474,21 @@ pub(super) fn standing(
 ) -> Standing {
     // The kernel's live re-resolution (`entitlement.check` of `ENTITLEMENT_STANDING`): a host that
     // serves no entitlement stands nothing.
-    let stands = plane.services.is_some_and(|services| {
+    let stands = plane.services.and_then(|services| {
         let h = super::door_tasks::handle(ticket, &mut unit.issued, &mut None);
         services
             .entitled(h, busbar_contract::abi::host::service::ENTITLEMENT_STANDING)
-            .unwrap_or(false)
+            .ok()
     });
-    if stands {
-        Standing::Live
-    } else {
-        Standing::Lapsed {
+    match stands {
+        Some(true) => Standing::Live,
+        None => Standing::Unavailable,
+        Some(false) => Standing::Lapsed {
             message: format!(
                 "`{principal}` is no longer live, so the standing decision it was admitted under \
                  no longer applies"
             ),
             reason: busbar_contract::vocab::REASON_IDENTITY_NOT_LIVE.to_string(),
-        }
+        },
     }
 }

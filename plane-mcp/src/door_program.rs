@@ -25,8 +25,9 @@
 
 use super::*;
 use crate::tool_program::{
-    first_in_line, list_id, AskOwner, Correlator, Exchanged, Peer, ProgramExchange,
+    first_in_line, list_id, unit_list_id, AskOwner, Correlator, Exchanged, Peer, ProgramExchange,
 };
+use std::task::Poll;
 
 /// THE LINE OF CALLS RELAYED TO STDIO CHILDREN, by serial (arrival order): every
 /// relayed call is entered before its request could reach the kernel's walk and leaves when its
@@ -42,7 +43,7 @@ pub(super) struct InLine {
     /// The generation its lease reached; `0` before its head.
     generation: u64,
     /// The id the call carries on the child.
-    call: u64,
+    call: Value,
     /// The ticket of its unit while it waits its turn: woken when the call ahead of it leaves.
     ticket: Option<Ticket>,
     /// Held across a relayed ask's round trip until this instant of the host's monotonic clock
@@ -86,14 +87,12 @@ pub(super) fn is_program(def: &crate::tools_config::McpServerDefCfg) -> bool {
 pub(super) enum Purpose {
     /// Greeting the member's child before the attempt's call.
     Ready,
-    /// Verify-on-call's `tools/list`.
-    Verify,
 }
 
 /// A relayed call to a stdio member, as its far pieces arrive.
 pub(super) struct ProgramRelay {
     /// The id the round in flight carries.
-    pub(super) wait: u64,
+    pub(super) wait: Value,
     /// The generation of the child the walk's lease reached.
     pub(super) generation: u64,
     pub(super) corr: Correlator,
@@ -120,16 +119,25 @@ impl Drop for ProgramRelay {
         let hold = self.hold;
         let next = line.with_all(|m| {
             if hold != 0 {
-                if let Some(e) = m.get_mut(serial) {
-                    e.held_until = hold;
-                }
-                return None;
+                let member = {
+                    let entry = m.get_mut(serial)?;
+                    entry.held_until = hold;
+                    entry.member.clone()
+                };
+                // A waiter already sleeping on its request deadline must learn that the
+                // child's place is now held only until the existing ask deadline.
+                return m
+                    .iter()
+                    .filter(|(at, entry)| **at > *serial && entry.member == member)
+                    .find_map(|(_, entry)| entry.ticket);
             }
             let gone = m.remove(serial)?;
             if m.range(..*serial).any(|(_, e)| e.member == gone.member) {
                 return None;
             }
-            m.values().find(|e| e.member == gone.member)?.ticket
+            m.values()
+                .filter(|entry| entry.member == gone.member)
+                .find_map(|entry| entry.ticket)
         });
         if let (Some(wake), Some(ticket)) = (self.wake, next) {
             wake.wake(ticket);
@@ -140,7 +148,8 @@ impl Drop for ProgramRelay {
 impl ProgramRelay {
     /// The relay of a call to member `member` whose round carries `wait`: entered at the end of
     /// the member's line.
-    pub(super) fn waiting(plane: &McpDoor, member: &str, wait: u64) -> Self {
+    pub(super) fn waiting(plane: &McpDoor, member: &str, wait: impl Into<Value>) -> Self {
+        let wait = wait.into();
         let serial = plane.relaying.with_all(|line| {
             let serial = line.last_key_value().map_or(1, |(k, _)| k.wrapping_add(1));
             line.insert(
@@ -148,7 +157,7 @@ impl ProgramRelay {
                 InLine {
                     member: member.to_string(),
                     generation: 0,
-                    call: wait,
+                    call: wait.clone(),
                     ticket: None,
                     held_until: 0,
                 },
@@ -158,7 +167,7 @@ impl ProgramRelay {
         ProgramRelay::at(plane, wait, serial)
     }
 
-    fn at(plane: &McpDoor, wait: u64, serial: u64) -> Self {
+    fn at(plane: &McpDoor, wait: Value, serial: u64) -> Self {
         ProgramRelay {
             wait,
             generation: 0,
@@ -186,10 +195,11 @@ impl ProgramRelay {
     pub(super) fn retrying(
         plane: &McpDoor,
         member: &str,
-        wait: u64,
+        wait: impl Into<Value>,
         generation: u64,
         rest: Vec<Vec<u8>>,
     ) -> Self {
+        let wait = wait.into();
         let held = plane.relaying.with_all(|line| {
             let (serial, e) = line
                 .iter_mut()
@@ -239,6 +249,31 @@ pub(super) fn in_line(
     })
 }
 
+/// The earlier existing deadline a queued call must re-enter on: its own request deadline or a
+/// held place ahead of it expiring. An unread clock or absent request deadline stays unchanged.
+pub(super) fn queue_wake_at(
+    plane: &McpDoor,
+    relay: &ProgramRelay,
+    deadline: u64,
+    now: Option<u64>,
+) -> u64 {
+    let Some(now) = now.filter(|_| deadline != 0) else {
+        return deadline;
+    };
+    let serial = relay.open.1;
+    plane.relaying.with_all(|line| {
+        let Some(member) = line.get(&serial).map(|entry| &entry.member) else {
+            return deadline;
+        };
+        line.range(..serial)
+            .filter(|(_, entry)| &entry.member == member && entry.held_until > now)
+            .map(|(_, entry)| entry.held_until)
+            .min()
+            .unwrap_or(deadline)
+            .min(deadline)
+    })
+}
+
 /// The door, as an exchange with member `member`'s child needs it.
 struct DoorPeer<'a> {
     plane: &'a McpDoor,
@@ -253,9 +288,13 @@ impl DoorPeer<'_> {
         &self,
         generation: u64,
         id: &Value,
-        first: impl FnOnce() -> Option<u64>,
-    ) -> (Option<u64>, bool) {
-        let key = (self.member.to_string(), generation, id.to_string());
+        first: impl FnOnce() -> Option<Value>,
+    ) -> (Option<Value>, bool) {
+        let key = (
+            self.member.to_string(),
+            generation,
+            busbar_contract::redacted::sha256_hex(&crate::codec::json(id)),
+        );
         self.plane
             .answered
             .with_all(|m| m.entry(()).or_default().decide(key, first))
@@ -275,9 +314,22 @@ pub(super) struct Answered {
     /// The number the next decision is made under.
     next: u64,
     /// Each decision, and the number it was made under.
-    by_key: std::collections::BTreeMap<AnsweredKey, (u64, Option<u64>)>,
+    by_key: std::collections::BTreeMap<AnsweredKey, (u64, Option<Value>)>,
     /// Each decision's key, by the number it was made under: oldest first.
     by_age: std::collections::BTreeMap<u64, AnsweredKey>,
+    greetings: Arc<Keyed<(), GreetingBook>>,
+}
+
+#[derive(Debug, Default)]
+struct GreetingBook {
+    in_flight: BTreeMap<(String, u64), GreetingState>,
+    latest: BTreeMap<String, u64>,
+}
+
+#[derive(Debug)]
+struct GreetingState {
+    owner: std::sync::Weak<()>,
+    waiters: Vec<Ticket>,
 }
 
 impl Default for Answered {
@@ -294,6 +346,7 @@ impl Answered {
             next: 0,
             by_key: std::collections::BTreeMap::new(),
             by_age: std::collections::BTreeMap::new(),
+            greetings: Arc::default(),
         }
     }
 
@@ -302,10 +355,10 @@ impl Answered {
     pub(super) fn decide(
         &mut self,
         key: AnsweredKey,
-        first: impl FnOnce() -> Option<u64>,
-    ) -> (Option<u64>, bool) {
+        first: impl FnOnce() -> Option<Value>,
+    ) -> (Option<Value>, bool) {
         if let Some((_, owner)) = self.by_key.get(&key) {
-            return (*owner, false);
+            return (owner.clone(), false);
         }
         while self.by_key.len() >= self.cap {
             let Some((_, oldest)) = self.by_age.pop_first() else {
@@ -317,12 +370,103 @@ impl Answered {
         let made = self.next;
         self.next = self.next.wrapping_add(1);
         self.by_age.insert(made, key.clone());
-        self.by_key.insert(key, (made, owner));
+        self.by_key.insert(key, (made, owner.clone()));
         (owner, true)
     }
 }
 
 impl Peer for DoorPeer<'_> {
+    fn greeting(&mut self, generation: u64, ticket: Ticket) -> Poll<crate::tool_program::Greeting> {
+        let greetings = self
+            .plane
+            .answered
+            .with_all(|m| Arc::clone(&m.entry(()).or_default().greetings));
+        let member = self.member.to_string();
+        let key = (member.clone(), generation);
+        let token = Arc::new(());
+        let mut woken = Vec::new();
+        let start = greetings.with_all(|tables| {
+            let book = tables.entry(()).or_default();
+            if self.plane.greeted.get(&member) == Some(generation) {
+                return Some(false);
+            }
+            if let Some(state) = book.in_flight.get_mut(&key) {
+                if state.owner.upgrade().is_some() {
+                    if !state.waiters.contains(&ticket) {
+                        state.waiters.push(ticket);
+                    }
+                    return None;
+                }
+            }
+            if let Some(old) = book.in_flight.remove(&key) {
+                woken.extend(old.waiters);
+            }
+            book.latest.insert(member.clone(), generation);
+            book.in_flight.insert(
+                key.clone(),
+                GreetingState {
+                    owner: Arc::downgrade(&token),
+                    waiters: Vec::new(),
+                },
+            );
+            Some(true)
+        });
+        if let Some(wake) = self.plane.wake {
+            for ticket in woken {
+                wake.wake(ticket);
+            }
+        }
+        match start {
+            None => Poll::Pending,
+            Some(false) => Poll::Ready(crate::tool_program::Greeting::Done),
+            Some(true) => {
+                let wake = self.plane.wake;
+                let claim = crate::tool_program::GreetingLease::new(move |_complete| {
+                    let woken = greetings.with_all(|tables| {
+                        let Some(book) = tables.get_mut(&()) else {
+                            return Vec::new();
+                        };
+                        if !book
+                            .in_flight
+                            .get(&key)
+                            .and_then(|s| s.owner.upgrade())
+                            .is_some_and(|owner| Arc::ptr_eq(&owner, &token))
+                        {
+                            return Vec::new();
+                        }
+                        book.in_flight
+                            .remove(&key)
+                            .map(|state| state.waiters)
+                            .unwrap_or_default()
+                    });
+                    if let Some(wake) = wake {
+                        for ticket in woken {
+                            wake.wake(ticket);
+                        }
+                    }
+                });
+                Poll::Ready(crate::tool_program::Greeting::Start(Some(claim)))
+            }
+        }
+    }
+
+    fn greeted(&mut self, generation: u64) {
+        let greetings = self
+            .plane
+            .answered
+            .with_all(|m| Arc::clone(&m.entry(()).or_default().greetings));
+        greetings.with_all(|tables| {
+            let Some(book) = tables.get(&()) else {
+                return;
+            };
+            if book.latest.get(self.member) == Some(&generation) {
+                self.plane
+                    .greeted
+                    .insert(self.member.to_string(), generation);
+            }
+        });
+    }
+
     fn grants(&self) -> crate::client::jsonrpc::ServerRequestGrants {
         self.grants
     }
@@ -339,7 +483,7 @@ impl Peer for DoorPeer<'_> {
                 first_in_line(
                     l.values()
                         .filter(|e| e.member == member)
-                        .map(|e| (e.call, e.generation)),
+                        .map(|e| (e.call.clone(), e.generation)),
                     generation,
                 )
             })
@@ -351,8 +495,10 @@ impl Peer for DoorPeer<'_> {
     }
 
     fn notice(&mut self) {
-        // The child's lists moved: the next call re-verifies (the timing, never the content).
-        self.plane.checked.remove(&self.member.to_string());
+        let mut issued = 0;
+        let now = clock(self.plane.services, Ticket::NONE, &mut issued)
+            .map(|reading| reading.mono_ns / 1_000_000);
+        super::door_sessions::list_changed(self.plane, self.member, now);
     }
 
     fn announced(&mut self, uri: &str) {
@@ -371,19 +517,25 @@ fn exchange_child(
     def: &crate::tools_config::McpServerDefCfg,
     exchange: &mut ProgramExchange,
 ) -> std::task::Poll<Result<Exchanged, String>> {
+    exchange_child_on(plane, host, ticket, base, member, def, exchange)
+}
+
+fn exchange_child_on(
+    plane: &McpDoor,
+    host: &dyn crate::tool_program::ProgramConn,
+    ticket: Ticket,
+    base: u32,
+    member: &str,
+    def: &crate::tools_config::McpServerDefCfg,
+    exchange: &mut ProgramExchange,
+) -> std::task::Poll<Result<Exchanged, String>> {
     let greeted = |g: u64| plane.greeted.get(&member.to_string()) == Some(g);
     let mut peer = DoorPeer {
         plane,
         member,
         grants: def.grants,
     };
-    let answer = exchange.drive(host, ticket, base, &greeted, &mut peer);
-    if let std::task::Poll::Ready(Ok(done)) = &answer {
-        if done.greeted {
-            plane.greeted.insert(member.to_string(), done.generation);
-        }
-    }
-    answer
+    exchange.drive(host, ticket, base, &greeted, &mut peer)
 }
 
 /// GREET the member's child before the attempt's call ([`Purpose::Ready`]): once per attempt, a
@@ -425,7 +577,7 @@ pub(super) fn ready(
     }
 }
 
-/// VERIFY-ON-CALL's fetch from a stdio member ([`Purpose::Verify`]): its `tools/list`, on a lease
+/// VERIFY-ON-CALL's fetch from a stdio member: its `tools/list`, on a lease
 /// of its own, answered by id, the child greeted first where its generation is new. The answer as
 /// the exchange SDK spells one (a child's answer is a success), or why it failed.
 pub(super) fn tools_listed(
@@ -435,29 +587,31 @@ pub(super) fn tools_listed(
     def: &crate::tools_config::McpServerDefCfg,
     server: &str,
     base: u32,
-) -> std::task::Poll<Result<(busbar_contract::abi::sdk::exchange::ExchangeResponse, u64), String>> {
+) -> std::task::Poll<Result<(busbar_contract::abi::sdk::exchange::ExchangeResponse, Value), String>>
+{
     let Some(host) = plane.host.as_ref() else {
         return std::task::Poll::Ready(Err(
             busbar_contract::abi::sdk::conn::ConnFailure::Unarmed.to_string()
         ));
     };
-    let id = list_id(unit.key, unit.attempt);
-    let mut exchange = match unit.program.take() {
-        Some((Purpose::Verify, parked)) => parked,
-        _ => list_exchange(server, def, id),
-    };
-    match exchange_child(plane, host, ticket, base, server, def, &mut exchange) {
+    let id = unit_list_id(unit.key, unit.attempt);
+    let mut listing = unit
+        .program_list
+        .take()
+        .filter(|listing| listing.root_id == id && listing.server == server)
+        .unwrap_or_else(|| ProgramList::new(server, def, id.clone()));
+    match listing.drive(plane, host, ticket, base, server, def) {
         std::task::Poll::Pending => {
-            unit.program = Some((Purpose::Verify, exchange));
+            unit.program_list = Some(listing);
             std::task::Poll::Pending
         }
-        std::task::Poll::Ready(answer) => std::task::Poll::Ready(answer.map(|done| {
+        std::task::Poll::Ready(answer) => std::task::Poll::Ready(answer.map(|body| {
             (
                 busbar_contract::abi::sdk::exchange::ExchangeResponse {
                     status: 200,
                     reason: None,
                     fields: Vec::new(),
-                    body: done.answer.unwrap_or_default(),
+                    body,
                 },
                 id,
             )
@@ -472,7 +626,7 @@ pub(super) fn connect_child(
     plane: &McpDoor,
     def: &crate::tools_config::McpServerDefCfg,
     server: &str,
-) -> std::task::Poll<(Result<Vec<u8>, String>, u64)> {
+) -> std::task::Poll<(Result<Vec<u8>, String>, Value)> {
     let ticket = instance.ticket();
     let id = list_id(
         (u64::from(ticket.slot) << 32) | u64::from(ticket.generation),
@@ -484,18 +638,16 @@ pub(super) fn connect_child(
             id,
         ));
     };
-    let mut exchange = match instance.resume::<ProgramExchange>() {
+    let mut listing = match instance.resume::<ProgramList>() {
         Some(parked) => *parked,
-        None => list_exchange(server, def, id),
+        None => ProgramList::new(server, def, id.clone()),
     };
-    match exchange_child(plane, host, ticket, 0, server, def, &mut exchange) {
+    match listing.drive(plane, host, ticket, 0, server, def) {
         std::task::Poll::Pending => {
-            instance.park(exchange);
+            instance.park(listing);
             std::task::Poll::Pending
         }
-        std::task::Poll::Ready(answer) => {
-            std::task::Poll::Ready((answer.map(|d| d.answer.unwrap_or_default()), id))
-        }
+        std::task::Poll::Ready(answer) => std::task::Poll::Ready((answer, id)),
     }
 }
 
@@ -503,16 +655,115 @@ pub(super) fn connect_child(
 fn list_exchange(
     server: &str,
     def: &crate::tools_config::McpServerDefCfg,
-    id: u64,
+    id: Value,
 ) -> ProgramExchange {
-    let request = crate::client::jsonrpc::tools_list("", id, None).body;
-    ProgramExchange::new(
-        server,
-        statement::NEED_PROGRAM,
-        vec![(request, Some(id))],
-        true,
-    )
-    .timed(def.timeout_ms())
+    ProgramExchange::listing(server, statement::NEED_PROGRAM, id, true).timed(def.timeout_ms())
+}
+
+/// One complete stdio list, retaining page state across host suspension and separate leases.
+#[derive(Debug)]
+pub(super) struct ProgramList {
+    server: String,
+    exchange: ProgramExchange,
+    pages: crate::client::jsonrpc::ToolPages,
+    root_id: Value,
+    page_id: Value,
+    used: u32,
+}
+
+impl ProgramList {
+    fn new(server: &str, def: &crate::tools_config::McpServerDefCfg, id: Value) -> Self {
+        Self {
+            server: server.to_string(),
+            exchange: list_exchange(server, def, id.clone()),
+            pages: Default::default(),
+            root_id: id.clone(),
+            page_id: id,
+            used: 0,
+        }
+    }
+
+    fn drive(
+        &mut self,
+        plane: &McpDoor,
+        host: &busbar_contract::abi::sdk::conn::Host,
+        ticket: Ticket,
+        base: u32,
+        server: &str,
+        def: &crate::tools_config::McpServerDefCfg,
+    ) -> std::task::Poll<Result<Vec<u8>, String>> {
+        use crate::client::jsonrpc::{parse_response_id, Paged, RpcOutcome};
+        loop {
+            let Some(at) = base.checked_add(self.used) else {
+                return std::task::Poll::Ready(Err(
+                    "the tool-list service-handle range is exhausted".to_string(),
+                ));
+            };
+            let done =
+                match exchange_child(plane, host, ticket, at, server, def, &mut self.exchange) {
+                    std::task::Poll::Pending => return std::task::Poll::Pending,
+                    std::task::Poll::Ready(Err(error)) => {
+                        return std::task::Poll::Ready(Err(error));
+                    }
+                    std::task::Poll::Ready(Ok(done)) => done,
+                };
+            let body = done.answer.unwrap_or_default();
+            let result = match parse_response_id(&body, &self.page_id) {
+                RpcOutcome::Result(result) => result,
+                RpcOutcome::Error { code, message } => {
+                    return std::task::Poll::Ready(Err(format!(
+                        "the upstream answered JSON-RPC error {code}: {message}"
+                    )));
+                }
+                RpcOutcome::InputRequired { .. } => {
+                    return std::task::Poll::Ready(Err(
+                        "tools/list cannot request caller input".to_string()
+                    ));
+                }
+                RpcOutcome::Malformed(error) | RpcOutcome::Uncorrelated(error) => {
+                    return std::task::Poll::Ready(Err(error));
+                }
+            };
+            match self.pages.take(result) {
+                Ok(Paged::Done(result)) => {
+                    let bytes = if self.pages.pages() == 1 {
+                        body
+                    } else {
+                        busbar_contract::jsonrpc::result_bytes(
+                            &crate::codec::json(&self.root_id),
+                            &crate::codec::json(&result),
+                        )
+                    };
+                    return std::task::Poll::Ready(Ok(bytes));
+                }
+                Ok(Paged::Next(cursor)) => {
+                    self.used =
+                        match self.used.checked_add(self.exchange.services_used()) {
+                            Some(used) if used < crate::tool_program::EXCHANGE_SERVICES => used,
+                            _ => return std::task::Poll::Ready(Err(
+                                "the complete tool list exceeds its existing service-handle range"
+                                    .to_string(),
+                            )),
+                        };
+                    self.page_id = Value::String(format!(
+                        "busbar-list-page:{}:{}",
+                        self.root_id,
+                        self.pages.pages()
+                    ));
+                    self.exchange = ProgramExchange::listing_page(
+                        server,
+                        statement::NEED_PROGRAM,
+                        self.page_id.clone(),
+                        true,
+                        Some(&cursor),
+                    )
+                    .timed(def.timeout_ms())
+                    .within_services(crate::tool_program::EXCHANGE_SERVICES - self.used);
+                }
+                Err(error) => return std::task::Poll::Ready(Err(error)),
+            }
+        }
+    }
 }
 
 /// What a far piece of a stdio member's answer came to.
@@ -564,10 +815,13 @@ pub(super) fn far(
             grants: def.grants,
         };
         relay.hold = 0;
-        match relay
-            .corr
-            .take(bytes, relay.wait, member, relay.generation, &mut peer)
-        {
+        match relay.corr.take(
+            bytes,
+            relay.wait.clone(),
+            member,
+            relay.generation,
+            &mut peer,
+        ) {
             Ok(Some(answer)) => relay.settled = Some(Ok(answer)),
             Ok(None) if last => relay.settled = Some(Err(crate::tool_program::CLOSED.to_string())),
             Ok(None) => {}
@@ -575,8 +829,10 @@ pub(super) fn far(
         }
         owe(member, relay);
     }
-    if replying(plane, ticket, member, def, relay) {
-        return Far::Pending;
+    match replying(plane, ticket, member, def, relay) {
+        Poll::Pending => return Far::Pending,
+        Poll::Ready(Err(why)) => relay.settled = Some(Err(why)),
+        Poll::Ready(Ok(())) => {}
     }
     match relay.settled.take() {
         Some(settled) => Far::Settled(settled),
@@ -598,28 +854,35 @@ fn owe(member: &str, relay: &mut ProgramRelay) {
     }
 }
 
-/// The replies' exchange driven: whether it pends.
+/// The replies' exchange driven to completion, preserving an actual send failure.
 fn replying(
     plane: &McpDoor,
     ticket: Ticket,
     member: &str,
     def: &crate::tools_config::McpServerDefCfg,
     relay: &mut ProgramRelay,
-) -> bool {
+) -> Poll<Result<(), String>> {
     if let Some(mut exchange) = relay.replying.take() {
-        if let Some(host) = plane.host.as_ref() {
-            let base = REPLY_SEQ.saturating_add(
-                relay
-                    .replies
-                    .saturating_mul(crate::tool_program::EXCHANGE_SERVICES),
-            );
-            if exchange_child(plane, host, ticket, base, member, def, &mut exchange).is_pending() {
+        let Some(host) = plane.host.as_ref() else {
+            return Poll::Ready(Err(
+                busbar_contract::abi::sdk::conn::ConnFailure::Unarmed.to_string()
+            ));
+        };
+        let base = REPLY_SEQ.saturating_add(
+            relay
+                .replies
+                .saturating_mul(crate::tool_program::EXCHANGE_SERVICES),
+        );
+        match exchange_child(plane, host, ticket, base, member, def, &mut exchange) {
+            Poll::Pending => {
                 relay.replying = Some(exchange);
-                return true;
+                return Poll::Pending;
             }
+            Poll::Ready(Err(why)) => return Poll::Ready(Err(why)),
+            Poll::Ready(Ok(_)) => {}
         }
     }
-    false
+    Poll::Ready(Ok(()))
 }
 
 /// ASKS BUSBAR COULD NOT RELAY, refused on the child's input (`replies`, one per ask: the round
@@ -637,10 +900,10 @@ pub(super) fn refuse_asks(
     if relay.replying.is_none() {
         owe(member, relay);
     }
-    if replying(plane, ticket, member, def, relay) {
-        Far::Pending
-    } else {
-        Far::Taken
+    match replying(plane, ticket, member, def, relay) {
+        Poll::Pending => Far::Pending,
+        Poll::Ready(Err(why)) => Far::Settled(Err(why)),
+        Poll::Ready(Ok(())) => Far::Taken,
     }
 }
 

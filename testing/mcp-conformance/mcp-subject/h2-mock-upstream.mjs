@@ -33,7 +33,7 @@ if (!PORT) {
 let seq = 0;
 function captureEgress(method, url, headers, body) {
   const dir = process.env.MCP_MOCK_CAPTURE_DIR;
-  if (!dir) return;
+  if (!dir) throw new Error('MCP_MOCK_CAPTURE_DIR is required for egress evidence');
   try {
     mkdirSync(dir, { recursive: true });
     const record = { path: url, method, headers, body };
@@ -41,8 +41,9 @@ function captureEgress(method, url, headers, body) {
     const tmp = join(dir, `.${name}.tmp`);
     writeFileSync(tmp, JSON.stringify(record));
     renameSync(tmp, join(dir, name));
-  } catch {
-    // best-effort: a capture failure must never change the response busbar gets
+  } catch (error) {
+    process.stderr.write(`egress capture failed: ${error}\n`);
+    process.exit(2);
   }
 }
 
@@ -71,20 +72,23 @@ const server = createServer((req, res) => {
     const raw = Buffer.concat(chunks).toString('utf8');
     const headers = {};
     for (const [k, v] of Object.entries(req.headers)) headers[k.toLowerCase()] = v;
-    captureEgress(req.method, req.url, headers, raw);
+    try { captureEgress(req.method, req.url, headers, raw); }
+    catch (error) { process.stderr.write(`${error}\n`); process.exit(2); }
     let body = {};
     try { body = raw ? JSON.parse(raw) : {}; } catch { body = {}; }
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return send(res, 400, { jsonrpc:'2.0', id:null, error:{code:-32600,message:'request must be an object'} });
+    if (!Object.hasOwn(body, 'id')) { res.writeHead(202).end(); return; }
     const id = body.id ?? null;
     const method = body.method;
     if (req.method !== 'POST') return send(res, 404, { error: 'GET not served' });
     if (method === 'tools/list') {
-      return send(res, 200, { jsonrpc: '2.0', id, result: { tools: TOOLS } });
+      return send(res, 200, { jsonrpc: '2.0', id, result: { resultType: 'complete', tools: TOOLS } });
     }
     if (method === 'tools/call') {
       const args = body.params?.arguments ?? {};
       return send(res, 200, {
         jsonrpc: '2.0', id,
-        result: { content: [{ type: 'text', text: `ping: ${args.label ?? ''}` }], isError: false },
+        result: { resultType: 'complete', content: [{ type: 'text', text: `ping: ${args.label ?? ''}` }], isError: false },
       });
     }
     return send(res, 400, { jsonrpc: '2.0', id, error: { code: -32601, message: `unknown method ${method}` } });

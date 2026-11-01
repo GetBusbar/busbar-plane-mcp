@@ -18,6 +18,23 @@ async function withServer(ctx, fn) {
   }
 }
 
+async function assertMalformedMetaHttpStatus(ctx, peer, id) {
+  // `close` drains stdout and the bridge's separate observation pipe. A response on
+  // stdout alone is not a barrier for another pipe, and native stdio has no HTTP status.
+  await peer.stop();
+  if (peer.httpObservationError) throw peer.httpObservationError;
+  if (!peer.httpTransport) {
+    ctx.note('meta.httpStatusCoverage', 'native stdio: HTTP status is not observed');
+    return;
+  }
+  const observed = peer.httpStatusesFor(id);
+  if (observed.length !== 1) {
+    throw new Error('HTTP status observation is missing or duplicated for the malformed-meta request');
+  }
+  ctx.assert('BASE.META.REQUIRED-FIELDS', observed[0].status === 400,
+    `malformed _meta requires HTTP 400; observed=${JSON.stringify(observed)}`);
+}
+
 test({
   id: 'SRV.DISCOVER.IMPLEMENTED',
   title: 'server/discover is implemented and returns supportedVersions',
@@ -92,6 +109,7 @@ test({
       ctx.assert('BASE.META.REQUIRED-FIELDS', res.error.code === ERR.INVALID_PARAMS,
         `code=${res.error.code} expected ${ERR.INVALID_PARAMS}`);
     }
+    await assertMalformedMetaHttpStatus(ctx, peer, 1);
   }),
 });
 
@@ -109,6 +127,7 @@ test({
       ctx.assert('BASE.META.REQUIRED-FIELDS', res.error.code === ERR.INVALID_PARAMS,
         `code=${res.error.code}`);
     }
+    await assertMalformedMetaHttpStatus(ctx, peer, 1);
   }),
 });
 
@@ -251,7 +270,7 @@ test({
 
 test({
   id: 'SRV.TOOLS.EXECUTION-ERROR-IS-RESULT',
-  title: 'a failing tool reports isError:true in a result, not a JSON-RPC error',
+  title: 'a failing tool reports a failure; record protocol-error versus isError routing',
   role: 'server', area: 'conformance', tier: 'pr', peer: 'real',
   catches: 'A server that maps tool exceptions to protocol errors, so the model never sees the message it needs to self-correct.',
   run: (ctx) => withServer(ctx, async (peer) => {
@@ -289,7 +308,7 @@ test({
     peer.send(request(1, 'tools/list'));
     const list = await peer.waitForId(1);
     if (list.error) ctx.skip('tools/list not supported');
-    const withSchema = (list.result.tools || []).filter((t) => t.outputSchema);
+    const withSchema = (list.result.tools || []).filter((t) => Object.hasOwn(t, 'outputSchema'));
     ctx.variance('outputSchema.declaringTools', withSchema.map((t) => t.name).sort());
     if (withSchema.length === 0) {
       ctx.skip('no tool declares an outputSchema, so this MUST is vacuous for this server. That is '
@@ -328,14 +347,19 @@ test({
           res.error ? `error:${res.error.code}` : 'no-result');
         continue;
       }
+      if (res.result.isError === true) {
+        ctx.variance(`outputSchema.${t.name}.callAnswered`, 'tool-execution-error');
+        continue;
+      }
       checked += 1;
+      ctx.assert('TOOLS.OUTPUTSCHEMA-CONFORMANCE', 'structuredContent' in res.result,
+        `tool=${t.name} declared outputSchema but returned no structuredContent`);
       if ('structuredContent' in res.result) {
         const ok = validateAgainstSchema(res.result.structuredContent, t.outputSchema);
+        if (!ok.supported) throw new Error(`Cannot evaluate outputSchema for ${t.name}: ${ok.errors.join('; ')}`);
         ctx.assert('TOOLS.OUTPUTSCHEMA-CONFORMANCE', ok.valid,
           `tool=${t.name} errors=${ok.errors.join('; ')}`);
       } else {
-        // The spec requires conforming structured results IF structured results
-        // are produced; it does not require structuredContent to be present.
         ctx.variance(`outputSchema.${t.name}.structuredContentPresent`, false);
       }
     }
@@ -420,42 +444,119 @@ function sampleValue(s, depth = 0) {
   }
 }
 
-// A deliberately small JSON Schema subset validator. The battery must not
-// dereference network $refs (BASE.SCHEMA.NO-NETWORK-REF), so this validator
-// never fetches anything.
+// A bounded evaluator: unknown validation semantics make the schema unsupported,
+// never conformant. No refs are fetched, including local refs this evaluator cannot resolve.
 export function validateAgainstSchema(value, schema, path = '$') {
   const errors = [];
+  const unsupported = [];
+  const annotations = new Set(['$id', '$comment', 'title', 'description', 'default', 'examples', 'deprecated', 'readOnly', 'writeOnly']);
+  const keywords = new Set(['$schema', 'type', 'enum', 'const', 'properties', 'required', 'additionalProperties',
+    'items', 'minItems', 'maxItems', 'uniqueItems', 'minLength', 'maxLength', 'pattern',
+    'minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf', 'minProperties', 'maxProperties']);
+  const types = new Set(['null', 'boolean', 'object', 'array', 'number', 'integer', 'string']);
+  const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+  // JSON numbers have mathematical equality, including 0 === -0. Object key order
+  // is immaterial, and that rule also applies inside nested const/enum/array values.
+  const jsonEqual = (left, right) => {
+    if (left === right) return true;
+    if (Array.isArray(left) || Array.isArray(right)) {
+      return Array.isArray(left) && Array.isArray(right) && left.length === right.length
+        && left.every((item, i) => jsonEqual(item, right[i]));
+    }
+    return isObject(left) && isObject(right) && Object.keys(left).length === Object.keys(right).length
+      && Object.keys(left).every((key) => Object.hasOwn(right, key) && jsonEqual(left[key], right[key]));
+  };
+  const owns = (v, key) => Object.hasOwn(v, key);
+  const nonnegative = new Set(['minItems', 'maxItems', 'minLength', 'maxLength', 'minProperties', 'maxProperties']);
+  const numeric = new Set(['minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf']);
+  const inspect = (s, p) => {
+    if (typeof s === 'boolean') return;
+    if (!isObject(s)) { unsupported.push(`${p}: schema must be an object or boolean`); return; }
+    for (const [k, v] of Object.entries(s)) {
+      if (!annotations.has(k) && !keywords.has(k)) unsupported.push(`${p}: unsupported keyword ${k}`);
+      if (nonnegative.has(k) && (!Number.isInteger(v) || v < 0)) unsupported.push(`${p}: invalid ${k}`);
+      if (numeric.has(k) && (typeof v !== 'number' || !Number.isFinite(v) || (k === 'multipleOf' && v <= 0))) {
+        unsupported.push(`${p}: invalid ${k}`);
+      }
+    }
+    if (owns(s, '$schema') && ![
+      'https://json-schema.org/draft/2020-12/schema', 'https://json-schema.org/draft/2019-09/schema',
+      'http://json-schema.org/draft-07/schema#',
+    ].includes(s.$schema)) unsupported.push(`${p}: unsupported schema dialect ${s.$schema}`);
+    if (owns(s, 'type')) {
+      const declared = Array.isArray(s.type) ? s.type : [s.type];
+      if (!declared.length || declared.some((t) => !types.has(t)) || new Set(declared).size !== declared.length) {
+        unsupported.push(`${p}: invalid type`);
+      }
+    }
+    if (owns(s, 'enum') && (!Array.isArray(s.enum) || !s.enum.length)) unsupported.push(`${p}: invalid enum`);
+    if (owns(s, 'required') && (!Array.isArray(s.required) || s.required.some((k) => typeof k !== 'string')
+      || new Set(s.required).size !== s.required.length)) unsupported.push(`${p}: invalid required`);
+    if (owns(s, 'properties')) {
+      if (!isObject(s.properties)) unsupported.push(`${p}: invalid properties`);
+      else for (const [k, child] of Object.entries(s.properties)) inspect(child, `${p}.properties.${k}`);
+    }
+    for (const k of ['items', 'additionalProperties']) if (owns(s, k)) inspect(s[k], `${p}.${k}`);
+    if (owns(s, 'uniqueItems') && typeof s.uniqueItems !== 'boolean') unsupported.push(`${p}: invalid uniqueItems`);
+    if (owns(s, 'pattern')) {
+      try {
+        if (typeof s.pattern !== 'string') throw new Error('pattern must be a string');
+        new RegExp(s.pattern, 'u');
+      } catch { unsupported.push(`${p}: unsupported or invalid pattern`); }
+    }
+  };
+  inspect(schema, path);
+  if (unsupported.length) return { valid: false, supported: false, errors: unsupported };
   const walk = (v, s, p) => {
-    if (!s || typeof s !== 'object') return;
-    if (s.$ref) { errors.push(`${p}: $ref not resolved (by design, refs are not dereferenced)`); return; }
-    if (s.type) {
-      const types = Array.isArray(s.type) ? s.type : [s.type];
-      const actual = v === null ? 'null'
-        : Array.isArray(v) ? 'array'
-          : Number.isInteger(v) ? 'integer'
-            : typeof v === 'number' ? 'number' : typeof v;
-      const ok = types.some((t) => t === actual
-        || (t === 'number' && (actual === 'integer' || actual === 'number')));
-      if (!ok) { errors.push(`${p}: expected ${types.join('|')}, got ${actual}`); return; }
-    }
-    if (s.type === 'object' || s.properties) {
-      if (v === null || typeof v !== 'object' || Array.isArray(v)) return;
-      for (const req of s.required || []) {
-        if (!(req in v)) errors.push(`${p}: missing required property "${req}"`);
-      }
-      for (const [k, sub] of Object.entries(s.properties || {})) {
-        if (k in v) walk(v[k], sub, `${p}.${k}`);
+    if (s === true) return;
+    if (s === false) { errors.push(`${p}: false schema rejects every value`); return; }
+    const actual = v === null ? 'null' : Array.isArray(v) ? 'array'
+      : Number.isInteger(v) ? 'integer' : typeof v;
+    if (owns(s, 'type')) {
+      const declared = Array.isArray(s.type) ? s.type : [s.type];
+      if (!declared.some((t) => t === actual || (t === 'number' && actual === 'integer'))) {
+        errors.push(`${p}: expected ${declared.join('|')}, got ${actual}`); return;
       }
     }
-    if ((s.type === 'array' || s.items) && Array.isArray(v)) {
-      v.forEach((item, i) => walk(item, s.items, `${p}[${i}]`));
+    if (owns(s, 'const') && !jsonEqual(v, s.const)) errors.push(`${p}: value differs from const`);
+    if (owns(s, 'enum') && !s.enum.some((e) => jsonEqual(e, v))) errors.push(`${p}: value not in enum`);
+    if (typeof v === 'number') {
+      for (const [k, violated] of [
+        ['minimum', v < s.minimum], ['maximum', v > s.maximum],
+        ['exclusiveMinimum', v <= s.exclusiveMinimum], ['exclusiveMaximum', v >= s.exclusiveMaximum],
+      ]) if (owns(s, k) && violated) errors.push(`${p}: violates ${k}`);
+      if (owns(s, 'multipleOf')) {
+        // Exact integer division is reliable here. Decimal arithmetic is not silently rounded.
+        if (!Number.isSafeInteger(v) || !Number.isSafeInteger(s.multipleOf)) {
+          unsupported.push(`${p}: non-integer multipleOf evaluation is unsupported`);
+        } else if (v % s.multipleOf !== 0) errors.push(`${p}: violates multipleOf`);
+      }
     }
-    if (s.enum && !s.enum.some((e) => JSON.stringify(e) === JSON.stringify(v))) {
-      errors.push(`${p}: value not in enum`);
+    if (typeof v === 'string') {
+      const length = [...v].length;
+      if (owns(s, 'minLength') && length < s.minLength) errors.push(`${p}: violates minLength`);
+      if (owns(s, 'maxLength') && length > s.maxLength) errors.push(`${p}: violates maxLength`);
+      if (owns(s, 'pattern') && !new RegExp(s.pattern, 'u').test(v)) errors.push(`${p}: violates pattern`);
+    }
+    if (Array.isArray(v)) {
+      if (owns(s, 'minItems') && v.length < s.minItems) errors.push(`${p}: violates minItems`);
+      if (owns(s, 'maxItems') && v.length > s.maxItems) errors.push(`${p}: violates maxItems`);
+      if (s.uniqueItems && v.some((x, i) => v.slice(0, i).some((y) => jsonEqual(x, y)))) errors.push(`${p}: violates uniqueItems`);
+      if (owns(s, 'items')) v.forEach((item, i) => walk(item, s.items, `${p}[${i}]`));
+    }
+    if (isObject(v)) {
+      const keys = Object.keys(v);
+      if (owns(s, 'minProperties') && keys.length < s.minProperties) errors.push(`${p}: violates minProperties`);
+      if (owns(s, 'maxProperties') && keys.length > s.maxProperties) errors.push(`${p}: violates maxProperties`);
+      for (const k of s.required || []) if (!owns(v, k)) errors.push(`${p}: missing required property ${JSON.stringify(k)}`);
+      for (const k of keys) {
+        if (s.properties && owns(s.properties, k)) walk(v[k], s.properties[k], `${p}.${k}`);
+        else if (owns(s, 'additionalProperties')) walk(v[k], s.additionalProperties, `${p}.${k}`);
+      }
     }
   };
   walk(value, schema, path);
-  return { valid: errors.length === 0, errors };
+  return { valid: !errors.length && !unsupported.length, supported: !unsupported.length, errors: [...errors, ...unsupported] };
 }
 
 test({
@@ -470,8 +571,11 @@ test({
     peer.send(notification('notifications/cancelled', { requestId: 'never-issued' }));
     peer.send(request(99, 'server/discover'));
     await peer.waitForId(99);
-    const stray = peer.messages.filter((m) => m.id === 'never-issued'
-      || (m.id === undefined && classify(m) === 'response'));
+    await peer.quiesce();
+    const responses = peer.messages.filter((m) => m && typeof m === 'object' && ('result' in m || 'error' in m));
+    const stray = responses.filter((m) => m.id !== 99);
+    ctx.assert('BASE.NOTIF.NO-RESPONSE', responses.filter((m) => m.id === 99).length === 1,
+      'only the barrier request may have one response');
     ctx.assert('BASE.NOTIF.NO-RESPONSE', stray.length === 0,
       `stray responses=${JSON.stringify(stray)}`);
   }),
@@ -485,7 +589,7 @@ test({
   run: (ctx) => withServer(ctx, async (peer) => {
     for (const [i, method] of ['server/discover', 'tools/list', 'resources/list', 'prompts/list'].entries()) {
       peer.send(request(i + 1, method));
-      try { await peer.waitForId(i + 1); } catch { /* unsupported method: fine */ }
+      await peer.waitForId(i + 1); // an unsupported method still owes a correlated error response
     }
     const reqs = peer.serverRequests();
     ctx.assert('PAT.SERVER-NO-REQUESTS', reqs.length === 0,
@@ -532,7 +636,7 @@ test({
     for (const [i, [method, params]] of probes.entries()) {
       peer.send(request(i + 1, method, params));
       let res;
-      try { res = await peer.waitForId(i + 1); } catch { continue; }
+      res = await peer.waitForId(i + 1);
       if (res.error) seen.push({ method, code: res.error.code });
     }
     const retired = seen.filter((s) => RETIRED_ERROR_CODES.includes(s.code));
@@ -554,12 +658,18 @@ test({
   role: 'server', area: 'conformance', tier: 'push', peer: 'fake',
   catches: 'A server that still requires an initialize handshake, rejecting every modern stateless client.',
   run: (ctx) => withServer(ctx, async (peer) => {
+    // Capability discovery is on a separate connection; this tested connection stays fresh.
+    const probe = ctx.target.spawnServer();
+    try {
+      probe.send(request('capabilities', 'server/discover'));
+      const discovered = await probe.waitForId('capabilities');
+      if (!Object.hasOwn(discovered.result?.capabilities || {}, 'tools')) ctx.skip('server does not declare tools');
+    } finally { await probe.stop(); }
     // No discover, no initialize. Straight to a real call.
     peer.send(request(1, 'tools/list'));
     const res = await peer.waitForId(1);
-    const rejectedForOrdering = Boolean(res.error)
-      && [ERR.INVALID_REQUEST, ERR.INTERNAL_ERROR].includes(res.error.code);
-    ctx.assert('BASE.STATELESS.NO-PRIOR-REQUESTS', !rejectedForOrdering,
+    const supported = !res.error && Array.isArray(res.result?.tools);
+    ctx.assert('BASE.STATELESS.NO-PRIOR-REQUESTS', supported,
       `server rejected an un-handshaked request: ${JSON.stringify(res.error)}`);
   }),
 });

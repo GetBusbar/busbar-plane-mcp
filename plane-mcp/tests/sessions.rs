@@ -26,6 +26,9 @@
 #[allow(dead_code)]
 mod door_facts;
 
+#[path = "support/completion_retirement_host.rs"]
+mod completion_retirement_host;
+
 #[path = "support/sessions_lines.rs"]
 mod sessions_lines;
 
@@ -721,7 +724,7 @@ unsafe impl Sync for Tables {}
 static TABLES: Tables = Tables(HostTables {
     size: std::mem::size_of::<HostTables>() as u32,
     _reserved: 0,
-    ctx: HostCtx::NONE,
+    ctx: HostCtx { handle: 71 },
     wake: None,
     conns: &CONN_SLOTS,
     io: std::ptr::null(),
@@ -752,6 +755,7 @@ fn head<T>(op: u32, ticket: Ticket) -> InHead {
     InHead {
         size: std::mem::size_of::<T>() as u32,
         op,
+        host: HostCtx { handle: 71 },
         ticket,
         ..z()
     }
@@ -776,6 +780,7 @@ fn lifecycle() -> &'static OpsHead {
 /// One opened instance of the door.
 struct Door {
     instance: *mut c_void,
+    retirement: std::cell::RefCell<completion_retirement_host::Host>,
 }
 
 /// The section: a registration that requires a session, and one that speaks the stateless revision.
@@ -831,6 +836,10 @@ fn open_with(section: &str) -> Door {
     assert_eq!(ret.outcome(), Outcome::Ready, "the door opens");
     Door {
         instance: o.open.instance,
+        retirement: std::cell::RefCell::new(completion_retirement_host::Host::new(
+            HostCtx { handle: 71 },
+            DRIVER,
+        )),
     }
 }
 
@@ -852,8 +861,7 @@ fn claim(verb: &str) -> u32 {
 impl Door {
     /// The kernel's tick, on the driver ticket.
     fn tick(&self) {
-        // A tick starts: the host forgets what the driver ticket kept.
-        kept_answers().clear();
+        // Pending legacy operations keep their service results across ticks until acknowledged.
         let now = TICKS.fetch_add(1, Ordering::Relaxed);
         let mut i = TickIn {
             head: head::<TickIn>(life::TICK, DRIVER),
@@ -887,7 +895,8 @@ impl Door {
     /// The driver ticket woke: `drive`.
     fn drive(&self) {
         let mut sessions = [0_u64; 16];
-        let i = PlaneDriveIn {
+        let extensions = self.retirement.borrow().input();
+        let mut i = PlaneDriveIn {
             drive: DriveIn {
                 head: head::<PlaneDriveIn>(life::DRIVE, DRIVER),
                 driver: DRIVER,
@@ -895,6 +904,7 @@ impl Door {
             sessions_buf: sessions.as_mut_ptr(),
             sessions_cap: sessions.len(),
         };
+        i.drive.head.extensions = octets(&extensions);
         let mut o: PlaneDriveOut = z();
         o.head = out_head::<PlaneDriveOut>();
         let f = lifecycle().drive.expect("drive");
@@ -907,7 +917,16 @@ impl Door {
                 std::ptr::from_mut(&mut o).cast(),
             )
         };
-        assert_eq!(ret.outcome(), Outcome::Ready);
+        assert!(matches!(ret.outcome(), Outcome::Ready | Outcome::Pending));
+        busbar_contract::abi::plane::check::check_drive(ret.outcome(), &o, sessions.len() as u64)
+            .unwrap();
+        for seq in self.retirement.borrow_mut().acknowledge(&o.head) {
+            assert!(
+                kept_answers().remove(&seq).is_some(),
+                "only an actual terminal result is retired"
+            );
+        }
+        completion_retirement_host::release(self.instance, &o.head, lifecycle());
     }
 
     /// A tick and the drive it wakes: every held stream read as far as it goes.

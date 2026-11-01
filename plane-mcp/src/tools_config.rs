@@ -47,10 +47,9 @@ pub const ASK_METHODS: &[&str] = &[ASK_ELICITATION, ASK_SAMPLING, ASK_ROOTS];
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum McpPinMechanism {
-    /// A signed tool manifest's operator-supplied, out-of-band issuer public key. It is a root (it
-    /// carries key material, and makes the registration approvable), not a pin of the far end's
-    /// key: the connector does not compare it with the server's certificate, and this build
-    /// verifies no MCP-native manifest signature under it.
+    /// A manifest issuer's public key. This build verifies no MCP manifest signature, so this
+    /// mechanism authenticates nothing and registrations using it are refused. Use `cert_spki`
+    /// or `mtls` to authenticate the far end.
     PinnedPubkey,
     /// The endpoint's certificate key, pinned: the host seals it into the registration's member
     /// route and the connector refuses, before a request byte is written, a connection whose
@@ -138,6 +137,7 @@ pub struct ToolAllowCfg {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_schema: Option<serde_json::Value>,
     /// The wire name busbar publishes (and `mcp_tool:` grants name); absent = `{server}_{tool}`.
+    /// With `token_exchange:`, this must also be one RFC 6749 scope token.
     /// Uniqueness is [`validate_published_names`]'s.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publish_as: Option<String>,
@@ -546,7 +546,7 @@ fn default_subject_token_type() -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ServerTransport {
-    /// Streamable HTTP, the `2026-07-28` stateless shape. The only one busbar speaks.
+    /// HTTP: the stateless shape, session revisions, and negotiated legacy HTTP+SSE.
     StreamableHttp,
     /// A locally spawned child process, newline-delimited JSON-RPC on its stdin and stdout.
     Stdio,
@@ -786,17 +786,15 @@ fn validate_endpoint(at: &str, def: &McpServerDefCfg) -> Result<(), String> {
              registration carrying both has named two different servers; drop one."
         ));
     }
-    let Some(program) = def
-        .command
-        .as_deref()
-        .map(str::trim)
-        .filter(|c| !c.is_empty())
-    else {
+    let Some(program) = def.command.as_deref().filter(|c| !c.is_empty()) else {
         return Err(format!(
             "{at}: `transport: stdio` needs `command:` — the absolute path of the binary busbar \
              spawns as this server. There is no default and busbar will not guess one."
         ));
     };
+    if program.trim() != program {
+        return Err(format!("{at}: `command:` has leading or trailing whitespace; write the exact absolute path without padding"));
+    }
     // ABSOLUTE (`Path::is_absolute`): a bare name is resolved through `PATH`, a relative one against
     // the working directory, so the environment would choose the binary.
     if !std::path::Path::new(program).is_absolute() {
@@ -806,7 +804,10 @@ fn validate_endpoint(at: &str, def: &McpServerDefCfg) -> Result<(), String> {
              runs instead of you."
         ));
     }
-    if let Some(dir) = def.cwd.as_deref().map(str::trim) {
+    if let Some(dir) = def.cwd.as_deref() {
+        if dir.trim() != dir {
+            return Err(format!("{at}: `cwd:` has leading or trailing whitespace; write the exact absolute path without padding"));
+        }
         if !std::path::Path::new(dir).is_absolute() {
             return Err(format!(
                 "{at}: `cwd: {dir}` must be an ABSOLUTE path. A relative one is resolved against \
@@ -943,6 +944,10 @@ pub fn validate_server(name: &str, def: &McpServerDefCfg) -> Result<(), String> 
     // The routing key's spelling ([`crate::identity::ToolKey`]), refused here in its words.
     let id = crate::identity::ServerId::new(name).map_err(|e| format!("{at}: {e}"))?;
 
+    if def.pin.mechanism == McpPinMechanism::PinnedPubkey {
+        return Err(format!("{at}: `pinned_pubkey` authenticates nothing in this build because no MCP manifest signature is verified; use `cert_spki` or `mtls` to authenticate the far end"));
+    }
+
     validate_endpoint(&at, def)?;
     def.sampling_bounds.validate(&at)?;
     validate_client_identity(&at, def)?;
@@ -993,6 +998,19 @@ pub fn validate_server(name: &str, def: &McpServerDefCfg) -> Result<(), String> 
                      whitespace. The published name is compared byte-for-byte against a caller's \
                      `tools/call` name and against an `mcp_tool:` grant, so padding that an operator \
                      cannot see would make both silently miss. Write it without the spaces."
+                ));
+            }
+            // RFC 6749 §3.3: each published name becomes one token in the exchange's scope list.
+            if def.token_exchange.is_some()
+                && !publish_as
+                    .bytes()
+                    .all(|b| matches!(b, 0x21 | 0x23..=0x5B | 0x5D..=0x7E))
+            {
+                return Err(format!(
+                    "{at}: `tools_allow.{tool}.publish_as: {publish_as:?}` must be one RFC 6749 \
+                     scope token when `token_exchange:` is configured. Use printable ASCII without \
+                     spaces, double quotes or backslashes; the published name is sent unchanged \
+                     as one OAuth scope, so a space would request more than one scope."
                 ));
             }
         }
@@ -1174,6 +1192,9 @@ pub fn validate_published_names(cfg: &ToolsCfg) -> Result<(), String> {
         for (name, family, capability, overridden) in
             tools.chain(prompts).chain(resources).chain(templates)
         {
+            if family == TOOL_APPROVALS_KEY && name.len() > crate::call::MAX_TOOL_NAME_BYTES {
+                return Err(format!("`tools.{server}.{family}.{capability}` publishes a name of {} bytes, longer than the {} bytes `tools/call` accepts; shorten the name or set `publish_as`", name.len(), crate::call::MAX_TOOL_NAME_BYTES));
+            }
             let claim = PublishedName {
                 server: server.clone(),
                 family,
@@ -1275,6 +1296,11 @@ fn validate_uri_template<'t>(at: &str, template: &'t str) -> Result<Vec<&'t str>
     let mut rest = template;
     let mut names: Vec<&str> = Vec::new();
     while let Some(open) = rest.find('{') {
+        if rest[..open].contains('}') {
+            return Err(format!(
+                "{at}: `resource_templates_allow.{template}` has a `}}` with no matching `{{`"
+            ));
+        }
         let after = &rest[open + 1..];
         let Some(close) = after.find('}') else {
             return Err(format!(

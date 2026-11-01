@@ -17,6 +17,17 @@ async function withServer(ctx, fn) {
   try { return await fn(peer); } finally { await peer.stop(); }
 }
 
+async function listedTool(peer, ctx) {
+  peer.send(request('probe-tool-list', 'tools/list'));
+  const res = await peer.waitForId('probe-tool-list');
+  if (res.error) ctx.skip('tools/list is unsupported; cannot deliver hostile arguments to a known tool');
+  const tools = res.result?.tools;
+  if (!Array.isArray(tools)) throw new Error('tools/list returned no tool array');
+  const tool = tools.find((entry) => entry && typeof entry.name === 'string');
+  if (!tool) ctx.skip('the target exposes no tool for hostile argument delivery');
+  return tool.name;
+}
+
 /**
  * The core adversarial oracle: after the nasty input, the server is still
  * RESPONSIVE. Deterministic barrier, not a sleep.
@@ -90,11 +101,19 @@ adversarial({
 
 adversarial({
   id: 'ADV.TRUNCATED-FRAME',
-  title: 'a truncated frame followed by a valid one is handled',
-  catches: 'A framing bug where an incomplete line poisons the read buffer and every later message is misparsed.',
-  inject: async (peer) => {
-    peer.sendRaw('{"jsonrpc":"2.0","id":1,"method":"tools/li');
-    peer.sendRaw('\n');
+  title: 'a frame split before its final bytes is buffered until it is complete',
+  timing: true,
+  catches: 'A framing bug that parses a partial line before its terminating newline or loses the buffered prefix.',
+  inject: async (peer, ctx) => {
+    const frame = JSON.stringify(request('split-frame', 'server/discover'));
+    const split = frame.length - 2;
+    peer.sendRaw(frame.slice(0, split));
+    await peer.quiesce();
+    ctx.assert('STDIO.NO-EMBEDDED-NEWLINES', peer.messages.length === 0 && peer.badLines.length === 0,
+      'the server answered an incomplete line before its newline arrived');
+    peer.sendRaw(frame.slice(split) + '\n');
+    const res = await peer.waitForId('split-frame');
+    ctx.assert('VER.DISCOVER-REQUIRED', Boolean(res.result), 'the completed split frame was not served');
   },
 });
 
@@ -134,9 +153,8 @@ adversarial({
     peer.send({ jsonrpc: '2.0', id: 777, result: { resultType: 'complete' } });
   },
   after: (peer, ctx) => {
-    ctx.assert('STDIO.CLIENT-NO-RESPONSES', true,
-      'client-sent responses are forbidden; this test verifies the server survives one');
     ctx.variance('responseToNobody.serverReplied', peer.responsesFor(777).length > 0);
+    ctx.note('spec-status', 'The injected client response violates the client rule; this scenario judges server survival, not a normative server obligation to ignore it.');
   },
 });
 
@@ -162,10 +180,11 @@ adversarial({
   id: 'ADV.DEEP-NESTING',
   title: 'a deeply nested arguments object does not cause a stack overflow',
   catches: 'A recursive-descent parser or validator with no depth bound, a one-line denial of service.',
-  inject: (peer) => {
+  inject: async (peer, ctx) => {
+    const name = await listedTool(peer, ctx);
     let deep = '1';
     for (let i = 0; i < 2000; i++) deep = `[${deep}]`;
-    peer.sendRaw(`{"jsonrpc":"2.0","id":"deep","method":"tools/call","params":{"name":"echo","arguments":{"text":${deep}},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}\n`);
+    peer.sendRaw(`{"jsonrpc":"2.0","id":"deep","method":"tools/call","params":{"name":${JSON.stringify(name)},"arguments":{"text":${deep}},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}\n`);
   },
 });
 
@@ -174,9 +193,10 @@ adversarial({
   title: 'a multi-megabyte argument is handled or refused, but not fatal',
   catches: 'An unbounded read buffer letting one client exhaust server memory.',
   tier: 'prerelease',
-  inject: (peer) => {
+  inject: async (peer, ctx) => {
+    const name = await listedTool(peer, ctx);
     const big = 'A'.repeat(8 * 1024 * 1024);
-    peer.send(request('big', 'tools/call', { name: 'echo', arguments: { text: big } }));
+    peer.send(request('big', 'tools/call', { name, arguments: { text: big } }));
   },
   after: (peer, ctx) => {
     const r = peer.responsesFor('big');
@@ -204,7 +224,7 @@ adversarial({
   after: async (peer, ctx) => {
     let res = null;
     try { res = await peer.waitForId('wrongtype', 5000); } catch { /* no reply */ }
-    ctx.assert('TOOLS.VALIDATE-INPUTS', res === null || Boolean(res.error),
+    ctx.assert('TOOLS.VALIDATE-INPUTS', res !== null && Boolean(res.error),
       `expected rejection, got result=${JSON.stringify(res && res.result)}`);
     ctx.variance('wrongParamTypes.code', res && res.error ? res.error.code : null);
   },
@@ -220,8 +240,24 @@ adversarial({
   after: async (peer, ctx) => {
     let res = null;
     try { res = await peer.waitForId('badmeta', 5000); } catch { /* no reply */ }
+    ctx.assert('BASE.META.REQUIRED-FIELDS', res !== null && res.error?.code === ERR.INVALID_PARAMS,
+      'a malformed _meta must receive the required invalid-params response');
     ctx.variance('badMeta.code', res && res.error ? res.error.code : null);
     ctx.variance('badMeta.answered', res !== null);
+    // The wrapper's health response has already arrived. Drain the independent
+    // observation pipe, then select the malformed request rather than that probe.
+    await peer.stop();
+    if (peer.httpObservationError) throw peer.httpObservationError;
+    if (!peer.httpTransport) {
+      ctx.note('meta.httpStatusCoverage', 'native stdio: HTTP status is not observed');
+      return;
+    }
+    const observed = peer.httpStatusesFor('badmeta');
+    if (observed.length !== 1) {
+      throw new Error('HTTP status observation is missing or duplicated for the malformed-meta request');
+    }
+    ctx.assert('BASE.META.REQUIRED-FIELDS', observed[0].status === 400,
+      `malformed _meta requires HTTP 400; observed=${JSON.stringify(observed)}`);
   },
 });
 
@@ -229,9 +265,10 @@ adversarial({
   id: 'ADV.NUL-AND-CONTROL-BYTES',
   title: 'control characters inside a JSON string are handled',
   catches: 'A server that passes raw control bytes into logs or downstream systems, enabling log injection.',
-  inject: (peer) => {
+  inject: async (peer, ctx) => {
+    const name = await listedTool(peer, ctx);
     peer.send(request('ctrl', 'tools/call', {
-      name: 'echo', arguments: { text: 'a\u0000b\u001bc\u0007d' },
+      name, arguments: { text: 'a\u0000b\u001bc\u0007d' },
     }));
   },
   after: (peer, ctx) => {
@@ -245,11 +282,12 @@ adversarial({
   id: 'ADV.UNICODE-AND-SURROGATES',
   title: 'lone surrogates and astral-plane text do not break framing',
   catches: 'A UTF-8 encoder that emits invalid sequences, corrupting the stream for a strict client.',
-  inject: (peer) => {
+  inject: async (peer, ctx) => {
+    const name = await listedTool(peer, ctx);
     peer.send(request('uni', 'tools/call', {
-      name: 'echo', arguments: { text: 'ok \ud83d\ude00 done' },
+      name, arguments: { text: 'ok \ud83d\ude00 done' },
     }));
-    peer.sendRaw('{"jsonrpc":"2.0","id":"lone","method":"tools/call","params":{"name":"echo","arguments":{"text":"\\ud800"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}\n');
+    peer.send(request('lone', 'tools/call', { name, arguments: { text: '\ud800' } }));
   },
 });
 
@@ -322,14 +360,14 @@ test({
   id: 'HOSTILE.CANCEL-UNKNOWN-ID',
   title: 'cancelling a request that was never issued is ignored',
   role: 'server', area: 'hostile', tier: 'pr', peer: 'fake',
-  catches: 'A cancellation path that trusts the requestId and tears down another caller request, a cross-tenant denial of service.',
+  catches: 'An unknown cancellation id tears down an unrelated in-flight request on the same connection.',
   run: (ctx) => withServer(ctx, async (peer) => {
     peer.send(request('victim', 'tools/list'));
-    peer.send(notification('notifications/cancelled', { requestId: 'victim' }));
     peer.send(notification('notifications/cancelled', { requestId: 'total-fiction' }));
     peer.send(request('survivor', 'server/discover'));
+    const victim = await peer.waitForId('victim');
     const res = await peer.waitForId('survivor');
-    ctx.assert('CANCEL.RACE-GRACEFUL', Boolean(res.result),
+    ctx.assert('CANCEL.RACE-GRACEFUL', Boolean(victim.result) && Boolean(res.result),
       'server failed to answer after cancelling an unknown id');
     // Spec: servers SHOULD not send a response for a cancelled request, but MAY
     // ignore cancellation if processing already completed. Both legal.
@@ -396,9 +434,8 @@ test({
     for (const [i, cursor] of forged.entries()) {
       peer.send(request(`cur-${i}`, 'tools/list', { cursor }));
       let res;
-      try { res = await peer.waitForId(`cur-${i}`, 6000); } catch { continue; }
-      const okShape = Boolean(res.error) || Array.isArray(res.result && res.result.tools);
-      ctx.assert('PAGE.INVALID-CURSOR-32602', okShape,
+      res = await peer.waitForId(`cur-${i}`, 6000);
+      ctx.assert('PAGE.INVALID-CURSOR-32602', res.error?.code === ERR.INVALID_PARAMS,
         `forged cursor produced a malformed reply: ${JSON.stringify(res).slice(0, 200)}`);
       ctx.variance(`cursorForgery.${i}.kind`,
         res.error ? `error:${res.error.code}` : 'result');
@@ -451,7 +488,7 @@ test({
     for (const [i, m] of ['server/discover', 'tools/list', 'resources/list', 'prompts/list'].entries()) {
       peer.send(request(i + 1, m));
       let res;
-      try { res = await peer.waitForId(i + 1, 6000); } catch { continue; }
+      res = await peer.waitForId(i + 1, 6000);
       const json = JSON.stringify(res.result || {});
       for (const match of json.matchAll(/"src"\s*:\s*"([^"]+)"/g)) uris.push(match[1]);
     }

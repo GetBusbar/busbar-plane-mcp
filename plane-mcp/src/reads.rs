@@ -10,7 +10,7 @@
 //! ([`PromptEntry::ask_caller`]) reaches [`prompts_get`] only once that exchange let it through.
 //!
 //! The answers and the refusals are the served engine's: a missing member is `400` + `-32602`;
-//! not found and not granted are one `404` + `-32000`; a uri two reachable approvals answer is
+//! resources not found and not granted are one `404` + `-32602`; a uri two reachable approvals answer is
 //! `409` + `-32000` naming them.
 
 use std::collections::BTreeMap;
@@ -44,28 +44,7 @@ pub fn substitute_arguments(template: &str, params: Option<&Value>) -> String {
     else {
         return template.to_string();
     };
-    let mut out = String::with_capacity(template.len());
-    let mut rest = template;
-    while let Some(open) = rest.find('{') {
-        out.push_str(&rest[..open]);
-        let after = &rest[open + 1..];
-        let Some(close) = after.find('}') else {
-            out.push_str(&rest[open..]);
-            return out;
-        };
-        let name = &after[..close];
-        match args.get(name).and_then(Value::as_str) {
-            Some(text) => out.push_str(text),
-            None => {
-                out.push('{');
-                out.push_str(name);
-                out.push('}');
-            }
-        }
-        rest = &after[close + 1..];
-    }
-    out.push_str(rest);
-    out
+    substitute_with(template, |name| args.get(name).and_then(Value::as_str))
 }
 
 /// The `messages` a prompt renders, in whichever form the operator declared: substituted first,
@@ -148,13 +127,11 @@ pub fn prompt_named<'c>(
 /// `prompts/get`'s answer for a prompt [`prompt_named`] found.
 #[must_use]
 pub fn prompts_get(prompt: &PromptEntry, id: &Value, params: Option<&Value>) -> Vec<u8> {
-    complete(
-        id,
-        json!({
-            "description": prompt.description.as_deref().map(normalise),
-            "messages": render_messages(prompt, params),
-        }),
-    )
+    let mut result = json!({"messages": render_messages(prompt, params)});
+    if let Some(description) = prompt.description.as_deref() {
+        result["description"] = normalise(description).into();
+    }
+    complete(id, result)
 }
 
 /// One `contents` entry: the uri, its media type, and the blob or else the text (normalised).
@@ -175,26 +152,29 @@ fn content(uri: &str, mime_type: Option<&String>, blob: Option<&String>, text: &
 /// template: a bound value is copied as it is, so a value that itself spells `{other}` is never
 /// substituted again. A `{...}` no binding names is kept as written.
 fn substitute(template: &str, bindings: &BTreeMap<String, String>) -> String {
+    substitute_with(template, |name| bindings.get(name).map(String::as_str))
+}
+
+fn substitute_with<'a>(template: &str, binding: impl Fn(&str) -> Option<&'a str>) -> String {
     let mut out = String::with_capacity(template.len());
-    let mut rest = template;
-    while let Some(open) = rest.find('{') {
-        out.push_str(&rest[..open]);
-        let after = &rest[open + 1..];
-        match after
-            .find('}')
-            .and_then(|close| Some((close, bindings.get(&after[..close])?)))
-        {
-            Some((close, value)) => {
-                out.push_str(value);
-                rest = &after[close + 1..];
+    let mut opening = None;
+    let mut copied = 0;
+    for (at, ch) in template.char_indices() {
+        match ch {
+            '{' => opening = Some(at),
+            '}' => {
+                if let Some(start) = opening.take() {
+                    if let Some(value) = binding(&template[start + 1..at]) {
+                        out.push_str(&template[copied..start]);
+                        out.push_str(value);
+                        copied = at + 1;
+                    }
+                }
             }
-            None => {
-                out.push('{');
-                rest = after;
-            }
+            _ => {}
         }
     }
-    out.push_str(rest);
+    out.push_str(&template[copied..]);
     out
 }
 
@@ -231,7 +211,8 @@ fn ambiguous(id: &Value, uri: &str, candidates: &[String]) -> Refusal {
 /// # Errors
 ///
 /// `400` + `-32602` without a string `params.uri`; `409` + `-32000` for an ambiguity; `404` +
-/// `-32000` for a uri nothing the caller may see answers.
+/// `-32602` for a uri nothing the caller may see answers. This dispatch serves `2026-07-28`,
+/// which retires `-32002`; legacy session adaptation preserves the standard Invalid params code.
 pub fn resources_read(
     catalogue: &Catalogue,
     id: &Value,
@@ -257,9 +238,9 @@ pub fn resources_read(
                 return Err(error(
                     STATUS_NOT_FOUND,
                     id,
-                    CODE_REFUSED,
+                    CODE_INVALID_PARAMS,
                     format!("`{uri}` is not a resource this server exposes."),
-                    None,
+                    Some(json!({"uri": uri})),
                 ))
             }
         },
