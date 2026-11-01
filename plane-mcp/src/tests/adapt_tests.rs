@@ -5,6 +5,20 @@ use super::*;
 use serde_json::json;
 
 #[test]
+fn event_frames_normalize_each_sse_line_ending() {
+    for data in ["one\ntwo", "one\rtwo", "one\r\ntwo"] {
+        assert_eq!(
+            frame(None, Some("message"), data),
+            "event: message\ndata: one\ndata: two\n\n"
+        );
+    }
+    assert_eq!(
+        frame(None, None, "one\r\rthree"),
+        "data: one\ndata: \ndata: three\n\n"
+    );
+}
+
+#[test]
 fn a_stateless_request_keeps_the_stateless_reading_whatever_else_it_carries() {
     let stateless = json!({"jsonrpc":"2.0","id":1,"method":"tools/list",
         "params":{"_meta":{META_PROTOCOL_VERSION: "2026-07-28"}}});
@@ -100,11 +114,9 @@ fn raising_adds_the_stateless_meta_and_mirrors_the_name() {
 
     let mut bare = json!({"jsonrpc":"2.0","id":4,"method":"tools/list"});
     assert_eq!(raise(&mut bare), Some(()));
-    assert!(
-        crate::codec::mirrored(&bare)
-            .iter()
-            .all(|(k, _)| k != "mcp-name")
-    );
+    assert!(crate::codec::mirrored(&bare)
+        .iter()
+        .all(|(k, _)| k != "mcp-name"));
     assert!(bare["params"]["_meta"].is_object());
 
     let mut bad = json!({"jsonrpc":"2.0","id":5,"method":"tools/list","params":[1]});
@@ -172,23 +184,6 @@ fn event_stream_framing() {
     assert_eq!(
         endpoint_event("/mcp", "0123"),
         "event: endpoint\ndata: /mcp?sessionId=0123\n\n"
-    );
-}
-
-/// M3-1: a bare CR is JSON whitespace, and every event-stream reader ends a line at one; a frame
-/// splits on CR, LF and CRLF alike, so no `data:` line carries a CR.
-#[test]
-fn a_bare_cr_in_framed_data_ends_its_data_line() {
-    let framed = frame(None, Some(EVENT_MESSAGE), "{\"a\":1\r,\"b\":2}");
-    assert_eq!(
-        framed,
-        "event: message\ndata: {\"a\":1\ndata: ,\"b\":2}\n\n"
-    );
-    assert!(!framed.contains('\r'));
-    assert_eq!(
-        frame(None, None, "a\r\nb"),
-        "data: a\ndata: b\n\n",
-        "CRLF stays one break"
     );
 }
 
@@ -261,17 +256,19 @@ fn lowering_an_answer_splices_its_own_bytes() {
     );
     assert_eq!(lower_answer(b"not json"), None);
 }
-
+/// M3-1: a bare CR is JSON whitespace, and every event-stream reader ends a line at one; a frame
+/// splits on CR, LF and CRLF alike, so no `data:` line carries a CR.
 #[test]
-fn event_frames_normalize_each_sse_line_ending() {
-    for data in ["one\ntwo", "one\rtwo", "one\r\ntwo"] {
-        assert_eq!(
-            frame(None, Some("message"), data),
-            "event: message\ndata: one\ndata: two\n\n"
-        );
-    }
+fn a_bare_cr_in_framed_data_ends_its_data_line() {
+    let framed = frame(None, Some(EVENT_MESSAGE), "{\"a\":1\r,\"b\":2}");
     assert_eq!(
-        frame(None, None, "one\r\rthree"),
-        "data: one\ndata: \ndata: three\n\n"
+        framed,
+        "event: message\ndata: {\"a\":1\ndata: ,\"b\":2}\n\n"
+    );
+    assert!(!framed.contains('\r'));
+    assert_eq!(
+        frame(None, None, "a\r\nb"),
+        "data: a\ndata: b\n\n",
+        "CRLF stays one break"
     );
 }

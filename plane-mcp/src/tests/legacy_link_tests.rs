@@ -7,6 +7,12 @@
 
 use super::*;
 
+#[path = "legacy_retention_regressions.rs"]
+mod retention;
+
+#[path = "legacy_call_regressions.rs"]
+mod calls;
+
 #[path = "legacy_initialization_regressions.rs"]
 mod initialization;
 

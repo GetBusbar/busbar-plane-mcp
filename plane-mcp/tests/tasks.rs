@@ -34,6 +34,20 @@
 #[allow(dead_code)]
 mod door_facts;
 
+#[path = "support/queued_deadline.rs"]
+mod queued_deadline;
+
+#[path = "support/task_settlement.rs"]
+mod task_settlement;
+
+#[path = "support/task_state_lifecycle.rs"]
+mod task_state_lifecycle;
+
+#[path = "support/inspection_wire.rs"]
+mod inspection_wire;
+#[path = "support/task_retention.rs"]
+mod task_retention;
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::os::raw::c_void;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -125,6 +139,12 @@ const ABSENT_SPAN: Span = Span {
 static MONO: AtomicU64 = AtomicU64::new(1_000_000_000);
 
 extern "C" fn clock_now(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
+    if let Some(outcome) = queued_deadline::clock(input, out) {
+        return outcome;
+    }
+    if let Some(outcome) = task_state_lifecycle::clock(input, out) {
+        return outcome;
+    }
     // SAFETY: the SDK hands a `ClockNowIn` whose reading slot it owns.
     let i = unsafe { input.cast::<ClockNowIn>().read() };
     let mono = MONO.fetch_add(1_000_000_000, Ordering::SeqCst);
@@ -151,8 +171,22 @@ extern "C" fn entitled(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -
     if NARROW.load(Ordering::SeqCst) && NOT_GRANTED.contains(&target.as_str()) {
         return ready(out, NOT_ENTITLED, 0, 0);
     }
+    if revoked().iter().any(|t| *t == target) {
+        return ready(out, NOT_ENTITLED, 0, 0);
+    }
     ready(out, ENTITLED, 0, 0)
 }
+
+/// THE GRANTS REVOKED since a task was created: the targets the kernel's entitlement answers say
+/// the caller no longer holds (none by default).
+static REVOKED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+fn revoked() -> MutexGuard<'static, Vec<String>> {
+    REVOKED.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// THE KERNEL'S TRUST VERDICT every `trust.serves` answers (`DISTRUST_NONE` by default: it serves).
+static VERDICT: AtomicU64 = AtomicU64::new(DISTRUST_NONE);
 
 static FILLS: AtomicU64 = AtomicU64::new(0);
 
@@ -170,7 +204,25 @@ extern "C" fn random_fill(_: HostCtx, input: *const c_void, out: *mut ServiceOut
 }
 
 extern "C" fn serves(_: HostCtx, _: *const c_void, out: *mut ServiceOut) -> RawOutcome {
-    ready(out, DISTRUST_NONE, 0, 0)
+    ready(out, VERDICT.load(Ordering::SeqCst), 0, 0)
+}
+
+/// The host's destination judge: a private address (`10.…`) is internal when the registration
+/// was granted no private reach (`DEST_REFUSE_PRIVATE`); every other destination is allowed.
+extern "C" fn dest_judge(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
+    use busbar_contract::abi::host::service::{
+        DestJudgeIn, DEST_ALLOWED, DEST_INTERNAL, DEST_REFUSE_PRIVATE,
+    };
+    // SAFETY: the SDK hands a `DestJudgeIn` naming its live destination.
+    let i = unsafe { input.cast::<DestJudgeIn>().read() };
+    let dest = String::from_utf8_lossy(&str_bytes(i.dest)).into_owned();
+    let private = dest.starts_with("10.");
+    let verdict = if private && i.flags & DEST_REFUSE_PRIVATE != 0 {
+        DEST_INTERNAL
+    } else {
+        DEST_ALLOWED
+    };
+    ready(out, verdict, 0, 0)
 }
 
 extern "C" fn sighted(_: HostCtx, _: *const c_void, out: *mut ServiceOut) -> RawOutcome {
@@ -201,6 +253,9 @@ struct Work {
     reference: String,
     live: bool,
     record: Vec<u8>,
+    opened_ms: u64,
+    settled_ms: Option<u64>,
+    owner: String,
 }
 
 /// THE STAND-IN HOST'S STATE, shared by every door the test opens (the nodes of one deployment).
@@ -217,6 +272,7 @@ struct Book {
     records: BTreeMap<Vec<u8>, Vec<u8>>,
     /// How many of the next settles fail (the host could not take them at once).
     fail_settles: u32,
+    principals: HashMap<Ticket, String>,
 }
 
 static BOOK: Mutex<Option<Book>> = Mutex::new(None);
@@ -240,6 +296,9 @@ fn open_work(b: &mut Book, reference: String, record: Vec<u8>) -> u64 {
             reference,
             live: true,
             record,
+            opened_ms: task_retention::now_ms(),
+            settled_ms: None,
+            owner: ALICE.to_string(),
         },
     );
     handle
@@ -265,12 +324,20 @@ unsafe fn write_found(buf: *mut u8, cap: usize, spans: *mut ItemSpan, w: &Work) 
 }
 
 extern "C" fn work_open(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
+    task_retention::sweep();
     // SAFETY: the SDK hands a `WorkOpenIn`.
     let i = unsafe { input.cast::<WorkOpenIn>().read() };
     let record = blob_bytes(i.record);
     let (handle, reference) = with_book(|b| {
         let reference = format!("{:032x}", 0xabc0_0000_u64 + b.next + 1);
-        (open_work(b, reference.clone(), record), reference)
+        let handle = open_work(b, reference.clone(), record);
+        let owner = b
+            .principals
+            .get(&i.head.handle.ticket)
+            .cloned()
+            .unwrap_or_default();
+        b.works.get_mut(&handle).unwrap().owner = owner;
+        (handle, reference)
     });
     // SAFETY: the SDK's buffers, at least 32 bytes and one span.
     unsafe {
@@ -284,13 +351,20 @@ extern "C" fn work_open(_: HostCtx, input: *const c_void, out: *mut ServiceOut) 
 }
 
 extern "C" fn work_find(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
+    if let Some(outcome) = task_state_lifecycle::fault("work.find", input, out) {
+        return outcome;
+    }
+    if let Some(outcome) = task_retention::absent(out) {
+        return outcome;
+    }
     // SAFETY: the SDK hands a `WorkFindIn`.
     let i = unsafe { input.cast::<WorkFindIn>().read() };
     let reference = String::from_utf8_lossy(&str_bytes(i.reference)).into_owned();
     let found = with_book(|b| {
+        let owner = b.principals.get(&i.head.handle.ticket);
         b.works
             .iter()
-            .find(|(_, w)| w.reference == reference)
+            .find(|(_, w)| w.reference == reference && owner == Some(&w.owner))
             .map(|(h, w)| (*h, w.clone()))
     });
     let Some((handle, w)) = found else {
@@ -304,9 +378,17 @@ extern "C" fn work_find(_: HostCtx, input: *const c_void, out: *mut ServiceOut) 
 }
 
 extern "C" fn work_resume(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
+    if let Some(outcome) = task_state_lifecycle::fault("work.resume", input, out) {
+        return outcome;
+    }
     // SAFETY: the SDK hands a `WorkResumeIn`.
     let i = unsafe { input.cast::<WorkResumeIn>().read() };
-    let Some(w) = with_book(|b| b.works.get(&i.handle).cloned()) else {
+    let Some(w) = with_book(|b| {
+        b.works
+            .get(&i.handle)
+            .filter(|w| b.principals.get(&i.head.handle.ticket) == Some(&w.owner))
+            .cloned()
+    }) else {
         return refused(out);
     };
     // SAFETY: the SDK's buffers.
@@ -328,14 +410,18 @@ extern "C" fn work_settle(_: HostCtx, input: *const c_void, out: *mut ServiceOut
     if failed {
         return answer(out, Outcome::Failed, 0, 0, 0);
     }
-    let landed = with_book(|b| match b.works.get_mut(&i.handle) {
-        Some(w) if w.live => {
-            w.live = false;
-            w.record.clone_from(&record);
-            b.settles.push((i.handle, record));
-            true
+    let landed = with_book(|b| {
+        let owner = b.principals.get(&i.head.handle.ticket).cloned();
+        match b.works.get_mut(&i.handle) {
+            Some(w) if w.live && owner.as_ref() == Some(&w.owner) => {
+                w.live = false;
+                w.settled_ms = Some(task_retention::now_ms());
+                w.record.clone_from(&record);
+                b.settles.push((i.handle, record));
+                true
+            }
+            _ => false,
         }
-        _ => false,
     });
     if landed {
         ready(out, 0, 0, 0)
@@ -361,6 +447,9 @@ extern "C" fn unit_nest(_: HostCtx, input: *const c_void, out: *mut ServiceOut) 
 }
 
 extern "C" fn records_claim(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
+    if let Some(outcome) = task_state_lifecycle::fault("records.claim", input, out) {
+        return outcome;
+    }
     // SAFETY: the SDK hands a `RecordsClaimIn`.
     let i = unsafe { input.cast::<RecordsClaimIn>().read() };
     let key = (str_bytes(i.kind), str_bytes(i.key));
@@ -369,6 +458,9 @@ extern "C" fn records_claim(_: HostCtx, input: *const c_void, out: *mut ServiceO
 }
 
 extern "C" fn records_list(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
+    if let Some(outcome) = task_state_lifecycle::fault("records.list", input, out) {
+        return outcome;
+    }
     // SAFETY: the SDK hands a `RecordsListIn` over its own buffers.
     let i = unsafe { input.cast::<RecordsListIn>().read() };
     let (prefix, after) = (str_bytes(i.prefix), str_bytes(i.after));
@@ -426,7 +518,7 @@ static HOST_SLOTS: HostSlots = HostSlots {
     records_get: None,
     records_list: Some(records_list),
     records_claim: Some(records_claim),
-    dest_judge: None,
+    dest_judge: Some(dest_judge),
     sign: Some(sign),
     unit_nest: Some(unit_nest),
     work_open: Some(work_open),
@@ -731,6 +823,8 @@ fn fresh() -> MutexGuard<'static, ()> {
     *book() = Some(Book::default());
     *upstreams() = Some(Upstreams::default());
     NARROW.store(false, Ordering::SeqCst);
+    revoked().clear();
+    VERDICT.store(DISTRUST_NONE, Ordering::SeqCst);
     serial
 }
 
@@ -946,6 +1040,7 @@ impl<'a> Given<'a> {
 
 #[derive(Debug, Default)]
 struct Answered {
+    wake_at_ns: u64,
     status: u32,
     fields: Vec<(String, String)>,
     bytes: Vec<u8>,
@@ -1028,10 +1123,18 @@ impl Door {
     /// One piece of `unit`, re-called while the door says `more`. Every record write of the task
     /// kind it carries is applied to the host's records.
     fn piece(&self, unit: u64, given: &Given<'_>) -> Answered {
-        let ticket = Ticket {
-            slot: u32::try_from(unit).unwrap(),
-            generation: 1,
-        };
+        self.piece_on_ticket(
+            unit,
+            Ticket {
+                slot: u32::try_from(unit).unwrap(),
+                generation: 1,
+            },
+            given,
+        )
+    }
+
+    /// A host ticket is independent of the plane's full-width unit identity.
+    fn piece_on_ticket(&self, unit: u64, ticket: Ticket, given: &Given<'_>) -> Answered {
         let head_fields: Vec<Field> = given
             .head
             .iter()
@@ -1047,12 +1150,21 @@ impl Door {
         let mut units = [z::<UnitCount>(); 8];
         let mut got = Answered::default();
         let mut first = true;
+        let mut inspection_reply = None;
         for _ in 0..64 {
             let mut i: OnPieceIn = z();
             i.head = head::<OnPieceIn>(slot::ON_PIECE, ticket);
+            let inspection_extensions = task_retention::input(inspection_reply.as_deref());
+            i.head.extensions = octets(&inspection_extensions);
+            if inspection_reply.is_some() {
+                i.head.flags |= inspection_wire::RESUME;
+            }
             i.unit = unit;
             i.from = given.from;
             i.caller_ref = str_of(given.caller);
+            with_book(|b| {
+                b.principals.insert(ticket, given.caller.to_string());
+            });
             if first {
                 i.flags = given.flags;
                 i.bytes = octets(given.bytes);
@@ -1080,7 +1192,17 @@ impl Door {
                     std::ptr::from_mut(&mut o).cast(),
                 )
             };
+            got.wake_at_ns = o.head.wake_at_ns;
             first = false;
+            if let Some(request) = inspection_wire::request(&o.head) {
+                assert_eq!(ret.outcome(), Outcome::Pending);
+                inspection_wire::release(self.instance, &o.head, lifecycle());
+                if task_retention::hold(&request) {
+                    break;
+                }
+                inspection_reply = Some(task_retention::receipt(&request));
+                continue;
+            }
             if o.reply_status != 0 {
                 got.status = o.reply_status;
             }
@@ -1242,7 +1364,12 @@ fn section() -> Value {
 
 /// `name` on `member` called as a task by ALICE on unit `unit`: the task's id.
 fn create(d: &Door, unit: u64, member: &str, name: &str) -> String {
-    let body = call(name, &json!({}));
+    create_with(d, unit, member, name, &json!({}))
+}
+
+/// `name` on `member` called as a task with `arguments` by ALICE on unit `unit`: the task's id.
+fn create_with(d: &Door, unit: u64, member: &str, name: &str, arguments: &Value) -> String {
+    let body = call(name, arguments);
     let arrived = d.arrive(unit, &body);
     assert_eq!(arrived.outcome, Outcome::Ready, "{arrived:?}");
     d.piece(unit, &Given::attempt(ALICE, member));
@@ -1793,6 +1920,24 @@ impl Door {
             .filter(|r| r.op == RECORD_AUDIT)
             .map(|r| (at(r.key), at(r.value)))
             .collect();
+        with_book(|book| {
+            for record in records[..o.records_written as usize]
+                .iter()
+                .filter(|r| r.op == RECORD_PUT && r.kind == door_facts::RECORD_TASK)
+            {
+                let key = arena
+                    [record.key.offset as usize..(record.key.offset + record.key.len) as usize]
+                    .to_vec();
+                let value = arena[record.value.offset as usize
+                    ..(record.value.offset + record.value.len) as usize]
+                    .to_vec();
+                if value.is_empty() {
+                    book.records.remove(&key);
+                } else {
+                    book.records.insert(key, value);
+                }
+            }
+        });
         (ret.outcome(), rows)
     }
 }
@@ -1820,3 +1965,106 @@ fn a_cancel_whose_audit_row_does_not_fit_is_a_fault() {
     assert_eq!(outcome, Outcome::Ready);
     assert_eq!(rows.len(), 1, "the task's cancel is audited once: {rows:?}");
 }
+
+// ── M2-1: the continuation's call is admitted on what it actually sends, when it sends it ───────
+
+/// M2-1 [HIGH], time of check: a grant the caller lost after the task was created is consulted
+/// when the continuation sends the call, as the synchronous call consults it; the task fails in
+/// words and nothing goes out.
+#[test]
+fn a_tasks_call_whose_grant_was_revoked_is_never_sent() {
+    let _serial = fresh();
+    let d = open(&section());
+    let task = create(&d, 1, "st", "st_read_file");
+    revoked().push("mcp_tool:st_read_file".to_string());
+    let sent = run(&d, 2, "st", &last_nested());
+    assert!(
+        !sent.far,
+        "a call the caller is no longer granted was sent: {}",
+        sent.text()
+    );
+    assert_failed(&get(&d, 3, &task), "not a tool this server exposes");
+}
+
+/// M2-1 [HIGH], time of check: a server the kernel quarantined after the task was created serves
+/// nothing to the continuation either.
+#[test]
+fn a_tasks_call_to_a_server_quarantined_since_its_create_is_never_sent() {
+    let _serial = fresh();
+    let d = open(&section());
+    let task = create(&d, 1, "st", "st_read_file");
+    VERDICT.store(
+        busbar_contract::abi::host::service::DISTRUST_QUARANTINED,
+        Ordering::SeqCst,
+    );
+    let sent = run(&d, 2, "st", &last_nested());
+    assert!(
+        !sent.far,
+        "a call to a quarantined server was sent: {}",
+        sent.text()
+    );
+    assert_failed(&get(&d, 3, &task), "quarantined");
+}
+
+/// M2-1 [HIGH], the pool's twin: the continuation's walk picked another member of the tool's
+/// pool, and the twin it sends is admitted as its own (its grants), as the synchronous call admits
+/// it. The caller holds the primary's grant and not the twin's: nothing goes to the twin.
+#[test]
+fn a_tasks_call_to_a_pool_twin_the_caller_is_not_granted_is_never_sent() {
+    let _serial = fresh();
+    let tool = json!({"read_file": {"task_support": "required", "schema_hash": "h1"}});
+    let mut s = json!({
+        "st": {"url": "https://up.example/st", "pin": pin(), "verify_ttl": "1h", "tools_allow": tool},
+        "st2": {"url": "https://up.example/st2", "pin": pin(), "verify_ttl": "1h", "tools_allow": tool},
+    });
+    s["pools"] = json!({"p": {"members": ["st", "st2"]}});
+    let d = open(&s);
+    let task = create(&d, 1, "st", "st_read_file");
+    revoked().push("mcp_tool:st2_read_file".to_string());
+    let sent = run(&d, 2, "st2", &last_nested());
+    assert!(
+        !sent.far,
+        "the twin the caller is not granted was sent the call: {}",
+        sent.text()
+    );
+    assert_failed(&get(&d, 3, &task), "not a tool this server exposes");
+}
+
+/// M2-1 [HIGH], the pool's twin: the arguments the continuation sends to the twin are judged under
+/// the twin's own registration (its private reach), as the synchronous call judges the twin it
+/// admits. The primary may reach a private address and the twin may not: nothing goes to the twin.
+#[test]
+fn a_tasks_call_to_a_pool_twin_is_judged_under_the_twins_own_reach() {
+    let _serial = fresh();
+    let tool = json!({"read_file": {"task_support": "required", "schema_hash": "h1"}});
+    let mut s = json!({
+        "st": {
+            "url": "https://up.example/st",
+            "pin": pin(),
+            "verify_ttl": "1h",
+            "allow_private": true,
+            "tools_allow": tool,
+        },
+        "st2": {"url": "https://up.example/st2", "pin": pin(), "verify_ttl": "1h", "tools_allow": tool},
+    });
+    s["pools"] = json!({"p": {"members": ["st", "st2"]}});
+    let d = open(&s);
+    let task = create_with(
+        &d,
+        1,
+        "st",
+        "st_read_file",
+        &json!({"from": "http://10.0.0.1/data"}),
+    );
+    let sent = run(&d, 2, "st2", &last_nested());
+    assert!(
+        !sent.far,
+        "a private address the twin may not reach was sent to it: {}",
+        sent.text()
+    );
+    let read = get(&d, 3, &task).json();
+    assert_eq!(read["result"]["status"], json!("failed"), "{read}");
+}
+
+#[path = "support/reported_budget.rs"]
+mod reported_budget;

@@ -26,6 +26,9 @@ async function idReplies(messages, rejectedId = undefined) {
     spawnServer() {
       return {
         messages, send() {}, async stop() {},
+        responsesFor(id) {
+          return messages.filter((m) => m.id === id && ('result' in m || 'error' in m));
+        },
         async waitForId(id) {
           if (id === rejectedId) throw new Error('fixture wait failed before aggregate replies');
           const found = messages.find((m) => m.id === id && ('result' in m || 'error' in m));
@@ -38,7 +41,8 @@ async function idReplies(messages, rejectedId = undefined) {
 }
 const goodReplies = () => [1, '1', 0, -7, ''].map((id) => ({
   jsonrpc: '2.0', id,
-  result: typeof id === 'string' && id === '1' ? { tools: [] } : { supportedVersions: ['2026-07-28'] },
+  ...(id === '1' ? { error: { code: -32601, message: 'Method not found' } }
+    : { result: { supportedVersions: ['2026-07-28'] } }),
 }));
 
 test('CONC.ID-TYPES rejects silence and a missing legal id, accepts correlated replies', async () => {
@@ -49,22 +53,30 @@ test('CONC.ID-TYPES rejects silence and a missing legal id, accepts correlated r
 });
 test('CONC.ID-TYPES rejects swapped, duplicated and invented replies', async () => {
   const swapped = goodReplies();
-  [swapped[0].result, swapped[1].result] = [swapped[1].result, swapped[0].result];
+  [swapped[0], swapped[1]] = [{ ...swapped[1], id: 1 }, { ...swapped[0], id: '1' }];
   assert.equal((await idReplies(swapped)).verdict, 'FAIL');
   const good = goodReplies();
   assert.equal((await idReplies([...good, good[0]])).verdict, 'FAIL');
   assert.equal((await idReplies([...good, { ...good[0], id: 'never-sent' }])).verdict, 'FAIL');
 });
 
-async function clientIds(entries) {
-  return runOne(scenario('CLI.IDS.UNIQUE-WHILE-IN-FLIGHT'), {
+async function clientScenario(id, entries, waitFailure) {
+  return runOne(scenario(id), {
     hasClientRole: true,
     spawnClient(_launch, env) {
       writeFileSync(env.MCP_FAKE_TRANSCRIPT, entries.map((e) => JSON.stringify(e)).join('\n'));
-      return { exitCode: 0, stderr: '', stdoutBytes: Buffer.alloc(0), async waitForExit() {}, async stop() {} };
+      return {
+        exitCode: 0, stderr: '', stdoutBytes: Buffer.alloc(0),
+        async waitForExit(ms) {
+          if (waitFailure === 'failsafe') throw new Error(`failsafe timeout after ${ms}ms waiting for peer exit`);
+          if (waitFailure) throw new Error(waitFailure);
+        },
+        async stop() {},
+      };
     },
   });
 }
+const clientIds = (entries) => clientScenario('CLI.IDS.UNIQUE-WHILE-IN-FLIGHT', entries);
 test('pending ids fail on overlap, including a response for the wrong typed id', async () => {
   for (const entries of [
     [client(req(1)), client(req(1))],
@@ -82,6 +94,81 @@ test('pending ids allow typed ids, out-of-order completion and reuse after resul
       client(req(1)), client(req('1')), server(reply('1')), server(response), client(req(1)),
     ])).verdict, 'PASS');
   }
+});
+
+test('client driver failsafes cannot pass a partial transcript, including intentional stall', async () => {
+  for (const id of ['CLI.META.EVERY-REQUEST-CARRIES-VERSION-AND-CAPS',
+    'CLI.NO-RESPONSES-SENT', 'CLI.HOSTILE.STALLING-SERVER-DOES-NOT-HANG-FOREVER']) {
+    const result = await clientScenario(id, [client(req(1))], 'failsafe');
+    assert.equal(result.verdict, 'ERROR');
+    assert.match(result.error, /failsafe timeout/);
+    assert.ok(result.notes.some((n) => n.key === 'client.driver'
+      && n.value.exitedBeforeCleanup === false && n.value.transcript));
+    if (id.includes('STALLING')) {
+      assert.ok(result.evidence.some((e) => e.key === 'stimulus.stall' && e.ok));
+    }
+  }
+  const unexpected = await clientScenario('CLI.HOSTILE.STALLING-SERVER-DOES-NOT-HANG-FOREVER',
+    [client(req(1))], 'fixture transport failure');
+  assert.equal(unexpected.verdict, 'ERROR');
+  assert.match(unexpected.error, /fixture transport failure/);
+});
+
+test('client no-response scenario challenges a real server request', async () => {
+  const attack = server({ jsonrpc: '2.0', id: 'server-initiated-1', method: 'sampling/createMessage' });
+  const id = 'CLI.NO-RESPONSES-SENT';
+  const rejected = await clientScenario(id, [attack, client(reply('server-initiated-1'))]);
+  assert.equal(rejected.verdict, 'FAIL');
+  assert.ok(rejected.assertions.some((a) => a.clause === 'STDIO.CLIENT-NO-RESPONSES' && !a.ok));
+  assert.equal((await clientScenario(id, [client(req(1)), attack])).verdict, 'PASS');
+  assert.equal((await clientScenario(id, [client(req(1)), server(reply(1))])).verdict, 'ERROR');
+});
+
+const elicitationEntries = (retryId, state) => [
+  client({ ...req(1), method: 'resources/read' }),
+  server({ jsonrpc: '2.0', id: 1, result: { resultType: 'input_required',
+    requestState: 'opaque-state-blob', inputRequests: { creds: {
+      method: 'elicitation/create', params: { mode: 'form', requestedSchema: {
+        type: 'object', properties: { password: { type: 'string' } },
+      } },
+    } } } }),
+  client({ ...req(retryId), method: 'resources/read', params: {
+    requestState: state, inputResponses: { creds: { action: 'accept', content: { password: 'fixture' } } },
+  } }),
+];
+test('elicitation retry id and opaque state obligations are falsifiable across methods', async () => {
+  const id = 'CLI.HOSTILE.EVIL-ELICITATION-PASSWORD';
+  for (const [retryId, state, clause] of [[1, 'opaque-state-blob', 'PAT.MRTR.NEW-ID'],
+    [2, 'changed-state', 'PAT.MRTR.ECHO-STATE']]) {
+    const result = await clientScenario(id, elicitationEntries(retryId, state));
+    assert.equal(result.verdict, 'FAIL');
+    assert.ok(result.assertions.some((a) => a.clause === clause && !a.ok));
+  }
+  const valid = await clientScenario(id, elicitationEntries(2, 'opaque-state-blob'));
+  assert.equal(valid.verdict, 'PASS');
+  assert.equal(valid.recommendations.find((r) => r.key === 'client.doesNotAutoFillCredentials').ok, false);
+  assert.deepEqual(valid.variance.find((v) => v.key === 'hostile.evilElicitation.leakedFields').value, ['password']);
+});
+
+test('sampling retry uses its triggering declaration and cannot invent requestState', async () => {
+  const id = 'CLI.HOSTILE.MRTR-UNDECLARED-CAPABILITY';
+  const entries = [
+    client({ ...req(1), method: 'tools/call', params: { _meta: {} } }),
+    client({ ...req('other'), params: { _meta: { 'io.modelcontextprotocol/clientCapabilities': { sampling: {} } } } }),
+    server({ jsonrpc: '2.0', id: 1, result: { resultType: 'input_required',
+      inputRequests: { sample: { method: 'sampling/createMessage', params: {} } } } }),
+    client({ ...req(2), method: 'tools/call', params: {
+      inputResponses: { sample: { model: '', stopReason: '' } },
+    } }),
+  ];
+  const valid = await clientScenario(id, entries);
+  assert.equal(valid.verdict, 'PASS');
+  assert.equal(valid.recommendations.find((r) => r.key === 'client.honoursOwnCapabilityDeclaration').ok, false);
+  const invented = structuredClone(entries);
+  invented.at(-1).payload.params.requestState = 'invented';
+  const rejected = await clientScenario(id, invented);
+  assert.equal(rejected.verdict, 'FAIL');
+  assert.ok(rejected.assertions.some((a) => a.clause === 'PAT.MRTR.NO-STATE-INVENTION' && !a.ok));
 });
 
 for (const [name, value, schema] of [
@@ -148,7 +235,10 @@ function baselineRun({ entries, raw, clause, id = 'CLI.NO-RESPONSES-SENT', claus
     return { status: child.status, report: JSON.parse(readFileSync(out, 'utf8')), output: child.stdout + child.stderr };
   } finally { rmSync(dir, { recursive: true, force: true }); }
 }
-const responseEntries = [server(reply(1)), client(reply(1))];
+const responseEntries = [
+  server({ jsonrpc: '2.0', id: 'server-initiated-1', method: 'sampling/createMessage' }),
+  client(reply('server-initiated-1')),
+];
 test('a baseline accepts precisely its documented failed clause', () => {
   const result = baselineRun({ entries: responseEntries, clause: 'STDIO.CLIENT-NO-RESPONSES' });
   assert.equal(result.report.results[0].verdict, 'FAIL');

@@ -8,6 +8,15 @@ use serde_json::json;
 
 use super::*;
 
+#[test]
+fn a_present_nonstring_description_is_refused_not_hashed_as_absent() {
+    for description in [json!(null), json!(false), json!(3), json!([]), json!({})] {
+        assert!(observe(&json!({"tools":[{"name":"read","description":description}]})).is_err());
+    }
+    assert!(observe(&json!({"tools":[{"name":"read"}]})).is_ok());
+    assert!(observe(&json!({"tools":[{"name":"read","description":""}]})).is_ok());
+}
+
 fn def(doc: Value) -> McpServerDefCfg {
     serde_json::from_value(doc).expect("a registration")
 }
@@ -214,11 +223,5 @@ fn the_views_read_the_verdict_the_kernel_enforces() {
     }
 }
 
-#[test]
-fn a_present_nonstring_description_is_refused_not_hashed_as_absent() {
-    for description in [json!(null), json!(false), json!(3), json!([]), json!({})] {
-        assert!(observe(&json!({"tools":[{"name":"read","description":description}]})).is_err());
-    }
-    assert!(observe(&json!({"tools":[{"name":"read"}]})).is_ok());
-    assert!(observe(&json!({"tools":[{"name":"read","description":""}]})).is_ok());
-}
+#[path = "reported_trust.rs"]
+mod reported;

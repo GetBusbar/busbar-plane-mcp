@@ -59,3 +59,6 @@ fn a_tampered_or_foreign_state_is_refused() {
     );
     assert_eq!(seal_state(&state(), &mut |_| None), None);
 }
+
+#[path = "reported_seals.rs"]
+mod reported;

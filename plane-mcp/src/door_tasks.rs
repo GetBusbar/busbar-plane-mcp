@@ -2157,3 +2157,7 @@ fn clock_now(plane: &McpDoor) -> Option<u64> {
         .ok()
         .map(|r| r.wall_ns / 1_000_000)
 }
+
+#[cfg(test)]
+#[path = "tests/task_host_views.rs"]
+mod task_host_view_tests;

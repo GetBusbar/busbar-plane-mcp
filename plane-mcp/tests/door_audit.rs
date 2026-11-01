@@ -24,8 +24,23 @@
 #[allow(dead_code)]
 mod door_facts;
 
+#[path = "support/legacy_reconnect.rs"]
+mod legacy_reconnect;
+
+#[path = "support/cache_receipts.rs"]
+mod cache_receipts;
+
+#[path = "support/published_scope.rs"]
+mod published_scope;
+
 #[path = "support/wire_pagination.rs"]
 mod wire_pagination;
+
+#[path = "support/line_subscription_cases.rs"]
+mod line_subscription_cases;
+
+#[path = "support/local_rendering.rs"]
+mod local_rendering;
 
 use std::collections::{HashMap, VecDeque};
 use std::os::raw::c_void;
@@ -33,30 +48,30 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use busbar_contract::abi::host::conn::connector::{
-    ConnectorSlots, EstablishIn, REPLY_BODY, REPLY_END, REPLY_HEAD, REQUEST_BODY, REQUEST_HEAD,
-    ReplyIn, ReplyPiece, RequestIn, RequestPiece, SERVICES as CONN_SERVICES, StreamIn,
+    ConnectorSlots, EstablishIn, ReplyIn, ReplyPiece, RequestIn, RequestPiece, StreamIn,
+    REPLY_BODY, REPLY_END, REPLY_HEAD, REQUEST_BODY, REQUEST_HEAD, SERVICES as CONN_SERVICES,
 };
 use busbar_contract::abi::host::service::{
-    ClockNowIn, DISTRUST_CHANGED, DISTRUST_NONE, DISTRUST_UNKNOWN_ITEM, ENTITLED, HostSlots,
-    RandomFillIn, SERVICES as HOST_SERVICES, ServiceOut, SessionEmitIn, TRUST_NEW, TrustServesIn,
-    TrustSightItemIn,
+    ClockNowIn, HostSlots, RandomFillIn, ServiceOut, SessionEmitIn, TrustServesIn,
+    TrustSightItemIn, DISTRUST_CHANGED, DISTRUST_NONE, DISTRUST_UNKNOWN_ITEM, ENTITLED,
+    SERVICES as HOST_SERVICES, TRUST_NEW,
 };
 use busbar_contract::abi::mechanism::call::{
-    AbiStr, BLOB_OCTETS, Blob, FLAG_RESUME, Field, InHead, OutHead, Outcome, RawOutcome,
+    AbiStr, Blob, Field, InHead, OutHead, Outcome, RawOutcome, BLOB_OCTETS, FLAG_RESUME,
 };
 use busbar_contract::abi::mechanism::lifecycle::{
-    CancelIn, DriveIn, OpenIn, OpenOut, OpsHead, TickIn, TickOut, slot as life,
+    slot as life, CancelIn, DriveIn, OpenIn, OpenOut, OpsHead, TickIn, TickOut,
 };
 use busbar_contract::abi::mechanism::ticket::{HostCtx, HostTables, Ticket};
 use busbar_contract::abi::plane::{
-    AUDIT_REJECTED, ArriveIn, ArriveOut, CANCEL_ABORTED, CANCEL_OK_PARTIAL, EMIT_DONE,
-    EMIT_TO_FAR_END, FROM_CALLER, FROM_FAR_END, FROM_KERNEL, OnPieceIn, OnPieceOut, Ops, OutField,
-    PIECE_HAS_STATUS, PIECE_LAST, PlaneCancelIn, PlaneCancelOut, PlaneDriveIn, PlaneDriveOut,
-    PlaneOpenIn, PlaneOpenOut, RECORD_AUDIT, RecordWrite, ServeIn, ServeOut, UnitCount, slot,
+    slot, ArriveIn, ArriveOut, OnPieceIn, OnPieceOut, Ops, OutField, PlaneCancelIn, PlaneCancelOut,
+    PlaneDriveIn, PlaneDriveOut, PlaneOpenIn, PlaneOpenOut, RecordWrite, ServeIn, ServeOut,
+    UnitCount, AUDIT_REJECTED, CANCEL_ABORTED, CANCEL_OK_PARTIAL, EMIT_DONE, EMIT_TO_FAR_END,
+    FROM_CALLER, FROM_FAR_END, FROM_KERNEL, PIECE_HAS_STATUS, PIECE_LAST, RECORD_AUDIT,
 };
 use busbar_contract::abi::transport::FrameSpan;
 use busbar_plane_mcp::door;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 // ── the host's services ─────────────────────────────────────────────────────────────────────────
 
@@ -139,7 +154,12 @@ extern "C" fn clock_now(_: HostCtx, input: *const c_void, out: *mut ServiceOut) 
 }
 
 extern "C" fn entitled(_: HostCtx, _: *const c_void, out: *mut ServiceOut) -> RawOutcome {
-    answer(out, Outcome::Ready, ENTITLED, 0)
+    answer(
+        out,
+        Outcome::Ready,
+        line_subscription_cases::entitlement(),
+        0,
+    )
 }
 
 /// Every fill differs from the last: a counter, spelled into the buffer.
@@ -209,12 +229,21 @@ extern "C" fn serves(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> 
     answer(out, Outcome::Ready, verdict, 0)
 }
 
-extern "C" fn sighted(_: HostCtx, _: *const c_void, out: *mut ServiceOut) -> RawOutcome {
-    answer(out, Outcome::Ready, TRUST_NEW, 0)
+extern "C" fn sighted(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
+    // SAFETY: the SDK lends a TrustSightIn for this service call.
+    let i = unsafe {
+        input
+            .cast::<busbar_contract::abi::host::service::TrustSightIn>()
+            .read()
+    };
+    cache_receipts::sighted(i, out)
 }
 
 /// One item's sighting, landed in the book on its own (the first approves it).
 extern "C" fn sighted_item(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
+    if cache_receipts::ITEM_FAILS.load(Ordering::SeqCst) {
+        return answer(out, Outcome::Failed, 0, 0);
+    }
     // SAFETY: the SDK hands a `TrustSightItemIn` over its own strings, live for the call.
     let i = unsafe { input.cast::<TrustSightItemIn>().read() };
     let moved = book().as_mut().is_some_and(|b| {
@@ -285,7 +314,7 @@ static HOST_SLOTS: HostSlots = HostSlots {
     trust_sight_item: Some(sighted_item),
     trust_serves: Some(serves),
     trust_decide: None,
-    trust_state: None,
+    trust_state: Some(cache_receipts::trust_state),
     session_emit: Some(session_emit),
     auth_call: None,
     unit_hand_in: None,
@@ -344,6 +373,7 @@ struct Upstreams {
     seen: Vec<Seen>,
     /// The legacy upstream holds its `tools/call` answers until the test releases them.
     hold_calls: bool,
+    legacy_media_type: Option<String>,
 }
 
 static UPSTREAMS: Mutex<Option<Upstreams>> = Mutex::new(None);
@@ -656,6 +686,11 @@ extern "C" fn read_reply(_: HostCtx, input: *const c_void, out: *mut ServiceOut)
     let buf = unsafe { std::slice::from_raw_parts_mut(i.buf, i.len) };
     let mut ups = upstreams();
     let ups = ups.get_or_insert_with(Upstreams::default);
+    let legacy_media_type = ups
+        .legacy_media_type
+        .as_deref()
+        .unwrap_or("text/event-stream")
+        .to_string();
     let Some(wire) = ups.open.get_mut(&i.stream) else {
         return answer(out, Outcome::Failed, 0, 0);
     };
@@ -663,7 +698,7 @@ extern "C" fn read_reply(_: HostCtx, input: *const c_void, out: *mut ServiceOut)
     // its end once it closed.
     if let Some(sse) = wire.sse.as_mut() {
         let (piece, n) = if wire.step == 0 {
-            let block = "content-type: text/event-stream\r\n";
+            let block = format!("content-type: {legacy_media_type}\r\n");
             buf[..block.len()].copy_from_slice(block.as_bytes());
             (
                 ReplyPiece {
@@ -792,7 +827,7 @@ static TABLES: Tables = Tables(HostTables {
     size: std::mem::size_of::<HostTables>() as u32,
     _reserved: 0,
     ctx: HostCtx::NONE,
-    wake: None,
+    wake: Some(cache_receipts::wake),
     conns: &CONN_SLOTS,
     io: std::ptr::null(),
     services: &HOST_SLOTS,
@@ -1881,6 +1916,14 @@ fn a_line_refused_at_the_unit_cap_moves_nothing_on_its_session() {
     assert_eq!(done.status, 200, "{}", done.text());
     let after = d.line(201, 9, LINE_LIST);
     assert_eq!(
+        after.refusal_status, plain.refusal_status,
+        "a freed slot reaches the revision check"
+    );
+    assert_ne!(
+        after.refusal_status, 429,
+        "the table no longer refuses this line by quota"
+    );
+    assert_eq!(
         after.outcome,
         Outcome::Refused,
         "the refused `initialize` kept no revision for session 9: {after:?}"
@@ -1975,7 +2018,7 @@ fn a_members_update_reaches_a_line_subscriber_exactly_once() {
 
 /// `refusal` for a kernel refusal before any unit: the status and body the door answers.
 fn unitless_kernel_refusal(d: &Door, status: u32, reason: u32) -> (Outcome, u32, Vec<u8>) {
-    use busbar_contract::abi::plane::{REFUSAL_KERNEL, RefusalIn, RefusalOut};
+    use busbar_contract::abi::plane::{RefusalIn, RefusalOut, REFUSAL_KERNEL};
     let mut reply = vec![0_u8; 1 << 12];
     let mut fields = [z::<OutField>(); 8];
     let mut arena = vec![0_u8; 1 << 12];
@@ -2279,3 +2322,6 @@ fn the_callers_credential_never_reaches_the_upstream_in_any_mode() {
         assert!(seen().is_empty(), "{mode}: no upstream was reached");
     }
 }
+
+#[path = "support/reported_origin.rs"]
+mod reported_origin;

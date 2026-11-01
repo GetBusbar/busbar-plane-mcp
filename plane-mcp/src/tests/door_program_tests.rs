@@ -6,6 +6,12 @@
 
 use super::*;
 
+#[path = "program_reply_regressions.rs"]
+mod replies;
+
+#[path = "program_greeting_regressions.rs"]
+mod greeting;
+
 fn key(member: &str, id: u64) -> AnsweredKey {
     (member.to_string(), 1, id.to_string())
 }

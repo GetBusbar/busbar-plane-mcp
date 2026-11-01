@@ -242,3 +242,34 @@ fn the_distinct_uris_are_counted_through_a_set_and_the_ceiling_refuses_at_once()
     let l = Listen::open(Some(&params), json!("sub"), 0, |_| true).expect("duplicates fold");
     assert_eq!(l.accepted.resources.as_ref().map(Vec::len), Some(3));
 }
+
+#[test]
+fn a_grant_change_notifies_without_a_catalogue_reload() {
+    let cat = catalogue(1, SECTION);
+    let params = json!({"notifications":{"toolsListChanged":true}});
+    let mut listen = Listen::open(Some(&params), json!("role-change"), 0, |_| false).unwrap();
+    assert!(matches!(
+        listen.step(&cat, &everything, &Standing::Live, &[], 1),
+        Step::Frames(_)
+    ));
+    let nothing = |_: &str, _: &str| false;
+    let Step::Frames(frames) = listen.step(&cat, &nothing, &Standing::Live, &[], 2) else {
+        panic!("the caller's visible list changed even though the catalogue generation did not");
+    };
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0]["method"], "notifications/tools/list_changed");
+    assert_eq!(
+        listen.step(&cat, &nothing, &Standing::Live, &[], 3),
+        Step::Quiet
+    );
+}
+
+#[test]
+fn a_tool_change_key_keeps_each_name_paired_with_its_schema() {
+    let before = br#"{"fs":{"url":"https://mcp.example/fs","pin":{"mechanism":"unpinned"},"tools_allow":{"a":{"schema_hash":"sha256:aa"},"b":{"schema_hash":"sha256:bb"}}}}"#;
+    let after = br#"{"fs":{"url":"https://mcp.example/fs","pin":{"mechanism":"unpinned"},"tools_allow":{"a":{"schema_hash":"sha256:bb"},"b":{"schema_hash":"sha256:aa"}}}}"#;
+    assert_ne!(
+        change_keys(&catalogue(1, before), &everything)[0],
+        change_keys(&catalogue(2, after), &everything)[0]
+    );
+}

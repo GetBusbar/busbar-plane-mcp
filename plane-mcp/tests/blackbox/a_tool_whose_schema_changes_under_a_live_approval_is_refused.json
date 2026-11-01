@@ -35,18 +35,18 @@
       },
       "tools/call": {
         "echo": {
-          "from": "/params/arguments/label",
-          "into": "/result/content/0/text",
+          "from": "/params",
+          "into": "/result/structuredContent",
           "base": {
             "content": [
               {
                 "type": "text",
-                "text": ""
+                "text": "ping: control"
               }
             ],
-            "isError": false
-          },
-          "format": "ping: {}"
+            "isError": false,
+            "structuredContent": null
+          }
         }
       }
     }
@@ -117,7 +117,8 @@
         "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"probe_ping\",\"arguments\":{\"label\":\"control\"},\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{}}}}",
         "status": 200,
         "body_contains": [
-          "ping: control"
+          "\"name\":\"ping\"",
+          "\"label\":\"control\""
         ]
       }
     },

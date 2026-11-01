@@ -7,8 +7,36 @@
 //! the engine's `mcp::envelope` reader, and must be accepted. busbar refusing a request busbar sent
 //! would be a silent, mutual misunderstanding that no single-direction test can see.
 
-use crate::client::jsonrpc::{RpcOutcome, parse_response, tools_call, tools_list};
+use crate::client::jsonrpc::{parse_response, tools_call, tools_list, RpcOutcome};
 use crate::codec::{META_CLIENT_CAPABILITIES, META_PROTOCOL_VERSION};
+
+#[test]
+fn an_unrequested_progress_token_is_absent_rather_than_null() {
+    let request = tools_call(
+        "https://u.example",
+        &tkey("fs", "read"),
+        &serde_json::json!({}),
+        5,
+        None,
+        Default::default(),
+        None,
+    );
+    let body = body_of(&request);
+    assert!(body["params"]["_meta"].get("progressToken").is_none());
+    assert_eq!(
+        body,
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 5, "method": "tools/call",
+            "params": {
+                "name": "read", "arguments": {},
+                "_meta": {
+                    META_PROTOCOL_VERSION: "2026-07-28",
+                    META_CLIENT_CAPABILITIES: {},
+                },
+            },
+        })
+    );
+}
 
 /// EVERY byte a request puts on the wire, concatenated: URL, each header name and value, the body.
 fn wire_bytes(req: &crate::client::jsonrpc::OutboundRequest) -> Vec<u8> {
@@ -238,32 +266,4 @@ fn a_call_that_asks_no_progress_carries_no_progress_token_member() {
         "no progress asked, no token member: {quiet}"
     );
     assert_eq!(call(true)["params"]["_meta"]["progressToken"], "busbar-7");
-}
-
-#[test]
-fn an_unrequested_progress_token_is_absent_rather_than_null() {
-    let request = tools_call(
-        "https://u.example",
-        &tkey("fs", "read"),
-        &serde_json::json!({}),
-        5,
-        None,
-        Default::default(),
-        None,
-    );
-    let body = body_of(&request);
-    assert!(body["params"]["_meta"].get("progressToken").is_none());
-    assert_eq!(
-        body,
-        serde_json::json!({
-            "jsonrpc": "2.0", "id": 5, "method": "tools/call",
-            "params": {
-                "name": "read", "arguments": {},
-                "_meta": {
-                    META_PROTOCOL_VERSION: "2026-07-28",
-                    META_CLIENT_CAPABILITIES: {},
-                },
-            },
-        })
-    );
 }

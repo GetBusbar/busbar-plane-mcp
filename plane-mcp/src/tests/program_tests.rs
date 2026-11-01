@@ -19,8 +19,14 @@ use busbar_contract::abi::sdk::conn::Replied;
 use busbar_contract::abi::transport::FrameSpan;
 use serde_json::{json, Value};
 
+#[path = "program_cleanup_regressions.rs"]
+mod cleanup;
+
 #[path = "program_namespace_tests.rs"]
 mod namespace;
+
+#[path = "program_call_id_tests.rs"]
+mod call_identity;
 
 /// THE STAND-IN CHILD: its generation, every message it received, the messages each open lease has
 /// to read (its head first), and what it says before each answer.
@@ -509,5 +515,19 @@ fn an_exhausted_exchange_keeps_settling_its_pending_close_before_returning_the_e
     assert!(
         calls.iter().all(|seq| *seq == calls[0]),
         "every pending close uses the same service handle"
+    );
+}
+
+#[test]
+fn a_resource_update_announces_without_forcing_an_unrelated_tools_list_fetch() {
+    let mut corr = Correlator::default();
+    let mut peer = Door::default();
+    let note = bytes(
+        &json!({"jsonrpc":"2.0","method":"notifications/resources/updated","params":{"uri":"file:///readme"}}),
+    );
+    assert!(corr.take(&note, 7, "srv", 1, &mut peer).unwrap().is_none());
+    assert_eq!(
+        peer.noticed, 0,
+        "a resource's content change is not a list change"
     );
 }

@@ -5,6 +5,34 @@ use super::*;
 use crate::client::jsonrpc::envelope;
 use serde_json::json;
 
+#[test]
+fn application_errors_mentioning_sessions_are_not_revision_refusals() {
+    for (code, message) in [
+        (-32050, "session not initialized"),
+        (-32000, "failed to save session notes"),
+        (-32602, "invalid session export argument"),
+    ] {
+        let body =
+            json!({"jsonrpc":"2.0","id":1,"error":{"code":code,"message":message}}).to_string();
+        assert_eq!(
+            stateless_outcome(200, body.as_bytes()),
+            StepOutcome::Answered,
+            "{message}"
+        );
+    }
+    for message in [
+        "Server not initialized",
+        "Bad Request: No valid session ID provided",
+    ] {
+        let body =
+            json!({"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":message}}).to_string();
+        assert_eq!(
+            stateless_outcome(200, body.as_bytes()),
+            StepOutcome::Refused4xx
+        );
+    }
+}
+
 fn stateless_call() -> OutboundRequest {
     envelope(
         "https://up.example/rpc",
@@ -253,30 +281,5 @@ fn the_event_reader_bound_counts_every_byte_held() {
     assert!(r.overflowed(), "a tail of 86 bytes held past a bound of 64");
 }
 
-#[test]
-fn application_errors_mentioning_sessions_are_not_revision_refusals() {
-    for (code, message) in [
-        (-32050, "session not initialized"),
-        (-32000, "failed to save session notes"),
-        (-32602, "invalid session export argument"),
-    ] {
-        let body =
-            json!({"jsonrpc":"2.0","id":1,"error":{"code":code,"message":message}}).to_string();
-        assert_eq!(
-            stateless_outcome(200, body.as_bytes()),
-            StepOutcome::Answered,
-            "{message}"
-        );
-    }
-    for message in [
-        "Server not initialized",
-        "Bad Request: No valid session ID provided",
-    ] {
-        let body =
-            json!({"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":message}}).to_string();
-        assert_eq!(
-            stateless_outcome(200, body.as_bytes()),
-            StepOutcome::Refused4xx
-        );
-    }
-}
+#[path = "reported_events.rs"]
+mod reported;

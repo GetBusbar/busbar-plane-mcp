@@ -4,7 +4,7 @@
 use super::*;
 use crate::tool_program::Correlator;
 
-fn opened() -> [(Ticket, u64); 2] {
+pub(super) fn opened() -> [(Ticket, u64); 2] {
     [1, 2].map(|slot| {
         let ticket = Ticket {
             slot,
@@ -23,7 +23,7 @@ fn opened() -> [(Ticket, u64); 2] {
     })
 }
 
-fn received((ticket, stream): (Ticket, u64)) -> Vec<u8> {
+pub(super) fn received((ticket, stream): (Ticket, u64)) -> Vec<u8> {
     let mut buf = vec![0; 4096];
     let mut piece = ReplyPiece::default();
     let Poll::Ready(Ok(got)) = ChildConn.read_reply(ticket, 3, stream, &mut buf, &mut piece) else {
@@ -33,14 +33,14 @@ fn received((ticket, stream): (Ticket, u64)) -> Vec<u8> {
     buf
 }
 
-fn send((ticket, stream): (Ticket, u64), request: &[u8]) {
+pub(super) fn send((ticket, stream): (Ticket, u64), request: &[u8]) {
     assert!(matches!(
         ChildConn.write(ticket, 2, stream, request),
         Poll::Ready(Ok(_))
     ));
 }
 
-fn close(leases: [(Ticket, u64); 2]) {
+pub(super) fn close(leases: [(Ticket, u64); 2]) {
     for (ticket, stream) in leases {
         assert!(ChildConn.close(ticket, 4, stream).is_ready());
     }

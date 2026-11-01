@@ -1673,3 +1673,9 @@ fn a_relative_reference_carrying_a_url_in_its_query_is_admitted() {
     assert_eq!(scan.declared_judged, 1, "the field was reached");
     assert_eq!(asked, 0, "a relative reference names no host to ask about");
 }
+
+#[path = "reported_arguments.rs"]
+mod reported;
+
+#[path = "argguard_pattern_tests.rs"]
+mod pattern_tests;

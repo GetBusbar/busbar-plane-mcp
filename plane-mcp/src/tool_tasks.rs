@@ -968,3 +968,7 @@ pub fn iso8601_ms(ms: u64) -> String {
 #[cfg(test)]
 #[path = "tests/tasks.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/task_hosted.rs"]
+mod task_hosted_tests;

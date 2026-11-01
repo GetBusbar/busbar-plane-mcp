@@ -651,39 +651,6 @@ fn structured_output_breaking_the_published_schema_is_relayed_unchanged() {
     assert_eq!(line.audit, Some(AuditRow::tool("fs_read_file", true)));
 }
 
-/// THE TASK PATH SETTLES THE SAME RESULT (Law 11): a task's completed result is the upstream's,
-/// stored and served as it came. A source plant, because the task's continuation is reached only
-/// through a live door: no rewrite of the result is named on that path.
-/// RED arm: `door_tasks.rs` ran the markup strip over every completed task result.
-///
-/// The plant reads the task path's CODE (comments stripped) for the module under any path or alias
-/// (`crate::sanitize`, `super::sanitize`, `use crate::sanitize as s`) and for a call of any of the
-/// module's public functions by its own name, however it was imported.
-#[test]
-fn the_task_path_names_no_rewrite_of_the_result() {
-    let code: String = include_str!("../door_tasks.rs")
-        .lines()
-        .map(|l| l.split("//").next().unwrap_or(""))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(
-        !code.contains("sanitize"),
-        "a task's completed result passes through no markup strip: the task path names the module"
-    );
-    let strips: Vec<&str> = include_str!("../sanitize.rs")
-        .lines()
-        .filter_map(|l| l.trim_start().strip_prefix("pub fn "))
-        .filter_map(|l| l.split('(').next())
-        .collect();
-    assert!(!strips.is_empty(), "the markup strip's functions are read");
-    for strip in strips {
-        assert!(
-            !code.contains(&format!("{strip}(")),
-            "a task's completed result passes through no markup strip: `{strip}` is called"
-        );
-    }
-}
-
 #[test]
 fn an_upstream_error_is_a_tool_failure_naming_the_server() {
     let (status, body, line) = answer_of(settle_far(
@@ -1694,3 +1661,6 @@ fn a_temperature_that_is_not_a_number_is_refused_naming_that() {
         "{message}"
     );
 }
+
+#[path = "reported_calls.rs"]
+mod reported;

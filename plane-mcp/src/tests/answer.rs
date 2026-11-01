@@ -3,7 +3,7 @@
 
 //! Each arrival is answered here or sent on, and what is answered here is the served engine's.
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use super::*;
 use crate::tests::everyone;
@@ -115,33 +115,44 @@ fn discover_counts_what_the_caller_reaches_and_names_the_revisions() {
     assert_eq!(body(&none)["result"]["servers"], json!([]));
 }
 
-/// M3-5: a tool the kernel's verdict hides is gone from `server/discover`'s count as it is from
-/// `tools/list`: the two answers agree on what this caller reaches.
 #[test]
-fn discover_counts_no_tool_the_verdict_hides() {
-    let hide_all = |_: &crate::catalogue::ToolEntry| true;
-    let (d, params) = request("tools/list", json!({}));
-    let listed = answer(&d, Some(&params), &catalogue(), &everyone, hide_all);
-    let listed = body(&listed)["result"]["tools"]
-        .as_array()
-        .map_or(0, Vec::len);
+fn discover_hides_the_same_quarantined_tools_as_tools_list() {
+    let cfg = crate::statement::read_tools_section(
+        br#"{"only":{"url":"https://mcp.example","tools_allow":{"hidden":{}}}}"#,
+    )
+    .unwrap();
+    let cat = Catalogue::build(1, &cfg);
     let (d, params) = request("server/discover", json!({}));
-    let discovered = answer(&d, Some(&params), &catalogue(), &everyone, hide_all);
-    assert_eq!(body(&discovered)["result"]["counts"]["tools"], listed);
+    let a = answer(&d, Some(&params), &cat, &everyone, |_| true);
+    assert_eq!(body(&a)["result"]["counts"]["tools"], 0);
+    assert_eq!(body(&a)["result"]["servers"], json!([]));
 }
 
-/// M3-6: the server's identity rides where the schema carries it on every result,
-/// `_meta["io.modelcontextprotocol/serverInfo"]`.
 #[test]
-fn discover_carries_server_info_in_meta() {
-    let v = body(&run("server/discover", json!({})));
+fn discovery_carries_namespaced_server_info_metadata() {
+    let a = run("server/discover", json!({}));
+    let v = body(&a);
     assert_eq!(
-        v["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
-        "busbar"
+        v["result"]["_meta"]["io.modelcontextprotocol/serverInfo"],
+        v["result"]["serverInfo"]
     );
+}
+
+#[test]
+fn resources_without_display_names_still_render_protocol_names() {
+    let cfg = crate::statement::read_tools_section(br#"{"only":{"url":"https://mcp.example","resources_allow":{"file:///readme":{"text":"x"}},"resource_templates_allow":{"file:///{id}":{"text":"{id}"}}}}"#).unwrap();
+    let cat = Catalogue::build(1, &cfg);
+    let resources: Value =
+        serde_json::from_slice(&cat.resources_list(&json!(1), &everyone)).unwrap();
     assert_eq!(
-        v["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["version"],
-        crate::plane_door::VERSION
+        resources["result"]["resources"][0]["name"],
+        "file:///readme"
+    );
+    let templates: Value =
+        serde_json::from_slice(&cat.resource_templates_list(&json!(1), &everyone)).unwrap();
+    assert_eq!(
+        templates["result"]["resourceTemplates"][0]["name"],
+        "file:///{id}"
     );
 }
 
@@ -188,44 +199,32 @@ fn a_notice_is_acknowledged_and_a_refusal_answered() {
     assert!(matches!(a, Answer::Here { status: 400, .. }));
     assert_eq!(body(&a)["error"]["code"], -32700);
 }
-
+/// M3-5: a tool the kernel's verdict hides is gone from `server/discover`'s count as it is from
+/// `tools/list`: the two answers agree on what this caller reaches.
 #[test]
-fn discover_hides_the_same_quarantined_tools_as_tools_list() {
-    let cfg = crate::statement::read_tools_section(
-        br#"{"only":{"url":"https://mcp.example","tools_allow":{"hidden":{}}}}"#,
-    )
-    .unwrap();
-    let cat = Catalogue::build(1, &cfg);
+fn discover_counts_no_tool_the_verdict_hides() {
+    let hide_all = |_: &crate::catalogue::ToolEntry| true;
+    let (d, params) = request("tools/list", json!({}));
+    let listed = answer(&d, Some(&params), &catalogue(), &everyone, hide_all);
+    let listed = body(&listed)["result"]["tools"]
+        .as_array()
+        .map_or(0, Vec::len);
     let (d, params) = request("server/discover", json!({}));
-    let a = answer(&d, Some(&params), &cat, &everyone, |_| true);
-    assert_eq!(body(&a)["result"]["counts"]["tools"], 0);
-    assert_eq!(body(&a)["result"]["servers"], json!([]));
+    let discovered = answer(&d, Some(&params), &catalogue(), &everyone, hide_all);
+    assert_eq!(body(&discovered)["result"]["counts"]["tools"], listed);
 }
 
+/// M3-6: the server's identity rides where the schema carries it on every result,
+/// `_meta["io.modelcontextprotocol/serverInfo"]`.
 #[test]
-fn discovery_carries_namespaced_server_info_metadata() {
-    let a = run("server/discover", json!({}));
-    let v = body(&a);
+fn discover_carries_server_info_in_meta() {
+    let v = body(&run("server/discover", json!({})));
     assert_eq!(
-        v["result"]["_meta"]["io.modelcontextprotocol/serverInfo"],
-        v["result"]["serverInfo"]
+        v["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+        "busbar"
     );
-}
-
-#[test]
-fn resources_without_display_names_still_render_protocol_names() {
-    let cfg = crate::statement::read_tools_section(br#"{"only":{"url":"https://mcp.example","resources_allow":{"file:///readme":{"text":"x"}},"resource_templates_allow":{"file:///{id}":{"text":"{id}"}}}}"#).unwrap();
-    let cat = Catalogue::build(1, &cfg);
-    let resources: Value =
-        serde_json::from_slice(&cat.resources_list(&json!(1), &everyone)).unwrap();
     assert_eq!(
-        resources["result"]["resources"][0]["name"],
-        "file:///readme"
-    );
-    let templates: Value =
-        serde_json::from_slice(&cat.resource_templates_list(&json!(1), &everyone)).unwrap();
-    assert_eq!(
-        templates["result"]["resourceTemplates"][0]["name"],
-        "file:///{id}"
+        v["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["version"],
+        crate::plane_door::VERSION
     );
 }

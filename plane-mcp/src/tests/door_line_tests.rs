@@ -120,3 +120,79 @@ fn a_unit_of_its_caller_reasks_the_standing_its_frames_are_stepped_under() {
         "a lapsed caller's stream ends on its next frame: {step:?}"
     );
 }
+
+#[test]
+fn a_cancellation_removes_only_its_own_subscription_on_its_carrier() {
+    let plane = McpDoor::default();
+    for (session, id) in [(1, json!("sub")), (1, json!(7)), (2, json!("sub"))] {
+        plane
+            .line_listens
+            .insert((session, line::id_key(&id)), opened("k", 1));
+    }
+    let cancel =
+        br#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"sub"}}"#;
+    let _arrival = arrive(&plane, 1, cancel);
+    assert!(plane
+        .line_listens
+        .get(&(1, line::id_key(&json!("sub"))))
+        .is_none());
+    assert!(plane
+        .line_listens
+        .get(&(1, line::id_key(&json!(7))))
+        .is_some());
+    assert!(plane
+        .line_listens
+        .get(&(2, line::id_key(&json!("sub"))))
+        .is_some());
+}
+
+#[test]
+fn an_unwatched_resource_is_not_retained_by_a_line_subscription() {
+    let plane = McpDoor::default();
+    let key = (1, "s:sub".to_string());
+    plane.line_listens.insert(key.clone(), opened("k", 1));
+    announced(&plane, "fs", "file:///an-unwatched-secret-path");
+    assert!(plane.line_listens.get(&key).unwrap().updates.is_empty());
+}
+
+fn host_check_unit() -> CallUnit {
+    CallUnit {
+        key: 1,
+        held: None,
+        disposition: crate::tool_arrival::Disposition::Notice {
+            method: String::new(),
+        },
+        params: None,
+        framing: None,
+        param_fields: Vec::new(),
+        ticket: None,
+        issued: 0,
+        entitled: BTreeMap::new(),
+        member: None,
+        attempt: 0,
+        relay: None,
+        pending: None,
+        claim: None,
+        verified: None,
+        joined_fetch: None,
+        program: None,
+        readied: None,
+        task: None,
+        line: None,
+        child_work: super::super::ChildWork::default(),
+        session: None,
+        negotiating: None,
+    }
+}
+
+#[test]
+fn an_unavailable_host_does_not_claim_the_callers_identity_was_revoked() {
+    let plane = McpDoor::default();
+    let result = door_listen::standing(&plane, Ticket::NONE, "caller", &mut host_check_unit());
+    if let Standing::Lapsed { reason, .. } = result {
+        assert_ne!(reason, busbar_contract::vocab::REASON_IDENTITY_NOT_LIVE);
+    }
+}
+
+#[path = "reported_line.rs"]
+mod reported;

@@ -74,7 +74,7 @@ fn a_typed_prompt_renders_each_message_and_leaves_media_untouched() {
             {"role": "user", "content": {"type": "image", "data": "aGk=", "mimeType": "image/png"}}
         ])
     );
-    assert_eq!(v["result"]["description"], Value::Null);
+    assert!(v["result"].get("description").is_none());
 }
 
 #[test]
@@ -87,6 +87,14 @@ fn an_ungranted_prompt_answers_exactly_like_a_nonexistent_one() {
         .expect_err("absent");
     assert_eq!((hidden.status, hidden.code), (404, -32000));
     assert_eq!((absent.status, absent.code), (404, -32000));
+    assert_eq!(
+        hidden.data, absent.data,
+        "the refusal carries no grant-only data"
+    );
+    assert_eq!(
+        hidden.message.replace("fs_greet", "fs_nope"),
+        absent.message
+    );
     assert_eq!(
         hidden.message,
         "`fs_greet` is not a prompt this server exposes."
@@ -141,10 +149,34 @@ fn nothing_reachable_is_not_found_and_a_missing_uri_is_invalid() {
         &none,
     )
     .expect_err("hidden");
-    assert_eq!((r.status, r.code), (404, -32000));
+    assert_eq!((r.status, r.code), (404, -32602));
     assert_eq!(
         r.message,
         "`file:///shared` is not a resource this server exposes."
+    );
+    let absent = resources_read(
+        &c,
+        &json!(1),
+        Some(&json!({"uri":"file:///absent"})),
+        &everyone,
+    )
+    .expect_err("absent");
+    assert_eq!((r.status, r.code), (absent.status, absent.code));
+    assert_eq!(
+        r.message.replace("file:///shared", "file:///absent"),
+        absent.message
+    );
+    assert_eq!(
+        r.data.as_ref().and_then(|d| d.get("uri")),
+        Some(&json!("file:///shared"))
+    );
+    assert_eq!(
+        absent.data.as_ref().and_then(|d| d.get("uri")),
+        Some(&json!("file:///absent"))
+    );
+    assert_eq!(
+        r.data.as_ref().unwrap().as_object().unwrap().len(),
+        absent.data.as_ref().unwrap().as_object().unwrap().len()
     );
     let r = resources_read(&c, &json!(1), None, &everyone).expect_err("missing");
     assert_eq!((r.status, r.code), (400, -32602));
@@ -183,4 +215,52 @@ fn a_bound_value_spelling_a_placeholder_is_not_substituted_again() {
     .into_iter()
     .collect();
     assert_eq!(super::substitute("{a}-{b}-{c}-{", &bindings), "{b}-x-{c}-{");
+}
+
+#[test]
+fn prompt_arguments_substitute_inside_literal_json_braces_without_recursing_values() {
+    let params = json!({"arguments": {"city": "Paris", "value": "{city}", "number": 3}});
+    for (template, expected) in [
+        ("{{city}}", "{Paris}"),
+        (
+            r#"Reply as JSON: {"city": "{city}"}"#,
+            r#"Reply as JSON: {"city": "Paris"}"#,
+        ),
+        ("{value} {missing} {number}", "{city} {missing} {number}"),
+    ] {
+        assert_eq!(substitute_arguments(template, Some(&params)), expected);
+    }
+}
+
+#[test]
+fn absent_and_ungranted_resources_use_current_invalid_params_and_echo_only_requested_uri() {
+    let c = catalogue();
+    for uri in ["file:///missing", "file:///shared"] {
+        let refused = resources_read(&c, &json!(7), Some(&json!({"uri": uri})), &|_, _| false)
+            .expect_err("not exposed");
+        assert_eq!((refused.status, refused.code), (404, -32602));
+        assert_eq!(refused.data, Some(json!({"uri": uri})));
+        // Legacy session adaptation preserves this standard JSON-RPC error. It must not
+        // reintroduce the retired resource-specific code into the modern dispatch.
+        assert_eq!(
+            crate::adapt::lower_answer(&refused.body()),
+            Some(crate::adapt::Lowered::Unchanged),
+        );
+    }
+}
+
+#[test]
+fn hidden_and_absent_resource_answers_are_identical_for_the_same_requested_uri() {
+    let populated = catalogue();
+    let empty = Catalogue::build(
+        1,
+        &crate::statement::read_tools_section(b"{}").expect("empty section"),
+    );
+    let params = json!({"uri": "file:///shared"});
+    let hidden =
+        resources_read(&populated, &json!(7), Some(&params), &|_, _| false).expect_err("hidden");
+    let absent = resources_read(&empty, &json!(7), Some(&params), &everyone).expect_err("absent");
+    assert_eq!(hidden.status, absent.status);
+    assert_eq!(hidden.body(), absent.body());
+    assert_eq!(read(hidden.body())["error"]["data"], params);
 }

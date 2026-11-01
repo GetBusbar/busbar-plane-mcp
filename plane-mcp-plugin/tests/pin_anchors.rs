@@ -43,8 +43,8 @@ fn linked(d: &Dispatcher) -> Plugin<Plane> {
 
 /// RED on a plane whose far-end pins are not peer-key pins: the host would seal no pin, and an
 /// operator's `cert_spki` or `mtls` key would be parsed and never compared with the far end's.
-/// `pinned_pubkey` names a signed manifest's issuer key (predev's posture), a root that is not the
-/// far end's key.
+/// `pinned_pubkey` authenticates nothing in this build: no manifest signature is verified, so
+/// it is neither an authenticity root nor a far-end key pin (SEC-PIN).
 #[test]
 fn every_far_end_pin_mechanism_is_a_peer_key_pin_the_host_seals() {
     let d = Dispatcher::new(DispatchConfig::default());
@@ -60,7 +60,13 @@ fn every_far_end_pin_mechanism_is_a_peer_key_pin_the_host_seals() {
         .filter(|m| m.root)
         .map(|m| m.token)
         .collect();
-    assert_eq!(roots, ["pinned_pubkey", "cert_spki", "mtls"]);
+    assert_eq!(roots, ["cert_spki", "mtls"]);
+    let unsupported = pin
+        .mechanisms
+        .iter()
+        .find(|m| m.token == "pinned_pubkey")
+        .expect("the refused mechanism remains named for config diagnostics");
+    assert!(!unsupported.root && !unsupported.peer_key);
     let peer: Vec<&str> = pin
         .mechanisms
         .iter()

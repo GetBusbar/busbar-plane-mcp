@@ -4,6 +4,9 @@
 //! A stdio child's messages, read whole and correlated by id.
 
 use super::*;
+
+#[path = "program_batch_regressions.rs"]
+mod batches;
 use serde_json::json;
 
 /// A stdio child's asks judged against `def.sampling_bounds`, as the door judges them.

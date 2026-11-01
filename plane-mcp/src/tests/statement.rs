@@ -103,7 +103,11 @@ fn the_tails_trust_keys_are_the_grammars() {
         assert_eq!(parsed.mechanism.token(), token);
         assert_eq!(
             abi.flags & MECHANISM_ROOT != 0,
-            parsed.mechanism != crate::tools_config::McpPinMechanism::Unpinned,
+            matches!(
+                parsed.mechanism,
+                crate::tools_config::McpPinMechanism::CertSpki
+                    | crate::tools_config::McpPinMechanism::ClientCertBinding
+            ),
             "{token}"
         );
         // `cert_spki` and `mtls` pin the far end's key, which the host seals into the member route.

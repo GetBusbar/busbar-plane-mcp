@@ -330,6 +330,119 @@ fn publish_as_is_the_published_name_and_the_namespaced_default_is_then_gone() {
     assert_eq!(all[0].tool, "greet");
 }
 
+fn exchanged_published_name(published: &str) -> Value {
+    json!({
+        "fs": {
+            "url": "https://tools.example/fs",
+            "aud": "https://tools.example/fs",
+            "token_exchange": {
+                "token_url": "https://as.example/token",
+                "subject_token": { "env": "SUBJECT" }
+            },
+            "tools_allow": {
+                "read_file": { "schema_hash": "sha256:approved", "publish_as": published }
+            }
+        }
+    })
+}
+
+#[test]
+fn an_exchanged_published_name_must_be_one_oauth_scope_token() {
+    for published in [
+        "read admin",
+        "read\tadmin",
+        "read\nadmin",
+        "read\radmin",
+        "read\"admin",
+        "read\\admin",
+        "read\u{7f}admin",
+        "read\0admin",
+        "readéadmin",
+    ] {
+        let section = exchanged_published_name(published);
+        let err = grammar(section.clone())
+            .expect_err("one MCP grant must not become multiple or malformed OAuth scopes");
+        assert!(err.contains("tools.fs"), "{err}");
+        assert!(err.contains("tools_allow.read_file.publish_as"), "{err}");
+        assert!(err.contains("scope token"), "{err}");
+        assert_eq!(door_validate(&section).unwrap_err(), err);
+    }
+}
+
+#[test]
+fn exchanged_scope_tokens_preserve_the_published_name_bytes_and_default() {
+    for published in ["read:admin", "!#[]~", "read%20admin"] {
+        let cfg = door_validate(&exchanged_published_name(published))
+            .expect("RFC 6749 punctuation remains legal in a scope token");
+        assert_eq!(published_names(&cfg), vec![published.to_string()]);
+        assert_eq!(
+            crate::tool_scope::registration_scope("fs", &cfg.servers["fs"]),
+            published
+        );
+        let catalogue = crate::catalogue::Catalogue::build(1, &cfg);
+        for wildcard in [false, true] {
+            assert_eq!(
+                crate::tool_scope::caller_downscope(
+                    &catalogue,
+                    "fs",
+                    published,
+                    wildcard,
+                    &|name| name == published,
+                ),
+                published
+            );
+        }
+    }
+    let mut section = exchanged_published_name("unused");
+    section["fs"]["tools_allow"]["read_file"] = json!({"schema_hash": "sha256:approved"});
+    let cfg = door_validate(&section).expect("the namespaced default remains one scope token");
+    assert_eq!(published_names(&cfg), vec!["fs_read_file".to_string()]);
+    assert_eq!(
+        crate::tool_scope::registration_scope("fs", &cfg.servers["fs"]),
+        "fs_read_file"
+    );
+}
+
+#[test]
+fn an_exchanged_default_name_cannot_hide_a_scope_separator() {
+    for (server, tool) in [("fs", "read admin"), ("bad server", "read_file")] {
+        let section = json!({
+            server: {
+                "url": "https://tools.example/fs",
+                "aud": "https://tools.example/fs",
+                "token_exchange": {
+                    "token_url": "https://as.example/token",
+                    "subject_token": { "env": "SUBJECT" }
+                },
+                "tools_allow": { tool: { "schema_hash": "sha256:approved" } }
+            }
+        });
+        let err = grammar(section.clone())
+            .expect_err("the server and tool identity rules already refuse embedded spaces");
+        assert_eq!(door_validate(&section).unwrap_err(), err);
+    }
+}
+
+#[test]
+fn ordinary_published_names_keep_their_non_oauth_spelling() {
+    for published in [
+        "read admin",
+        "read\tadmin",
+        "read\"admin",
+        "read\\admin",
+        "readéadmin",
+    ] {
+        let mut section = exchanged_published_name(published);
+        section["fs"]
+            .as_object_mut()
+            .unwrap()
+            .remove("token_exchange");
+        let cfg = door_validate(&section)
+            .expect("an ordinary MCP published name need not be an OAuth scope token");
+        assert_eq!(published_names(&cfg), vec![published.to_string()]);
+    }
+}
+
 /// RED 1 — TWO OVERRIDES COLLIDING. The obvious case, and the only one a naive check catches.
 #[test]
 fn two_publish_as_overrides_that_collide_refuse_the_config() {
@@ -918,4 +1031,92 @@ fn a_registrations_own_passthrough_is_refused_alone_and_beside_an_exchange() {
             assert!(err.contains("token_exchange"), "{err}");
         }
     }
+}
+
+#[test]
+fn an_unverified_manifest_key_is_not_an_authenticity_root() {
+    let section = json!({"fs": {
+        "url": "https://mcp.example/rpc",
+        "pin": {"mechanism": "pinned_pubkey", "key": "sha256/47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU="}
+    }});
+    let error = door_validate(&section).expect_err("no manifest signature is verified");
+    assert!(
+        error.contains("pinned_pubkey") && error.contains("authenticates nothing"),
+        "{error}"
+    );
+    assert!(
+        error.contains("cert_spki") && error.contains("mtls"),
+        "{error}"
+    );
+}
+
+#[test]
+fn supported_endpoint_pins_still_validate_with_their_required_identity() {
+    for mechanism in ["cert_spki", "mtls"] {
+        let mut entry = json!({
+            "url": "https://mcp.example/rpc",
+            "pin": {"mechanism": mechanism, "key": "sha256/47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU="}
+        });
+        if mechanism == "mtls" {
+            entry["client_identity"] = json!({"cert": {"file": "/run/mcp/client.crt"}, "key": {"file": "/run/mcp/client.key"}});
+        }
+        door_validate(&json!({"fs": entry})).expect("supported pin and identity grammar");
+    }
+}
+
+#[test]
+fn program_paths_are_validated_with_the_exact_bytes_the_child_will_receive() {
+    let directory = if cfg!(windows) { r"C:\Windows" } else { "/tmp" };
+    for field in ["command", "cwd"] {
+        let value = if field == "command" {
+            ABS_PROGRAM
+        } else {
+            directory
+        };
+        for padded in [format!(" {value}"), format!("{value} ")] {
+            let mut entry = json!({"transport": "stdio", "command": ABS_PROGRAM, "pin": {"mechanism": "unpinned"}});
+            entry[field] = padded.into();
+            let error = door_validate(&json!({"fs": entry})).expect_err("padded exec path");
+            assert!(error.contains(field), "{error}");
+        }
+    }
+}
+
+#[test]
+fn every_advertised_tool_name_fits_the_existing_call_limit() {
+    let max = crate::call::MAX_TOOL_NAME_BYTES;
+    for overridden in [false, true] {
+        for length in [max, max + 1] {
+            let tool = if overridden {
+                "read".to_owned()
+            } else {
+                "a".repeat(length - 3)
+            };
+            let allow = if overridden {
+                json!({"publish_as": "a".repeat(length)})
+            } else {
+                json!({})
+            };
+            let section = json!({"fs": {"url": "https://mcp.example/rpc", "pin": {"mechanism": "unpinned"}, "tools_allow": {(tool): allow}}});
+            let result = door_validate(&section);
+            assert_eq!(
+                result.is_ok(),
+                length == max,
+                "override={overridden}, length={length}: {result:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_uri_template_rejects_unmatched_closing_braces_in_every_literal_segment() {
+    for template in [
+        "file:///a}b/{name}",
+        "file:///{name}/a}b/{tail}",
+        "file:///{name}/end}",
+    ] {
+        let section = json!({"fs": {"url": "https://mcp.example/rpc", "pin": {"mechanism": "unpinned"}, "resource_templates_allow": {(template): {"text": "Hello {name}"}}}});
+        door_validate(&section).expect_err("stray closing brace");
+    }
+    door_validate(&json!({"fs": {"url": "https://mcp.example/rpc", "pin": {"mechanism": "unpinned"}, "resource_templates_allow": {"file:///{name}": {"text": "Hello {name}"}}}})).expect("balanced template");
 }

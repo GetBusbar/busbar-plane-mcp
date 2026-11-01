@@ -35,18 +35,18 @@
       },
       "tools/call": {
         "echo": {
-          "from": "/params/arguments/label",
-          "into": "/result/content/0/text",
+          "from": "/params",
+          "into": "/result/structuredContent",
           "base": {
             "content": [
               {
                 "type": "text",
-                "text": ""
+                "text": "ping: control"
               }
             ],
-            "isError": false
-          },
-          "format": "ping: {}"
+            "isError": false,
+            "structuredContent": null
+          }
         }
       }
     }
@@ -117,8 +117,52 @@
         "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"probe_ping\",\"arguments\":{\"label\":\"control\"},\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{}}}}",
         "status": 200,
         "body_contains": [
-          "ping: control"
+          "\"name\":\"ping\"",
+          "\"label\":\"control\""
         ]
+      }
+    },
+    {
+      "call": {
+        "port": "data",
+        "method": "POST",
+        "path": "/mcp",
+        "bearer": "{minted}",
+        "headers": [
+          ["content-type", "application/json"],
+          ["mcp-method", "tools/list"],
+          ["mcp-protocol-version", "2026-07-28"]
+        ],
+        "body": "{\"jsonrpc\":\"2.0\",\"id\":\"listed-with-grant\",\"method\":\"tools/list\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{}}}}",
+        "status": 200,
+        "body_contains": ["probe_ping"]
+      }
+    },
+    {
+      "mint": {
+        "path": "/api/v1/admin/keys",
+        "body": {
+          "name": "qa-tool-no-grants",
+          "allowed_pools": []
+        },
+        "bind_audience": "http://127.0.0.1:{data_port}/mcp"
+      }
+    },
+    {
+      "call": {
+        "port": "data",
+        "method": "POST",
+        "path": "/mcp",
+        "bearer": "{minted}",
+        "headers": [
+          ["content-type", "application/json"],
+          ["mcp-method", "tools/list"],
+          ["mcp-protocol-version", "2026-07-28"]
+        ],
+        "body": "{\"jsonrpc\":\"2.0\",\"id\":\"listed-without-grant\",\"method\":\"tools/list\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{}}}}",
+        "status": 200,
+        "body_contains": ["\"tools\":[]"],
+        "body_lacks": ["probe_ping"]
       }
     },
     {

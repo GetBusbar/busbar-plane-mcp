@@ -138,6 +138,7 @@
         "port": "data",
         "method": "POST",
         "path": "/mcp",
+        "status": 404,
         "body_lacks": [
           "error_description"
         ]

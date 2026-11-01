@@ -26,6 +26,14 @@
 #[allow(dead_code)]
 mod door_facts;
 
+#[path = "support/sessions_lines.rs"]
+mod sessions_lines;
+
+#[path = "support/carrier_retirement.rs"]
+mod carrier_retirement;
+#[path = "support/inspection_wire.rs"]
+mod inspection_wire;
+
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::os::raw::c_void;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -91,7 +99,12 @@ extern "C" fn clock_now(_: HostCtx, input: *const c_void, out: *mut ServiceOut) 
 }
 
 extern "C" fn entitled(_: HostCtx, _: *const c_void, out: *mut ServiceOut) -> RawOutcome {
-    answer(out, Outcome::Ready, ENTITLED, 0)
+    answer(
+        out,
+        Outcome::Ready,
+        reported_stream_standing::entitlement(),
+        0,
+    )
 }
 
 /// Every fill differs from the last: a counter, spelled into the buffer.
@@ -149,7 +162,7 @@ static HOST_SLOTS: HostSlots = HostSlots {
     trust_serves: Some(serves),
     trust_decide: None,
     trust_state: None,
-    session_emit: None,
+    session_emit: Some(carrier_retirement::emit),
     auth_call: None,
     unit_hand_in: None,
     unit_refuse: None,
@@ -842,10 +855,12 @@ impl Door {
         // A tick starts: the host forgets what the driver ticket kept.
         kept_answers().clear();
         let now = TICKS.fetch_add(1, Ordering::Relaxed);
-        let i = TickIn {
+        let mut i = TickIn {
             head: head::<TickIn>(life::TICK, DRIVER),
             now_ns: now,
         };
+        let inspection_extensions = inspection_wire::input(1, None);
+        i.head.extensions = octets(&inspection_extensions);
         let mut o = TickOut {
             head: out_head::<TickOut>(),
             next_tick_ns: 0,
@@ -860,6 +875,12 @@ impl Door {
                 std::ptr::from_mut(&mut o).cast(),
             )
         };
+        if let Some(request) = inspection_wire::request(&o.head) {
+            assert_eq!(ret.outcome(), Outcome::Pending);
+            inspection_wire::release(self.instance, &o.head, lifecycle());
+            carrier_retirement::finish(self, request);
+            return;
+        }
         assert_eq!(ret.outcome(), Outcome::Ready);
     }
 
@@ -2617,6 +2638,11 @@ fn a_held_stream_is_never_ended_for_another() {
     // The first stream is still live: a collection writes no end of stream.
     d.turn();
     let collected = d.piece(141, &Given::collect(ALICE, 141));
+    assert_eq!(
+        collected.outcome,
+        Some(Outcome::Ready),
+        "the original stream remains collectable"
+    );
     assert!(
         !collected.done,
         "the first stream was ended for the seventeenth: {}",
@@ -2829,6 +2855,7 @@ fn a_session_subscription_sends_its_member_nothing() {
         br#"{"jsonrpc":"2.0","id":3,"method":"resources/subscribe","params":{"uri":"file:///readme"}}"#;
     let unsubscribe =
         br#"{"jsonrpc":"2.0","id":4,"method":"resources/unsubscribe","params":{"uri":"file:///readme"}}"#;
+    let opened_before = upstreams().as_ref().map_or(0, |upstreams| upstreams.next);
     let subscribed = session_post(&d, 241, &session, ALICE, subscribe);
     assert_eq!(subscribed.outcome, Some(Outcome::Ready));
     assert_eq!(subscribed.status, 200, "{}", subscribed.text());
@@ -2839,6 +2866,11 @@ fn a_session_subscription_sends_its_member_nothing() {
         subscribed.text()
     );
     let dropped = session_post(&d, 242, &session, ALICE, unsubscribe);
+    assert_eq!(
+        upstreams().as_ref().map_or(0, |upstreams| upstreams.next),
+        opened_before,
+        "neither HTTP nor stdio opens a member lease for these local subscriptions"
+    );
     assert_eq!(dropped.status, 200, "{}", dropped.text());
     assert_eq!(
         dropped.bytes,
@@ -3028,3 +3060,6 @@ fn a_members_update_reaches_a_listen_subscriber_exactly_once() {
         );
     }
 }
+
+#[path = "support/reported_stream_standing.rs"]
+mod reported_stream_standing;

@@ -4104,3 +4104,11 @@ mod door_tasks;
 #[cfg(test)]
 #[path = "tests/door_money.rs"]
 mod door_money;
+
+#[cfg(test)]
+#[path = "tests/published_scope.rs"]
+mod published_scope;
+
+#[cfg(test)]
+#[path = "tests/reported_progress.rs"]
+mod reported_progress;

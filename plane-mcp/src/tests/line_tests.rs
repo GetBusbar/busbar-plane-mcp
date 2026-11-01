@@ -149,3 +149,39 @@ fn initialize_negotiates_a_session_revision() {
     let stateless = json!({ "jsonrpc": "2.0", "id": 2, "method": "initialize", "params": { "protocolVersion": "2026-07-28" } });
     assert_eq!(era(&stateless), Era::Answer(initialize_result(&json!(2))));
 }
+
+#[test]
+fn an_upstream_ask_without_params_remains_without_params() {
+    let result = json!({"inputRequests":{"a":{"method":"roots/list"}},"requestState":"sealed"});
+    let mut live = LiveAsk::of(json!({"params":{}}), b"{}".to_vec(), &result, 0).unwrap();
+    let request: Value = serde_json::from_slice(&live.issue(1).unwrap()).unwrap();
+    assert_eq!(request["method"], "roots/list");
+    assert!(
+        request.get("params").is_none(),
+        "absent params is not params:null: {request}"
+    );
+    let explicit = json!({"inputRequests":{"a":{"method":"roots/list","params":null}},"requestState":"sealed"});
+    let mut live = LiveAsk::of(json!({"params":{}}), Vec::new(), &explicit, 0).unwrap();
+    let request: Value = serde_json::from_slice(&live.issue(2).unwrap()).unwrap();
+    assert_eq!(request.get("params"), Some(&Value::Null));
+}
+
+#[test]
+fn a_session_line_advertises_no_list_change_channel_it_cannot_serve() {
+    for revision in crate::revision::SESSION_REVISIONS {
+        let answer = session_initialize_result(&json!(1), *revision);
+        for kind in ["tools", "prompts", "resources"] {
+            assert_eq!(answer["result"]["capabilities"][kind]["listChanged"], false);
+        }
+    }
+}
+
+#[test]
+fn an_unknown_requested_line_revision_uses_the_shared_session_negotiation() {
+    let request = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}});
+    let Era::Opened(revision, answer) = era(&request) else {
+        panic!("a requested session revision is negotiated")
+    };
+    assert_eq!(revision, crate::revision::negotiate(Some("2025-03-26")));
+    assert_eq!(answer["result"]["protocolVersion"], revision.wire());
+}

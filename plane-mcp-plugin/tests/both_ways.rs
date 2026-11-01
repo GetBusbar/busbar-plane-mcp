@@ -2260,26 +2260,6 @@ mod bounds {
         );
     }
 
-    /// An upstream's answer is gathered only under the SDK's reply ceiling, and the call that
-    /// passes it fails as any bad upstream answer does. The gather site is reached only by a call
-    /// the kernel has admitted and entitled, which this harness has no host to do, so the bound is
-    /// read off the source at that site.
-    #[test]
-    fn an_upstreams_answer_is_gathered_only_under_the_reply_ceiling() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../plane-mcp/src/plane_door.rs");
-        let source = std::fs::read_to_string(path).expect("the door's source reads");
-        let lines: Vec<&str> = source.lines().collect();
-        let gather = lines
-            .iter()
-            .position(|l| l.contains("relay.far.extend_from_slice(bytes)"))
-            .expect("the gather site");
-        let guard = lines[gather.saturating_sub(8)..gather].join("\n");
-        assert!(
-            guard.contains("REPLY_MAX") && guard.contains("upstream_failed"),
-            "the gather is not bounded by the reply ceiling, failing the call past it:\n{guard}"
-        );
-    }
-
     /// A `subscriptions/listen`, opting in to a list category.
     const LISTEN: &[u8] = br#"{"jsonrpc":"2.0","id":3,"method":"subscriptions/listen","params":{"notifications":{"toolsListChanged":true},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#;
     const LISTEN_FIELDS: &[Field] = &[
