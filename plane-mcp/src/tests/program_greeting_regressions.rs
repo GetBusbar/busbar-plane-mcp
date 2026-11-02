@@ -221,10 +221,15 @@ fn a_restarted_child_is_greeted_and_a_cancelled_owner_does_not_strand_waiters() 
 #[test]
 fn a_child_request_memo_keeps_identity_without_retaining_the_far_ends_large_id() {
     let plane = McpDoor::default();
+    let def = serde_json::from_value(serde_json::json!({
+        "transport":"stdio", "command":"/usr/bin/child", "pin":{"mechanism":"unpinned"}
+    }))
+    .unwrap();
     let peer = DoorPeer {
         plane: &plane,
         member: "srv",
         grants: Default::default(),
+        def: &def,
     };
     let marker = "remote-large-id-canary";
     let id = Value::String(marker.repeat(100_000));
@@ -309,15 +314,21 @@ fn exact_generations_and_stale_completions_do_not_regreet_the_latest_child() {
 #[test]
 fn memo_identity_distinguishes_typed_ids_members_and_generations() {
     let plane = McpDoor::default();
+    let def = serde_json::from_value(serde_json::json!({
+        "transport":"stdio", "command":"/usr/bin/child", "pin":{"mechanism":"unpinned"}
+    }))
+    .unwrap();
     let peer = DoorPeer {
         plane: &plane,
         member: "srv",
         grants: Default::default(),
+        def: &def,
     };
     let other = DoorPeer {
         plane: &plane,
         member: "other",
         grants: Default::default(),
+        def: &def,
     };
     assert_eq!(
         peer.decide(1, &Value::from(7), || Some(1_u64.into())),
