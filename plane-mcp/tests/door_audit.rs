@@ -919,6 +919,11 @@ struct Door {
 static CARRIER_SESSIONS: Mutex<std::collections::BTreeMap<usize, std::collections::BTreeSet<u64>>> =
     Mutex::new(std::collections::BTreeMap::new());
 
+// A host re-enters precisely the pending op on its original ticket; a fresh crossing must not
+// discard that op's parked exchange and then replay completed services onto a closed stream.
+static PENDING_PIECES: Mutex<std::collections::BTreeSet<(usize, u32, u32)>> =
+    Mutex::new(std::collections::BTreeSet::new());
+
 /// The section: a registration that requires a session, and one that speaks the stateless revision.
 const SECTION: &str = r#"{
     "fs": {"url": "https://up.example/sess", "pin": {"mechanism": "unpinned"}, "verify_ttl": "1h", "tools_allow": {"read_file": {}}},
@@ -1131,6 +1136,12 @@ impl Door {
                 std::ptr::from_mut(&mut o).cast(),
             )
         };
+        if ret.outcome() == Outcome::Ready {
+            PENDING_PIECES
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(&(self.instance as usize, u32::try_from(unit).unwrap(), 1));
+        }
         Arrived {
             outcome: ret.outcome(),
             refusal_status: o.refusal_status,
@@ -1162,6 +1173,14 @@ impl Door {
         for _ in 0..64 {
             let mut i: OnPieceIn = z();
             i.head = head::<OnPieceIn>(slot::ON_PIECE, ticket);
+            let pending_key = (self.instance as usize, ticket.slot, ticket.generation);
+            if PENDING_PIECES
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .contains(&pending_key)
+            {
+                i.head.flags |= FLAG_RESUME;
+            }
             i.unit = unit;
             i.from = given.from;
             i.stream = given.stream;
@@ -1193,6 +1212,16 @@ impl Door {
                     std::ptr::from_mut(&mut o).cast(),
                 )
             };
+            PENDING_PIECES
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .retain(|key| *key != pending_key);
+            if ret.outcome() == Outcome::Pending {
+                PENDING_PIECES
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(pending_key);
+            }
             first = false;
             got.outcome = Some(ret.outcome());
             if o.reply_status != 0 {
@@ -1518,6 +1547,12 @@ impl Door {
                 std::ptr::from_mut(&mut o).cast(),
             )
         };
+        if ret.outcome() == Outcome::Ready {
+            PENDING_PIECES
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(&(self.instance as usize, u32::try_from(unit).unwrap(), 1));
+        }
         Arrived {
             outcome: ret.outcome(),
             refusal_status: o.refusal_status,
@@ -1705,17 +1740,17 @@ fn concurrent_mcp_callers_share_one_list_fetch() {
         "the second caller joined the fetch in flight instead of sending its own"
     );
     drop(held);
-    // This host's connector re-sends a pended exchange when it is resumed, so what is counted
-    // from here is what RESUMED: the one fetch in flight, and nothing from the call that joined it.
+    // Re-entry replays completed host receipts. Neither resuming the fetch owner nor its joined
+    // caller may send a second tools/list; the one already observed must serve both calls.
     let before = lists_to(STATELESS_URL);
     for unit in [330, 331] {
         let sent = d.pump(unit, &Given::caller(ALICE, ST_CALL));
         assert!(sent.far, "unit {unit} is relayed: {}", sent.text());
     }
     assert_eq!(
-        lists_to(STATELESS_URL) - before,
-        1,
-        "one fetch served the burst: the call that joined it sent none"
+        lists_to(STATELESS_URL),
+        before,
+        "the original single fetch served both callers without a repeated request"
     );
 }
 
@@ -2197,6 +2232,12 @@ impl Door {
                 std::ptr::from_mut(&mut o).cast(),
             )
         };
+        if ret.outcome() == Outcome::Ready {
+            PENDING_PIECES
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(&(self.instance as usize, ticket.slot, ticket.generation));
+        }
         (ret.outcome(), o.cancel.disposition)
     }
 }
