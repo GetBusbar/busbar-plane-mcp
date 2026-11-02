@@ -70,7 +70,22 @@ fn looks_like_a_method(piece: &str) -> bool {
         "roots/",
         "elicitation/",
     ];
-    heads.iter().any(|h| piece.starts_with(h)) && !piece.contains(' ')
+    heads.iter().any(|head| {
+        piece.strip_prefix(head).is_some_and(|tail| {
+            !tail.is_empty() && tail.split('/').all(|segment| !segment.is_empty())
+        })
+    }) && !piece.contains(' ')
+}
+
+#[test]
+fn battery_method_names_are_complete_and_unknown_names_still_reach_the_coverage_gate() {
+    assert!(!looks_like_a_method("notifications/"));
+    assert!(!looks_like_a_method("notifications//changed"));
+    assert!(!looks_like_a_method("tools/call with a space"));
+    assert!(looks_like_a_method("notifications/tools/list_changed"));
+    assert!(looks_like_a_method(
+        "tools/a_new_method_the_plane_must_account_for"
+    ));
 }
 
 /// Every method the battery sends is one this plane carries, in one of its three roles.

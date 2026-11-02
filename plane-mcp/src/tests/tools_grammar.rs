@@ -334,6 +334,7 @@ fn exchanged_published_name(published: &str) -> Value {
     json!({
         "fs": {
             "url": "https://tools.example/fs",
+            "pin": { "mechanism": "unpinned" },
             "aud": "https://tools.example/fs",
             "token_exchange": {
                 "token_url": "https://as.example/token",
@@ -409,6 +410,7 @@ fn an_exchanged_default_name_cannot_hide_a_scope_separator() {
         let section = json!({
             server: {
                 "url": "https://tools.example/fs",
+            "pin": { "mechanism": "unpinned" },
                 "aud": "https://tools.example/fs",
                 "token_exchange": {
                     "token_url": "https://as.example/token",
