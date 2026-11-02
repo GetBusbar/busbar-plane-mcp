@@ -8,15 +8,15 @@ use busbar_contract::abi::mechanism::lifecycle::{
     slot, CancelIn, CancelOut, DriveIn, GenIn, OpenIn, OpenOut,
 };
 use busbar_contract::abi::mechanism::ticket::{CompletionHandle, HostCtx};
-use busbar_contract::abi::sdk::capture::{CaptureHome, CaptureSlot};
-use busbar_contract::abi::sdk::door::{blank_in, blank_out, kind_op, Lifecycle};
-use busbar_contract::abi::sdk::{Instance, Lent, Out, Safe, SafeSlot};
+use busbar_contract::abi::sdk::door::blank_out;
+use busbar_contract::abi::sdk::{Instance, Lent, Out, SafeSlot};
 use busbar_test_kit::test_support::{
     fake::{self, FakeHost, FakeService, ServiceCall},
     reply,
+    test_in::TestIn,
+    DoorView,
 };
 use std::cell::RefCell;
-use std::ffi::c_void;
 
 const BINDING: &str = "binding";
 const MEMBER: &str = "fs";
@@ -97,7 +97,7 @@ impl FakeService for Write {
     type In = RequestIn;
     fn serve(call: &mut ServiceCall<RequestIn>) -> Outcome {
         if call.lent(|i| &i.piece)[0].kind == REQUEST_BODY {
-            let body = serde_json::from_slice(call.lent(|i| &i.bytes)).unwrap();
+            let body = serde_json::from_slice(call.lent(|i| &i.buf)).unwrap();
             STATE.with(|state| state.borrow_mut().bodies.push(body));
         }
         call.set_len(call.input().len as u64);
@@ -128,20 +128,6 @@ impl FakeService for CloseStream {
     fn serve(call: &mut ServiceCall<StreamIn>) -> Outcome {
         STATE.with(|state| state.borrow_mut().closed.push(call.input().stream));
         Outcome::Ready
-    }
-}
-
-struct Capture;
-impl CaptureHome for Capture {
-    fn retention() -> &'static busbar_contract::abi::sdk::capture::CaptureRetention {
-        static RETENTION: std::sync::OnceLock<
-            busbar_contract::abi::sdk::capture::CaptureRetention,
-        > = std::sync::OnceLock::new();
-        RETENTION.get_or_init(Default::default)
-    }
-    fn with<R>(f: impl FnOnce(&mut CaptureSlot) -> R) -> R {
-        thread_local! {static SLOT: RefCell<CaptureSlot> = RefCell::new(CaptureSlot::default());}
-        SLOT.with(|slot| f(&mut slot.borrow_mut()))
     }
 }
 
@@ -294,14 +280,42 @@ impl SafeSlot for Close {
     }
 }
 
-struct Fixture {
-    instance: *mut c_void,
-    // Keep the host tables alive until CLOSE has destroyed the instance and parked Exchange.
-    _host: FakeHost,
+mod fixture_door {
+    busbar_contract::plugin_door! {
+        ops: busbar_contract::abi::export::Ops,
+        statement: busbar_contract::abi::sdk::door::statement("mcp-fixture", "1.6.0", 4),
+        lifecycle: {
+            validate: busbar_contract::abi::sdk::Safe<crate::tests::fixture::Idle<busbar_contract::abi::mechanism::lifecycle::ValidateIn, busbar_contract::abi::mechanism::call::OutHead>>,
+            open: busbar_contract::abi::sdk::Safe<super::Open>,
+            refresh: busbar_contract::abi::sdk::Safe<crate::tests::fixture::Idle<busbar_contract::abi::mechanism::lifecycle::RefreshIn, busbar_contract::abi::mechanism::call::OutHead>>,
+            retire: busbar_contract::abi::sdk::Safe<super::Inspect>,
+            tick: busbar_contract::abi::sdk::Safe<crate::tests::fixture::Idle<busbar_contract::abi::mechanism::lifecycle::TickIn, busbar_contract::abi::mechanism::lifecycle::TickOut>>,
+            drive: busbar_contract::abi::sdk::Safe<super::PollCall>,
+            cancel: busbar_contract::abi::sdk::Safe<super::Cancel>,
+            release: busbar_contract::abi::sdk::Safe<crate::tests::fixture::Idle<busbar_contract::abi::mechanism::lifecycle::ReleaseIn, busbar_contract::abi::mechanism::call::OutHead>>,
+            close: busbar_contract::abi::sdk::Safe<super::Close>,
+        },
+    }
 }
 
-impl Fixture {
-    fn new(pause_stream: u64, address_missing: bool) -> Self {
+fn view() -> DoorView {
+    DoorView::of(fixture_door::MACRO_DOOR)
+}
+
+fn fixture_host() -> FakeHost {
+    FakeHost::new()
+        .ctx(HostCtx { handle: 71 })
+        .wake(wake)
+        .serve(fake::conn::ESTABLISH, Establish)
+        .serve(fake::conn::WRITE_REQUEST, Write)
+        .serve(fake::conn::READ_REPLY, Read)
+        .serve(fake::conn::CLOSE, CloseStream)
+}
+struct Fixture<'h> {
+    instance: Option<reply::Instance<'h>>,
+}
+impl<'h> Fixture<'h> {
+    fn new(host: &'h FakeHost, pause_stream: u64, address_missing: bool) -> Self {
         STATE.with(|state| {
             *state.borrow_mut() = State {
                 pause_stream,
@@ -311,69 +325,90 @@ impl Fixture {
             }
         });
         CALLS.with(|calls| calls.borrow_mut().clear());
-        let host = FakeHost::new()
-            .ctx(HostCtx { handle: 71 })
-            .wake(wake)
-            .serve(fake::conn::ESTABLISH, Establish)
-            .serve(fake::conn::WRITE_REQUEST, Write)
-            .serve(fake::conn::READ_REPLY, Read)
-            .serve(fake::conn::CLOSE, CloseStream);
-        let open = kind_op::<Lifecycle, Safe<Open>, Capture, { slot::OPEN }>().unwrap();
-        let mut input = blank_in::<OpenIn>();
-        input.head.op = slot::OPEN;
-        let opened = reply::call_hosted(
-            open,
-            std::ptr::null_mut(),
-            &host.lend_to(input),
+        let input = host.lend_in(TestIn::<OpenIn>::new().set(|i| &i.head.op, slot::OPEN));
+        // The instance proof retains this external host borrow through CLOSE.
+        let mut opened = reply::call_hosted_in(
+            view()
+                .op::<busbar_contract::abi::export::Ops>(|o| &o.head.open)
+                .unwrap(),
+            None,
+            &input,
             blank_out::<OpenOut>(),
         );
         assert_eq!(opened.outcome, Outcome::Ready, "{opened:?}");
         Self {
-            instance: opened.out.instance,
-            _host: host,
+            instance: Some(
+                opened
+                    .take_instance()
+                    .expect("the hosted open owns an instance"),
+            ),
         }
     }
-
     fn poll(&self, ticket: Ticket, resuming: bool) -> Outcome {
-        let op = kind_op::<Lifecycle, Safe<PollCall>, Capture, { slot::DRIVE }>().unwrap();
-        let mut input = blank_in::<DriveIn>();
-        input.head.op = slot::DRIVE;
-        input.head.ticket = ticket;
-        if resuming {
-            input.head.flags = FLAG_RESUME;
-        }
-        reply::call(op, self.instance, &input, blank_out::<OutHead>()).outcome
+        let input = TestIn::<DriveIn>::new()
+            .set(|i| &i.head.op, slot::DRIVE)
+            .set(|i| &i.head.ticket, ticket)
+            .set(|i| &i.head.flags, if resuming { FLAG_RESUME } else { 0 });
+        // A pointer-free input and this door's retained instance proof cover the call.
+        reply::call_in(
+            view()
+                .op::<busbar_contract::abi::export::Ops>(|o| &o.head.drive)
+                .unwrap(),
+            self.instance.as_ref(),
+            &input,
+            blank_out::<OutHead>(),
+        )
+        .outcome
     }
-
     fn inspect(&self, action: Action) {
-        let op = kind_op::<Lifecycle, Safe<Inspect>, Capture, { slot::RETIRE }>().unwrap();
-        let mut input = blank_in::<GenIn>();
-        input.head.op = slot::RETIRE;
-        input.generation = action as u64;
+        let input = TestIn::<GenIn>::new()
+            .set(|i| &i.head.op, slot::RETIRE)
+            .set(|i| &i.generation, action as u64);
+        // This exact RETIRE frame carries only the action scalar; the instance stays borrowed.
         assert_eq!(
-            reply::call(op, self.instance, &input, blank_out::<OutHead>()).outcome,
+            reply::call_in(
+                view()
+                    .op::<busbar_contract::abi::export::Ops>(|o| &o.head.retire)
+                    .unwrap(),
+                self.instance.as_ref(),
+                &input,
+                blank_out::<OutHead>()
+            )
+            .outcome,
             Outcome::Ready
         );
     }
-
     fn cancel(&self) {
-        let op = kind_op::<Lifecycle, Safe<Cancel>, Capture, { slot::CANCEL }>().unwrap();
-        let mut input = blank_in::<CancelIn>();
-        input.head.op = slot::CANCEL;
-        input.ticket = OWNER;
+        let input = TestIn::<CancelIn>::new()
+            .set(|i| &i.head.op, slot::CANCEL)
+            .set(|i| &i.ticket, OWNER);
+        // Cancellation targets the owner ticket on this fixture's still-live instance.
         assert_eq!(
-            reply::call(op, self.instance, &input, blank_out::<CancelOut>()).outcome,
+            reply::call_in(
+                view()
+                    .op::<busbar_contract::abi::export::Ops>(|o| &o.head.cancel)
+                    .unwrap(),
+                self.instance.as_ref(),
+                &input,
+                blank_out::<CancelOut>()
+            )
+            .outcome,
             Outcome::Ready
         );
     }
 }
-
-impl Drop for Fixture {
+impl Drop for Fixture<'_> {
     fn drop(&mut self) {
-        let close = kind_op::<Lifecycle, Safe<Close>, Capture, { slot::CLOSE }>().unwrap();
-        let mut input = blank_in::<InHead>();
-        input.op = slot::CLOSE;
-        let closed = reply::call(close, self.instance, &input, blank_out::<OutHead>());
+        let input = TestIn::<InHead>::new().set(|i| &i.op, slot::CLOSE);
+        // CLOSE consumes the proof while its external host and parked Exchange remain live.
+        let closed = reply::close_in(
+            view()
+                .op::<busbar_contract::abi::export::Ops>(|o| &o.head.close)
+                .unwrap(),
+            self.instance.take().unwrap(),
+            &input,
+            blank_out::<OutHead>(),
+        );
         assert_eq!(closed.outcome, Outcome::Ready);
         CALLS.with(|calls| calls.borrow_mut().clear());
     }
@@ -439,7 +474,8 @@ fn complete(fixture: &Fixture) {
 
 #[test]
 fn an_initialization_post_resumes_its_first_pending_host_operation_and_wakes_followers() {
-    let fixture = Fixture::new(INITIALIZE_STREAM, false);
+    let host = fixture_host();
+    let fixture = Fixture::new(&host, INITIALIZE_STREAM, false);
     pending_owner(&fixture);
     assert_eq!(fixture.poll(FOLLOWER, false), Outcome::Pending);
     assert_eq!(fixture.poll(FOLLOWER, true), Outcome::Pending);
@@ -455,7 +491,8 @@ fn an_initialization_post_resumes_its_first_pending_host_operation_and_wakes_fol
 
 #[test]
 fn an_initialized_notification_resumes_without_reposting_initialize() {
-    let fixture = Fixture::new(NOTIFICATION_STREAM, false);
+    let host = fixture_host();
+    let fixture = Fixture::new(&host, NOTIFICATION_STREAM, false);
     assert_eq!(fixture.poll(OWNER, false), Outcome::Pending);
     fixture.inspect(Action::InitializeAnswer);
     assert_eq!(fixture.poll(OWNER, true), Outcome::Pending);
@@ -475,7 +512,8 @@ fn an_initialized_notification_resumes_without_reposting_initialize() {
 
 #[test]
 fn cancelling_a_pending_initialization_drops_its_exchange_and_wakes_a_successor() {
-    let fixture = Fixture::new(INITIALIZE_STREAM, false);
+    let host = fixture_host();
+    let fixture = Fixture::new(&host, INITIALIZE_STREAM, false);
     pending_owner(&fixture);
     assert_eq!(fixture.poll(FOLLOWER, false), Outcome::Pending);
     fixture.cancel();
@@ -508,7 +546,8 @@ fn cancelling_a_pending_initialization_drops_its_exchange_and_wakes_a_successor(
 
 #[test]
 fn cancelling_a_pending_initialized_notification_releases_the_same_owner() {
-    let fixture = Fixture::new(NOTIFICATION_STREAM, false);
+    let host = fixture_host();
+    let fixture = Fixture::new(&host, NOTIFICATION_STREAM, false);
     assert_eq!(fixture.poll(OWNER, false), Outcome::Pending);
     fixture.inspect(Action::InitializeAnswer);
     assert_eq!(fixture.poll(OWNER, true), Outcome::Pending);
@@ -531,7 +570,8 @@ fn cancelling_a_pending_initialized_notification_releases_the_same_owner() {
 
 #[test]
 fn an_initialize_post_refusal_finishes_the_owner_and_wakes_followers() {
-    let fixture = Fixture::new(INITIALIZE_STREAM, false);
+    let host = fixture_host();
+    let fixture = Fixture::new(&host, INITIALIZE_STREAM, false);
     pending_owner(&fixture);
     assert_eq!(fixture.poll(FOLLOWER, false), Outcome::Pending);
     STATE.with(|state| {
@@ -560,7 +600,8 @@ fn an_initialize_post_refusal_finishes_the_owner_and_wakes_followers() {
 
 #[test]
 fn an_initialized_notification_refusal_finishes_the_owner_and_wakes_followers() {
-    let fixture = Fixture::new(NOTIFICATION_STREAM, false);
+    let host = fixture_host();
+    let fixture = Fixture::new(&host, NOTIFICATION_STREAM, false);
     assert_eq!(fixture.poll(OWNER, false), Outcome::Pending);
     fixture.inspect(Action::InitializeAnswer);
     assert_eq!(fixture.poll(OWNER, true), Outcome::Pending);
@@ -592,7 +633,8 @@ fn an_initialized_notification_refusal_finishes_the_owner_and_wakes_followers() 
 
 #[test]
 fn repeated_polls_park_once_until_the_endpoint_event_arrives() {
-    let fixture = Fixture::new(INITIALIZE_STREAM, true);
+    let host = fixture_host();
+    let fixture = Fixture::new(&host, INITIALIZE_STREAM, true);
     assert_eq!(fixture.poll(OWNER, false), Outcome::Pending);
     assert_eq!(fixture.poll(OWNER, true), Outcome::Pending);
     fixture.inspect(Action::Snapshot);
@@ -608,7 +650,8 @@ fn repeated_polls_park_once_until_the_endpoint_event_arrives() {
 
 #[test]
 fn closing_an_instance_destroys_a_pending_initialize_without_sending_it() {
-    let fixture = Fixture::new(INITIALIZE_STREAM, false);
+    let host = fixture_host();
+    let fixture = Fixture::new(&host, INITIALIZE_STREAM, false);
     pending_owner(&fixture);
     drop(fixture);
     STATE.with(|state| {

@@ -9,6 +9,8 @@
 //! crate through `door` alone. (The per-module unit tests beside these in this directory are wired
 //! from their own modules.)
 
+pub(crate) mod fixture;
+
 /// A grant check that admits every grant: the unit suites' stand-in for a caller entitled to all.
 pub(crate) fn everyone(_: &str, _: &str) -> bool {
     true
