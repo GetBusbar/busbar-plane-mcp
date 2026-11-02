@@ -220,6 +220,7 @@ fn a_high_units_child_ask_and_serialized_retry_never_belong_to_the_low_unit() {
         Some(call_id(high, 0))
     );
     let leg = crate::ask::ChildLeg {
+        launch: None,
         generation: 1,
         wait: call_id(high, 0),
         asks: vec![("child-ask".into(), json!("child-ask"))],

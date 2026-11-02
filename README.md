@@ -69,8 +69,11 @@ call lease head before accepting its response. The identity
 contains only the configured command path. The private grant binds arguments, environment,
 and working directory; no public recipe hash or secret fingerprint is emitted. Missing,
 duplicate, unsuccessful, noncanonical, mismatched, repeated, or retired receipts refuse the
-exchange. Program incarnations are nonzero and never reused; changing the launch recipe creates
+exchange. Program incarnations are nonzero and never reused within a live host process; changing the launch recipe creates
 a new incarnation, so greeting and request caches cannot reuse an earlier recipe's generation.
+A rooted child reply additionally requires the originating plane's locally owned live work handle;
+a durable work row or a sealed numeric pair cannot transfer child custody to a fresh plane or
+host process.
 
 This authenticates the operator's configured launch under the host grant. It assumes the selected
 stdio carrier preserves the host's framing semantics. It does not attest executable bytes, an

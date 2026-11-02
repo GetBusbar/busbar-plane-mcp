@@ -369,6 +369,7 @@ fn the_childs_asks_go_out_verbatim_and_the_answers_come_back_under_its_ids() {
         ]
     );
     let leg = crate::ask::ChildLeg {
+        launch: None,
         generation: 1,
         wait: json!(9),
         asks: keys,
@@ -537,6 +538,7 @@ fn a_callers_answer_to_a_stdio_childs_ask_over_the_cap_is_refused() {
     .expect("kid")
     .clone();
     let child = crate::ask::ChildLeg {
+        launch: None,
         generation: 1,
         wait: json!(1),
         asks: vec![("s".to_string(), json!(9))],

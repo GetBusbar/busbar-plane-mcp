@@ -167,6 +167,11 @@ pub struct UpstreamLeg {
 /// exchange is correlated under.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ChildLeg {
+    /// The checked host (member incarnation, child generation), sealed as correlation metadata.
+    /// Rooted reuse also requires the originating plane's local child-work custody; this pair
+    /// does not authorize transfer across plane or host restarts. Missing proof refuses reuse.
+    #[serde(rename = "l", default, skip_serializing_if = "Option::is_none")]
+    pub launch: Option<(u64, u64)>,
     /// The generation of the child that asked.
     #[serde(rename = "g")]
     pub generation: u64,

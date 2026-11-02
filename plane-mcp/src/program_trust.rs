@@ -54,6 +54,19 @@ impl Versions {
         ])
     }
 
+    pub(crate) fn expected_child_fields(
+        &self,
+        member: &str,
+        stamp: u64,
+        launch: Option<(u64, u64)>,
+    ) -> Option<[(String, String); 2]> {
+        let observed = self.observed(member, stamp)?;
+        if launch != Some((observed.instance, observed.generation)) {
+            return None;
+        }
+        self.expected_fields(member, stamp)
+    }
+
     pub(crate) fn stamp(&mut self, member: &str, observed: Observed) -> Result<u64, String> {
         if let Some((before, stamp)) = self.latest.get(member) {
             if observed == *before {
@@ -384,5 +397,54 @@ mod tests {
             )
             .unwrap();
         assert!(versions.expected_fields("legacy", legacy).is_none());
+    }
+    #[test]
+    fn persisted_child_stamp_cannot_alias_a_fresh_planes_stamp() {
+        let mut old = Versions::default();
+        let old_stamp = old
+            .stamp(
+                "server",
+                Observed {
+                    instance: 37,
+                    generation: 1,
+                },
+            )
+            .unwrap();
+        let mut fresh = Versions::default();
+        let new_stamp = fresh
+            .stamp(
+                "server",
+                Observed {
+                    instance: 38,
+                    generation: 1,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            old_stamp, new_stamp,
+            "the adversarial fixture recreates the numeric stamp collision"
+        );
+        assert!(fresh
+            .expected_child_fields("server", old_stamp, Some((37, 1)))
+            .is_none());
+        assert!(fresh
+            .expected_child_fields("server", old_stamp, None)
+            .is_none());
+        assert!(fresh
+            .expected_child_fields("server", new_stamp, Some((38, 1)))
+            .is_some());
+        let leg = crate::ask::ChildLeg {
+            launch: Some((37, 1)),
+            generation: old_stamp,
+            wait: serde_json::json!(9),
+            asks: vec![],
+            work: None,
+        };
+        let decoded: crate::ask::ChildLeg =
+            serde_json::from_slice(&serde_json::to_vec(&leg).unwrap()).unwrap();
+        assert_eq!(decoded.launch, Some((37, 1)));
+        assert!(fresh
+            .expected_child_fields("server", decoded.generation, decoded.launch)
+            .is_none());
     }
 }

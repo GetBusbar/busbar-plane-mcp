@@ -151,6 +151,7 @@ impl SafeSlot for Open {
         if input.open().generation() == 0 {
             // Exercise the actual post-open clock-refusal path, not a hand-built cleanup entry.
             let child = crate::ask::ChildLeg {
+                launch: None,
                 generation: 1,
                 wait: serde_json::json!(7),
                 asks: Vec::new(),

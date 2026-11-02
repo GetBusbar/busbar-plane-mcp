@@ -2824,6 +2824,15 @@ enum Relayed {
 /// The record of the work handle a stdio child's relayed ask is correlated under: the child's
 /// generation, the call it owes and the member that asked (its digest).
 fn child_record(member: &str, child: &crate::ask::ChildLeg) -> Vec<u8> {
+    if let Some((instance, generation)) = child.launch {
+        return format!(
+            "a2|{instance}|{generation}|{}|{}|{}",
+            child.generation,
+            child.wait,
+            busbar_contract::redacted::sha256_hex(member.as_bytes())
+        )
+        .into_bytes();
+    }
     format!(
         "a1|{}|{}|{}",
         child.generation,
@@ -3072,6 +3081,7 @@ fn bind_child_work(
     unit: &mut CallUnit,
     member: &str,
     child: &crate::ask::ChildLeg,
+    require_local: bool,
 ) -> std::task::Poll<bool> {
     use std::task::Poll;
     let (Some(services), Some(reference)) = (plane.services, child.work.as_deref()) else {
@@ -3094,6 +3104,15 @@ fn bind_child_work(
             }
             Poll::Ready(_) => return Poll::Ready(false),
         }
+    }
+    // A durable work row cannot transfer custody of a live child to a fresh plane instance.
+    // Recheck on pending continuations too; st.done records this unit's completed local bind.
+    if require_local
+        && !plane
+            .relays
+            .with_all(|owned| owned.contains_key(&st.handle))
+    {
+        return Poll::Ready(false);
     }
     if !st.resumed {
         let h = door_tasks::handle(ticket, &mut unit.issued, &mut st.resume);
@@ -3196,11 +3215,30 @@ fn send_to_member(
     if let Err(refusal) = judged {
         return Some(MemberSend::Judged(Box::new(relay.admitted), refusal));
     }
+    let child_launch = child.as_ref().map(|child| child.launch);
     let checked_program = child.as_ref().map(|child| child.generation).or_else(|| {
         unit.program_ready
             .filter(|(attempt, _)| *attempt == unit.attempt)
             .map(|(_, stamp)| stamp)
     });
+    let guarded_fields = if def.pin.mechanism == crate::tools_config::McpPinMechanism::LocalProgram
+    {
+        let expected = checked_program.and_then(|stamp| {
+            plane.program_versions.with_all(|all| {
+                all.get(&()).and_then(|versions| match child_launch {
+                    Some(launch) => versions.expected_child_fields(member, stamp, launch),
+                    None => versions.expected_fields(member, stamp),
+                })
+            })
+        });
+        let Some(expected) = expected else {
+            // No rooted call or owed child reply may open eagerly without its checked current pair.
+            return Some(MemberSend::Decline);
+        };
+        Some(expected)
+    } else {
+        None
+    };
     let mut outbound = if let Some(child) = child {
         // A STDIO CHILD'S RELAYED ASK, ANSWERED: its work handle bound, the caller's
         // answers written to the child under its own ids, and the call it still owes
@@ -3208,7 +3246,14 @@ fn send_to_member(
         if !door_program::is_program(def) {
             return Some(MemberSend::Decline);
         }
-        match bind_child_work(plane, ticket, unit, member, &child) {
+        match bind_child_work(
+            plane,
+            ticket,
+            unit,
+            member,
+            &child,
+            def.pin.mechanism == crate::tools_config::McpPinMechanism::LocalProgram,
+        ) {
             std::task::Poll::Pending => return Some(MemberSend::Step(Step::Pending)),
             std::task::Poll::Ready(true) => {}
             std::task::Poll::Ready(false) => {
@@ -3249,17 +3294,7 @@ fn send_to_member(
     } else {
         crate::call::outbound(&relay.admitted, member, def, round, continuation.as_ref())?
     };
-    if def.pin.mechanism == crate::tools_config::McpPinMechanism::LocalProgram {
-        let expected = checked_program.and_then(|stamp| {
-            plane.program_versions.with_all(|all| {
-                all.get(&())
-                    .and_then(|versions| versions.expected_fields(member, stamp))
-            })
-        });
-        let Some(expected) = expected else {
-            // No rooted call or owed child reply may open eagerly without its checked current pair.
-            return Some(MemberSend::Decline);
-        };
+    if let Some(expected) = guarded_fields {
         // Consumed by the host before the kernel-owned lease flushes its body.
         outbound.fields.extend(expected);
     }
@@ -3513,6 +3548,10 @@ slot!(
                                         result,
                                         round: relay.round,
                                         child: Some(crate::ask::ChildLeg {
+                                            launch: (def.pin.mechanism == crate::tools_config::McpPinMechanism::LocalProgram)
+                                                .then(|| plane.program_versions.with_all(|all| {
+                                                    all.get(&()).and_then(|versions| versions.observed(member, program.generation))
+                                                })).flatten().map(|observed| (observed.instance, observed.generation)),
                                             generation: program.generation,
                                             wait,
                                             asks: keys,
@@ -4685,3 +4724,7 @@ mod published_scope;
 #[cfg(test)]
 #[path = "tests/reported_progress.rs"]
 mod reported_progress;
+
+#[cfg(test)]
+#[path = "tests/child_work_custody_tests.rs"]
+mod child_work_custody_tests;

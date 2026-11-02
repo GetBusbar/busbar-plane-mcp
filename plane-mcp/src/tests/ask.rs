@@ -461,6 +461,7 @@ fn child_leg() -> UpstreamLeg {
         state: None,
         round: 1,
         child: Some(ChildLeg {
+            launch: None,
             generation: 3,
             wait: serde_json::json!(77),
             asks: vec![("srv-1".into(), json!("srv-1")), ("9".into(), json!(9))],
