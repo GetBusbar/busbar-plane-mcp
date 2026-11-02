@@ -1,68 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright (C) 2026 Busbar Inc and contributors
-
-//! Runs linked and dropped-in MCP doors over the same published conformance script and host connector.
-
-#[path = "support/conformance_host.rs"]
-mod conformance_host;
-
-/// The doors the host serves: the rendered network ones, and the PROCESS carrier for the stdio
-const DOORS: busbar_test_kit::conformance_host::Doors = &[
-    conformance_host::DOORS[0],
-    conformance_host::DOORS[1],
-    ("stdio", busbar_transport_stdio::door::MACRO_DOOR),
-];
-
-/// THE REGISTERED SERVER `fs`, at the suite's far end: each HTTP request is answered, under the
-fn server(seen: &[u8]) -> Option<Vec<u8>> {
-    let end = seen.windows(4).position(|w| w == b"\r\n\r\n")? + 4;
-    let head = String::from_utf8_lossy(&seen[..end]).to_ascii_lowercase();
-    let len = head
-        .lines()
-        .find_map(|l| l.strip_prefix("content-length:"))
-        .and_then(|n| n.trim().parse::<usize>().ok())
-        .unwrap_or(0);
-    if seen.len() < end + len {
-        return None;
-    }
-    let asked: serde_json::Value =
-        serde_json::from_slice(&seen[end..end + len]).unwrap_or(serde_json::Value::Null);
-    let reply = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": asked["id"],
-        "result": {"tools": [{
-            "name": "read_file",
-            "inputSchema": {"type": "object", "properties": {"path": {"type": "string", "x-mcp-header": "Path"}}}
-        }]}
-    })
-    .to_string();
-    let mut out = format!(
-        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n",
-        reply.len()
-    )
-    .into_bytes();
-    out.extend_from_slice(reply.as_bytes());
-    Some(out)
-}
-
-/// THE SUITE'S HOST (`conformance::Host`): the far end started, then busbar's connector over
-fn host(
-    wake: busbar_test_kit::conformance_host::ConnWake,
-    anchors: Option<&str>,
-) -> std::sync::Arc<dyn busbar_test_kit::conformance_host::DeclaredConns> {
-    conformance_host::far_end(server);
-    busbar_test_kit::conformance_host::host(DOORS, wake, anchors)
-}
-
-/// Bind both initial and refreshed settings to the exact leaf the suite's far end serves.
+//! MCP's actual host composition; product script migration is tracked in assertion-migration.json.
+#[path = "support/mcp_network.rs"]
+mod mcp_network;
 fn inputs() -> &'static str {
     static INPUTS: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     INPUTS.get_or_init(|| {
         let template = include_str!("conformance.json");
         let marker = "__MCP_CONFORMANCE_PEER_KEY_PIN__";
         assert_eq!(template.matches(marker).count(), 2);
-        let pin = busbar_test_kit::conformance_host::peer_key_pin();
-        template.replace(marker, &pin)
+        template
+            .replace(marker, &mcp_network::peer_key_pin())
+            .replace("localhost:56712", mcp_network::authority())
     })
 }
 
@@ -70,6 +18,6 @@ busbar_test_kit::conformance_suite! {
     door: busbar_plane_mcp::door,
     cdylib: "busbar_plane_mcp_plugin",
     inputs: inputs(),
-    host: host,
-    tls: conformance_host::anchors(),
+    host: mcp_network::host,
+    tls: mcp_network::anchors(),
 }

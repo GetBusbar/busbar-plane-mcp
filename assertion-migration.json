@@ -15,6 +15,11 @@
       "old": "plane-mcp/src/tests/alloc_gate_tests.rs:a_childs_message_read_in_small_pieces_is_parsed_once + kit global allocator",
       "new": "plane-mcp-plugin/tests/alloc_gate.rs same named test with direct thread-local System allocation counter",
       "assertions": "Original 2000 items, 64-byte chunks, parsed whole/once result equality and count <20*ITEMS retained. Counts alloc/alloc_zeroed/realloc exactly as old unregistered kit counter."
+    },
+    {
+      "old": "plane-mcp-plugin/tests/support/conformance_host.rs conformance_host! + kit host and TLS catalogue helpers",
+      "new": "plane-mcp-plugin/tests/support/mcp_network.rs fixed actual TCP/HTTP/stdio Dispatched doors + actual production Connector; direct rcgen/rustls local catalogue",
+      "assertions": "Existing catalogue JSON-RPC response body retained. Both original fs settings and refresh now bind dynamic localhost port and exact served leaf SPKI pin. Actual TLS trust anchor DER installed, no verification bypass. Existing credentials canary/configuration retained; conformance_suite macro still invokes original tests pending ordinary script migration."
     }
   ],
   "production_source_move": {
@@ -27,7 +32,7 @@
   "remaining": [
     {
       "consumer": "plane-mcp-plugin/tests/conformance.rs + support/conformance_host.rs",
-      "status": "pending actual host composition and ordinary product assertions; shared macros still present"
+      "status": "conformance_host/shared host consumption removed; conformance_suite product script still pending ordinary direct replacement"
     },
     {
       "consumer": "plane-mcp/src/tests/{child_work_custody_tests,relay_cleanup_regressions,legacy_initialization_regressions,legacy_call_regressions,legacy_driver_regressions}.rs",
@@ -42,6 +47,7 @@
     "format": "rustfmt source parse/check and git diff --check",
     "runtime": "Not built or executed: resource lane permission absent",
     "locks_and_public_pins": "unchanged",
-    "retired_assertions": []
+    "retired_assertions": [],
+    "host_qualification": "Direct host composition source-reviewed only; no build, live TLS, process or MCP runtime pass claimed. TCP uses public linked::door; HTTP/stdio original public door functions."
   }
 }

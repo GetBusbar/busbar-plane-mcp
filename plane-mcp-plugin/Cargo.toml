@@ -42,3 +42,9 @@ busbar-contract = { workspace = true, features = ["test-support"] }
 busbar-transport-http = { workspace = true }
 busbar-transport-tcp = { workspace = true }
 busbar-transport-stdio = { git = "https://github.com/GetBusbar/busbar-transport-stdio", rev = "f12b4f1b52c9088fe313a640c1e05325983d7b62" }
+
+# Actual production connector/TLS for MCP's local catalogue; no shared test host.
+busbar-core-connector = { workspace = true }
+tokio = { workspace = true, features = ["rt", "net", "time"] }
+rcgen = { workspace = true }
+rustls = { workspace = true }
