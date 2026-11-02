@@ -3,7 +3,7 @@ use busbar_contract::abi::host::conn::connector::{EstablishIn, ReplyIn, RequestI
 use busbar_contract::abi::mechanism::call::Outcome;
 use busbar_contract::abi::mechanism::ticket::CompletionHandle;
 use busbar_contract::abi::sdk::completion_retirement::{self, Capability};
-use busbar_contract::abi::sdk::test_support::fake::{self, FakeHost, FakeService, ServiceCall};
+use busbar_test_kit::test_support::fake::{self, FakeHost, FakeService, ServiceCall};
 use std::cell::RefCell;
 
 #[derive(Default)]
@@ -115,7 +115,7 @@ fn with_host(run: impl FnOnce(&Host, &RefCell<State>)) {
         .serve(fake::conn::READ_REPLY, Read)
         .serve(fake::conn::WRITE_REQUEST, Write)
         .serve(fake::conn::CLOSE, Close);
-    let host = Host::of(&fake.lent());
+    let host = Host::of(fake.lent());
     STATE.with(|state| {
         *state.borrow_mut() = State::default();
         run(&host, state);

@@ -325,9 +325,9 @@ impl PlaneLife for McpDoor {
             admitted,
             facts,
             origins,
-            services: host.and_then(|h| Services::of(&h)),
-            host: host.map(|h| busbar_contract::abi::sdk::conn::Host::of(&h)),
-            wake: host.and_then(|h| busbar_contract::abi::sdk::services::Wake::of(&h)),
+            services: host.and_then(Services::of),
+            host: host.map(busbar_contract::abi::sdk::conn::Host::of),
+            wake: host.and_then(busbar_contract::abi::sdk::services::Wake::of),
             ..McpDoor::default()
         };
         plane.sessions.insert(

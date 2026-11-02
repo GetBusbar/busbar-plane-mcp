@@ -171,7 +171,7 @@ fn run(generation: u64) {
         generation: 1,
     };
     input.generation = generation;
-    let result = busbar_contract::abi::sdk::test_support::reply::call(
+    let result = busbar_test_kit::test_support::reply::call(
         open,
         std::ptr::null_mut(),
         &input,
@@ -181,7 +181,7 @@ fn run(generation: u64) {
     let close = kind_op::<Lifecycle, Safe<Close>, Capture, { slot::CLOSE }>().unwrap();
     let mut input = blank_in::<InHead>();
     input.op = slot::CLOSE;
-    let closed = busbar_contract::abi::sdk::test_support::reply::call(
+    let closed = busbar_test_kit::test_support::reply::call(
         close,
         result.out.instance,
         &input,

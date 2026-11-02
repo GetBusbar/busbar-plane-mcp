@@ -10,11 +10,11 @@ use busbar_contract::abi::mechanism::lifecycle::{
 use busbar_contract::abi::mechanism::ticket::{CompletionHandle, HostCtx};
 use busbar_contract::abi::sdk::capture::{CaptureHome, CaptureSlot};
 use busbar_contract::abi::sdk::door::{blank_in, blank_out, kind_op, Lifecycle};
-use busbar_contract::abi::sdk::test_support::{
+use busbar_contract::abi::sdk::{Instance, Lent, Out, Safe, SafeSlot};
+use busbar_test_kit::test_support::{
     fake::{self, FakeHost, FakeService, ServiceCall},
     reply,
 };
-use busbar_contract::abi::sdk::{Instance, Lent, Out, Safe, SafeSlot};
 use std::cell::RefCell;
 use std::ffi::c_void;
 
@@ -157,8 +157,8 @@ impl SafeSlot for Open {
     ) -> Outcome {
         let host = input.host().unwrap();
         let mut plane = McpDoor::default();
-        plane.host = Some(Host::of(&host));
-        plane.wake = busbar_contract::abi::sdk::services::Wake::of(&host);
+        plane.host = Some(Host::of(host));
+        plane.wake = busbar_contract::abi::sdk::services::Wake::of(host);
         let mut link = link();
         if !STATE.with(|state| state.borrow().address_missing) {
             link.address = Some(ENDPOINT.into());
