@@ -173,5 +173,5 @@ mod tests;
 // Same ordinary actual-product ABI scenarios, now invoking this integration binary's actual
 // production door so its passive private Instance observations can also be asserted.
 #[allow(unused_imports)]
-#[path = "../../plane-mcp/tests/sessions.rs"]
+#[path = "support/private_sessions.rs"]
 mod actual_sessions;

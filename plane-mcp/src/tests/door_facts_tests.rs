@@ -9,7 +9,7 @@ use crate::statement;
 
 #[path = "../../tests/support/door_facts.rs"]
 #[allow(dead_code)]
-mod stated;
+pub(crate) mod stated;
 
 #[test]
 fn the_door_driven_tests_restate_the_doors_own_constants() {

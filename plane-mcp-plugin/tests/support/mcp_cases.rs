@@ -1382,7 +1382,7 @@ fn actual_mcp_cases(dropped: bool) -> BTreeMap<String, String> {
     };
     for (i, b) in bad.iter().enumerate() {
         {
-            let label = (&format!("validate bad #{i}")).to_string();
+            let label = format!("validate bad #{i}");
             let before = count();
             let value = { called(&validate(&p, &dealt(b))) };
             assert_eq!(count() - before, 1, "{label}: exact first crossings");
@@ -1497,7 +1497,7 @@ fn actual_mcp_cases(dropped: bool) -> BTreeMap<String, String> {
 
         let arrives = |r: &mut BTreeMap<String, String>, what: &str, unit: u64| {
             {
-                let label = (&format!("{what} arrive")).to_string();
+                let label = format!("{what} arrive");
                 let before = count();
                 let value = { arrive(&p, &claimed.for_unit(unit), &request) };
                 assert_eq!(count() - before, 1, "{label}: exact first crossings");
@@ -1506,7 +1506,7 @@ fn actual_mcp_cases(dropped: bool) -> BTreeMap<String, String> {
         };
         let sends = |r: &mut BTreeMap<String, String>, what: &str, unit: u64, on: &Unit| {
             {
-                let label = (&format!("{what} body")).to_string();
+                let label = format!("{what} body");
                 let before = count();
                 let value = {
                     {
@@ -1547,7 +1547,7 @@ fn actual_mcp_cases(dropped: bool) -> BTreeMap<String, String> {
         };
         for i in 0..more {
             {
-                let label = (&format!("narrow more #{i}")).to_string();
+                let label = format!("narrow more #{i}");
                 let before = count();
                 let value = {
                     let g = far_end(narrow_unit, claim, 0, b"", answer);

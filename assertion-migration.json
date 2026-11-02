@@ -395,5 +395,21 @@
     "before_sha256": "25fe4ffa15f807e782fd898ad80666172ff1dae8348b27edb52b74a4e0438fde",
     "retired": "Source filesystem walk, minimum20files and textual construction-site matching only, under root KICKOFF STRICT2 explicit diet_planes authorization after immutable81ff private617PASS/1scannerFAIL. Applies identically to owning logic and actual-source integration.",
     "retained": "Renamed ordinary the_issued_method_set_accounts_for_the_inventory retains actual UpstreamVerb::all()/method() method-set accounting, >=20 nonvacuous inventory cells, no invented method and exact NOT_ISSUED policy. Existing every_server_originated_method_in_the_inventory_is_classified, inventory data and other actual ask/method construction unit tests unchanged."
+  },
+  "strict_source_composition_followup": {
+    "session_body": "plane-mcp/tests/support/session_cases.rs",
+    "normalized_original_body_sha256": "f5675443057f27b3e747c51ecd03acf590c46ffc42a523036ecf4d4d8aadcfa6",
+    "normalization": "Remove original wrapper before use std::collections; remove new SPDX header; restore bottom reported_stream_standing path support/ prefix. Remaining body byte-identical.",
+    "retained_tests": {
+      "session_body": 33,
+      "sessions_lines": 5,
+      "carrier_retirement": 1,
+      "inspection_carrier_controls": 5,
+      "reported_stream_standing": 1,
+      "total": 45
+    },
+    "composition": "Original sessions target retains its support modules and includes unchanged body. Private actual_sessions wrapper reuses test-only pub(crate) door_facts_tests::stated, loads the same other support modules and includes same session body; crate::door routing/private parking witness unchanged. Original allow(unsafe_code) scope relocated to private wrapper; no new lint exemption.",
+    "labels": "Four format! String labels lose redundant borrow/to_string, preserving values.",
+    "qualification": "Source rustfmt and diff check only; no Cargo builds or runtime claims."
   }
 }

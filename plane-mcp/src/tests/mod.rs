@@ -15,7 +15,7 @@ mod digest_pin_tests;
 /// A sealed state's window judged at the host clock's time: a clock that fails refuses
 mod door_clock_tests;
 /// The door's facts the door-driven tests restate (`tests/support/door_facts.rs`), held to the
-mod door_facts_tests;
+pub(crate) mod door_facts_tests;
 /// The stdio client leg against busbar's method inventory (`tests/method_inventory.rs`).
 mod method_inventory_tests;
 /// The door's own exchanges with a stdio child (`ProgramExchange` over a child that is a value).
