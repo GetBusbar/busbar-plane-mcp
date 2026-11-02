@@ -45,11 +45,15 @@ fn a_short_session_buffer_retains_completed_legacy_results_until_a_successful_re
     let mut short: PlaneDriveOut = z();
     short.head = out_head::<PlaneDriveOut>();
     let f = lifecycle().drive.unwrap();
-    let answer = f(
-        d.instance,
-        std::ptr::from_ref(&input).cast(),
-        std::ptr::from_mut(&mut short).cast(),
-    );
+    // SAFETY: d owns the live instance; the drive slot receives its declared frames. The borrowed
+    // extensions stay live, and the zero-capacity session buffer intentionally lends no storage.
+    let answer = unsafe {
+        f(
+            d.instance,
+            std::ptr::from_ref(&input).cast(),
+            std::ptr::from_mut(&mut short).cast(),
+        )
+    };
     assert_eq!(answer.outcome(), Outcome::Failed);
     busbar_contract::abi::plane::check::check_drive(answer.outcome(), &short, 0).unwrap();
     assert!(short.sessions_needed > 0);
@@ -79,11 +83,15 @@ fn a_short_session_buffer_retains_completed_legacy_results_until_a_successful_re
     input.drive.head.flags |= busbar_contract::abi::mechanism::call::FLAG_RESUME;
     let mut full: PlaneDriveOut = z();
     full.head = out_head::<PlaneDriveOut>();
-    let answer = f(
-        d.instance,
-        std::ptr::from_ref(&input).cast(),
-        std::ptr::from_mut(&mut full).cast(),
-    );
+    // SAFETY: the same live instance is resumed with the slot's declared frames. The extensions
+    // and writable sessions array remain live for the synchronous call, with their exact lengths.
+    let answer = unsafe {
+        f(
+            d.instance,
+            std::ptr::from_ref(&input).cast(),
+            std::ptr::from_mut(&mut full).cast(),
+        )
+    };
     assert_eq!(answer.outcome(), Outcome::Pending);
     assert!(sessions[..full.sessions_written as usize].contains(&905));
     assert!(
@@ -118,11 +126,15 @@ fn a_legacy_pending_read_keeps_the_driver_pending_across_later_ticks() {
         let mut output: PlaneDriveOut = z();
         output.head = out_head::<PlaneDriveOut>();
         let f = lifecycle().drive.unwrap();
-        let answer = f(
-            d.instance,
-            std::ptr::from_ref(&input).cast(),
-            std::ptr::from_mut(&mut output).cast(),
-        );
+        // SAFETY: d owns the live instance. The drive slot receives its declared frames, while
+        // extensions and the writable sessions array remain live with the stated capacities.
+        let answer = unsafe {
+            f(
+                d.instance,
+                std::ptr::from_ref(&input).cast(),
+                std::ptr::from_mut(&mut output).cast(),
+            )
+        };
         assert_eq!(
             answer.outcome(),
             Outcome::Pending,

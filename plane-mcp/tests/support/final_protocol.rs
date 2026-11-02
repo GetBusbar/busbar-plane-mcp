@@ -7,6 +7,8 @@ use super::*;
 
 const STATELESS: &str = "https://audit.example/stateless";
 const SESSION: &str = "https://audit.example/session";
+/// A different caller from ALICE, using the opaque reference from the session-ownership suite.
+const BOB: &str = "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2";
 
 #[test]
 fn an_uninspected_combinator_schema_never_reaches_the_normal_member_send() {

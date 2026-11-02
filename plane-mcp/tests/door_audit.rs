@@ -2145,11 +2145,15 @@ impl Door {
         let mut o: PlaneCancelOut = z();
         o.cancel.head = out_head::<PlaneCancelOut>();
         let f = lifecycle().cancel.expect("cancel");
-        let ret = f(
-            self.instance,
-            std::ptr::from_ref(&i).cast(),
-            std::ptr::from_mut(&mut o).cast(),
-        );
+        // SAFETY: this fixture owns the live door instance. The cancel slot receives its declared
+        // input/output frames, and the writable records and arena stay live through the call.
+        let ret = unsafe {
+            f(
+                self.instance,
+                std::ptr::from_ref(&i).cast(),
+                std::ptr::from_mut(&mut o).cast(),
+            )
+        };
         (ret.outcome(), o.cancel.disposition)
     }
 }
