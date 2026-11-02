@@ -74,10 +74,23 @@ fn host(
     busbar_test_kit::conformance_host::host(DOORS, wake, anchors)
 }
 
+/// Bind both initial and refreshed settings to the exact leaf the suite's far end serves.
+/// The CA and leaf belong to the test kit; a syntactically valid invented digest is no pin.
+fn inputs() -> &'static str {
+    static INPUTS: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    INPUTS.get_or_init(|| {
+        let template = include_str!("conformance.json");
+        let marker = "__MCP_CONFORMANCE_PEER_KEY_PIN__";
+        assert_eq!(template.matches(marker).count(), 2);
+        let pin = busbar_test_kit::conformance_host::peer_key_pin();
+        template.replace(marker, &pin)
+    })
+}
+
 busbar_test_kit::conformance_suite! {
     door: busbar_plane_mcp::door,
     cdylib: "busbar_plane_mcp_plugin",
-    inputs: include_str!("conformance.json"),
+    inputs: inputs(),
     host: host,
     tls: conformance_host::anchors(),
 }

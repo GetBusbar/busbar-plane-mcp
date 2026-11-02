@@ -79,7 +79,7 @@ test('tool digest mirrors the offered protocol version in the HTTP header', { ti
     req.on('end', () => {
       const message = JSON.parse(body);
       const offered = message.params?._meta?.['io.modelcontextprotocol/protocolVersion'];
-      if (req.headers['mcp-protocol-version'] !== offered || req.headers['mcp-method'] !== message.method) {
+      if (offered !== revision || req.headers['mcp-protocol-version'] !== offered || req.headers['mcp-method'] !== message.method) {
         res.writeHead(400).end(JSON.stringify({ error: 'protocol mirror missing' }));
         return;
       }

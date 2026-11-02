@@ -6,8 +6,8 @@
     "fs": {
       "url": "https://localhost:56712/fs/rpc?v=1",
       "pin": {
-        "mechanism": "pinned_pubkey",
-        "key": "sha256/K="
+        "mechanism": "cert_spki",
+        "key": "__MCP_CONFORMANCE_PEER_KEY_PIN__"
       },
       "grants": {
         "roots": true
@@ -54,8 +54,8 @@
       "fs": {
         "url": "https://localhost:56712/fs/rpc?v=1",
         "pin": {
-          "mechanism": "pinned_pubkey",
-          "key": "sha256/K="
+          "mechanism": "cert_spki",
+          "key": "__MCP_CONFORMANCE_PEER_KEY_PIN__"
         },
         "grants": {
           "roots": true
