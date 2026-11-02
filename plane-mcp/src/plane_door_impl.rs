@@ -458,54 +458,10 @@ impl PlaneLife for McpDoor {
         input: Lent<'_, PlaneCancelIn>,
         mut out: Out<'_, PlaneCancelOut>,
     ) -> Outcome {
-        let mut stopped = Vec::new();
-        let mut creating_records = Vec::new();
-        let mut answered = false;
-        if let Some(plane) = instance.get() {
-            let named = UnitCancel::of(&input);
-            let ticket = named.ticket;
-
-            stopped = door_tasks::cancelled(plane, ticket);
-            answered = named.end(
-                &plane.units,
-                Ending::Remove,
-                |u| u.ticket,
-                |u| {
-                    if let Some((reference, records)) = door_tasks::abandoned_create(plane, u) {
-                        stopped.push(reference);
-                        creating_records.extend(records);
-                    }
-                    u.relay.as_ref().is_some_and(|r| r.status != 0)
-                },
-            );
-            door_inspection::cancelled(plane, ticket, named.unit);
-
-            abandon_fetches(plane, |lease| {
-                lease.ticket == ticket || lease.owner == named.unit
-            });
-            let abandoned = plane.connecting.with_all(|fetches| {
-                let keys: Vec<_> = fetches
-                    .keys()
-                    .filter(|(_, slot, generation)| {
-                        *slot == ticket.slot && *generation == ticket.generation
-                    })
-                    .cloned()
-                    .collect();
-                keys.into_iter()
-                    .filter_map(|key| fetches.remove(&key))
-                    .collect::<Vec<_>>()
-            });
-            drop(abandoned);
-            plane.list_fetch.with_all(|fetches| {
-                for lease in fetches.values_mut() {
-                    lease.waiters.retain(|waiting| *waiting != ticket);
-                }
-            });
-            door_listen::cancelled(plane, ticket);
-            door_line::abandoned(plane, ticket, named.unit);
-            door_sessions::cancelled(plane, ticket);
-            door_legacy::cancelled(plane, ticket);
-        }
+        let (stopped, creating_records, answered) = instance.get().map_or_else(
+            || (Vec::new(), Vec::new(), false),
+            |plane| cancel_unit_state(plane, UnitCancel::of(&input)),
+        );
 
         let (mut records, mut arena) = (input.records_buf(), input.arena_buf());
         for id in &stopped {
@@ -532,6 +488,57 @@ impl PlaneLife for McpDoor {
         out.set(|o| &o.cancel.disposition, cancel_disposition(answered));
         Outcome::Ready
     }
+}
+
+/// The actual unit-state cancellation, separated from writing its caller's ABI buffers.
+fn cancel_unit_state(
+    plane: &McpDoor,
+    named: UnitCancel,
+) -> (Vec<String>, crate::tool_tasks::Records, bool) {
+    let mut creating_records = Vec::new();
+    let ticket = named.ticket;
+
+    let mut stopped = door_tasks::cancelled(plane, ticket);
+    let answered = named.end(
+        &plane.units,
+        Ending::Remove,
+        |u| u.ticket,
+        |u| {
+            if let Some((reference, records)) = door_tasks::abandoned_create(plane, u) {
+                stopped.push(reference);
+                creating_records.extend(records);
+            }
+            u.relay.as_ref().is_some_and(|r| r.status != 0)
+        },
+    );
+    door_inspection::cancelled(plane, ticket, named.unit);
+
+    abandon_fetches(plane, |lease| {
+        lease.ticket == ticket || lease.owner == named.unit
+    });
+    let abandoned = plane.connecting.with_all(|fetches| {
+        let keys: Vec<_> = fetches
+            .keys()
+            .filter(|(_, slot, generation)| {
+                *slot == ticket.slot && *generation == ticket.generation
+            })
+            .cloned()
+            .collect();
+        keys.into_iter()
+            .filter_map(|key| fetches.remove(&key))
+            .collect::<Vec<_>>()
+    });
+    drop(abandoned);
+    plane.list_fetch.with_all(|fetches| {
+        for lease in fetches.values_mut() {
+            lease.waiters.retain(|waiting| *waiting != ticket);
+        }
+    });
+    door_listen::cancelled(plane, ticket);
+    door_line::abandoned(plane, ticket, named.unit);
+    door_sessions::cancelled(plane, ticket);
+    door_legacy::cancelled(plane, ticket);
+    (stopped, creating_records, answered)
 }
 
 /// The most units the instance keeps state for at once; past it, a new arrival is refused.

@@ -57,10 +57,10 @@ const CYCLE_SPAN: u32 = 1 << 26;
 
 #[derive(Debug, Default)]
 pub(super) struct Driver {
-    retirement: Retirement,
+    pub(super) retirement: Retirement,
     issued: u32,
     reusable: Vec<u32>,
-    failure: Option<Error>,
+    pub(super) failure: Option<Error>,
 }
 
 impl Driver {
@@ -117,7 +117,12 @@ impl Driver {
         }
     }
 
-    fn begin(&mut self, owner: HostCtx, ticket: Ticket, extensions: &[u8]) -> Result<(), Error> {
+    pub(super) fn begin(
+        &mut self,
+        owner: HostCtx,
+        ticket: Ticket,
+        extensions: &[u8],
+    ) -> Result<(), Error> {
         let reusable = self.retirement.begin(owner, ticket, extensions)?;
         self.reusable
             .extend(reusable.into_iter().map(|handle| handle.seq));

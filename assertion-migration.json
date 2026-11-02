@@ -41,11 +41,11 @@
     },
     {
       "consumer": "plane-mcp/src/tests/{child_work_custody_tests,relay_cleanup_regressions,legacy_initialization_regressions,legacy_call_regressions,legacy_driver_regressions}.rs",
-      "status": "14 meaningful tests remain: legacy initialization8, legacy call3, relay cleanup3. ActualDriver6 and childwork5 now ordinary actual-private-source unit tests in plugin integration target."
+      "status": "11 meaningful tests remain: legacy initialization8 and legacy call3. Driver6, childwork5 and maintenance3 are ordinary actual-private-source assertions."
     },
     {
       "consumer": "Cargo.toml + plane-mcp/Cargo.toml + plane-mcp-plugin/Cargo.toml",
-      "status": "Kit dev edges retained for remaining14private tests until exact ordinary actual-source ports; no SDK/peer/publicpin/lock retarget."
+      "status": "Kit dev edges retained for remaining11 tests; no SDK/peer/publicpin/lock retarget."
     }
   ],
   "validation": {
@@ -54,7 +54,11 @@
     "locks_and_public_pins": "unchanged",
     "retired_assertions": [],
     "host_qualification": "Direct host composition source-reviewed only; no build, live TLS, process or MCP runtime pass claimed. TCP uses public linked::door; HTTP/stdio original public door functions.",
-    "private_source_qualification": "Actual implementation source included by path in private_cases integration binary; production forbid(unsafe_code) unchanged. Exact production core and plane body moved to include files. New raw callbacks exist only in ordinary integration tests. No build/runtime claim."
+    "private_source_qualification": "Actual implementation source included by path in private_cases integration binary; production forbid(unsafe_code) unchanged. Exact production core and plane body moved to include files. New raw callbacks exist only in ordinary integration tests. No build/runtime claim.",
+    "private_source_current_sha256": {
+      "plane-mcp/src/plane_door_impl.rs": "1e65b9a3de751677f40f81ca4f4d5d5a9c78ce5d344f22ae760f296dc099e974",
+      "plane-mcp/src/legacy_wire.rs": "db7cc06c0f91034111ae2d6be23bea13575e3b87016abe8fa1e159aa92746501"
+    }
   },
   "macro_assertions": {
     "no_configured_credential_crosses_back": {
@@ -257,6 +261,26 @@
         "legacy_unrooted_child_work_keeps_its_existing_durable_binding"
       ],
       "assertions": "All original5case bodies and binder state predicates retained. Fake OPEN/CLOSE wrappers removed; direct actual McpDoor/bind_child_work state unit invocation uses fixed typed work.find/resume/settle raw callbacks. Fake product lifecycle Ready selfchecks retired only."
+    },
+    {
+      "old": "plane-mcp/src/tests/relay_cleanup_regressions.rs",
+      "new": "plane-mcp-plugin/tests/support/private_cleanup.rs",
+      "tests": [
+        "expiry_is_maintained_without_another_ask_and_pending_keeps_the_full_handle",
+        "clock_refusal_after_open_keeps_immediate_cleanup_even_while_clock_stays_unavailable",
+        "pending_cleanup_survives_config_reload_and_old_generation_retirement"
+      ],
+      "assertions": "Exact expiry, full completion handle replay/freshness after terminal refusal/failure, unavailable clock immediate cleanup, single successful application, and cleanup across actual refresh/publication/retirement preserved on actual private state. Fixed raw clock/work callbacks replace generic FakeHost. Fake Probe OPEN/DRIVE/CLOSE framing selfchecks retired; no product callback replaced."
+    }
+  ],
+  "private_source_refactors": [
+    {
+      "source": "plane-mcp/src/plane_door_impl.rs cancel_unit_state",
+      "reason": "Extracted unchanged cancellation state mutations from actual PlaneLife::cancel; real ABI callback delegates to same helper then writes original buffers. Private unit maintenance case invokes actual helper with actual UnitCancel, preserving caller cancellation boundary without fabricating SDK Instance."
+    },
+    {
+      "source": "plane-mcp/src/legacy_wire.rs Driver",
+      "reason": "Only internal visibility extended to parent plane module for begin/retirement/failure; no public crate API, algorithm, SDK or wire change."
     }
   ]
 }

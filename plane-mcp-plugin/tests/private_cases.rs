@@ -41,6 +41,9 @@ mod local_renderer;
 #[allow(dead_code)]
 mod plane_door {
     include!("../../plane-mcp/src/plane_door_impl.rs");
+    mod cleanup_tests {
+        include!("support/private_cleanup.rs");
+    }
     mod child_work_custody_tests {
         include!("support/private_child_work.rs");
     }

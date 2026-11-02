@@ -529,7 +529,3 @@ fn post(
 #[cfg(test)]
 #[path = "tests/legacy_link_tests.rs"]
 mod tests;
-
-#[cfg(test)]
-#[path = "tests/relay_cleanup_regressions.rs"]
-mod relay_cleanup_tests;
