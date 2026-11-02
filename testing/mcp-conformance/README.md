@@ -145,6 +145,25 @@ The two arming variables still work and still take precedence, for anyone
 pointing this battery at something that is not this build. Nothing in CI depends
 on one being set.
 
+The subject upstreams use ephemeral HTTPS identities created by
+`mcp-subject/fixture-tls.sh`. It creates a short-lived CA and a leaf valid for
+`localhost` and `127.0.0.1`, then derives the `cert_spki` pin from the served
+leaf's SubjectPublicKeyInfo. The diagnostic server and both independent hostile
+peer processes share that identity within one battery boot; each H2 boot creates
+its own identity. Private keys stay in the scratch directory with owner-only
+permissions.
+
+`NODE_EXTRA_CA_CERTS` configures the digest client's trust. It does not configure
+busbar: the same CA must also reach busbar through a supported operator CA route.
+Missing host trust must keep the boot-time connect assertion red. Plaintext
+standalone negative controls remain available; neither `unpinned` nor
+`pinned_pubkey` can make a positive subject registration approved.
+
+The authored `scripts/fixture-custody.test.mjs` and `scripts/fixture-tls.test.mjs`
+cover repeated output EOF, strict protocol header mirroring, actual certificate
+pin derivation, and rejection of a wrong CA or name. They require an explicit
+runtime run; source and shell syntax review alone does not qualify a subject.
+
 ## Layout
 
 ```

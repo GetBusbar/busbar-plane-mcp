@@ -180,7 +180,10 @@ test('the HTTP observer catches real headers and escaped body credentials withou
   writeFileSync(control, JSON.stringify({ mode: 'honest', credentialFile, transcript }));
   const port = await fixturePort();
   const fixture = fileURLToPath(new URL('../fakepeer/http-fake-server.mjs', import.meta.url));
-  const child = spawn(process.execPath, [fixture, String(port), control], { stdio: ['ignore', 'ignore', 'pipe'] });
+  const env = { ...process.env };
+  delete env.MCP_FIXTURE_TLS_CERT;
+  delete env.MCP_FIXTURE_TLS_KEY;
+  const child = spawn(process.execPath, [fixture, String(port), control], { stdio: ['ignore', 'ignore', 'pipe'], env });
   const closed = new Promise((resolve) => child.once('close', resolve));
   let log = '';
   child.stderr.on('data', (chunk) => { log += chunk.toString('utf8'); });

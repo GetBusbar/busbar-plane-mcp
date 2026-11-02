@@ -20,12 +20,14 @@
 set -uo pipefail
 H2_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 H2_REPO="$(cd "${H2_HERE}/../../.." && pwd)"
+# shellcheck source=fixture-tls.sh
+source "${H2_HERE}/fixture-tls.sh"
 H2_UPSTREAM_PID=""
 H2_BUSBAR_PID=""
 
 h2_wait_for_http() {
   local url="$1" limit="$2" started=$SECONDS
-  while ! curl -s -o /dev/null --max-time 1 "$url"; do
+  while ! curl --cacert "$MCP_FIXTURE_CA_FILE" -s -o /dev/null --max-time 1 "$url"; do
     [ "$((SECONDS-started))" -lt "$limit" ] || return 1
     sleep 1
   done
@@ -74,6 +76,7 @@ h2_boot() {
   mkdir -p "$dir"
   dir="$(cd "$dir" && pwd)"
   H2_WORKDIR="$dir"
+  mcp_fixture_prepare_tls "$dir/tls" || return 1
   H2_EGRESS_DIR="$dir/egress"
   mkdir -p "$H2_EGRESS_DIR"
 
@@ -85,13 +88,13 @@ h2_boot() {
   MCP_MOCK_CAPTURE_DIR="$H2_EGRESS_DIR" node "${H2_HERE}/h2-mock-upstream.mjs" "$H2_UPSTREAM_PORT" \
     >"$dir/upstream.log" 2>&1 &
   H2_UPSTREAM_PID=$!
-  h2_wait_for_http "http://127.0.0.1:${H2_UPSTREAM_PORT}/" 10 || return 1
+  h2_wait_for_http "https://127.0.0.1:${H2_UPSTREAM_PORT}/" 10 || return 1
 
   ( umask 077; "$H2_BIN" --generate-signing-key >"$H2_SIGNING_KEY" 2>"$dir/genkey.log" ) \
     || { cat "$dir/genkey.log" >&2; return 1; }
 
   local digest
-  digest="$(node "${H2_HERE}/tool-digest.mjs" "http://127.0.0.1:${H2_UPSTREAM_PORT}/mcp" | awk '{print $2}')"
+  digest="$(node "${H2_HERE}/tool-digest.mjs" "https://127.0.0.1:${H2_UPSTREAM_PORT}/mcp" | awk '{print $2}')"
   [ -n "$digest" ] || { echo "H2: could not digest the h2 mock upstream's served tools" >&2; return 1; }
 
   cat >"$dir/providers.yaml" <<'YAML'
@@ -121,10 +124,11 @@ tools:
   fees: { per_request: 1 }
 ${H2_RATE_CARD_YAML:-$H2_RATE_CARD_DEFAULT}
   probe:
-    url: "http://127.0.0.1:${H2_UPSTREAM_PORT}/mcp"
+    url: "https://127.0.0.1:${H2_UPSTREAM_PORT}/mcp"
     allow_private: true
     pin:
-      mechanism: unpinned
+      mechanism: cert_spki
+      key: "$MCP_FIXTURE_KEY_PIN"
     tools_allow:
       ping:
         schema_hash: "${digest}"

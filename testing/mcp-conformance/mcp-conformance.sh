@@ -631,6 +631,7 @@ battery_subject() {
     seamdir=".mcp-conformance/battery-seam"
     rm -rf "$seamdir"; mkdir -p "$seamdir"
     seamdir="$(cd "$seamdir" && pwd)"
+    mcp_fixture_prepare_tls "$seamdir/tls" || die "could not prepare hostile-peer TLS."
     seam_control="$seamdir/seam-control.json"
     printf '%s\n' '{"mode":"honest","transcript":null}' >"$seam_control.tmp"
     mv -f "$seam_control.tmp" "$seam_control"
@@ -649,7 +650,7 @@ battery_subject() {
     # EXPORTED BEFORE THE BOOT, because `subject_write_config` reads it: the registration has to
     # exist in the config busbar starts with. A busbar booted first and reconfigured later would be
     # a different test.
-    export MCP_SEAM_UPSTREAM_URL="http://127.0.0.1:$seam_port/mcp"
+    export MCP_SEAM_UPSTREAM_URL="https://127.0.0.1:$seam_port/mcp"
 
     SUBJECT_PIDS=""
     MCP_SUBJECT_WORKDIR="$workdir" boot_busbar_subject
