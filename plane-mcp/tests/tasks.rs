@@ -1268,11 +1268,16 @@ impl Door {
         let mut o: RefusalOut = z();
         o.head = out_head::<RefusalOut>();
         let f = ops().refusal.expect("refusal");
-        let ret = f(
-            self.instance,
-            std::ptr::from_ref(&i).cast(),
-            std::ptr::from_mut(&mut o).cast(),
-        );
+        // SAFETY: this fixture owns the instance opened through this same door. `i` lends
+        // the live reply/fields/arena/record buffers above for the synchronous refusal call;
+        // their capacities match those allocations, and `o` is the live typed output.
+        let ret = unsafe {
+            f(
+                self.instance,
+                std::ptr::from_ref(&i).cast(),
+                std::ptr::from_mut(&mut o).cast(),
+            )
+        };
         let bytes_at = |s: Span| {
             let from = s.offset as usize;
             arena[from..from + s.len as usize].to_vec()
@@ -1938,11 +1943,16 @@ impl Door {
         let mut o: PlaneCancelOut = z();
         o.cancel.head = out_head::<PlaneCancelOut>();
         let f = lifecycle().cancel.expect("cancel");
-        let ret = f(
-            self.instance,
-            std::ptr::from_ref(&i).cast(),
-            std::ptr::from_mut(&mut o).cast(),
-        );
+        // SAFETY: this fixture owns the instance opened through this same door. The cancel
+        // input borrows the live record/arena allocations above for this synchronous call,
+        // with exact capacities; `o` is the live typed output, read only after return.
+        let ret = unsafe {
+            f(
+                self.instance,
+                std::ptr::from_ref(&i).cast(),
+                std::ptr::from_mut(&mut o).cast(),
+            )
+        };
         let at = |s: Span| {
             let from = s.offset as usize;
             String::from_utf8_lossy(&arena[from..from + s.len as usize]).into_owned()
