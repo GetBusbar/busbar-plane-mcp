@@ -148,7 +148,7 @@ impl<D: ReplayData> Session<D> {
             return 0;
         };
         stream.trimmed_through = stream.trimmed_through.max(event.seq);
-        let freed = event.data.len() + EVENT_OVERHEAD;
+        let freed = event.data.encoded_len() + EVENT_OVERHEAD;
         self.bytes -= freed;
         freed
     }
@@ -176,14 +176,11 @@ pub struct ReplayTable<D: ReplayData> {
 
 /// An event's encoded bytes are charged even when its output is generated on collection.
 pub trait ReplayData: Clone + std::fmt::Debug + From<String> {
-    fn len(&self) -> usize;
-    fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
+    fn encoded_len(&self) -> usize;
 }
 
 impl ReplayData for String {
-    fn len(&self) -> usize {
+    fn encoded_len(&self) -> usize {
         String::len(self)
     }
 }
@@ -358,7 +355,7 @@ impl<D: ReplayData> ReplayTable<D> {
             freed += dropped
                 .events
                 .iter()
-                .map(|e| e.data.len() + EVENT_OVERHEAD)
+                .map(|e| e.data.encoded_len() + EVENT_OVERHEAD)
                 .sum::<usize>();
         }
         s.bytes -= freed;
@@ -468,7 +465,7 @@ impl<D: ReplayData> ReplayTable<D> {
         let order = s.next_order;
         let st = s.open.iter_mut().find(|st| st.id == stream)?;
         let data = data();
-        let cost = data.len().checked_add(EVENT_OVERHEAD)?;
+        let cost = data.encoded_len().checked_add(EVENT_OVERHEAD)?;
         let charged = s.bytes.checked_add(cost)?;
         let seq = st.next_seq;
         st.next_seq += 1;

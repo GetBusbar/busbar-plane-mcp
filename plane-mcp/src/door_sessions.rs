@@ -60,7 +60,7 @@ impl From<String> for Data {
 }
 
 impl ReplayData for Data {
-    fn len(&self) -> usize {
+    fn encoded_len(&self) -> usize {
         match self {
             Self::Text(text) => text.len(),
             Self::Local(local) => local.len(),
