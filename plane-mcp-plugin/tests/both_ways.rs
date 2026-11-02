@@ -54,7 +54,6 @@ mod both_ways {
         in_head, load_dropped, load_linked, out_head, Bind, DispatchConfig, Dispatcher, Frame,
         LinkedRow, LoadedDoor, NoSink, Plugin,
     };
-    use busbar_test_kit::services_double::{Double, ServicesDouble};
     use serde_json::{json, Value};
 
     use busbar_plane_mcp::door;
@@ -920,7 +919,7 @@ mod both_ways {
     /// A HOST whose entitlement answer is a fixed table of `"<kind>:<name>"` grants, and which
     struct Grants(&'static [&'static str]);
 
-    impl ServicesDouble for Grants {
+    impl busbar_contract::services::HostServices for Grants {
         fn now(&self) -> busbar_plugin_loader::dispatch::Reading {
             busbar_plugin_loader::dispatch::Reading {
                 wall_ns: 0,
@@ -1103,12 +1102,69 @@ mod both_ways {
         fn snapshot_read(&self, _: &Caller, _: u32) -> busbar_contract::services::Snapshot {
             busbar_contract::services::Snapshot::Refused(UNSERVED)
         }
+
+        fn trust_unreached(
+            &self,
+            _caller: &busbar_contract::services::Caller,
+            _counterparty: &str,
+        ) -> busbar_contract::services::Stored {
+            busbar_contract::services::Stored::refused(busbar_contract::services::UNSERVED)
+        }
+        fn trust_sight_item(
+            &self,
+            _caller: &busbar_contract::services::Caller,
+            _counterparty: &str,
+            _item: &str,
+            _digest: &str,
+        ) -> busbar_contract::services::Stored {
+            busbar_contract::services::Stored::refused(busbar_contract::services::UNSERVED)
+        }
+        fn trust_decide(
+            &self,
+            _caller: &busbar_contract::services::Caller,
+            _key: busbar_contract::services::TrustKeyRef<'_>,
+            _expected: Option<&str>,
+            _approve: bool,
+        ) -> busbar_contract::services::Stored {
+            busbar_contract::services::Stored::refused(busbar_contract::services::UNSERVED)
+        }
+        fn trust_state(
+            &self,
+            _caller: &busbar_contract::services::Caller,
+            _counterparty: &str,
+        ) -> busbar_contract::services::Stored {
+            busbar_contract::services::Stored::refused(busbar_contract::services::UNSERVED)
+        }
+        fn session_emit(
+            &self,
+            _caller: &busbar_contract::services::Caller,
+            _session: u64,
+            _bytes: &[u8],
+        ) -> busbar_contract::services::Stored {
+            busbar_contract::services::Stored::refused(busbar_contract::services::UNSERVED)
+        }
+        fn ticket_mint(
+            &self,
+            _caller: &busbar_contract::services::Caller,
+            _unit: Option<u64>,
+            _ttl_secs: u64,
+            _record: &[u8],
+        ) -> busbar_contract::services::Stored {
+            busbar_contract::services::Stored::refused(busbar_contract::services::UNSERVED)
+        }
+        fn ticket_take(
+            &self,
+            _caller: &busbar_contract::services::Caller,
+            _unit: Option<u64>,
+        ) -> busbar_contract::services::Stored {
+            busbar_contract::services::Stored::refused(busbar_contract::services::UNSERVED)
+        }
     }
 
     /// [`Grants`], and a random source that answers (fresh bytes at every call): a host the plane
     struct Minting(Grants, std::sync::atomic::AtomicU64);
 
-    impl ServicesDouble for Minting {
+    impl busbar_contract::services::HostServices for Minting {
         fn now(&self) -> busbar_plugin_loader::dispatch::Reading {
             busbar_plugin_loader::dispatch::Reading {
                 wall_ns: 0,
@@ -1293,6 +1349,63 @@ mod both_ways {
         }
         fn snapshot_read(&self, _: &Caller, _: u32) -> busbar_contract::services::Snapshot {
             busbar_contract::services::Snapshot::Refused(UNSERVED)
+        }
+
+        fn trust_unreached(
+            &self,
+            _caller: &busbar_contract::services::Caller,
+            _counterparty: &str,
+        ) -> busbar_contract::services::Stored {
+            busbar_contract::services::Stored::refused(busbar_contract::services::UNSERVED)
+        }
+        fn trust_sight_item(
+            &self,
+            _caller: &busbar_contract::services::Caller,
+            _counterparty: &str,
+            _item: &str,
+            _digest: &str,
+        ) -> busbar_contract::services::Stored {
+            busbar_contract::services::Stored::refused(busbar_contract::services::UNSERVED)
+        }
+        fn trust_decide(
+            &self,
+            _caller: &busbar_contract::services::Caller,
+            _key: busbar_contract::services::TrustKeyRef<'_>,
+            _expected: Option<&str>,
+            _approve: bool,
+        ) -> busbar_contract::services::Stored {
+            busbar_contract::services::Stored::refused(busbar_contract::services::UNSERVED)
+        }
+        fn trust_state(
+            &self,
+            _caller: &busbar_contract::services::Caller,
+            _counterparty: &str,
+        ) -> busbar_contract::services::Stored {
+            busbar_contract::services::Stored::refused(busbar_contract::services::UNSERVED)
+        }
+        fn session_emit(
+            &self,
+            _caller: &busbar_contract::services::Caller,
+            _session: u64,
+            _bytes: &[u8],
+        ) -> busbar_contract::services::Stored {
+            busbar_contract::services::Stored::refused(busbar_contract::services::UNSERVED)
+        }
+        fn ticket_mint(
+            &self,
+            _caller: &busbar_contract::services::Caller,
+            _unit: Option<u64>,
+            _ttl_secs: u64,
+            _record: &[u8],
+        ) -> busbar_contract::services::Stored {
+            busbar_contract::services::Stored::refused(busbar_contract::services::UNSERVED)
+        }
+        fn ticket_take(
+            &self,
+            _caller: &busbar_contract::services::Caller,
+            _unit: Option<u64>,
+        ) -> busbar_contract::services::Stored {
+            busbar_contract::services::Stored::refused(busbar_contract::services::UNSERVED)
         }
     }
 
@@ -1562,7 +1675,7 @@ mod both_ways {
     }
 
     fn served(grants: &'static [&'static str]) -> Dispatcher {
-        Dispatcher::with_services(DispatchConfig::default(), Arc::new(Double(Grants(grants))))
+        Dispatcher::with_services(DispatchConfig::default(), Arc::new(Grants(grants)))
     }
 
     #[test]
@@ -1867,10 +1980,7 @@ mod both_ways {
     fn the_ungoverned_stream_diagnostic_reaches_the_host_log_dropped_in_as_linked() {
         let d = Dispatcher::with_services(
             DispatchConfig::default(),
-            Arc::new(Double(Minting(
-                Grants(&[]),
-                std::sync::atomic::AtomicU64::new(1),
-            ))),
+            Arc::new(Minting(Grants(&[]), std::sync::atomic::AtomicU64::new(1))),
         );
         const ACCEPT: &[Field] = &[field("accept", "text/event-stream")];
         for dropped_in in [false, true] {
@@ -1955,7 +2065,6 @@ mod bounds {
         in_head, load_linked, out_head, Bind, DispatchConfig, Dispatcher, Frame, LinkedRow, NoSink,
         Plugin,
     };
-    use busbar_test_kit::services_double::{Double, ServicesDouble};
 
     const SECTION: &[u8] =
         br#"{"fs": {"url": "https://mcp.example/fs", "pin": {"mechanism": "unpinned"}}}"#;
@@ -2143,18 +2252,297 @@ mod bounds {
     /// A HOST WITH A CLOCK: the shared services double, serving `clock.now` (a subscription is
     struct Clocked;
 
-    impl ServicesDouble for Clocked {
+    impl busbar_contract::services::HostServices for Clocked {
         fn now(&self) -> busbar_contract::services::Reading {
             busbar_contract::services::Reading {
                 wall_ns: 1_800_000_000_000_000_000,
                 mono_ns: 1_000_000_000,
             }
         }
+
+        fn dest_judge(
+            &self,
+            _dest: &str,
+            _class: u32,
+            _flags: u32,
+            _later: Option<busbar_contract::services::Later>,
+        ) -> busbar_contract::services::Ran {
+            busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused(
+                busbar_contract::services::UNSERVED,
+            ))
+        }
+        fn records_get(
+            &self,
+            _caller: &busbar_contract::services::Caller,
+            _kind: &str,
+            _key: &[u8],
+            _later: busbar_contract::services::Later,
+        ) -> busbar_contract::services::Ran {
+            busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused(
+                busbar_contract::services::UNSERVED,
+            ))
+        }
+        fn records_list(
+            &self,
+            _caller: &busbar_contract::services::Caller,
+            _list: busbar_contract::services::RecordsList,
+            _later: busbar_contract::services::Later,
+        ) -> busbar_contract::services::Ran {
+            busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused(
+                busbar_contract::services::UNSERVED,
+            ))
+        }
+        fn records_claim(
+            &self,
+            _caller: &busbar_contract::services::Caller,
+            _kind: &str,
+            _key: &[u8],
+            _ttl_ms: u64,
+            _later: busbar_contract::services::Later,
+        ) -> busbar_contract::services::Ran {
+            busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused(
+                busbar_contract::services::UNSERVED,
+            ))
+        }
+        fn sign(
+            &self,
+            _caller: &busbar_contract::services::Caller,
+            _data: &[u8],
+        ) -> busbar_contract::services::Stored {
+            busbar_contract::services::Stored::refused(busbar_contract::services::UNSERVED)
+        }
+        fn trust_sight(
+            &self,
+            _caller: &busbar_contract::services::Caller,
+            _counterparty: &str,
+            _hash: &str,
+            _later: busbar_contract::services::Later,
+        ) -> busbar_contract::services::Ran {
+            busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused(
+                busbar_contract::services::UNSERVED,
+            ))
+        }
+        fn trust_unreached(
+            &self,
+            _caller: &busbar_contract::services::Caller,
+            _counterparty: &str,
+        ) -> busbar_contract::services::Stored {
+            busbar_contract::services::Stored::refused(busbar_contract::services::UNSERVED)
+        }
+        fn trust_sight_item(
+            &self,
+            _caller: &busbar_contract::services::Caller,
+            _counterparty: &str,
+            _item: &str,
+            _digest: &str,
+        ) -> busbar_contract::services::Stored {
+            busbar_contract::services::Stored::refused(busbar_contract::services::UNSERVED)
+        }
+        fn trust_decide(
+            &self,
+            _caller: &busbar_contract::services::Caller,
+            _key: busbar_contract::services::TrustKeyRef<'_>,
+            _expected: Option<&str>,
+            _approve: bool,
+        ) -> busbar_contract::services::Stored {
+            busbar_contract::services::Stored::refused(busbar_contract::services::UNSERVED)
+        }
+        fn trust_state(
+            &self,
+            _caller: &busbar_contract::services::Caller,
+            _counterparty: &str,
+        ) -> busbar_contract::services::Stored {
+            busbar_contract::services::Stored::refused(busbar_contract::services::UNSERVED)
+        }
+        fn trust_serves(
+            &self,
+            _caller: &busbar_contract::services::Caller,
+            _counterparty: &str,
+            _item: Option<&str>,
+            _digest: Option<&str>,
+        ) -> busbar_contract::services::Stored {
+            busbar_contract::services::Stored::refused(busbar_contract::services::UNSERVED)
+        }
+        fn trust_due(
+            &self,
+            _caller: &busbar_contract::services::Caller,
+        ) -> busbar_contract::services::Stored {
+            busbar_contract::services::Stored::refused(busbar_contract::services::UNSERVED)
+        }
+        fn trust_verify(
+            &self,
+            _caller: &busbar_contract::services::Caller,
+            _counterparty: &str,
+            _payload: &[u8],
+            _signatures: &[u8],
+        ) -> busbar_contract::services::Stored {
+            busbar_contract::services::Stored::refused(busbar_contract::services::UNSERVED)
+        }
+        fn entitlement_check(
+            &self,
+            _caller: &busbar_contract::services::Caller,
+            _unit: Option<u64>,
+            _target: &str,
+        ) -> busbar_contract::services::Stored {
+            busbar_contract::services::Stored::refused(busbar_contract::services::UNSERVED)
+        }
+        fn session_emit(
+            &self,
+            _caller: &busbar_contract::services::Caller,
+            _session: u64,
+            _bytes: &[u8],
+        ) -> busbar_contract::services::Stored {
+            busbar_contract::services::Stored::refused(busbar_contract::services::UNSERVED)
+        }
+        fn ticket_mint(
+            &self,
+            _caller: &busbar_contract::services::Caller,
+            _unit: Option<u64>,
+            _ttl_secs: u64,
+            _record: &[u8],
+        ) -> busbar_contract::services::Stored {
+            busbar_contract::services::Stored::refused(busbar_contract::services::UNSERVED)
+        }
+        fn ticket_take(
+            &self,
+            _caller: &busbar_contract::services::Caller,
+            _unit: Option<u64>,
+        ) -> busbar_contract::services::Stored {
+            busbar_contract::services::Stored::refused(busbar_contract::services::UNSERVED)
+        }
+        fn random_fill(&self, _len: u64) -> busbar_contract::services::Stored {
+            busbar_contract::services::Stored::refused(busbar_contract::services::UNSERVED)
+        }
+        fn records_secret(
+            &self,
+            _kind: &str,
+            _id: &str,
+            _later: busbar_contract::services::Later,
+        ) -> busbar_contract::services::Ran {
+            busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused(
+                busbar_contract::services::UNSERVED,
+            ))
+        }
+        fn unit_nest(
+            &self,
+            _caller: &busbar_contract::services::Caller,
+            _unit: Option<u64>,
+            _ask: busbar_contract::services::NestAsk,
+            _later: busbar_contract::services::Later,
+        ) -> busbar_contract::services::Ran {
+            busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused(
+                busbar_contract::services::UNSERVED,
+            ))
+        }
+        fn work_open(
+            &self,
+            _caller: &busbar_contract::services::Caller,
+            _unit: Option<u64>,
+            _kind: &str,
+            _record: &[u8],
+            _later: busbar_contract::services::Later,
+        ) -> busbar_contract::services::Ran {
+            busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused(
+                busbar_contract::services::UNSERVED,
+            ))
+        }
+        fn work_find(
+            &self,
+            _caller: &busbar_contract::services::Caller,
+            _unit: Option<u64>,
+            _reference: &[u8],
+            _later: busbar_contract::services::Later,
+        ) -> busbar_contract::services::Ran {
+            busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused(
+                busbar_contract::services::UNSERVED,
+            ))
+        }
+        fn work_settle(
+            &self,
+            _caller: &busbar_contract::services::Caller,
+            _unit: Option<u64>,
+            _handle: u64,
+            _record: &[u8],
+            _later: busbar_contract::services::Later,
+        ) -> busbar_contract::services::Ran {
+            busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused(
+                busbar_contract::services::UNSERVED,
+            ))
+        }
+        fn work_resume(
+            &self,
+            _caller: &busbar_contract::services::Caller,
+            _unit: Option<u64>,
+            _handle: u64,
+            _later: busbar_contract::services::Later,
+        ) -> busbar_contract::services::Ran {
+            busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused(
+                busbar_contract::services::UNSERVED,
+            ))
+        }
+        fn disk_append(
+            &self,
+            _dest: &busbar_contract::services::DiskDest,
+            _bytes: Vec<u8>,
+            _later: busbar_contract::services::Later,
+        ) -> busbar_contract::services::Ran {
+            busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused(
+                busbar_contract::services::UNSERVED,
+            ))
+        }
+        fn verify_lookup(
+            &self,
+            _caller: &busbar_contract::services::Caller,
+            _key: &[u8],
+            _later: busbar_contract::services::Later,
+        ) -> busbar_contract::services::Ran {
+            busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused(
+                busbar_contract::services::UNSERVED,
+            ))
+        }
+        fn verify_store(
+            &self,
+            _caller: &busbar_contract::services::Caller,
+            _key: &[u8],
+            _entry: &[u8],
+            _ttl_ms: u64,
+        ) -> busbar_contract::services::Stored {
+            busbar_contract::services::Stored::refused(busbar_contract::services::UNSERVED)
+        }
+        fn content_scan(
+            &self,
+            _caller: &busbar_contract::services::Caller,
+            _unit: Option<u64>,
+            _content: &[u8],
+            _later: busbar_contract::services::Later,
+        ) -> busbar_contract::services::Ran {
+            busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused(
+                busbar_contract::services::UNSERVED,
+            ))
+        }
+        fn hook_call(
+            &self,
+            _caller: &busbar_contract::services::Caller,
+            _unit: Option<u64>,
+            _ask: busbar_contract::services::HookAsk,
+            _later: busbar_contract::services::Later,
+        ) -> busbar_contract::services::Ran {
+            busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused(
+                busbar_contract::services::UNSERVED,
+            ))
+        }
+        fn snapshot_read(
+            &self,
+            _caller: &busbar_contract::services::Caller,
+            _scope: u32,
+        ) -> busbar_contract::services::Snapshot {
+            busbar_contract::services::Snapshot::Refused(busbar_contract::services::UNSERVED)
+        }
     }
 
     /// A dispatcher whose host serves a clock.
     fn clocked() -> Dispatcher {
-        Dispatcher::with_services(DispatchConfig::default(), Arc::new(Double(Clocked)))
+        Dispatcher::with_services(DispatchConfig::default(), Arc::new(Clocked))
     }
 
     /// One caller opening its quota's worth of subscriptions, plus one, cuts off no other caller's

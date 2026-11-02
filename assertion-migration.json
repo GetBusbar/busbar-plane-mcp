@@ -1,0 +1,47 @@
+{
+  "baseline": "b8c4a9b1cff45d6647d497d829e8dcafa543bb73",
+  "completed": [
+    {
+      "old": "plane-mcp-plugin/tests/both_ways.rs:Grants/Minting/Clocked ServicesDouble implementations",
+      "new": "same types implement busbar_contract::services::HostServices directly",
+      "assertions": "Every original test and domain method body retained; generic Double adapter removed; explicit unrelated service refusal bodies added."
+    },
+    {
+      "old": "plane-mcp-plugin/tests/relayed_call.rs:Grants ServicesDouble + conformance input/output helpers",
+      "new": "direct HostServices plus ordinary Default ABI frames with explicit in/out heads",
+      "assertions": "Every original relayed-call test unchanged; input/output headers initialized explicitly."
+    },
+    {
+      "old": "plane-mcp/src/tests/alloc_gate_tests.rs:a_childs_message_read_in_small_pieces_is_parsed_once + kit global allocator",
+      "new": "plane-mcp-plugin/tests/alloc_gate.rs same named test with direct thread-local System allocation counter",
+      "assertions": "Original 2000 items, 64-byte chunks, parsed whole/once result equality and count <20*ITEMS retained. Counts alloc/alloc_zeroed/realloc exactly as old unregistered kit counter."
+    }
+  ],
+  "production_source_move": {
+    "old": "plane-mcp/src/tool_program.rs Message/Frames block",
+    "new": "plane-mcp/src/program_frames.rs; same production tool_program private reexport",
+    "sha256_body_without_boundary_whitespace": "e6d583f81c6e8e7535e7158ab6f458ddd30d404cebcbeb5664cd72440fce8972",
+    "exact_body_equality_without_boundary_whitespace": true,
+    "reason": "Measure actual private parser source without weakening logic crate forbid(unsafe_code) or publishing test API."
+  },
+  "remaining": [
+    {
+      "consumer": "plane-mcp-plugin/tests/conformance.rs + support/conformance_host.rs",
+      "status": "pending actual host composition and ordinary product assertions; shared macros still present"
+    },
+    {
+      "consumer": "plane-mcp/src/tests/{child_work_custody_tests,relay_cleanup_regressions,legacy_initialization_regressions,legacy_call_regressions,legacy_driver_regressions}.rs",
+      "status": "pending actual safe domain/real product tests; existing fake harness retained until exact replacement, never copied"
+    },
+    {
+      "consumer": "Cargo.toml + plane-mcp/Cargo.toml + plane-mcp-plugin/Cargo.toml",
+      "status": "kit dev edges retained while active consumers remain"
+    }
+  ],
+  "validation": {
+    "format": "rustfmt source parse/check and git diff --check",
+    "runtime": "Not built or executed: resource lane permission absent",
+    "locks_and_public_pins": "unchanged",
+    "retired_assertions": []
+  }
+}

@@ -10,13 +10,6 @@ pub(crate) fn everyone(_: &str, _: &str) -> bool {
     true
 }
 
-/// The crate's one `#[global_allocator]`, every allocation gate's count: busbar-test-kit's
-#[global_allocator]
-static A: busbar_test_kit::alloc_counter::Counting =
-    busbar_test_kit::alloc_counter::Counting::new();
-
-/// What reading a stdio child's message may allocate (`tests/alloc_gate.rs`).
-mod alloc_gate_tests;
 /// The plane's vocabulary against the conformance battery (the plugin crate's `tests/both_ways.rs`).
 mod battery_vocabulary_tests;
 /// The plane's own declarations agree with each other (`tests/declarations_agree.rs`).

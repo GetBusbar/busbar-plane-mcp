@@ -22,8 +22,6 @@ use busbar_plugin_loader::dispatch::{
     in_head, load_linked, out_head, Bind, DispatchConfig, Dispatcher, Frame, LinkedRow, NoSink,
     Plugin,
 };
-use busbar_test_kit::conformance::{input, output};
-use busbar_test_kit::services_double::{Double, ServicesDouble};
 use serde_json::{json, Value};
 
 use door_facts::{
@@ -132,7 +130,7 @@ fn arrive(
     body: &'static [u8],
     fields: &'static [Field],
 ) -> (Step, Option<Vec<u8>>) {
-    let mut a: Frame<ArriveIn, ArriveOut> = Frame::new(input(), output());
+    let mut a: Frame<ArriveIn, ArriveOut> = Frame::new(Default::default(), Default::default());
     (a.input.head, a.out.head) = (in_head(), out_head());
     a.input.unit = unit;
     a.input.claim = route_of(verb, target);
@@ -218,7 +216,7 @@ fn push(p: &Plugin<Plane>, what: &'static str, unit: u64, given: Push, cap: usiz
     let mut line = String::new();
     let mut first = true;
     loop {
-        let mut i: OnPieceIn = input();
+        let mut i: OnPieceIn = Default::default();
         i.head = in_head();
         (i.unit, i.from) = (unit, given.from);
         if first {
@@ -234,7 +232,7 @@ fn push(p: &Plugin<Plane>, what: &'static str, unit: u64, given: Push, cap: usiz
         (i.arena_buf, i.arena_cap) = (arena.as_mut_ptr(), arena.len());
         (i.records_buf, i.records_cap) = (records.as_mut_ptr(), records.len());
         (i.units_buf, i.units_cap) = (units.as_mut_ptr(), units.len());
-        let mut o: OnPieceOut = output();
+        let mut o: OnPieceOut = Default::default();
         o.head = out_head();
         let mut f = Frame::new(i, o);
         let c = p.call(slot::ON_PIECE, &mut f);
@@ -317,7 +315,7 @@ fn length_of(reply: &[u8]) -> (String, String) {
 /// A HOST whose entitlement answer is a fixed table of `"<kind>:<name>"` grants, and which
 struct Grants(&'static [&'static str]);
 
-impl ServicesDouble for Grants {
+impl busbar_contract::services::HostServices for Grants {
     fn now(&self) -> busbar_plugin_loader::dispatch::Reading {
         busbar_plugin_loader::dispatch::Reading {
             wall_ns: 0,
@@ -500,6 +498,63 @@ impl ServicesDouble for Grants {
     fn snapshot_read(&self, _: &Caller, _: u32) -> busbar_contract::services::Snapshot {
         busbar_contract::services::Snapshot::Refused(UNSERVED)
     }
+
+    fn trust_unreached(
+        &self,
+        _caller: &busbar_contract::services::Caller,
+        _counterparty: &str,
+    ) -> busbar_contract::services::Stored {
+        busbar_contract::services::Stored::refused(busbar_contract::services::UNSERVED)
+    }
+    fn trust_sight_item(
+        &self,
+        _caller: &busbar_contract::services::Caller,
+        _counterparty: &str,
+        _item: &str,
+        _digest: &str,
+    ) -> busbar_contract::services::Stored {
+        busbar_contract::services::Stored::refused(busbar_contract::services::UNSERVED)
+    }
+    fn trust_decide(
+        &self,
+        _caller: &busbar_contract::services::Caller,
+        _key: busbar_contract::services::TrustKeyRef<'_>,
+        _expected: Option<&str>,
+        _approve: bool,
+    ) -> busbar_contract::services::Stored {
+        busbar_contract::services::Stored::refused(busbar_contract::services::UNSERVED)
+    }
+    fn trust_state(
+        &self,
+        _caller: &busbar_contract::services::Caller,
+        _counterparty: &str,
+    ) -> busbar_contract::services::Stored {
+        busbar_contract::services::Stored::refused(busbar_contract::services::UNSERVED)
+    }
+    fn session_emit(
+        &self,
+        _caller: &busbar_contract::services::Caller,
+        _session: u64,
+        _bytes: &[u8],
+    ) -> busbar_contract::services::Stored {
+        busbar_contract::services::Stored::refused(busbar_contract::services::UNSERVED)
+    }
+    fn ticket_mint(
+        &self,
+        _caller: &busbar_contract::services::Caller,
+        _unit: Option<u64>,
+        _ttl_secs: u64,
+        _record: &[u8],
+    ) -> busbar_contract::services::Stored {
+        busbar_contract::services::Stored::refused(busbar_contract::services::UNSERVED)
+    }
+    fn ticket_take(
+        &self,
+        _caller: &busbar_contract::services::Caller,
+        _unit: Option<u64>,
+    ) -> busbar_contract::services::Stored {
+        busbar_contract::services::Stored::refused(busbar_contract::services::UNSERVED)
+    }
 }
 
 /// The deployment's public base URL the host lends `open`.
@@ -524,16 +579,18 @@ const JSON_HEAD: &[Field] = &[field("content-type", "application/json")];
 const SSE_HEAD: &[Field] = &[field("content-type", "text/event-stream")];
 
 fn served(grants: &'static [&'static str]) -> Dispatcher {
-    Dispatcher::with_services(DispatchConfig::default(), Arc::new(Double(Grants(grants))))
+    Dispatcher::with_services(DispatchConfig::default(), Arc::new(Grants(grants)))
 }
 
 /// THE RELAY SCRIPT'S CALLS: each far answer a member gives one relayed call, read back.
 fn relay_script(p: &Plugin<Plane>) -> Vec<Step> {
     let mut t = Vec::new();
-    let mut i: PlaneOpenIn = input();
+    let mut i: PlaneOpenIn = Default::default();
+    i.open.head = in_head();
     (i.open.generation, i.open.settings) = (1, octets(RELAY_SECTION));
     i.public_url = text(PUBLIC_URL.as_bytes());
-    let o: PlaneOpenOut = output();
+    let mut o: PlaneOpenOut = Default::default();
+    o.open.head = out_head();
     t.push(Step::new("open", p.open(&mut Frame::new(i, o)).0.outcome));
     let post = ("POST", "/mcp");
     let far_answers = [
