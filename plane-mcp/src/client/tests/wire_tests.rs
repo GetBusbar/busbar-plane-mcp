@@ -7,8 +7,29 @@
 //! the engine's `mcp::envelope` reader, and must be accepted. busbar refusing a request busbar sent
 //! would be a silent, mutual misunderstanding that no single-direction test can see.
 
-use crate::client::jsonrpc::{parse_response, tools_call, tools_list, RpcOutcome};
+use crate::client::jsonrpc::{parse_response, tools_list, RpcOutcome};
 use crate::codec::{META_CLIENT_CAPABILITIES, META_PROTOCOL_VERSION};
+
+// Numeric-id convenience belongs to these legacy wire fixtures; production uses typed ids.
+fn tools_call(
+    url: &str,
+    key: &crate::identity::ToolKey,
+    arguments: &serde_json::Value,
+    request_id: u64,
+    authorization: Option<&str>,
+    advertise: crate::client::jsonrpc::AdvertisedCaps,
+    continuation: Option<&serde_json::Value>,
+) -> crate::client::jsonrpc::OutboundRequest {
+    crate::client::jsonrpc::tools_call_id(
+        url,
+        key,
+        arguments,
+        &serde_json::Value::from(request_id),
+        authorization,
+        advertise,
+        continuation,
+    )
+}
 
 #[test]
 fn an_unrequested_progress_token_is_absent_rather_than_null() {

@@ -47,26 +47,6 @@ pub struct AdvertisedCaps {
 /// caller's busbar key. `continuation` is the caller's answer to a relayed `InputRequiredResult`
 /// (its `inputResponses` and the upstream's `requestState`), echoed onto the retry; `None` is every
 /// first round. `advertise` declares the client capabilities in `_meta`.
-pub fn tools_call(
-    url: &str,
-    key: &ToolKey,
-    arguments: &serde_json::Value,
-    request_id: u64,
-    authorization: Option<&str>,
-    advertise: AdvertisedCaps,
-    continuation: Option<&serde_json::Value>,
-) -> OutboundRequest {
-    tools_call_id(
-        url,
-        key,
-        arguments,
-        &serde_json::Value::from(request_id),
-        authorization,
-        advertise,
-        continuation,
-    )
-}
-
 /// A call whose complete stdio identity may be a JSON-RPC string instead of a legacy number.
 pub fn tools_call_id(
     url: &str,

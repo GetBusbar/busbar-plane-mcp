@@ -757,8 +757,8 @@ fn normalise_spans<'a>(
             && piece.start == 0
             && piece.end == source(piece.source).len()
         {
-            if !cache.contains_key(&piece.source) {
-                cache.insert(piece.source, source_summary(piece, source)?);
+            if let std::collections::hash_map::Entry::Vacant(entry) = cache.entry(piece.source) {
+                entry.insert(source_summary(piece, source)?);
             }
             cache
                 .get(&piece.source)
