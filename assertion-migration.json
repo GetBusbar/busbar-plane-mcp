@@ -41,11 +41,11 @@
     },
     {
       "consumer": "plane-mcp/src/tests/{child_work_custody_tests,relay_cleanup_regressions,legacy_initialization_regressions,legacy_call_regressions,legacy_driver_regressions}.rs",
-      "status": "pending actual safe domain/real product tests; existing fake harness retained until exact replacement, never copied"
+      "status": "14 meaningful tests remain: legacy initialization8, legacy call3, relay cleanup3. ActualDriver6 and childwork5 now ordinary actual-private-source unit tests in plugin integration target."
     },
     {
       "consumer": "Cargo.toml + plane-mcp/Cargo.toml + plane-mcp-plugin/Cargo.toml",
-      "status": "kit dev edges retained only while 25 active actual-private custody/legacy tests still consume safe fake framework; next port preserves private oracles without fake Probe products"
+      "status": "Kit dev edges retained for remaining14private tests until exact ordinary actual-source ports; no SDK/peer/publicpin/lock retarget."
     }
   ],
   "validation": {
@@ -53,7 +53,8 @@
     "runtime": "No MCP build or test run under resource restriction; source parse/format/diff checks only; actual MemoryStore dev graph/lock pending metadata owner.",
     "locks_and_public_pins": "unchanged",
     "retired_assertions": [],
-    "host_qualification": "Direct host composition source-reviewed only; no build, live TLS, process or MCP runtime pass claimed. TCP uses public linked::door; HTTP/stdio original public door functions."
+    "host_qualification": "Direct host composition source-reviewed only; no build, live TLS, process or MCP runtime pass claimed. TCP uses public linked::door; HTTP/stdio original public door functions.",
+    "private_source_qualification": "Actual implementation source included by path in private_cases integration binary; production forbid(unsafe_code) unchanged. Exact production core and plane body moved to include files. New raw callbacks exist only in ordinary integration tests. No build/runtime claim."
   },
   "macro_assertions": {
     "no_configured_credential_crosses_back": {
@@ -216,5 +217,46 @@
     },
     "path": "Actual memory door -> load_linked<Store> -> LoadedStore -> typed StoreCalls record_get/record_put/record_scan",
     "qualification": "Actual product stores emitted MCP records. No fake BTreeMap store. Typed chains retain contract chain key mapping. Final graph/lock and SDK3 resolution are metadata-owner work."
-  }
+  },
+  "private_source_moves": [
+    {
+      "original": "plane-mcp/src/plane_door.rs",
+      "destination": "plane-mcp/src/plane_door_impl.rs",
+      "body_sha256": "b9e0c1f453e51c864e359bac41dbe24a4ab3c8063989911665b144a8a70b3546",
+      "changes": "Same production body. Only child-work fake Probe test module declaration removed; ordinary direct state assertions mount in actual-source integration target."
+    },
+    {
+      "original": "plane-mcp/src/door_legacy.rs",
+      "destination": "plane-mcp/src/legacy_wire.rs",
+      "body_sha256": "e441d9ac4810256b5ae611a10d5d68b71b4b2f9547fecde54356a1eac3ccdf40",
+      "changes": "Actual Driver/Link implementation plus head/span helpers extracted unchanged. McpDoor/Instance-only imports remain in outer actual module. Original fake-host driver test declaration removed from old unit registration."
+    }
+  ],
+  "private_assertion_ports": [
+    {
+      "old": "plane-mcp/src/tests/legacy_driver_regressions.rs",
+      "new": "plane-mcp-plugin/tests/support/private_driver.rs",
+      "tests": [
+        "a_terminal_reply_handle_is_reused_only_after_exact_host_retirement_confirmation",
+        "a_dead_link_redeems_and_closes_a_pending_get_establish",
+        "a_dead_link_keeps_a_pending_reply_establish_until_its_stream_is_closed",
+        "closing_a_dead_link_redeems_each_pending_read_before_releasing_its_buffers",
+        "a_reply_post_closes_on_its_final_head_without_reading_an_endless_body",
+        "held_links_and_reply_posts_keep_distinct_pending_handles_and_read_buffers"
+      ],
+      "assertions": "All original case bodies retained; actual private production state/algorithm compiles by source path. Generic FakeHost replaced with fixed typed raw callbacks; no Probe/Idle/SafeSlot test product. Exact CompletionHandle, read byte-buffer and descriptor pointer predicates retained, including direct issued=CYCLE_SPAN oracle without67M calls."
+    },
+    {
+      "old": "plane-mcp/src/tests/child_work_custody_tests.rs",
+      "new": "plane-mcp-plugin/tests/support/private_child_work.rs",
+      "tests": [
+        "rooted_child_work_owned_by_the_current_plane_resumes_and_settles",
+        "same_plane_pending_resume_replays_its_handle_and_completed_unit_needs_no_custody",
+        "a_fresh_plane_refuses_identical_durable_child_work_before_resume_or_settle",
+        "current_custody_cannot_authorize_a_changed_child_launch_record",
+        "legacy_unrooted_child_work_keeps_its_existing_durable_binding"
+      ],
+      "assertions": "All original5case bodies and binder state predicates retained. Fake OPEN/CLOSE wrappers removed; direct actual McpDoor/bind_child_work state unit invocation uses fixed typed work.find/resume/settle raw callbacks. Fake product lifecycle Ready selfchecks retired only."
+    }
+  ]
 }

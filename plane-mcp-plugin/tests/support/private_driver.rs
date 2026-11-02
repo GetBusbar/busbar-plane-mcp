@@ -3,7 +3,6 @@ use busbar_contract::abi::host::conn::connector::{EstablishIn, ReplyIn, RequestI
 use busbar_contract::abi::mechanism::call::Outcome;
 use busbar_contract::abi::mechanism::ticket::CompletionHandle;
 use busbar_contract::abi::sdk::completion_retirement::{self, Capability};
-use busbar_test_kit::test_support::fake::{self, FakeHost, FakeService, ServiceCall};
 use std::cell::RefCell;
 
 #[derive(Default)]
@@ -37,91 +36,127 @@ fn driver() -> Driver {
 
 thread_local! {static STATE: RefCell<State> = RefCell::new(State::default());}
 
-struct Read;
-impl FakeService for Read {
-    type In = ReplyIn;
-    fn serve(call: &mut ServiceCall<ReplyIn>) -> Outcome {
-        let input = *call.input();
-        STATE.with(|state| {
-            let mut state = state.borrow_mut();
-            state.reads.push((
-                input.stream,
-                input.head.handle,
-                input.buf as usize,
-                input.piece as usize,
-            ));
-            if state.closed.contains(&input.stream) {
-                return Outcome::Failed;
-            }
-            match state.heads.pop_front() {
-                Some(code) => {
-                    call.put(
-                        |i| &i.piece,
-                        ReplyPiece {
-                            kind: REPLY_HEAD,
-                            code,
-                            ..ReplyPiece::default()
-                        },
-                    );
-                    Outcome::Ready
+use busbar_contract::abi::host::conn::connector::{ConnectorSlots, SERVICES as CONNECTOR_SERVICES};
+use busbar_contract::abi::host::service::ServiceOut;
+use busbar_contract::abi::mechanism::call::RawOutcome;
+use busbar_contract::abi::mechanism::ticket::HostTables;
+use std::ffi::c_void;
+fn finish(out: *mut ServiceOut, outcome: Outcome, value: u64, len: u64) -> RawOutcome {
+    let raw = RawOutcome::of(outcome);
+    // SAFETY: the actual SDK lends this complete exclusive service result for this call.
+    unsafe {
+        out.write(ServiceOut {
+            size: std::mem::size_of::<ServiceOut>() as u32,
+            outcome: raw,
+            value,
+            len,
+            items: 0,
+            needed_bytes: 0,
+            needed_items: 0,
+            ..ServiceOut::ZERO
+        });
+    }
+    raw
+}
+extern "C" fn read_reply(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
+    // SAFETY: the actual production Driver invokes READ_REPLY with its declared frame and live buffers.
+    let input = unsafe { input.cast::<ReplyIn>().read_unaligned() };
+    let outcome = STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        state.reads.push((
+            input.stream,
+            input.head.handle,
+            input.buf as usize,
+            input.piece as usize,
+        ));
+        if state.closed.contains(&input.stream) {
+            return Outcome::Failed;
+        }
+        match state.heads.pop_front() {
+            Some(code) => {
+                unsafe {
+                    input.piece.write(ReplyPiece {
+                        kind: REPLY_HEAD,
+                        code,
+                        ..ReplyPiece::default()
+                    });
                 }
-                None => Outcome::Pending,
-            }
-        })
-    }
-}
-
-struct Establish;
-impl FakeService for Establish {
-    type In = EstablishIn;
-    fn serve(call: &mut ServiceCall<EstablishIn>) -> Outcome {
-        STATE.with(|state| {
-            let mut state = state.borrow_mut();
-            state.dials.push(call.input().head.handle);
-            if state.dial_ready {
-                call.set_value(77);
                 Outcome::Ready
-            } else {
-                Outcome::Pending
             }
-        })
-    }
+            None => Outcome::Pending,
+        }
+    });
+    finish(out, outcome, 0, 0)
 }
-
-struct Write;
-impl FakeService for Write {
-    type In = RequestIn;
-    fn serve(call: &mut ServiceCall<RequestIn>) -> Outcome {
-        let input = *call.input();
-        STATE.with(|state| state.borrow_mut().writes.push(input.head.handle));
-        call.set_len(input.len as u64);
-        Outcome::Ready
-    }
+extern "C" fn establish(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
+    let input = unsafe { input.cast::<EstablishIn>().read_unaligned() };
+    let ready = STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        state.dials.push(input.head.handle);
+        state.dial_ready
+    });
+    finish(
+        out,
+        if ready {
+            Outcome::Ready
+        } else {
+            Outcome::Pending
+        },
+        if ready { 77 } else { 0 },
+        0,
+    )
 }
-
-struct Close;
-impl FakeService for Close {
-    type In = StreamIn;
-    fn serve(call: &mut ServiceCall<StreamIn>) -> Outcome {
-        STATE.with(|state| state.borrow_mut().closed.push(call.input().stream));
-        Outcome::Ready
-    }
+extern "C" fn write_request(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
+    let input = unsafe { input.cast::<RequestIn>().read_unaligned() };
+    STATE.with(|state| state.borrow_mut().writes.push(input.head.handle));
+    finish(out, Outcome::Ready, 0, input.len as u64)
 }
-
+extern "C" fn close_stream(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
+    let input = unsafe { input.cast::<StreamIn>().read_unaligned() };
+    STATE.with(|state| state.borrow_mut().closed.push(input.stream));
+    finish(out, Outcome::Ready, 0, 0)
+}
 fn with_host(run: impl FnOnce(&Host, &RefCell<State>)) {
-    let fake = FakeHost::new()
-        .ctx(HostCtx { handle: 71 })
-        .serve(fake::conn::ESTABLISH, Establish)
-        .serve(fake::conn::READ_REPLY, Read)
-        .serve(fake::conn::WRITE_REQUEST, Write)
-        .serve(fake::conn::CLOSE, Close);
-    let host = Host::of(fake.lent());
+    // Only the four connector values this actual Driver scenario consumes are served.
+    let mut conns: ConnectorSlots = unsafe { std::mem::zeroed() };
+    conns.size = std::mem::size_of::<ConnectorSlots>() as u32;
+    conns.slots = CONNECTOR_SERVICES;
+    conns.establish = Some(establish);
+    conns.read_reply = Some(read_reply);
+    conns.write_request = Some(write_request);
+    conns.close = Some(close_stream);
+    let tables = HostTables {
+        size: std::mem::size_of::<HostTables>() as u32,
+        _reserved: 0,
+        ctx: HostCtx { handle: 71 },
+        wake: None,
+        conns: &conns,
+        services: std::ptr::null(),
+        io: std::ptr::null(),
+    };
+    // SAFETY: complete immutable local tables remain live through run; all callbacks obey their exact slot layouts.
+    let host = unsafe { Host::from_raw(&tables) };
     STATE.with(|state| {
         *state.borrow_mut() = State::default();
         run(&host, state);
     });
 }
-
+fn link() -> Link {
+    let template = crate::client::jsonrpc::envelope(
+        "https://up.example/events",
+        "tools/call",
+        None,
+        crate::codec::json(&serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call"})),
+        None,
+    );
+    Link::new(1, "https://up.example/events", "fs", &template)
+}
+fn ticket(slot: u32) -> Ticket {
+    Ticket {
+        slot,
+        generation: 1,
+    }
+}
 #[test]
 fn a_terminal_reply_handle_is_reused_only_after_exact_host_retirement_confirmation() {
     with_host(|host, state| {

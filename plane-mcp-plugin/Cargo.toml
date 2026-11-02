@@ -51,3 +51,10 @@ rustls = { workspace = true }
 
 busbar-store-memory = { workspace = true }
 base64 = { workspace = true }
+
+# Same source dependencies for ordinary actual-private-code integration tests.
+serde = { workspace = true }
+indexmap = { workspace = true }
+jsonschema = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
