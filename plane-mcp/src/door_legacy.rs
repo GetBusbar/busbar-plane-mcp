@@ -228,9 +228,13 @@ pub(super) struct Link {
     handle: Option<u32>,
 }
 
-/// What a drive heard that the instance acts on outside the link's lock: the resource updates
-/// announced, as `(server, uri)`.
-type Announced = Vec<(String, String)>;
+/// What a drive heard that the instance acts on outside the link's lock.
+enum Announcement {
+    Resource(String, String),
+    ListChanged(String),
+}
+
+type Announced = Vec<Announcement>;
 
 impl Link {
     fn new(generation: u64, url: &str, member: &str, template: &OutboundRequest) -> Self {
@@ -400,7 +404,8 @@ impl Link {
                 match n.effect() {
                     NotificationEffect::RelayResourceUpdate => {
                         if let Some(uri) = v.pointer("/params/uri").and_then(Value::as_str) {
-                            announced.push((self.member.clone(), uri.to_string()));
+                            announced
+                                .push(Announcement::Resource(self.member.clone(), uri.to_string()));
                         }
                     }
                     // Progress reaches only the call whose request carried the token.
@@ -431,7 +436,10 @@ impl Link {
                             self.logs.push(v.clone());
                         }
                     }
-                    NotificationEffect::Log | NotificationEffect::BringRefreshForward => {}
+                    NotificationEffect::BringRefreshForward => {
+                        announced.push(Announcement::ListChanged(self.member.clone()));
+                    }
+                    NotificationEffect::Log => {}
                 }
                 None
             }
@@ -982,8 +990,17 @@ pub(super) fn drive(
         }
         Ok(pending(plane) || state.retirement.queued())
     });
-    for (server, uri) in announced {
-        super::door_sessions::announce(plane, &server, &uri);
+    for announcement in announced {
+        match announcement {
+            Announcement::Resource(server, uri) => {
+                super::door_sessions::announce(plane, &server, &uri)
+            }
+            Announcement::ListChanged(server) => super::door_sessions::list_changed(
+                plane,
+                &server,
+                (cycle != 0).then_some(cycle / 1_000_000),
+            ),
+        }
     }
     wake_all(plane, woken);
     result

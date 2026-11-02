@@ -140,22 +140,37 @@ pub enum Era {
 /// legacy-era client sends them without one: that is what the era negotiation is for.
 #[must_use]
 pub fn era(value: &Value) -> Era {
-    let (Some(method), Some(id)) = (
-        value.get("method").and_then(Value::as_str),
-        value.get("id").filter(|i| i.is_string() || i.is_number()),
-    ) else {
+    let Some(method) = value.get("method").and_then(Value::as_str) else {
         return Era::Dispatch;
     };
+    if !matches!(
+        method,
+        "initialize"
+            | "ping"
+            | "logging/setLevel"
+            | "resources/subscribe"
+            | "resources/unsubscribe"
+    ) {
+        return Era::Dispatch;
+    }
+    let id = match crate::tool_arrival::request(value) {
+        Ok(busbar_contract::jsonrpc::Envelope::Request { id, .. }) => id,
+        Ok(busbar_contract::jsonrpc::Envelope::Notification { .. }) => return Era::Dispatch,
+        Err(refusal) => {
+            return Era::Answer(serde_json::from_slice(&refusal.body()).expect("a refusal is JSON"))
+        }
+    };
+    let id = &id;
     match method {
         crate::adapt::METHOD_INITIALIZE => match value
             .pointer("/params/protocolVersion")
             .and_then(Value::as_str)
         {
-            Some(requested) => {
+            Some(requested) if requested != PROTOCOL_VERSION => {
                 let revision = crate::revision::negotiate(Some(requested));
                 Era::Opened(revision, session_initialize_result(id, revision))
             }
-            None => Era::Answer(initialize_result(id)),
+            _ => Era::Answer(initialize_result(id)),
         },
         crate::adapt::METHOD_PING => Era::Answer(result(id, json!({}))),
         "logging/setLevel" => Era::Answer(unsupported(
@@ -193,16 +208,27 @@ fn ask_of(id: &Value) -> Option<u64> {
 #[must_use]
 pub fn reply(value: &Value) -> Option<Reply> {
     let obj = value.as_object()?;
+    if obj.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+        return None;
+    }
     match obj.get("method").and_then(Value::as_str) {
         None => {
+            if obj.contains_key("method") {
+                return None;
+            }
             let n = ask_of(obj.get("id")?)?;
-            match (obj.get("result"), obj.get("error")) {
-                (Some(result), None) => Some(Reply::Answered(n, result.clone())),
-                (_, Some(_)) => Some(Reply::Failed(n)),
-                (None, None) => None,
+            match busbar_contract::jsonrpc::read_response(value, obj.get("id")?).ok()? {
+                busbar_contract::jsonrpc::Reply::Result(result) => Some(Reply::Answered(n, result)),
+                busbar_contract::jsonrpc::Reply::Error { .. } => Some(Reply::Failed(n)),
             }
         }
         Some("notifications/elicitation/response") => {
+            if !matches!(
+                crate::tool_arrival::request(value),
+                Ok(busbar_contract::jsonrpc::Envelope::Notification { .. })
+            ) {
+                return None;
+            }
             let n = ask_of(value.pointer("/params/requestId")?)?;
             Some(Reply::Answered(
                 n,

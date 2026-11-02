@@ -197,6 +197,24 @@ fn read(plane: &McpDoor, session: u64, body: &[u8], unit: &mut LineUnit) -> Opti
     let Ok(value) = serde_json::from_slice::<Value>(body) else {
         return Some(body.to_vec());
     };
+    // Read the envelope before a cancellation, greeting or reply can move carrier state.
+    if value.get("method").is_some() {
+        match crate::tool_arrival::request(&value) {
+            Err(refusal) => {
+                unit.preset = Some(refusal.body());
+                return None;
+            }
+            Ok(busbar_contract::jsonrpc::Envelope::Notification { .. })
+                if value
+                    .get("params")
+                    .is_some_and(|params| !params.is_object()) =>
+            {
+                unit.preset = Some(Vec::new());
+                return None;
+            }
+            _ => {}
+        }
+    }
     if let Some(reply) = line::reply(&value) {
         let n = match &reply {
             Reply::Answered(n, _) | Reply::Failed(n) => *n,

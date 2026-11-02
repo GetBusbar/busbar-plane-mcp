@@ -182,11 +182,20 @@ fn initialize_asks_for_a_revision_and_names_busbar() {
 
 #[test]
 fn only_a_revision_this_plane_carries_is_accepted_from_initialize() {
-    let ok = json!({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18"}}).to_string();
+    let ok = json!({"jsonrpc":"2.0","id":INITIALIZE_ID,"result":{"protocolVersion":"2025-06-18"}})
+        .to_string();
     assert_eq!(offered_revision(ok.as_bytes()), Some(Revision::R2025_06_18));
-    let old = json!({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26"}}).to_string();
+    let old = json!({"jsonrpc":"2.0","id":INITIALIZE_ID,"result":{"protocolVersion":"2025-03-26"}})
+        .to_string();
     assert_eq!(offered_revision(old.as_bytes()), None);
     assert_eq!(offered_revision(b"not json"), None);
+    for invalid in [
+        json!({"jsonrpc":"2.0","id":INITIALIZE_ID.to_string(),"result":{"protocolVersion":"2025-06-18"}}),
+        json!({"jsonrpc":"1.0","id":INITIALIZE_ID,"result":{"protocolVersion":"2025-06-18"}}),
+        json!({"jsonrpc":"2.0","id":INITIALIZE_ID,"result":{"protocolVersion":"2025-06-18"},"error":{"code":-1,"message":"no"}}),
+    ] {
+        assert_eq!(offered_revision(&crate::codec::json(&invalid)), None);
+    }
 }
 
 /// RED: the message address a `2024-11-05` stream names can never move busbar's POSTs (and the

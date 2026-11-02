@@ -1362,7 +1362,7 @@ pub fn settle_call_as(
 /// The correlated response of an event stream, else the body itself. Notifications may follow
 /// the response; they do not replace it. With no correlated response, retain the last event so
 /// the ordinary reader reports the malformed or uncorrelated upstream answer.
-fn answer_body(raw: &[u8], sse: bool, sent_id: &Value) -> Vec<u8> {
+pub(crate) fn answer_body(raw: &[u8], sse: bool, sent_id: &Value) -> Vec<u8> {
     if sse {
         let events = event_stream_data(&String::from_utf8_lossy(raw));
         events

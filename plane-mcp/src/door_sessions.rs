@@ -138,6 +138,10 @@ pub(super) enum Carriage {
 /// What a unit is to the session machinery.
 #[derive(Debug, Clone)]
 pub(super) enum SessionUnit {
+    /// A malformed opening message: no session is allocated.
+    Rejected(Box<Refusal>),
+    /// An opening notification: acknowledged without creating a session or replying.
+    Notification,
     /// `initialize` POSTed to the endpoint: it opens a session. `id` is the request's id.
     Open {
         id: Value,
@@ -266,13 +270,21 @@ pub(super) fn arrive(
                 None => adapt::PostKind::Stateless,
             };
             match (kind, value) {
-                (adapt::PostKind::Initialize, Some(v)) => local(SessionUnit::Open {
-                    id: v.get("id").cloned().unwrap_or(Value::Null),
-                    requested: v
-                        .pointer("/params/protocolVersion")
-                        .and_then(Value::as_str)
-                        .map(str::to_string),
-                }),
+                (adapt::PostKind::Initialize, Some(v)) => match crate::tool_arrival::request(&v) {
+                    Ok(busbar_contract::jsonrpc::Envelope::Request { id, .. }) => {
+                        local(SessionUnit::Open {
+                            id,
+                            requested: v
+                                .pointer("/params/protocolVersion")
+                                .and_then(Value::as_str)
+                                .map(str::to_string),
+                        })
+                    }
+                    Ok(busbar_contract::jsonrpc::Envelope::Notification { .. }) => {
+                        local(SessionUnit::Notification)
+                    }
+                    Err(refusal) => local(SessionUnit::Rejected(Box::new(refusal))),
+                },
                 (adapt::PostKind::InSession, value) => SessionArrived::Session(message(
                     held,
                     session.unwrap_or_default(),
@@ -332,31 +344,24 @@ fn message(
             mirror: Vec::new(),
         });
     };
-    let object = value.as_object();
-    let valid = object.is_some_and(|object| {
-        object.get("jsonrpc").and_then(Value::as_str) == Some("2.0")
-            && match object.get("method") {
-                Some(method) => method.is_string(),
-                None => {
-                    object
-                        .get("id")
-                        .is_some_and(|id| id.is_string() || id.is_number())
-                        && (object.contains_key("result") != object.contains_key("error"))
-                }
-            }
-    });
-    if !valid {
+    let envelope = if value.get("method").is_some() {
+        crate::tool_arrival::request(&value).map(|_| ())
+    } else {
         let id = value
             .get("id")
             .filter(|id| id.is_string() || id.is_number())
             .cloned();
-        let refused = Refusal {
+        busbar_contract::jsonrpc::read_response(&value, id.as_ref().unwrap_or(&Value::Null))
+            .map(|_| ())
+            .map_err(|_| Refusal {
             status: STATUS_BAD_REQUEST,
             id,
             code: CODE_INVALID_REQUEST,
             message: "a session message must be one JSON-RPC 2.0 request, notification or response object".to_string(),
             data: None,
-        };
+        })
+    };
+    if let Err(refused) = envelope {
         return Box::new(Arrival {
             unit: unit(Kind::Refused(Box::new(refused))),
             dispatch: None,
@@ -416,6 +421,12 @@ pub(super) fn disposition(unit: &SessionUnit) -> Disposition {
         },
     };
     match unit {
+        SessionUnit::Rejected(refusal) => {
+            request("server/discover", refusal.id.clone().unwrap_or(Value::Null))
+        }
+        SessionUnit::Notification => Disposition::Notice {
+            method: String::new(),
+        },
         SessionUnit::Open { id, .. } => request("server/discover", id.clone()),
         SessionUnit::Stream { .. } => request("subscriptions/listen", Value::Null),
         SessionUnit::Message { kind, .. } => match kind {
@@ -570,13 +581,24 @@ pub(super) fn answer(
     if matches!(session_unit, SessionUnit::Line | SessionUnit::Stream { .. }) {
         return None;
     }
-    let Some(now) = wall_ms(plane.services, ticket, &mut unit.issued) else {
-        return Some(written(
-            unit,
-            unavailable(&Value::Null, super::CLOCK_UNREAD),
-        ));
+    let now = if matches!(
+        &session_unit,
+        SessionUnit::Rejected(_) | SessionUnit::Notification
+    ) {
+        // Neither a refusal nor an unanswered notification opens or touches a session.
+        0
+    } else {
+        let Some(now) = wall_ms(plane.services, ticket, &mut unit.issued) else {
+            return Some(written(
+                unit,
+                unavailable(&Value::Null, super::CLOCK_UNREAD),
+            ));
+        };
+        now
     };
     let pending = match session_unit {
+        SessionUnit::Rejected(refusal) => answer_of(refusal.status, refusal.body()),
+        SessionUnit::Notification => answer_of(STATUS_ACCEPTED, Vec::new()),
         SessionUnit::Line | SessionUnit::Stream { .. } => return None,
         SessionUnit::Open { id, requested } => {
             open_endpoint(plane, ticket, unit, &owner, &id, requested.as_deref(), now)
@@ -969,9 +991,16 @@ pub(super) fn session_of(unit: &Option<SessionUnit>) -> Option<String> {
 
 /// LOWERS the answer a session unit's dispatch wrote, before its first byte: the session
 /// revision's shape (a result no session revision can carry becomes an error), every JSON-RPC
-/// answer at `200`; on the `2024-11-05` stream, the answer goes on the stream and the POST is
+/// dispatch answer at `200` (a malformed message keeps its refusal status); on the `2024-11-05` stream, the answer goes on the stream and the POST is
 /// accepted (`202`).
 pub(super) fn lower(plane: &McpDoor, ticket: Ticket, caller: &str, unit: &mut CallUnit) {
+    let malformed = matches!(
+        &unit.session,
+        Some(SessionUnit::Message {
+            kind: Kind::Refused(_),
+            ..
+        })
+    );
     let (line, legacy) = match &unit.session {
         Some(SessionUnit::Message {
             checked: true,
@@ -1091,7 +1120,7 @@ pub(super) fn lower(plane: &McpDoor, ticket: Ticket, caller: &str, unit: &mut Ca
             }
         }
         None => {
-            if rpc {
+            if rpc && !malformed {
                 pending.status = 200;
             }
             for (name, value) in &mut pending.fields {
@@ -1650,6 +1679,8 @@ pub(super) enum Negotiated {
 #[derive(Debug)]
 pub(super) struct Negotiating {
     negotiator: Negotiator,
+    /// The exact id of the current HTTP hop, including initialize and session renumbering.
+    reply_id: Option<Value>,
     list_pages: Option<crate::client::jsonrpc::ToolPages>,
     next: Option<Action>,
     hops: u32,
@@ -1717,8 +1748,13 @@ impl Negotiating {
         let mut negotiator =
             Negotiator::new(original, remembered, super::VERSION).with_session_id(session_id);
         let first = negotiator.start();
+        let reply_id = match &first {
+            Action::Send { request } => request_id(request),
+            _ => None,
+        };
         Negotiating {
             negotiator,
+            reply_id,
             list_pages: None,
             next: Some(first),
             hops: 0,
@@ -1766,7 +1802,10 @@ impl Negotiating {
             .iter()
             .any(|(n, v)| n.eq_ignore_ascii_case(CONTENT_TYPE) && v.starts_with(EVENT_STREAM));
         let json = if sse {
-            crate::call::last_sse_data(&body)
+            match &self.reply_id {
+                Some(id) => crate::call::answer_body(&body, true, id),
+                None => crate::call::last_sse_data(&body),
+            }
         } else {
             body.clone()
         };
@@ -1810,6 +1849,7 @@ impl Negotiating {
         loop {
             match self.next.take() {
                 Some(Action::Send { request }) => {
+                    self.reply_id = request_id(&request);
                     if self.list_pages.is_some() && self.hops >= super::ROUND_SEQ_SPAN / HOP_SPAN {
                         return Poll::Ready(Negotiated::Failed("the complete tool list exceeds this fetch's existing service-handle range".to_string()));
                     }
@@ -2013,7 +2053,8 @@ pub(super) fn fetch_in(
             )),
             Negotiated::Answer(status, raw, sse, sent) => {
                 let body = if sse {
-                    crate::call::last_sse_data(&raw)
+                    let sent_id = sent.map(Value::from).unwrap_or_else(|| original_id.clone());
+                    crate::call::answer_body(&raw, true, &sent_id)
                 } else {
                     raw
                 };
@@ -2087,6 +2128,13 @@ pub(super) fn fetch_in(
         *slot = None;
         return Poll::Ready(Ok(response));
     }
+}
+
+fn request_id(request: &OutboundRequest) -> Option<Value> {
+    serde_json::from_slice::<Value>(&request.body)
+        .ok()?
+        .get("id")
+        .cloned()
 }
 
 /// `request` with the progress token it carries (when it asks for progress at all) replaced by one

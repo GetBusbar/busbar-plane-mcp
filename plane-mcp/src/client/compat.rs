@@ -152,7 +152,12 @@ pub fn initialized_notification(
 #[must_use]
 pub fn offered_revision(body: &[u8]) -> Option<Revision> {
     let v: Value = serde_json::from_slice(body).ok()?;
-    crate::revision::accept_offered(v.pointer("/result/protocolVersion")?.as_str()?)
+    let busbar_contract::jsonrpc::Reply::Result(result) =
+        busbar_contract::jsonrpc::read_response(&v, &Value::from(INITIALIZE_ID)).ok()?
+    else {
+        return None;
+    };
+    crate::revision::accept_offered(result.get("protocolVersion")?.as_str()?)
 }
 
 /// LOWERS a stateless request into `revision`: the stateless `_meta` members go (a session

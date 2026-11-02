@@ -76,6 +76,59 @@ pub enum Disposition {
     Refused(Refusal),
 }
 
+/// The shared MCP request envelope, including the shape of present parameters. Session and
+/// line housekeeping use this before changing state, just as the stateless dispatch does.
+pub fn request(value: &Value) -> Result<busbar_contract::jsonrpc::Envelope, Refusal> {
+    use busbar_contract::jsonrpc::Envelope;
+    let envelope = busbar_contract::jsonrpc::read(value).map_err(|invalid| Refusal {
+        status: STATUS,
+        id: (!invalid.id.is_null()).then_some(invalid.id),
+        code: invalid.code,
+        message: invalid.message.to_string(),
+        data: None,
+    })?;
+    if let Envelope::Request { id, method } = &envelope {
+        let invalid = |message: &str| Refusal {
+            status: STATUS,
+            id: Some(id.clone()),
+            code: crate::codec::CODE_INVALID_PARAMS,
+            message: message.to_string(),
+            data: None,
+        };
+        if value
+            .get("params")
+            .is_some_and(|params| !params.is_object())
+        {
+            return Err(invalid("`params` must be an object when present."));
+        }
+        if method == crate::adapt::METHOD_INITIALIZE {
+            if let Some(params) = value.get("params") {
+                for name in ["protocolVersion", "capabilities", "clientInfo"] {
+                    if let Some(member) = params.get(name) {
+                        let valid = match name {
+                            "protocolVersion" => member.is_string(),
+                            _ => member.is_object(),
+                        };
+                        if !valid {
+                            return Err(invalid(&format!("`params.{name}` has an invalid type.")));
+                        }
+                    }
+                }
+                if let Some(info) = params.get("clientInfo") {
+                    for name in ["name", "version"] {
+                        if info.get(name).is_some_and(|member| !member.is_string()) {
+                            return Err(invalid(&format!(
+                                "`params.clientInfo.{name}` must be a string when present."
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(envelope)
+}
+
 /// DECIDE ONE ARRIVAL. `value` is the body as JSON (`None` = not JSON); `field` reads a request head
 /// field by its lower-case name.
 pub fn decide<'a>(value: Option<&Value>, field: impl Fn(&str) -> Option<&'a str>) -> Disposition {
@@ -88,17 +141,9 @@ pub fn decide<'a>(value: Option<&Value>, field: impl Fn(&str) -> Option<&'a str>
             data: None,
         });
     };
-    let envelope = match busbar_contract::jsonrpc::read(value) {
+    let envelope = match request(value) {
         Ok(envelope) => envelope,
-        Err(invalid) => {
-            return Disposition::Refused(Refusal {
-                status: STATUS,
-                id: (!invalid.id.is_null()).then_some(invalid.id),
-                code: invalid.code,
-                message: invalid.message.to_string(),
-                data: None,
-            })
-        }
+        Err(refusal) => return Disposition::Refused(refusal),
     };
     let (id, method) = match envelope {
         busbar_contract::jsonrpc::Envelope::Notification { method } => {
