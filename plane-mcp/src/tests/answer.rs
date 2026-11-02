@@ -177,7 +177,7 @@ fn a_local_refusal_answers_its_own_status() {
         panic!("answered here")
     };
     assert_eq!(*status, 404);
-    assert_eq!(body(&a)["error"]["code"], -32000);
+    assert_eq!(body(&a)["error"]["code"], -32602);
 }
 
 /// A notification is acknowledged with no body; a refused arrival answers its refusal.
