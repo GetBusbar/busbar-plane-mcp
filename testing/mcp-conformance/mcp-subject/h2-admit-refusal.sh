@@ -35,10 +35,12 @@ read -r kid tok <<<"$(h2_mint h2-broke)"
 bound="$(h2_bind "$tok")"
 
 # First call: within budget, admitted, dispatched.
+egress_before="$(h2_egress_count)" || h2_verdict FAIL "egress observer failed"
 read -r first_status _ <<<"$(h2_call "$bound" "first")"
 [ "$first_status" = "200" ] || { failures=$((failures+1)); detail="${detail}first_status=${first_status}(want 200); "; }
 
-egress_mid="$(h2_egress_count)"
+egress_mid="$(h2_egress_count)" || h2_verdict FAIL "egress observer failed"
+h2_int_is "$egress_mid" -gt "$egress_before" || h2_verdict FAIL "admitted first call produced no positive egress witness"
 usage_mid="$(h2_usage "$kid")"
 
 # Second call on the same exhausted `requests` budget: refused at ADMIT.
@@ -49,7 +51,7 @@ case "$second_body" in
   *) failures=$((failures+1)); detail="${detail}second_body missing reason=budget_exhausted: ${second_body}; " ;;
 esac
 
-egress_after="$(h2_egress_count)"
+egress_after="$(h2_egress_count)" || h2_verdict FAIL "egress observer failed"
 egress_delta_on_refusal="$((egress_after - egress_mid))"
 [ "$egress_delta_on_refusal" -eq 0 ] || { failures=$((failures+1)); detail="${detail}egress_delta_on_refusal=${egress_delta_on_refusal}(want 0); "; }
 

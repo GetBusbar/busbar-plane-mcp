@@ -87,20 +87,25 @@ if (!url) {
 // The same defaulting `mcp::connect::parse_tool_list` applies: a missing description is the empty
 // string and a missing inputSchema is `{}`, BOTH digested at their defaulted value — an upstream
 // that later supplies one has drifted, and this helper must agree about that baseline.
+const revision = '2026-07-28';
 const body = JSON.stringify({
   jsonrpc: '2.0',
   id: 'tool-digest',
   method: 'tools/list',
   params: {
     _meta: {
-      'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+      'io.modelcontextprotocol/protocolVersion': revision,
       'io.modelcontextprotocol/clientCapabilities': {},
     },
   },
 });
 const res = await fetch(url, {
   method: 'POST',
-  headers: { 'content-type': 'application/json', 'mcp-method': 'tools/list' },
+  headers: {
+    'content-type': 'application/json',
+    'mcp-method': 'tools/list',
+    'mcp-protocol-version': revision,
+  },
   body,
 });
 const answer = await res.json();

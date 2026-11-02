@@ -36,8 +36,11 @@ detail=""
 read -r witness_kid witness_tok <<<"$(h2_mint h2-oracle)"
 [ -n "$witness_kid" ] && [ -n "$witness_tok" ] || h2_verdict FAIL "positive-control mint failed"
 witness_bound="$(h2_bind "$witness_tok")"
+witness_egress_before="$(h2_egress_count)" || h2_verdict FAIL "egress observer failed"
 read -r witness_status _ <<<"$(h2_call "$witness_bound" "usage-witness")"
 [ "$witness_status" = 200 ] || h2_verdict FAIL "positive-control call was not admitted"
+witness_egress_after="$(h2_egress_count)" || h2_verdict FAIL "egress observer failed"
+h2_int_is "$witness_egress_after" -gt "$witness_egress_before" || h2_verdict FAIL "positive-control egress was not observed"
 witness_usage="$(h2_usage "$witness_kid")"
 witness_requests="$(h2_read_usage_field requests <<<"$witness_usage")"
 h2_int_is "$witness_requests" -gt 0 || h2_verdict FAIL "positive-control usage was not observed"
@@ -56,7 +59,7 @@ if [ -z "$kid" ] || [ -z "$tok" ]; then
 fi
 bound="$(h2_bind "$tok")"
 
-egress_before="$(h2_egress_count)"
+egress_before="$(h2_egress_count)" || h2_verdict FAIL "egress observer failed"
 usage_before="$(h2_usage "$kid")"
 
 read -r verify_status verify_body <<<"$(h2_call "$bound" "verify-probe")"
@@ -66,7 +69,7 @@ case "$verify_body" in
   *) failures=$((failures+1)); detail="${detail}verify_body missing reason=not_granted: ${verify_body}; " ;;
 esac
 
-egress_after="$(h2_egress_count)"
+egress_after="$(h2_egress_count)" || h2_verdict FAIL "egress observer failed"
 [ "$egress_after" -eq "$egress_before" ] || { failures=$((failures+1)); detail="${detail}egress_delta=$((egress_after-egress_before))(want 0); "; }
 
 usage_after="$(h2_usage "$kid")"

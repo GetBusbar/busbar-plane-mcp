@@ -493,7 +493,10 @@ sys.stdout.write(src.replace(needle, os.environ['CARD']))" "${H2_WORKDIR}/config
 h2_egress_count() {
   kill -0 "${H2_UPSTREAM_PID:?upstream was not started}" 2>/dev/null || { echo 'egress observer is not alive' >&2; return 1; }
   [ -d "$H2_EGRESS_DIR" ] || { echo 'egress capture directory is missing' >&2; return 1; }
-  find "$H2_EGRESS_DIR" -type f -name '*.json' | wc -l | tr -d ' '
+  local count
+  count="$(find "$H2_EGRESS_DIR" -type f -name '*.json' | wc -l | tr -d ' ')" || return 1
+  [[ "$count" =~ ^[0-9]+$ ]] || { echo 'egress observer returned no count' >&2; return 1; }
+  printf '%s\n' "$count"
 }
 
 # h2_audit_max_seq -> the current top seq of the admin audit chain (0 if empty)

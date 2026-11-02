@@ -46,7 +46,7 @@ probe() {
     -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"probe_ping","arguments":{"label":"probe"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}'
 }
 
-egress_before="$(h2_egress_count)"
+egress_before="$(h2_egress_count)" || h2_verdict FAIL "egress observer failed"
 
 got_none="$(probe "")"
 [ "$got_none" = "401" ] || { failures=$((failures+1)); detail="${detail}no-credential->${got_none}(want 401); "; }
@@ -72,7 +72,7 @@ else
   [ "$got_right" = "200" ] || { failures=$((failures+1)); detail="${detail}right-audience->${got_right}(want 200); "; }
 fi
 
-egress_after="$(h2_egress_count)"
+egress_after="$(h2_egress_count)" || h2_verdict FAIL "egress observer failed"
 egress_delta="$((egress_after - egress_before))"
 # Exactly one egress request is expected: the ONE successful control probe above. Any egress beyond
 # that means one of the three refused probes reached the upstream before being refused.

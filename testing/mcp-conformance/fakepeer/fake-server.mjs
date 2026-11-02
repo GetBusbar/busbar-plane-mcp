@@ -141,16 +141,15 @@ let callCount = 0;
 // (`half-answer`, `truncate`): a later request writing to the ended stream is an unhandled
 // `ERR_STREAM_WRITE_AFTER_END` that kills this process mid-conversation -- and through the HTTP
 // mirror that death cascaded into its parent and blacked out every remaining seam verdict. The
-// TRANSCRIPT still records what would have been sent: the observation channel stays honest even
-// when the wire is deliberately dead.
+// transcript records only writes attempted on a live output, never hypothetical replies after EOF.
 function out(obj) {
+  if (process.stdout.writableEnded || process.stdout.destroyed) return;
   record('server->client', obj);
-  if (process.stdout.writableEnded) return;
   process.stdout.write(`${typeof obj === 'string' ? obj : JSON.stringify(obj)}\n`);
 }
 function raw(text) {
+  if (process.stdout.writableEnded || process.stdout.destroyed) return;
   record('server->client-raw', text);
-  if (process.stdout.writableEnded) return;
   process.stdout.write(text);
 }
 

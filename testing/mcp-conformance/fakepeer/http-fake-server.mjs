@@ -140,17 +140,11 @@ function observeRequest(control, req, body) {
  */
 function ensureChild(want) {
   const key = `${want.mode}\0${want.transcript}\0${want.credentialFile}`;
-  // A CHILD THAT DIED ON ITS OWN IS NOT A CHILD. `half-answer` ends its stdout mid-frame and the
-  // process then exits, and this condition used to read `!child.killed` alone -- which is only
-  // true of a child WE signalled, never of one that died -- so a self-dead child was reused for
-  // the rest of its mode window: every later request was written into a dead stdin (an
-  // asynchronous `error` on the pipe that nothing handled, which took THIS process down with it,
-  // taking every remaining CLI and seam verdict along) and reached no transcript. A hostile peer
-  // that silently stops observing is the vacuity trap `requireUpstreamWasReached` exists to
-  // refuse, one process further out. Respawning on death means every request meets a LIVE
-  // attacker in the armed mode -- `half-answer` then kills each request the way its contract
-  // says, rather than the first one only and nothing at all afterwards.
-  if (child && childKey === key && !child.killed && child.exitCode === null) return;
+  // Output EOF ends this peer's custody even if its process still reads stdin. A later
+  // request must meet a fresh attacker in the armed mode, including repeated half-answers.
+  if (child && childKey === key && !child.killed && child.exitCode === null
+      && !child.stdout.readableEnded && !child.stdout.destroyed
+      && !child.stdin.writableEnded && !child.stdin.destroyed) return;
   if (child) {
     for (const p of pending.splice(0)) p.abandon();
     const retiring = child;
@@ -168,6 +162,9 @@ function ensureChild(want) {
   // delivered to the requests in flight by the `end`/`exit` handlers below -- this handler
   // exists so the messenger survives the message.
   spawned.stdin.on('error', () => {});
+  spawned.on('error', (error) => {
+    process.stderr.write(`fake-peer spawn failed: ${error}\n`);
+  });
   child = spawned;
   // EVERY HANDLER IS GUARDED ON `child === spawned`, AND THAT GUARD IS LOAD-BEARING.
   //
@@ -184,13 +181,22 @@ function ensureChild(want) {
   spawned.stdout.on('end', () => {
     if (child !== spawned) return;               // a retired child's death is nobody's business
     const partial = lineBuf;
+    // Retire before failing requests: their callbacks may admit the next request, and late
+    // exit/end events from this child must never consume that new peer's pending queue.
+    child = null;
+    childKey = null;
     lineBuf = Buffer.alloc(0);
+    try { spawned.kill('SIGKILL'); } catch { /* already gone */ }
     const p = pending.shift();
     if (p) p.die(partial);
     for (const q of pending.splice(0)) q.die(Buffer.alloc(0));
   });
-  spawned.on('exit', () => {
+  // `close` follows stdout's final data/end; `exit` may precede their delivery.
+  spawned.on('close', () => {
     if (child !== spawned) return;
+    child = null;
+    childKey = null;
+    lineBuf = Buffer.alloc(0);
     for (const q of pending.splice(0)) q.die(Buffer.alloc(0));
   });
 }
