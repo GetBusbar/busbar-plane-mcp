@@ -292,8 +292,13 @@ fn failing_mcp_readiness_is_not_retried_and_preserves_its_exact_error() {
     let mut i: PlaneOpenIn = unsafe { std::mem::zeroed() };
     i.open.head = in_head();
     i.open.generation = 1;
-    i.open.settings =
-        Blob::of(&settings).with_fmt(busbar_contract::abi::mechanism::call::BLOB_JSON);
+    // The settings allocation remains alive through this synchronous OPEN call.
+    i.open.settings = Blob {
+        ptr: settings.as_ptr(),
+        len: settings.len(),
+        fmt: busbar_contract::abi::mechanism::call::BLOB_JSON,
+        flags: 0,
+    };
     let mut o: PlaneOpenOut = unsafe { std::mem::zeroed() };
     o.open.head = out_head();
     assert_eq!(p.open(&mut Frame::new(i, o)).0.outcome, Outcome::Ready);

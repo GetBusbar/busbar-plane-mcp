@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use busbar_contract::abi::hook::SignalEntry;
 use busbar_contract::abi::mechanism::call::{
-    AbiStr, Blob, DeadlineClass, Field, OutHead, Span, BLOB_OCTETS,
+    AbiStr, Blob, DeadlineClass, Field, OutHead, Outcome, Span, BLOB_OCTETS,
 };
 use busbar_contract::abi::mechanism::lifecycle::{slot as life, GenIn, RefreshIn};
 use busbar_contract::abi::mechanism::ticket::Ticket;
@@ -24,7 +24,8 @@ use busbar_contract::abi::mechanism::lifecycle::{ReleaseIn, ValidateIn};
 use busbar_contract::services::{Caller, Ran, RecordsList, Stored, UNSERVED};
 use busbar_plugin_loader::dispatch::kinds::plane::{OwnedSnapshot, Plane, ServedFacts};
 use busbar_plugin_loader::dispatch::{
-    in_head, now_ns, out_head, Called, Dispatcher, Done, Frame, InFrame, Lent, OutFrame, Plugin,
+    in_head, now_ns, out_head, Called, Dispatcher, Done, Frame, InFrame, Kind, Lent, OutFrame,
+    Plugin,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;

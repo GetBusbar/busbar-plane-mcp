@@ -338,5 +338,44 @@
     "Mutated synthetic unreported-class comparator",
     "Fake Probe helper OPEN/CLOSE/Outcome wrapper selfchecks that always answered hard-coded Ready/Pending; meaningful state/custody assertions transferred to actual private source and actual-door boundary tests."
   ],
-  "source_status": "COMPLETE_SOURCE_MIGRATION_NATIVE_AND_FINAL_GRAPH_QUALIFICATION_PENDING"
+  "source_status": "COMPLETE_SOURCE_MIGRATION_NATIVE_AND_FINAL_GRAPH_QUALIFICATION_PENDING",
+  "retired_source_tooling_scanners": [
+    {
+      "old": "plane-mcp/tests/invariance.rs",
+      "sha256": "957f2f8a08ecb4314823ef6e754eabbe55316bc3e94a56c8e4ac37a4c5557b67",
+      "tests": [
+        "the_crate_declares_no_features",
+        "no_item_is_conditionally_compiled",
+        "the_crate_forbids_unsafe_and_undocumented_items",
+        "the_source_contains_no_unsafe_block",
+        "the_manifest_names_only_what_a_plane_may_name",
+        "the_comments_cite_the_design_in_words",
+        "the_cadence_grammar_has_no_knob_that_slows_detection_or_delays_demotion"
+      ],
+      "disposition": "Retired source/tooling-only scanner gate under root KICKOFF STRICT2, explicitly directed by diet_planes following immutable81b native evidence. No domain/runtime assertion retired."
+    },
+    {
+      "old": "plane-mcp/tests/purity.rs",
+      "sha256": "c7fd3115ed246c48f086cc1ec45fb6565e843fbd9cfff6a61f8aef78bc1531af",
+      "tests": [
+        "the_plane_holds_no_interior_state",
+        "the_plane_performs_no_input_or_output",
+        "the_plane_names_no_kernel_side_crate",
+        "the_plane_names_no_money_and_no_decision",
+        "the_plane_satisfies_no_upstream_ask",
+        "no_code_routes_a_call_to_another_plane_or_implements_the_unserved_plane_traits"
+      ],
+      "disposition": "Retired source/tooling-only scanner gate under root KICKOFF STRICT2, explicitly directed by diet_planes following immutable81b native evidence. No domain/runtime assertion retired."
+    }
+  ],
+  "native_81b_evidence": {
+    "source": "81b46ba8026cd83fda6aa681cfd9303c7fa8db59",
+    "reported_by": "diet_planes native executor",
+    "actual_library_build": "PASS",
+    "logic_library_tests": "547 PASS",
+    "both_ways": "65 PASS",
+    "plugin_tests": "compile RED missing Kind/Outcome imports; successor fixes imports and synchronous borrowed settings Blob",
+    "source_scanners": "invariance7 PASS; purity5 PASS/1 FAIL on cfg(test) passive observer; root explicitly retires these source-only gates",
+    "qualification": "Immutable evidence preserved; descendant native qualification still required."
+  }
 }
