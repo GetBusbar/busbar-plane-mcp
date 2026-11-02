@@ -41,4 +41,4 @@ busbar-contract = { workspace = true, features = ["test-support"] }
 # (the process carrier of the `transport: stdio` need) at the rev busbar's dist links at the pin.
 busbar-transport-http = { workspace = true }
 busbar-transport-tcp = { workspace = true }
-busbar-transport-stdio = { git = "https://github.com/GetBusbar/busbar-transport-stdio", rev = "79beea2100f04a38e13008539e7f2e4ad2a94073" }
+busbar-transport-stdio = { git = "https://github.com/GetBusbar/busbar-transport-stdio", rev = "f12b4f1b52c9088fe313a640c1e05325983d7b62" }
