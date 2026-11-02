@@ -239,3 +239,24 @@ fn local_program_does_not_change_existing_network_pin_grammar_or_pubkey_refusal(
     assert!(error.contains("pinned_pubkey"), "{error}");
     assert!(error.contains("authenticates nothing"), "{error}");
 }
+
+#[test]
+fn stdio_cannot_claim_a_tls_identity_without_a_tls_connection() {
+    // A protocol-only development registration remains readable, but has no authenticity root.
+    let mut dev = local_section();
+    dev["local"]["pin"] = json!({ "mechanism": "unpinned" });
+    read(&dev).expect("an explicitly unpinned stdio fixture remains registrable");
+    for mechanism in ["cert_spki", "mtls"] {
+        let mut section = dev.clone();
+        section["local"]["pin"] = json!({ "mechanism": mechanism, "key": "sha256/PIN==" });
+        if mechanism == "mtls" {
+            section["local"]["client_identity"] = json!({
+                "cert": { "env": "BUSBAR_LOCAL_CERT" },
+                "key": { "env": "BUSBAR_LOCAL_KEY" }
+            });
+        }
+        let error = refuses(&section);
+        assert!(error.contains("stdio"), "{error}");
+        assert!(error.contains("TLS"), "{error}");
+    }
+}
