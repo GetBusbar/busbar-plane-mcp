@@ -11,7 +11,7 @@ use busbar_contract::abi::mechanism::call::{Blob, InHead, OutHead, Outcome, Span
 use busbar_contract::abi::mechanism::lifecycle::{
     slot, DriveIn, GenIn, OpenIn, OpenOut, RefreshIn,
 };
-use busbar_contract::abi::plane::{PlaneCancelIn, PlaneCancelOut, PlaneRefreshOut};
+use busbar_contract::abi::plane::{PlaneCancelIn, PlaneCancelOut, PlaneLifecycle, PlaneRefreshOut};
 use busbar_contract::abi::sdk::capture::{CaptureHome, CaptureRetention, CaptureSlot};
 use busbar_contract::abi::sdk::completion_retirement::{self as wire, Capability};
 use busbar_contract::abi::sdk::door::{blank_in, blank_out, kind_op, Lifecycle};
@@ -323,7 +323,8 @@ impl Fixture {
             ..Blob::ZERO
         };
         let refreshed = reply::call(
-            kind_op::<Lifecycle, Safe<Refresh<McpDoor>>, Capture, { slot::REFRESH }>().unwrap(),
+            kind_op::<PlaneLifecycle, Safe<Refresh<McpDoor>>, Capture, { slot::REFRESH }>()
+                .unwrap(),
             self.instance,
             &input,
             blank_out::<PlaneRefreshOut>(),
@@ -349,7 +350,7 @@ impl Fixture {
         };
         input.unit = 1;
         let cancelled = reply::call(
-            kind_op::<Lifecycle, Safe<Cancel>, Capture, { slot::CANCEL }>().unwrap(),
+            kind_op::<PlaneLifecycle, Safe<Cancel>, Capture, { slot::CANCEL }>().unwrap(),
             self.instance,
             &input,
             blank_out::<PlaneCancelOut>(),
