@@ -146,7 +146,7 @@ fn the_issued_set_is_what_production_constructs() {
         issued.insert(verb.method().to_string());
     }
     for (method, needle) in [
-        ("tools/call", "::tools_call("),
+        ("tools/call", "::tools_call_id("),
         ("tools/list", "jsonrpc::tools_list("),
     ] {
         assert!(

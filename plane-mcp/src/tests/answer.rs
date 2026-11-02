@@ -118,7 +118,7 @@ fn discover_counts_what_the_caller_reaches_and_names_the_revisions() {
 #[test]
 fn discover_hides_the_same_quarantined_tools_as_tools_list() {
     let cfg = crate::statement::read_tools_section(
-        br#"{"only":{"url":"https://mcp.example","tools_allow":{"hidden":{}}}}"#,
+        br#"{"only":{"url":"https://mcp.example","pin":{"mechanism":"unpinned"},"tools_allow":{"hidden":{}}}}"#,
     )
     .unwrap();
     let cat = Catalogue::build(1, &cfg);
@@ -140,7 +140,7 @@ fn discovery_carries_namespaced_server_info_metadata() {
 
 #[test]
 fn resources_without_display_names_still_render_protocol_names() {
-    let cfg = crate::statement::read_tools_section(br#"{"only":{"url":"https://mcp.example","resources_allow":{"file:///readme":{"text":"x"}},"resource_templates_allow":{"file:///{id}":{"text":"{id}"}}}}"#).unwrap();
+    let cfg = crate::statement::read_tools_section(br#"{"only":{"url":"https://mcp.example","pin":{"mechanism":"unpinned"},"resources_allow":{"file:///readme":{"text":"x"}},"resource_templates_allow":{"file:///{id}":{"text":"{id}"}}}}"#).unwrap();
     let cat = Catalogue::build(1, &cfg);
     let resources: Value =
         serde_json::from_slice(&cat.resources_list(&json!(1), &everyone)).unwrap();
