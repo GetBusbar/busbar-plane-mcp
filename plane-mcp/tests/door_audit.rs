@@ -30,6 +30,9 @@ mod invoke_projection_custody;
 #[path = "support/completion_retirement_host.rs"]
 mod completion_retirement_host;
 
+#[path = "support/inspection_wire.rs"]
+mod inspection_wire;
+
 #[path = "support/legacy_reconnect.rs"]
 mod legacy_reconnect;
 
@@ -904,6 +907,11 @@ struct Door {
     retirement: std::cell::RefCell<completion_retirement_host::Host>,
 }
 
+/// The host's actual line-carrier IDs, scoped to the live fixture instance. These tests script
+/// no carrier-close operation; refusing an MCP message does not close its transport session.
+static CARRIER_SESSIONS: Mutex<std::collections::BTreeMap<usize, std::collections::BTreeSet<u64>>> =
+    Mutex::new(std::collections::BTreeMap::new());
+
 /// The section: a registration that requires a session, and one that speaks the stateless revision.
 const SECTION: &str = r#"{
     "fs": {"url": "https://up.example/sess", "pin": {"mechanism": "unpinned"}, "verify_ttl": "1h", "tools_allow": {"read_file": {}}},
@@ -986,25 +994,45 @@ impl Door {
     /// The kernel's tick, on the driver ticket.
     fn tick(&self) {
         let now = TICKS.fetch_add(1, Ordering::Relaxed);
-        let i = TickIn {
+        let mut i = TickIn {
             head: head::<TickIn>(life::TICK, DRIVER),
             now_ns: now,
         };
-        let mut o = TickOut {
-            head: out_head::<TickOut>(),
-            next_tick_ns: 0,
-        };
+        let mut extensions = inspection_wire::input(1, None);
         let f = lifecycle().tick.expect("tick");
-        // SAFETY: the slot is the door's own, called with an in and an out of the types it declares.
-        #[allow(unused_unsafe)]
-        let ret = unsafe {
-            f(
-                self.instance,
-                std::ptr::from_ref(&i).cast(),
-                std::ptr::from_mut(&mut o).cast(),
-            )
-        };
-        assert_eq!(ret.outcome(), Outcome::Ready);
+        loop {
+            i.head.extensions = octets(&extensions);
+            let mut o = TickOut {
+                head: out_head::<TickOut>(),
+                next_tick_ns: 0,
+            };
+            // SAFETY: this live instance receives the TICK slot's exact frames. The capability
+            // and any exact inspection reply remain borrowed for the entire synchronous call.
+            let ret = unsafe {
+                f(
+                    self.instance,
+                    std::ptr::from_ref(&i).cast(),
+                    std::ptr::from_mut(&mut o).cast(),
+                )
+            };
+            let request = inspection_wire::request(&o.head);
+            // Copy the request before releasing the output lease; no plugin bytes are retained.
+            inspection_wire::release(self.instance, &o.head, lifecycle());
+            let Some(request) = request else {
+                assert_eq!(ret.outcome(), Outcome::Ready);
+                break;
+            };
+            assert_eq!(ret.outcome(), Outcome::Pending);
+            let receipt = inspection_wire::carriers(&request, |id| {
+                CARRIER_SESSIONS
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .get(&(self.instance as usize))
+                    .is_some_and(|sessions| sessions.contains(&id))
+            });
+            extensions = inspection_wire::input(1, Some(&receipt));
+            i.head.flags |= inspection_wire::RESUME;
+        }
     }
 
     /// The driver ticket woke: `drive`.
@@ -1447,6 +1475,13 @@ impl Door {
 
     /// A line of carrier session `session` arriving as `unit`.
     fn line(&self, unit: u64, session: u64, body: &[u8]) -> Arrived {
+        // The transport supplied this actual live carrier before the plane judges its message.
+        CARRIER_SESSIONS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(self.instance as usize)
+            .or_default()
+            .insert(session);
         let session = session.to_string();
         let fields = [Field {
             name: str_of(busbar_contract::abi::host::service::CARRIER_SESSION_FIELD),

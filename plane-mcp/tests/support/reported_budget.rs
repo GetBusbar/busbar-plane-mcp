@@ -44,7 +44,18 @@ fn a_task_budget_refusal_keeps_the_kernels_status_and_budget_reason() {
         )
     };
     assert_eq!(result.outcome(), Outcome::Ready);
-    assert_eq!(output.status, 429);
+    // The refusal ABI delegates status 0 to the kernel's input status; this fixture applies
+    // the same mapping as the kernel rather than treating delegation as a wire status.
+    assert_eq!(
+        output.status, 0,
+        "the plane preserves the kernel's budget status"
+    );
+    let wire_status = if output.status == 0 {
+        input.status
+    } else {
+        output.status
+    };
+    assert_eq!(wire_status, 429);
     let body: Value = serde_json::from_slice(&reply[..output.reply_written as usize]).unwrap();
     assert_eq!(body["id"], 30);
     assert_eq!(body["error"]["data"]["reason"], "budget_exhausted");

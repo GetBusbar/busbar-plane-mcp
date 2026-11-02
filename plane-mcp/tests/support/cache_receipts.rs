@@ -2,7 +2,10 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 use super::*;
-use busbar_contract::abi::host::service::TrustSightIn;
+use busbar_contract::abi::host::service::{
+    ItemSpan, TrustSightIn, TrustStateIn, KEY_APPROVED, KEY_DRIFTED, KEY_NEW, KEY_SAME,
+};
+use busbar_contract::abi::mechanism::call::Span;
 use busbar_contract::abi::mechanism::ticket::CompletionHandle;
 
 static SIGHT_FAILS: AtomicBool = AtomicBool::new(false);
@@ -30,19 +33,97 @@ pub(super) fn sighted(i: TrustSightIn, out: *mut ServiceOut) -> RawOutcome {
 
 pub(super) extern "C" fn trust_state(
     _: HostCtx,
-    _: *const c_void,
+    input: *const c_void,
     out: *mut ServiceOut,
 ) -> RawOutcome {
-    answer(
-        out,
-        if STATE_FAILS.load(Ordering::SeqCst) {
-            Outcome::Failed
-        } else {
-            Outcome::Ready
-        },
-        0,
-        0,
-    )
+    if STATE_FAILS.load(Ordering::SeqCst) {
+        return answer(out, Outcome::Failed, 0, 0);
+    }
+    // SAFETY: the SDK lends the exact TrustStateIn and its writable buffers for this call.
+    let input = unsafe { input.cast::<TrustStateIn>().read() };
+    let (state, bytes, spans) = trust_rows();
+    let short = bytes.len() > input.into.cap || spans.len() > input.into.spans_cap;
+    let outcome = if short {
+        Outcome::Failed
+    } else {
+        Outcome::Ready
+    };
+    // SAFETY: the SDK's buffers have the capacities checked above. Empty vectors copy no bytes;
+    // the ServiceOut is its exact declared frame, live and writable throughout this crossing.
+    unsafe {
+        if !short {
+            if !bytes.is_empty() {
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), input.into.buf, bytes.len());
+            }
+            if !spans.is_empty() {
+                std::ptr::copy_nonoverlapping(spans.as_ptr(), input.into.spans, spans.len());
+            }
+        }
+        out.write(ServiceOut {
+            size: std::mem::size_of::<ServiceOut>() as u32,
+            outcome: RawOutcome::of(outcome),
+            value: state,
+            len: if short { 0 } else { bytes.len() as u64 },
+            items: if short { 0 } else { spans.len() as u64 },
+            needed_bytes: if short { bytes.len() as u64 } else { 0 },
+            needed_items: if short { spans.len() as u64 } else { 0 },
+            ..ServiceOut::ZERO
+        });
+    }
+    RawOutcome::of(outcome)
+}
+
+/// Render only approvals and sightings the existing mock book actually holds. Reading this view
+/// never creates an approval; no book means no known items and an unapproved counterparty.
+fn trust_rows() -> (u64, Vec<u8>, Vec<ItemSpan>) {
+    let held = book();
+    let Some(book) = held.as_ref() else {
+        return (KEY_NEW, Vec::new(), Vec::new());
+    };
+    let names: std::collections::BTreeSet<_> =
+        book.approved.keys().chain(book.items.keys()).collect();
+    let mut bytes = Vec::new();
+    let mut spans = Vec::new();
+    let mut state = KEY_APPROVED;
+    for name in names {
+        let approved = book.approved.get(name);
+        let seen = book.items.get(name);
+        let (word, item_state) = match (approved, seen) {
+            (None, _) => ("new", KEY_NEW),
+            (Some(_), None) => ("approved", KEY_APPROVED),
+            (Some(approved), Some(seen)) if approved == seen => ("same", KEY_SAME),
+            (Some(_), Some(_)) => ("drifted", KEY_DRIFTED),
+        };
+        if item_state == KEY_DRIFTED || state == KEY_DRIFTED {
+            state = KEY_DRIFTED;
+        } else if item_state == KEY_NEW || state == KEY_NEW {
+            state = KEY_NEW;
+        } else if item_state == KEY_SAME {
+            state = KEY_SAME;
+        }
+        let key = Span {
+            offset: bytes.len() as u32,
+            len: name.len() as u32,
+        };
+        bytes.extend_from_slice(name.as_bytes());
+        let value_start = bytes.len();
+        bytes.extend_from_slice(word.as_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(approved.map_or("", String::as_str).as_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(seen.map_or("", String::as_str).as_bytes());
+        spans.push(ItemSpan {
+            key,
+            value: Span {
+                offset: value_start as u32,
+                len: (bytes.len() - value_start) as u32,
+            },
+        });
+    }
+    if spans.is_empty() {
+        state = KEY_NEW;
+    }
+    (state, bytes, spans)
 }
 
 pub(super) extern "C" fn wake(_: HostCtx, ticket: Ticket) {

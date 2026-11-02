@@ -1038,7 +1038,7 @@ pub fn validate_server(name: &str, def: &McpServerDefCfg) -> Result<(), String> 
                      cannot see would make both silently miss. Write it without the spaces."
                 ));
             }
-            // RFC 6749 §3.3: each published name becomes one token in the exchange's scope list.
+            // OAuth scope-token grammar: each published name becomes one token in the exchange's scope list.
             if def.token_exchange.is_some()
                 && !publish_as
                     .bytes()

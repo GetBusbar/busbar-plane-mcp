@@ -47,7 +47,19 @@ fn a_held_stdio_place_wakes_queued_work_at_its_existing_ask_deadline() {
         let ask=serde_json::to_vec(&json!({"jsonrpc":"2.0","id":900,"method":"elicitation/create","params":{"message":"sure?"}})).unwrap();
         let mut far = Given::far(ALICE, 200, &ask);
         far.head.push(("generation", "1"));
-        d.piece(2, &far);
+        let asked = d.piece(2, &far);
+        assert_eq!(
+            asked.status,
+            200,
+            "the child ask was actually relayed: {}",
+            asked.text()
+        );
+        assert_eq!(
+            asked.json()["status"],
+            "input_required",
+            "the child ask parks its task: {}",
+            asked.text()
+        );
         if queued_before_ask {
             assert!(WOKEN.lock().unwrap_or_else(PoisonError::into_inner).contains(&Ticket {slot:4,generation:1}),"a call already queued before the hold was installed is woken to learn its earlier timer");
         }
