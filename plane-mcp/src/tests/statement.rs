@@ -44,6 +44,7 @@ fn text(a: AbiStr) -> String {
         "pinned_pubkey",
         "cert_spki",
         "mtls",
+        "local_program",
         "unpinned",
         crate::tool_records::KIND_CALL,
         crate::tool_records::KIND_DEMOTION,

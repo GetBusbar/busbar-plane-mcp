@@ -1,5 +1,6 @@
 use super::*;
 use crate::tool_program::{Exchanged, ProgramConn};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use busbar_contract::abi::host::conn::connector::{ReplyPiece, REPLY_BODY, REPLY_HEAD};
 use busbar_contract::abi::sdk::conn::Replied;
 use busbar_contract::abi::transport::FrameSpan;
@@ -8,6 +9,7 @@ use std::task::Poll;
 
 #[derive(Default)]
 struct Child {
+    instance: u64,
     generation: u64,
     next: u64,
     streams: BTreeMap<u64, (bool, std::collections::VecDeque<Vec<u8>>, bool)>,
@@ -36,12 +38,13 @@ impl ProgramConn for Conn {
     ) -> Poll<Result<Replied, String>> {
         let mut c = self.0.lock().unwrap();
         let generation = c.generation.max(1);
+        let instance = c.instance.max(1);
         let (head, inbox, failed) = c.streams.get_mut(&stream).unwrap();
         let (kind, bytes) = if *head {
             *head = false;
             (
                 REPLY_HEAD,
-                format!("generation: {generation}\r\n").into_bytes(),
+                format!("generation: {generation}\r\nprogram-instance: {instance}\r\nprogram-identity: {}\r\n", STANDARD.encode("/usr/bin/child")).into_bytes(),
             )
         } else if *failed {
             return Poll::Ready(Err("tools/list transport failed".into()));
@@ -53,6 +56,7 @@ impl ProgramConn for Conn {
         buf[..bytes.len()].copy_from_slice(&bytes);
         *slot = ReplyPiece {
             kind,
+            code: if kind == REPLY_HEAD { 200 } else { 0 },
             fields: if kind == REPLY_HEAD {
                 FrameSpan {
                     offset: 0,
@@ -96,7 +100,7 @@ impl ProgramConn for Conn {
 fn list_exchange(id: u64) -> ProgramExchange {
     ProgramExchange::new(
         "srv",
-        0,
+        crate::statement::NEED_PROGRAM,
         vec![(
             crate::client::jsonrpc::tools_list("", id, None).body,
             Some(id),
@@ -284,6 +288,7 @@ fn exact_generations_and_stale_completions_do_not_regreet_the_latest_child() {
     assert!(drive(&plane, &conn, &mut older, 1).is_pending());
     {
         let mut child = conn.0.lock().unwrap();
+        child.instance = 2; // A replacement Member starts a distinct child generation space.
         child.generation = 3;
         child.hold_initialized = false;
     }
@@ -291,12 +296,21 @@ fn exact_generations_and_stale_completions_do_not_regreet_the_latest_child() {
         drive(&plane, &conn, &mut list_exchange(8), 2),
         Poll::Ready(Ok(_))
     ));
-    assert_eq!(plane.greeted.get(&"srv".to_string()), Some(3));
+    let latest = plane.greeted.get(&"srv".to_string()).unwrap();
+    assert_eq!(
+        plane
+            .program_versions
+            .with_all(|all| all.get(&()).and_then(|v| v.observed("srv", latest))),
+        Some(crate::program_trust::Observed {
+            instance: 2,
+            generation: 3
+        })
+    );
     assert!(matches!(
         drive(&plane, &conn, &mut older, 1),
         Poll::Ready(Ok(_))
     ));
-    assert_eq!(plane.greeted.get(&"srv".to_string()), Some(3));
+    assert_eq!(plane.greeted.get(&"srv".to_string()), Some(latest));
     let greeted = initializes(&conn);
     assert!(matches!(
         drive(&plane, &conn, &mut list_exchange(9), 3),
