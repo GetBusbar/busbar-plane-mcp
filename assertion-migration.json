@@ -377,5 +377,10 @@
     "plugin_tests": "compile RED missing Kind/Outcome imports; successor fixes imports and synchronous borrowed settings Blob",
     "source_scanners": "invariance7 PASS; purity5 PASS/1 FAIL on cfg(test) passive observer; root explicitly retires these source-only gates",
     "qualification": "Immutable evidence preserved; descendant native qualification still required."
+  },
+  "network_resume_oracle": {
+    "old": "a354 both_ways resumed(fold, networked=true, dialing_steps=[]) requires >0 actual RESUME on each leg",
+    "new": "actual_mcp_cases captures held.resumes before product operations and asserts final > before independently for linked and dropped legs",
+    "scope": "Actual per-instance SDK resume counters; preserves blocking/no-Pending regression oracle in addition to exact first-crossing assertions. Native descendant execution pending."
   }
 }

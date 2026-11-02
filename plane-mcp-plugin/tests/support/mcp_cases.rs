@@ -1358,6 +1358,7 @@ fn actual_mcp_cases(dropped: bool) -> BTreeMap<String, String> {
     };
     let c = &carried;
     let held = p.inner.clone();
+    let resumes_before = held.resumes.load(std::sync::atomic::Ordering::SeqCst);
     let count = || {
         let resumed = held.resumes.load(std::sync::atomic::Ordering::SeqCst);
         held.crossings.load(std::sync::atomic::Ordering::SeqCst) - resumed
@@ -1728,6 +1729,11 @@ fn actual_mcp_cases(dropped: bool) -> BTreeMap<String, String> {
     if let Some(driver) = driver {
         d.recycle(driver);
     }
+    assert!(
+        held.resumes.load(std::sync::atomic::Ordering::SeqCst) > resumes_before,
+        "actual networked MCP {} leg must resume at least one pending operation",
+        if dropped { "dropped" } else { "linked" },
+    );
     let at = |label: &str| r.get(label).expect(label).as_str();
     let str_of = |v: &Value, what: &str| String::from_utf8(text(v, what)).expect("UTF-8 input");
     for (label, answer) in &r {
