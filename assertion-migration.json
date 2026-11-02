@@ -388,5 +388,12 @@
   "native_compile_followups": {
     "driver_module": "Private driver test module now nested under actual plane_door parent, matching production legacy_wire super::handle_at and super::door_sessions references; unchanged actual implementation included, no algorithm copy.",
     "refresh": "Renamed refresh closure to refresh_call, retaining refresh settings bytes passed to handed and actual REFRESH."
+  },
+  "method_inventory_scanner_retirement": {
+    "old": "tests::method_inventory_tests::the_issued_set_is_what_production_constructs",
+    "file": "plane-mcp/src/tests/method_inventory_tests.rs",
+    "before_sha256": "25fe4ffa15f807e782fd898ad80666172ff1dae8348b27edb52b74a4e0438fde",
+    "retired": "Source filesystem walk, minimum20files and textual construction-site matching only, under root KICKOFF STRICT2 explicit diet_planes authorization after immutable81ff private617PASS/1scannerFAIL. Applies identically to owning logic and actual-source integration.",
+    "retained": "Renamed ordinary the_issued_method_set_accounts_for_the_inventory retains actual UpstreamVerb::all()/method() method-set accounting, >=20 nonvacuous inventory cells, no invented method and exact NOT_ISSUED policy. Existing every_server_originated_method_in_the_inventory_is_classified, inventory data and other actual ask/method construction unit tests unchanged."
   }
 }

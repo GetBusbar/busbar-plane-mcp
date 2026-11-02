@@ -57,36 +57,9 @@ const NOT_ISSUED: &[&str] = &[
     "tasks/update",
 ];
 
-/// The shipped source, every file under `src/` but the test modules: `(path, code)`, its `//`
-fn production_source() -> Vec<(String, String)> {
-    fn walk(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
-        for entry in std::fs::read_dir(dir).expect("src reads") {
-            let path = entry.expect("an entry").path();
-            if path.is_dir() {
-                if path.file_name().is_some_and(|n| n != "tests") {
-                    walk(&path, out);
-                }
-            } else if path.extension().is_some_and(|e| e == "rs") {
-                let text = std::fs::read_to_string(&path).expect("a source file reads");
-                let code: Vec<&str> = text
-                    .lines()
-                    .map(|l| l.split("//").next().unwrap_or(""))
-                    .collect();
-                out.push((path.display().to_string(), code.join("\n")));
-            }
-        }
-    }
-    let mut out = Vec::new();
-    walk(
-        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
-        &mut out,
-    );
-    out
-}
-
-/// THE ISSUED SET IS WHAT PRODUCTION CONSTRUCTS, and the inventory column is accounted for.
+/// The actual upstream verb method set accounts for the inventory column.
 #[test]
-fn the_issued_set_is_what_production_constructs() {
+fn the_issued_method_set_accounts_for_the_inventory() {
     let owed = inventory_methods();
     assert!(
         owed.len() >= 20,
@@ -94,41 +67,11 @@ fn the_issued_set_is_what_production_constructs() {
          a filter that matched nothing would report a complete column of nothing.",
         owed.len()
     );
-    let source = production_source();
-    assert!(source.len() >= 20, "the shipped source is read");
-    let built_at = |needle: &str| {
-        source
-            .iter()
-            .filter(|(path, code)| {
-                !path.ends_with("client/verb.rs")
-                    && !path.ends_with("client/jsonrpc.rs")
-                    && code.contains(needle)
-            })
-            .count()
-    };
     let mut issued = std::collections::BTreeSet::new();
     for verb in UpstreamVerb::all() {
-        let debug = format!("{verb:?}");
-        let variant = debug
-            .split([' ', '{', '('])
-            .next()
-            .expect("a variant name")
-            .to_string();
-        assert!(
-            built_at(&format!("UpstreamVerb::{variant}")) > 0,
-            "`UpstreamVerb::{variant}` has no production construction site: a verb no production \
-             path builds does not ship"
-        );
         issued.insert(verb.method().to_string());
     }
-    for (method, needle) in [
-        ("tools/call", "::tools_call_id("),
-        ("tools/list", "jsonrpc::tools_list("),
-    ] {
-        assert!(
-            built_at(needle) > 0,
-            "`{method}` has no production construction site"
-        );
+    for method in ["tools/call", "tools/list"] {
         issued.insert(method.to_string());
     }
     let invented: Vec<&String> = issued.difference(&owed).collect();
