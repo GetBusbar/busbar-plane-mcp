@@ -305,7 +305,7 @@ impl<D: ReplayData> ReplayTable<D> {
 
     /// Finds `id` for `owner`, refreshing its idle clock. Unknown, expired and foreign sessions all
     /// read `None`.
-    fn find(&mut self, id: &str, owner: &Owner, now_ms: u64) -> Option<&mut Session> {
+    fn find(&mut self, id: &str, owner: &Owner, now_ms: u64) -> Option<&mut Session<D>> {
         let last_ms = self.sessions.get(id)?.last_ms;
         let expired = now_ms.saturating_sub(last_ms) >= self.bounds.idle_ms;
         if expired {

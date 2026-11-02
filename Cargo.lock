@@ -410,6 +410,7 @@ dependencies = [
  "jsonschema",
  "serde",
  "serde_json",
+ "tracing",
  "url",
 ]
 

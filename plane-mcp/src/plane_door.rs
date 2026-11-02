@@ -2146,7 +2146,7 @@ fn admit_task_send(
     let schema = entry
         .input_schema
         .clone()
-        .unwrap_or_else(|| json!({"type":"object"}));
+        .unwrap_or_else(|| serde_json::json!({"type":"object"}));
     crate::argguard::guard(&schema, arguments, |dest| {
         let h = door_tasks::handle(ticket, &mut unit.issued, &mut None);
         plane

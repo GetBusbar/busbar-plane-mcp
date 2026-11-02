@@ -12,7 +12,9 @@ use std::sync::Mutex;
 use std::task::Poll;
 
 use crate::client::jsonrpc::ServerRequestGrants;
-use crate::tool_program::{list_id, AskOwner, Exchanged, Peer, ProgramConn, ProgramExchange};
+use crate::tool_program::{
+    list_id, AskOwner, Correlator, Exchanged, Peer, ProgramConn, ProgramExchange,
+};
 use busbar_contract::abi::host::conn::connector::{ReplyPiece, REPLY_BODY, REPLY_HEAD};
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::conn::Replied;
@@ -516,7 +518,7 @@ fn an_exhausted_exchange_keeps_settling_its_pending_close_before_returning_the_e
 fn a_resource_update_announces_without_forcing_an_unrelated_tools_list_fetch() {
     let mut corr = Correlator::default();
     let mut peer = Door::default();
-    let note = bytes(
+    let note = crate::codec::json(
         &json!({"jsonrpc":"2.0","method":"notifications/resources/updated","params":{"uri":"file:///readme"}}),
     );
     assert!(corr.take(&note, 7, "srv", 1, &mut peer).unwrap().is_none());
