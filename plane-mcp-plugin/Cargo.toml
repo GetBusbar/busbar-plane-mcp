@@ -32,9 +32,9 @@ busbar-plugin-loader = { workspace = true }
 busbar-test-kit = { workspace = true }
 # The door witness reads the plane's answers as JSON documents.
 serde_json = { workspace = true }
-# The SHARED HOST-SERVICES DOUBLE (`services-double`, dev-only): the door witness binds a clock on
-# its loader host through it.
-busbar-contract = { workspace = true, features = ["services-double"] }
+# Manual ABI fixtures use the contract test support; the door witness binds its clock through
+# the shared host-service double in busbar-test-kit, dev-only.
+busbar-contract = { workspace = true, features = ["test-support"] }
 # THE SUITE'S HOST CONNECTOR (`tests/support/conformance_host.rs`, `conformance_host!`, mounted by
 # `tests/conformance.rs`): the transport doors this plugin's needs name, which the test kit's host
 # loads and opens as the root does: `tcp` and `http` at the revs the workspace pins, and `stdio`
