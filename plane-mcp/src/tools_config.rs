@@ -933,6 +933,14 @@ impl McpServerDefCfg {
 /// A configured-launch root is confined to a host-owned stdio program. The public material names
 /// only its path; the host privately enforces arguments, environment and explicit working directory.
 fn validate_local_program(at: &str, def: &McpServerDefCfg) -> Result<(), String> {
+    if def.transport.is_some_and(ServerTransport::spawns_child)
+        && matches!(
+            def.pin.mechanism,
+            McpPinMechanism::CertSpki | McpPinMechanism::ClientCertBinding
+        )
+    {
+        return Err(format!("{at}: stdio has no TLS connection to authenticate `cert_spki` or `mtls`; use `local_program` with its actual host launch receipt, or explicitly `unpinned` without approval"));
+    }
     if def.pin.mechanism != McpPinMechanism::LocalProgram {
         return Ok(());
     }
@@ -977,8 +985,8 @@ pub fn validate_server(name: &str, def: &McpServerDefCfg) -> Result<(), String> 
         return Err(format!("{at}: `pinned_pubkey` authenticates nothing in this build because no MCP manifest signature is verified; use `cert_spki` or `mtls` to authenticate the far end"));
     }
 
-    validate_endpoint(&at, def)?;
     validate_local_program(&at, def)?;
+    validate_endpoint(&at, def)?;
     def.sampling_bounds.validate(&at)?;
     validate_client_identity(&at, def)?;
 

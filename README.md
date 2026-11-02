@@ -54,7 +54,8 @@ and refuses a malformed one, but keeps the endpoint `open` read.
 A `transport: stdio` server can use `pin.mechanism: local_program`. Its `pin.key` must equal
 its configured absolute `command` path exactly, and it must configure an explicit absolute
 `cwd`. This mechanism is confined to the host-owned program need; an HTTP registration cannot
-use it. The host runs the command directly with the admitted arguments and a cleared environment,
+use it. Stdio refuses `cert_spki` and `mtls` because no TLS handshake authenticates their keys.
+The host runs the command directly with the admitted arguments and a cleared environment,
 resolves only its admitted environment references, and applies the admitted working directory.
 
 The host supplies the first successful lease head only after it has observed a live program
