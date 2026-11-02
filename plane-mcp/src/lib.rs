@@ -30,6 +30,7 @@ mod line;
 mod local_output;
 mod local_renderer;
 mod plane_door;
+mod program_trust;
 mod statement;
 mod tool_arrival;
 mod tool_claims;

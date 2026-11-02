@@ -46,7 +46,7 @@ fn linked(d: &Dispatcher) -> Plugin<Plane> {
 /// `pinned_pubkey` authenticates nothing in this build: no manifest signature is verified, so
 /// it is neither an authenticity root nor a far-end key pin (SEC-PIN).
 #[test]
-fn every_far_end_pin_mechanism_is_a_peer_key_pin_the_host_seals() {
+fn tls_roots_pin_peer_keys_and_local_program_has_its_own_launch_root() {
     let d = Dispatcher::new(DispatchConfig::default());
     let served = linked(&d).served();
     let pin = served
@@ -60,13 +60,22 @@ fn every_far_end_pin_mechanism_is_a_peer_key_pin_the_host_seals() {
         .filter(|m| m.root)
         .map(|m| m.token)
         .collect();
-    assert_eq!(roots, ["cert_spki", "mtls"]);
+    assert_eq!(roots, ["cert_spki", "mtls", "local_program"]);
     let unsupported = pin
         .mechanisms
         .iter()
         .find(|m| m.token == "pinned_pubkey")
         .expect("the refused mechanism remains named for config diagnostics");
     assert!(!unsupported.root && !unsupported.peer_key);
+    let program = pin
+        .mechanisms
+        .iter()
+        .find(|m| m.token == "local_program")
+        .unwrap();
+    assert!(
+        program.root && !program.peer_key,
+        "a local launch is not a TLS key"
+    );
     let peer: Vec<&str> = pin
         .mechanisms
         .iter()

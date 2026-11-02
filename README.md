@@ -26,9 +26,10 @@ Off by default: a document that writes neither section below never uses the plan
 - `tools:` (the section the plane declares): one entry per registered MCP server, keyed by its id,
   and two reserved keys.
   - `<id>.url` or `<id>.transport: stdio` with `command`, `args`, `env`, `cwd`: where the server is.
-  - `<id>.pin`: `cert_spki` or `mtls` authenticates the server's certificate key. `unpinned`
+  - `<id>.pin`: `cert_spki` or `mtls` authenticates the server's certificate key.
+    `local_program` identifies a host-launched stdio program as described below. `unpinned`
     declares no authenticity root and cannot approve tools. `pinned_pubkey` is refused because
-    this build verifies no MCP manifest signature; use `cert_spki` or `mtls` instead.
+    this build verifies no MCP manifest signature.
   - `<id>.client_identity`: busbar's client certificate and key for that server (secret references).
   - `<id>.tools_allow`, `prompts_allow`, `resources_allow`, `resource_templates_allow`: what it may
     publish.
@@ -46,6 +47,31 @@ Off by default: a document that writes neither section below never uses the plan
 
 An unknown key in either section is refused. `validate` judges both; a reload judges `mcp:` again
 and refuses a malformed one, but keeps the endpoint `open` read.
+
+
+### Host-launched stdio identity
+
+A `transport: stdio` server can use `pin.mechanism: local_program`. Its `pin.key` must equal
+its configured absolute `command` path exactly, and it must configure an explicit absolute
+`cwd`. This mechanism is confined to the host-owned program need; an HTTP registration cannot
+use it. The host runs the command directly with the admitted arguments and a cleared environment,
+resolves only its admitted environment references, and applies the admitted working directory.
+
+The host supplies the first successful lease head only after it has observed a live program
+handle from a successful spawn under that same ticket and checked supplier grant. The plane
+requires one canonical `generation`, `program-instance`, and base64 `program-identity` field
+from that head before sending a greeting, observing tools, or forwarding a call. The identity
+contains only the configured command path. The private grant binds arguments, environment,
+and working directory; no public recipe hash or secret fingerprint is emitted. Missing,
+duplicate, unsuccessful, noncanonical, mismatched, repeated, or retired receipts refuse the
+exchange. Program incarnations are nonzero and never reused; changing the launch recipe creates
+a new incarnation, so greeting and request caches cannot reuse an earlier recipe's generation.
+
+This authenticates the operator's configured launch under the host grant. It assumes the selected
+stdio carrier preserves the host's framing semantics. It does not attest executable bytes, an
+inode, signatures, script contents, or arbitrary malicious carrier payloads. Keep the executable
+and its inputs under the operator's control. Tool content still requires the usual observation
+and approval; a valid launch receipt grants no tool approval on its own.
 
 ## Diagnostics
 

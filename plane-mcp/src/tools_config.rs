@@ -49,7 +49,7 @@ pub const ASK_METHODS: &[&str] = &[ASK_ELICITATION, ASK_SAMPLING, ASK_ROOTS];
 pub enum McpPinMechanism {
     /// A manifest issuer's public key. This build verifies no MCP manifest signature, so this
     /// mechanism authenticates nothing and registrations using it are refused. Use `cert_spki`
-    /// or `mtls` to authenticate the far end.
+    /// or `mtls` for a network peer, or `local_program` for a host-launched stdio program.
     PinnedPubkey,
     /// The endpoint's certificate key, pinned: the host seals it into the registration's member
     /// route and the connector refuses, before a request byte is written, a connection whose
@@ -61,6 +61,9 @@ pub enum McpPinMechanism {
     /// The operator's config word for it is fixed by the explicit rename below.
     #[serde(rename = "mtls")]
     ClientCertBinding,
+    /// The host launched the operator's configured stdio program under its exact private grant.
+    /// The key is the configured absolute command path, not a digest or executable-byte claim.
+    LocalProgram,
     /// NO authenticity root. Registrable, never approvable — low-risk dev use has to be spelled out
     /// loud rather than inferred from an absent field.
     Unpinned,
@@ -73,6 +76,7 @@ impl McpPinMechanism {
             McpPinMechanism::PinnedPubkey => "pinned_pubkey",
             McpPinMechanism::CertSpki => "cert_spki",
             McpPinMechanism::ClientCertBinding => "mtls",
+            McpPinMechanism::LocalProgram => "local_program",
             McpPinMechanism::Unpinned => "unpinned",
         }
     }
@@ -88,8 +92,9 @@ pub struct ServerPinCfg {
     /// The operator-supplied material. Under `cert_spki` and `mtls`, the far end's key pin: the
     /// SHA-256 of its certificate's SubjectPublicKeyInfo in standard base64
     /// (`busbar_contract::transport::trust::key_pin`'s spelling, the string the connector compares
-    /// the observed key against). Under `pinned_pubkey`, a manifest issuer's public key. Absent
-    /// only for `unpinned`.
+    /// the observed key against). Under `local_program`, exactly the configured absolute command
+    /// path (not a digest); the host verifies launch custody, not executable bytes. Under
+    /// `pinned_pubkey`, a manifest issuer's public key. Absent only for `unpinned`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
 }
@@ -925,6 +930,30 @@ impl McpServerDefCfg {
     }
 }
 
+/// A configured-launch root is confined to a host-owned stdio program. The public material names
+/// only its path; the host privately enforces arguments, environment and explicit working directory.
+fn validate_local_program(at: &str, def: &McpServerDefCfg) -> Result<(), String> {
+    if def.pin.mechanism != McpPinMechanism::LocalProgram {
+        return Ok(());
+    }
+    if !def.transport.is_some_and(ServerTransport::spawns_child) {
+        return Err(format!("{at}: `pin.mechanism: local_program` authenticates only a host-launched `transport: stdio` program"));
+    }
+    let command = def.command.as_deref().unwrap_or_default();
+    if command.contains('\0') || def.pin.key.as_deref() != Some(command) {
+        return Err(format!("{at}: `local_program` needs `pin.key:` equal to the exact configured absolute `command:` path; it is not an executable or environment digest"));
+    }
+    let Some(cwd) = def.cwd.as_deref() else {
+        return Err(format!("{at}: `local_program` needs an explicit absolute `cwd:` that the host applies from its private launch grant"));
+    };
+    if cwd.contains('\0') || !std::path::Path::new(cwd).is_absolute() {
+        return Err(format!(
+            "{at}: `local_program` needs an explicit absolute `cwd:` without NUL bytes"
+        ));
+    }
+    Ok(())
+}
+
 /// THE VALUE-LEVEL RULES for one `tools:` entry, run at boot and by the admin write path alike.
 pub fn validate_server(name: &str, def: &McpServerDefCfg) -> Result<(), String> {
     let at = format!("`tools.{name}`");
@@ -949,6 +978,7 @@ pub fn validate_server(name: &str, def: &McpServerDefCfg) -> Result<(), String> 
     }
 
     validate_endpoint(&at, def)?;
+    validate_local_program(&at, def)?;
     def.sampling_bounds.validate(&at)?;
     validate_client_identity(&at, def)?;
 

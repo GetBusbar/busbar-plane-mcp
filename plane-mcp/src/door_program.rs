@@ -95,6 +95,7 @@ pub(super) struct ProgramRelay {
     pub(super) wait: Value,
     /// The generation of the child the walk's lease reached.
     pub(super) generation: u64,
+    pub(super) head_seen: bool,
     pub(super) corr: Correlator,
     /// The exchange writing the replies the child is owed, while it pends.
     replying: Option<ProgramExchange>,
@@ -171,6 +172,7 @@ impl ProgramRelay {
         ProgramRelay {
             wait,
             generation: 0,
+            head_seen: false,
             corr: Correlator::relaying(),
             replying: None,
             replies: 0,
@@ -279,6 +281,7 @@ struct DoorPeer<'a> {
     plane: &'a McpDoor,
     member: &'a str,
     grants: crate::client::jsonrpc::ServerRequestGrants,
+    def: &'a crate::tools_config::McpServerDefCfg,
 }
 
 impl DoorPeer<'_> {
@@ -376,6 +379,28 @@ impl Answered {
 }
 
 impl Peer for DoorPeer<'_> {
+    fn program_generation(
+        &mut self,
+        need: u32,
+        member: &str,
+        status: u32,
+        fields: &[u8],
+    ) -> Result<u64, String> {
+        if need != crate::statement::NEED_PROGRAM || member != self.member {
+            return Err(crate::program_trust::UNTRUSTED.into());
+        }
+        let rooted = self.def.pin.mechanism == crate::tools_config::McpPinMechanism::LocalProgram;
+        let observed = crate::program_trust::block(
+            status,
+            fields,
+            self.def.command.as_deref().unwrap_or_default(),
+            rooted,
+        )?;
+        self.plane
+            .program_versions
+            .with_all(|all| all.entry(()).or_default().stamp(self.member, observed))
+    }
+
     fn greeting(&mut self, generation: u64, ticket: Ticket) -> Poll<crate::tool_program::Greeting> {
         let greetings = self
             .plane
@@ -507,6 +532,26 @@ impl Peer for DoorPeer<'_> {
     }
 }
 
+/// The host pair on the first own program-need head, scoped to this configured member.
+pub(super) fn program_generation<'a>(
+    plane: &McpDoor,
+    member: &str,
+    def: &crate::tools_config::McpServerDefCfg,
+    status: u32,
+    fields: impl IntoIterator<Item = (&'a [u8], &'a [u8])>,
+) -> Result<u64, String> {
+    let rooted = def.pin.mechanism == crate::tools_config::McpPinMechanism::LocalProgram;
+    let observed = crate::program_trust::observe(
+        status,
+        fields,
+        def.command.as_deref().unwrap_or_default(),
+        rooted,
+    )?;
+    plane
+        .program_versions
+        .with_all(|all| all.entry(()).or_default().stamp(member, observed))
+}
+
 /// Drive `exchange` with member `member` on `ticket` from `base`: the door's greeting record kept.
 fn exchange_child(
     plane: &McpDoor,
@@ -534,6 +579,7 @@ fn exchange_child_on(
         plane,
         member,
         grants: def.grants,
+        def,
     };
     exchange.drive(host, ticket, base, &greeted, &mut peer)
 }
@@ -570,7 +616,16 @@ pub(super) fn ready(
             unit.program = Some((Purpose::Ready, exchange));
             Looked::Pending
         }
-        std::task::Poll::Ready(_) => {
+        std::task::Poll::Ready(result) => {
+            if let Err(reason) = result {
+                if def.pin.mechanism == crate::tools_config::McpPinMechanism::LocalProgram {
+                    publish(
+                        plane,
+                        &list_key(held, member),
+                        crate::trust::Sighting::Failed(reason),
+                    );
+                }
+            }
             unit.readied = Some(unit.attempt);
             Looked::Fresh
         }
@@ -797,6 +852,10 @@ pub(super) fn far(
 ) -> Far {
     if relay.replying.is_none() && relay.settled.is_none() {
         if let Some(generation) = head {
+            if relay.head_seen {
+                return Far::Settled(Err(crate::program_trust::REPEATED.into()));
+            }
+            relay.head_seen = true;
             relay.generation = generation;
             plane.relaying.with(&relay.open.1, |e| {
                 if let Some(e) = e {
@@ -809,10 +868,16 @@ pub(super) fn far(
                 return Far::Settled(Err(RESTARTED.to_string()));
             }
         }
+        if def.pin.mechanism == crate::tools_config::McpPinMechanism::LocalProgram
+            && !relay.head_seen
+        {
+            return Far::Settled(Err(crate::program_trust::UNTRUSTED.into()));
+        }
         let mut peer = DoorPeer {
             plane,
             member,
             grants: def.grants,
+            def,
         };
         relay.hold = 0;
         match relay.corr.take(

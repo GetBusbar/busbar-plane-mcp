@@ -211,6 +211,8 @@ pub struct McpDoor {
     /// THE STDIO SERVERS' GREETINGS: the generation of each member's child the door ran
     /// `initialize` on ([`door_program`]), once per generation.
     greeted: Keyed<String, u64>,
+    /// Checked names of complete host Member incarnation/generation pairs.
+    program_versions: Keyed<(), crate::program_trust::Versions>,
     /// The requests of a stdio child's own the door decided, by member, generation and id: the call
     /// a granted ask was put to, or `None` = busbar answered it, decided once by whichever exchange
     /// read it first.
@@ -3371,9 +3373,6 @@ slot!(
         let far_type = head(input.head_fields(), CONTENT_TYPE);
         // A session revision's far end names its session in its head.
         let far_session = head(input.head_fields(), crate::adapt::H_SESSION_ID).map(str::to_string);
-        // A stdio member's lease names the generation of the child it reached in its head.
-        let far_generation = head(input.head_fields(), busbar_contract::conn::PROGRAM_GENERATION_FIELD)
-            .and_then(|v| v.trim().parse::<u64>().ok());
         let mut step = plane.units.with(&key, |unit| {
             let unit = unit?;
             unit.ticket = Some(ticket);
@@ -3432,10 +3431,19 @@ slot!(
                                 return None;
                             };
                             let last = piece.flags() & PIECE_LAST != 0;
-                            let head = far_generation.filter(|_| piece.flags() & PIECE_HAS_STATUS != 0);
-                            let far = door_program::far(
-                                plane, ticket, member, def, program, head, bytes, last,
-                            );
+                            let head = if piece.flags() & PIECE_HAS_STATUS != 0 {
+                                Some(if program.head_seen {
+                                    Err(crate::program_trust::REPEATED.to_string())
+                                } else {
+                                    door_program::program_generation(plane, member, def, piece.status_code(),
+                                        input.head_fields().iter().map(|field| (field.name().bytes(), field.value().bytes())))
+                                })
+                            } else { None };
+                            let far = match head {
+                                Some(Err(reason)) => door_program::Far::Settled(Err(reason)),
+                                head => door_program::far(plane, ticket, member, def, program,
+                                    head.and_then(Result::ok), bytes, last),
+                            };
                             let wait = program.wait.clone();
                             relay.frames.extend(std::mem::take(&mut program.corr.progress));
                             match far {

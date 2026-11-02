@@ -44,3 +44,6 @@ mod sanitize_complexity_tests;
 
 /// Configured host-launch authentication for stdio registrations.
 mod local_program_trust_tests;
+
+/// Launch receipts must precede every actual stdio exchange write.
+mod program_receipt_exchange_tests;

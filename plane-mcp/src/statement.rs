@@ -103,9 +103,12 @@ pub const NEED_UPSTREAM: u32 = 0;
 /// host keeps running.
 pub const NEED_PROGRAM: u32 = 1;
 
-/// The program need's response field the plane reads: the generation of the child a lease reached.
-pub const KEEP_PROGRAM_HEADERS: &[AbiStr] =
-    &[abi_str(busbar_contract::conn::PROGRAM_GENERATION_FIELD)];
+/// Host-generated launch fields retained on the program need's first successful lease head.
+pub const KEEP_PROGRAM_HEADERS: &[AbiStr] = &[
+    abi_str(busbar_contract::conn::PROGRAM_GENERATION_FIELD),
+    abi_str(busbar_contract::conn::PROGRAM_INSTANCE_FIELD),
+    abi_str(busbar_contract::conn::PROGRAM_IDENTITY_FIELD),
+];
 
 /// THE PLANE'S CONNECTION NEEDS: outbound over http to the servers the operator registered at a URL,
 /// governed as upstreams a plane reaches (no auth style is named here: each member's credential is
@@ -133,7 +136,7 @@ pub const NEEDS: &[Need] = &[
         n.direction = DIRECTION_OUTBOUND;
         n.egress_class = EGRESS_OPERATOR_INFRASTRUCTURE;
         n.transport = abi_str(CARRIER_STDIO);
-        // Each stdio server is its registration's own program: `command`, `args` and `env`.
+        // Each stdio server is its registration's own program: command, args, env and cwd.
         n.target_from = abi_str(busbar_contract::section::MEMBER_PROGRAM);
         n.keep_mode = KEEP_NAMED;
         n
@@ -198,8 +201,9 @@ const RECORD_CHAINS: &[RecordChain] = &[RecordChain {
     _reserved: 0,
 }];
 
-/// Only `cert_spki` and `mtls` authenticate the far end: the host seals their peer key into
-/// the member route. `pinned_pubkey` verifies no manifest signature in this build and is refused
+/// `cert_spki` and `mtls` seal a peer key into the member route. `local_program` instead verifies
+/// the host's successful configured-launch receipt on the program need; its public key is the
+/// exact command path, never an executable-byte claim or secret-bearing descriptor hash. `pinned_pubkey` verifies no manifest signature in this build and is refused
 /// by validation; `unpinned` remains explicitly unauthenticated and cannot approve tools.
 const PIN_MECHANISMS: &[PinMechanism] = &[
     PinMechanism {
@@ -215,6 +219,11 @@ const PIN_MECHANISMS: &[PinMechanism] = &[
     PinMechanism {
         token: abi_str("mtls"),
         flags: MECHANISM_ROOT | MECHANISM_PEER_KEY,
+        _reserved: 0,
+    },
+    PinMechanism {
+        token: abi_str("local_program"),
+        flags: MECHANISM_ROOT,
         _reserved: 0,
     },
     PinMechanism {

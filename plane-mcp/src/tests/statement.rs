@@ -94,7 +94,7 @@ fn the_tails_trust_keys_are_the_grammars() {
         ]
     );
     assert_eq!(TRUST_KEYS[0].mechanisms_len(), PIN_MECHANISMS.len());
-    assert_eq!(PIN_MECHANISMS.len(), 4, "every mechanism the grammar has");
+    assert_eq!(PIN_MECHANISMS.len(), 5, "every mechanism the grammar has");
     for abi in PIN_MECHANISMS {
         let token = text(abi.token);
         let parsed: crate::tools_config::ServerPinCfg =
@@ -107,6 +107,7 @@ fn the_tails_trust_keys_are_the_grammars() {
                 parsed.mechanism,
                 crate::tools_config::McpPinMechanism::CertSpki
                     | crate::tools_config::McpPinMechanism::ClientCertBinding
+                    | crate::tools_config::McpPinMechanism::LocalProgram
             ),
             "{token}"
         );

@@ -220,6 +220,17 @@ impl Frames {
 
 /// What an exchange needs of the door while it reads a child's own messages.
 pub trait Peer {
+    /// Validate the first host-generated program head and scope its generation to this peer.
+    fn program_generation(
+        &mut self,
+        need: u32,
+        member: &str,
+        status: u32,
+        fields: &[u8],
+    ) -> Result<u64, String> {
+        let _ = (need, member, status);
+        Ok(generation_of(fields))
+    }
     /// The member's grants, read now.
     fn grants(&self) -> ServerRequestGrants;
     /// Whether this exchange is the first to read the request `id` of the child of `generation`,
@@ -831,7 +842,18 @@ impl ProgramExchange {
                                 continue;
                             }
                             let block = spanned(&self.buf[..got.len], got.piece.fields);
-                            self.generation = generation_of(block);
+                            self.generation = match peer.program_generation(
+                                self.need,
+                                &self.member,
+                                got.piece.code,
+                                block,
+                            ) {
+                                Ok(generation) => generation,
+                                Err(reason) => {
+                                    self.fail(reason);
+                                    continue;
+                                }
+                            };
                             if self.only.is_some_and(|g| g != self.generation) {
                                 self.queue.clear();
                             }
@@ -919,6 +941,7 @@ impl ProgramExchange {
                                         Err(e) => self.fail(e),
                                     }
                                 }
+                                REPLY_HEAD => self.fail(crate::program_trust::REPEATED.to_string()),
                                 REPLY_END | REPLY_ACK => self.fail(CLOSED.to_string()),
                                 _ => {}
                             }
