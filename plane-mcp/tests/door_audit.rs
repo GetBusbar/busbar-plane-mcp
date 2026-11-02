@@ -765,7 +765,7 @@ extern "C" fn read_reply(_: HostCtx, input: *const c_void, out: *mut ServiceOut)
     // A HELD tool list: its answer waits until the test lets it go.
     let lists = serde_json::from_slice::<Value>(&wire.body)
         .is_ok_and(|b| b["method"] == json!("tools/list"));
-    if lists && HOLD_LISTS.load(Ordering::SeqCst) {
+    if lists && (200..300).contains(&status) && HOLD_LISTS.load(Ordering::SeqCst) {
         return answer(out, Outcome::Pending, 0, 0);
     }
     let (piece, n) = match wire.step {

@@ -29,7 +29,7 @@ fn a_held_stdio_place_wakes_queued_work_at_its_existing_ask_deadline() {
             &WAKING,
             &json!({"io":{"transport":"stdio","command":"/usr/bin/true","pin":pin(),"timeout":"600s","grants":{"elicitation":true},"tools_allow":{"read_file":{"task_support":"required"}}}}),
         );
-        create(&d, 1, "io", "io_read_file");
+        let first_task = create(&d, 1, "io", "io_read_file");
         let first = last_nested();
         create(&d, 3, "io", "io_read_file");
         let second = last_nested();
@@ -46,6 +46,8 @@ fn a_held_stdio_place_wakes_queued_work_at_its_existing_ask_deadline() {
         }
         let ask=serde_json::to_vec(&json!({"jsonrpc":"2.0","id":900,"method":"elicitation/create","params":{"message":"sure?"}})).unwrap();
         let mut far = Given::far(ALICE, 200, &ask);
+        // An ask keeps the stdio lease live; LAST would truthfully mean the child closed stdout.
+        far.flags &= !PIECE_LAST;
         far.head.push(("generation", "1"));
         let asked = d.piece(2, &far);
         assert_eq!(
@@ -57,8 +59,9 @@ fn a_held_stdio_place_wakes_queued_work_at_its_existing_ask_deadline() {
         assert_eq!(
             asked.json()["status"],
             "input_required",
-            "the child ask parks its task: {}",
-            asked.text()
+            "the child ask parks its task: {}; stored task: {}",
+            asked.text(),
+            get(&d, 90, &first_task).text()
         );
         if queued_before_ask {
             assert!(WOKEN.lock().unwrap_or_else(PoisonError::into_inner).contains(&Ticket {slot:4,generation:1}),"a call already queued before the hold was installed is woken to learn its earlier timer");

@@ -439,13 +439,55 @@ fn two_pending_operator_connects_keep_their_own_negotiation() {
     let held = HoldLists::on();
     assert_eq!(d.serve_once(719, 0, "fs", false).outcome, Outcome::Pending);
     assert_eq!(d.serve_once(720, 0, "fs", false).outcome, Outcome::Pending);
-    // Both connects already own their greeting/list state. Re-entry should resume those wires;
-    // replacing the other ticket's negotiation starts an extra greeting on each turn.
+    // A first Pending may still be progressing through the optimistic request or greeting.
+    // Start the no-restart observation only once both actual session-list wires are held.
+    let held_lists = || {
+        upstreams()
+            .as_ref()
+            .unwrap()
+            .open
+            .iter()
+            .filter(|(_, wire)| {
+                wire.url.starts_with(SESSION_URL)
+                    && field_of(&wire.head, "mcp-session-id") == Some(UPSTREAM_SESSION)
+                    && serde_json::from_slice::<Value>(&wire.body)
+                        .is_ok_and(|body| body["method"] == "tools/list")
+                    && wire
+                        .reply
+                        .as_ref()
+                        .is_some_and(|(status, _, _)| (200..300).contains(status))
+            })
+            .map(|(id, _)| *id)
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    for _ in 0..16 {
+        if held_lists().len() == 2 {
+            break;
+        }
+        for unit in [719, 720] {
+            assert_eq!(d.serve_once(unit, 0, "fs", true).outcome, Outcome::Pending);
+        }
+    }
+    let wires = held_lists();
+    assert_eq!(wires.len(), 2, "both negotiations reached their held list");
+    let negotiated = seen();
+    for method in ["initialize", "notifications/initialized"] {
+        assert_eq!(
+            negotiated
+                .iter()
+                .filter(|request| request.url.starts_with(SESSION_URL)
+                    && request.body["method"] == method)
+                .count(),
+            2,
+            "each connect completes each greeting hop once"
+        );
+    }
     let before = requests_to("https://up.example/sess");
     for unit in [719, 720, 719, 720] {
         assert_eq!(d.serve_once(unit, 0, "fs", true).outcome, Outcome::Pending);
     }
     let after = requests_to("https://up.example/sess");
+    assert_eq!(held_lists(), wires, "both exact held leases are retained");
     drop(held);
     for unit in [719, 720] {
         let mut view = d.serve_once(unit, 0, "fs", true);

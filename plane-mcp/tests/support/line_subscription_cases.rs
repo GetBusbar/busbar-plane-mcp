@@ -76,6 +76,7 @@ fn short_ack(door: &Door, unit: u64, session: u64) {
     );
     input.unit = unit;
     input.from = FROM_CALLER;
+    input.flags = PIECE_LAST;
     input.caller_ref = str_of(ALICE);
     input.bytes = octets(LINE_LISTEN);
     input.reply_buf = reply.as_mut_ptr();

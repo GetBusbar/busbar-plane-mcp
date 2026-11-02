@@ -326,6 +326,16 @@ fn a_completed_stdio_response_obeys_the_reply_bound_on_its_final_piece() {
                 given.flags &= !PIECE_HAS_STATUS;
             }
             final_answer = door.piece(unit, &given);
+            if at + 1 != count {
+                assert!(
+                    !final_answer.done && final_answer.bytes.is_empty(),
+                    "the bound must be crossed on the final piece; piece {}/{} returned {:?}: {}",
+                    at + 1,
+                    count,
+                    final_answer.outcome,
+                    final_answer.text()
+                );
+            }
         }
         assert_eq!(final_answer.json()["result"]["isError"], true);
         assert!(final_answer.text().contains(&REPLY_MAX.to_string()));
