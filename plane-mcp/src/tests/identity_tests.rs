@@ -9,8 +9,7 @@ use crate::identity::{NameError, ServerId, ToolKey};
 fn a_server_id_containing_the_separator_is_refused() {
     let err = ServerId::new("file_system").expect_err("`_` in a server id must be refused");
     assert_eq!(err, NameError::ServerIdHasSeparator("file_system".into()));
-    // The message has to say WHY, because an operator who reads "invalid" renames it to
-    // `file__system` and reintroduces the ambiguity.
+
     let msg = err.to_string();
     assert!(
         msg.contains("mcp_tool"),

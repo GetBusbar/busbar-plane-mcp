@@ -4,10 +4,6 @@
 //! The MCP plane's call-record content.
 
 /// THE CALL RECORD'S CONTENT SUFFIX, as the plane writes it to the host's record seam: the chained
-/// fields after the prelude the host frames (`prev_hash`, the scope, `seq`), LengthPrefixed — every
-/// field `len:u64-be ⧺ bytes`, a numeric field its eight big-endian bytes as one such field — in the
-/// call digest's order: `ts, server, tool, outcome, reason, tool_digest, pin_generation`. The
-/// `request_id` is not in it: a join key is never in the digest.
 #[must_use]
 pub fn call_suffix(
     ts: u64,

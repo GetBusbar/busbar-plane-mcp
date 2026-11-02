@@ -2,17 +2,7 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE RELAYED CALL IS THE REQUEST AND THE ANSWER THE PLANE SAYS. The linked door is admitted
-//! through the one loader and driven op by op, as `tests/both_ways.rs` drives it, and its
-//! transcript is held to what the plane's own builders answer: the request bound for the member is
-//! `call::outbound`'s, the settled answers are `call::settle_call_as`'s, the call record is
-//! `record::call_suffix`'s. This file reaches the logic crate through `door` alone (the loader is
-//! this plugin crate's dev-dependency, never the logic crate's), so those answers are restated in
-//! `plane-mcp/tests/support/door_facts.rs` and held to the builders by the logic crate's unit test
-//! `door_facts_tests`. The door is driven through the loader's own frames
-//! (`busbar_test_kit::conformance::{input, output}`), so this file needs no raw ABI call.
 
-// The door's private facts this file needs, restated and held to the crate's own items by the
-// logic crate's unit test `door_facts_tests`.
 #[path = "../../plane-mcp/tests/support/door_facts.rs"]
 #[allow(dead_code)]
 mod door_facts;
@@ -70,7 +60,7 @@ fn bind(d: &Dispatcher) -> Bind {
         max_inflight_cap: 64,
         sink: Arc::new(NoSink),
         dispatcher: d.adopter(),
-        // The conformance door is driven op by op and opens nothing: bound as a probe.
+
         conns: busbar_plugin_loader::dispatch::ConnTable::Probe,
     }
 }
@@ -217,8 +207,6 @@ impl Push {
 }
 
 /// One `on_piece` of `unit` with a reply buffer of `cap` bytes, then re-called with the same
-/// `from` and zero bytes while the door answers `more = 1`. The bytes of every call, in order,
-/// the head fields and the request line it wrote, and its flags.
 fn push(p: &Plugin<Plane>, what: &'static str, unit: u64, given: Push, cap: usize) -> Step {
     let mut reply = vec![0_u8; cap];
     let (mut fields, mut arena) = ([OUT_FIELD; 16], vec![0_u8; 4096]);
@@ -327,9 +315,6 @@ fn length_of(reply: &[u8]) -> (String, String) {
 }
 
 /// A HOST whose entitlement answer is a fixed table of `"<kind>:<name>"` grants, and which
-/// serves nothing else: the kernel's entitlement service, as the door asks it. As the kernel's
-/// (`KernelServices::entitled`), a crossing that serves no unit is entitled to nothing: the
-/// loader's request lookup must hand the unit the crossing serves.
 struct Grants(&'static [&'static str]);
 
 impl ServicesDouble for Grants {
@@ -435,7 +420,6 @@ impl ServicesDouble for Grants {
         busbar_plugin_loader::dispatch::Ran::Now(Stored::refused(UNSERVED))
     }
     /// The kernel's Approve as this section's approvals seed it: `read_file` approved at its
-    /// digest, `draft` allowed and pending (ARCHITECT Q3: the door renders the verdict).
     fn trust_serves(
         &self,
         _: &Caller,
@@ -568,8 +552,6 @@ fn relay_script(p: &Plugin<Plane>) -> Vec<Step> {
 }
 
 /// The relayed call: the ATTEMPT is taken, the caller's body becomes the request bound for the
-/// member (the dialect's own builder, at the path of the member's URL), and the far end's
-/// answer is settled as the plane's pure settle says, in JSON.
 #[test]
 fn a_relayed_call_is_the_request_and_the_answer_the_plane_says() {
     let t = relay_script(&linked(&served(ALL)));
@@ -608,10 +590,7 @@ fn a_relayed_call_is_the_request_and_the_answer_the_plane_says() {
     );
     assert_eq!(ok.fields, vec![json_type(), length_of(&ok.reply)]);
     assert!(ok.detail.contains("done=true far=false"), "{}", ok.detail);
-    // THE METER: a call the server answered is counted, once, as one tool call (tail class 0)
-    // and the bytes of the document it answered with (tail class 1, a Response class: "the
-    // length of the document it just read back"), and the success earns its fee unit (tail
-    // class 2, `per_request`). The plane states its counts; the kernel prices them.
+
     assert_eq!(
         ok.units,
         vec![
@@ -621,9 +600,7 @@ fn a_relayed_call_is_the_request_and_the_answer_the_plane_says() {
         ],
         "the one tool call the server answered, its answer's bytes, and its fee unit"
     );
-    // THE CALL LOG (RULE-CHECK 2026-09-30): the answer carries the call's one chained record,
-    // keyed by the caller's chain scope (no caller reference: the ungoverned scope), its suffix
-    // the plane's own fields at the host clock's reading (this HOST's clock reads 0).
+
     assert_eq!(
         ok.records,
         vec![(
@@ -633,11 +610,7 @@ fn a_relayed_call_is_the_request_and_the_answer_the_plane_says() {
         )],
         "one call record"
     );
-    // THE AUDIT ROW (SEAM-L(k)): the dispatched call's one `mcp_tool.call` row, applied, on the
-    // published tool; and THE LEDGER LANE (SEAM-L(j)): the call's registered server,
-    // `mcp_server:<server>`, never the published tool (architect ruling 2026-10-23, R-11): the
-    // kernel holds a present `tools.rate_card` to its registrations, so a per-tool key prices
-    // nothing.
+
     assert_eq!(
         ok.audits,
         vec![(
@@ -669,8 +642,6 @@ fn a_relayed_call_is_the_request_and_the_answer_the_plane_says() {
         "the stream's last event"
     );
 
-    // A GRANTED ASK IS RELAYED under busbar's sealed state (Law 11); a host that signs nothing
-    // cannot seal it, so the ask is refused, never answered by busbar.
     let ask = step(&t, "answer ask");
     assert_eq!(ask.status, 403);
     assert_eq!(

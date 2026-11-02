@@ -25,7 +25,6 @@ fn fields(method: &str) -> impl Fn(&str) -> Option<&'static str> + '_ {
         if n == H_PROTOCOL_VERSION {
             Some(PROTOCOL_VERSION)
         } else if n == H_MCP_METHOD {
-            // A leaked `'static` for the test's one method name.
             Some(Box::leak(method.to_string().into_boxed_str()))
         } else {
             None

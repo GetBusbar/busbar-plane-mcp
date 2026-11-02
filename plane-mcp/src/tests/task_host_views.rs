@@ -56,7 +56,6 @@ fn continuation_refusal_requires_the_bound_handle_digest_and_runner() {
     assert_eq!(ended.runner, None);
     assert_eq!(ended.digest(), "bound-digest");
 
-    // A short-output retry retains its positive bind receipt after the runner was cleared.
     assert!(!continuation_refused(&plane, 41, "task", receipt, "budget refused").is_empty());
     assert_eq!(plane.tasks.get(&task.id).unwrap().status(), Status::Failed);
 }

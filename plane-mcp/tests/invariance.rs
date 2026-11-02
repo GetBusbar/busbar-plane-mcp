@@ -1,8 +1,4 @@
 //! This plane is the same plane everywhere it is compiled.
-//!
-//! A plane compiled two ways is two planes, and the kernel would have no way to tell which one it
-//! registered. The contract crate holds itself to that rule and asserts it; this is the same
-//! assertion, one crate over, for the same reason.
 
 #[path = "support/source_scan.rs"]
 mod source_scan;
@@ -48,9 +44,6 @@ fn the_crate_declares_no_features() {
 }
 
 /// No item on the surface is behind a conditional-compilation attribute.
-///
-/// Test modules are exempt, because a test module is not on the surface: it is compiled only when
-/// the tests are, and the kernel never sees it.
 #[test]
 fn no_item_is_conditionally_compiled() {
     let mut offenders = Vec::new();
@@ -71,7 +64,6 @@ fn no_item_is_conditionally_compiled() {
     );
 }
 
-/// The crate carries the two lint gates the design requires of a plugin.
 #[test]
 fn the_crate_forbids_unsafe_and_undocumented_items() {
     let lib = std::fs::read_to_string(src_dir().join("lib.rs")).expect("the root is readable");
@@ -80,9 +72,6 @@ fn the_crate_forbids_unsafe_and_undocumented_items() {
 }
 
 /// No source file contains the word the lint gate forbids: neither the shipped surface nor the
-/// crate's own test modules (`src/tests/`, and each module's `tests/`), which compile under the same
-/// literal `#![forbid(unsafe_code)]`. A test that needs `unsafe` drives the door from an integration
-/// test (`tests/*.rs`) instead.
 #[test]
 fn the_source_contains_no_unsafe_block() {
     let mut offenders = Vec::new();
@@ -138,10 +127,6 @@ fn the_manifest_names_only_what_a_plane_may_name() {
     }
 }
 
-/// The comments cite the design in words, not in section numbers or binding identifiers.
-///
-/// A section number in a comment is a cross-reference that rots the first time the document is
-/// renumbered, and the design says as much: cite the section in words.
 #[test]
 fn the_comments_cite_the_design_in_words() {
     let mut offenders = Vec::new();
@@ -176,8 +161,6 @@ fn the_comments_cite_the_design_in_words() {
 }
 
 /// THE CADENCE RATCHET, OVER THIS PLANE'S OWN FILES (moved with the grammar: the host's connect
-/// path went with its crate, so the ratchet now reads the grammar and the door that judge
-/// `verify_ttl:`). Detection is never rate-limited and demotion is never held.
 #[test]
 fn the_cadence_grammar_has_no_knob_that_slows_detection_or_delays_demotion() {
     let read = |rel: &str| -> String {

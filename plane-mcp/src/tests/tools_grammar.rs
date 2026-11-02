@@ -2,18 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE `tools:` GRAMMAR'S TYPED READING — the half of the composition root's registry-row battery
-//! (`crates/busbar/src/root/tests/linked_tools.rs`) that needs the plane's own types: what the
-//! section's custom `Deserialize` reads a document INTO (the values, the pin mechanisms and their
-//! root-ness, the deny-by-default grants, the ask lists), the published-name invariant
-//! (`validate_published_names`, read off the built `Catalogue`) and the Statement facts the root
-//! side reads the plane's words from. The root half judges the same documents through the kernel
-//! and the folded row (boot's Ok/Err and its words); this half says what an accepted document
-//! means.
-//!
-//! Every document here goes through `serde_json` into `ToolsCfg` — the carriage the door itself
-//! reads its settings by (`statement::read_tools_section`) — rather than constructing the struct, because
-//! the thing under test IS the grammar: a test that built `McpServerDefCfg` directly would skip the
-//! custom `Deserialize` where the reserved keys, the section knobs and the value rules all live.
 
 use busbar_contract::abi::mechanism::call::AbiStr;
 use busbar_contract::abi::mechanism::door::{SECTION_DECLARING, SECTION_SELECTS};
@@ -23,7 +11,6 @@ use super::{namespaced, validate_published_names, ToolsCfg, SECTION, SUBJECT_NOU
 use crate::client::jsonrpc::ServerAsk;
 
 /// The section read by the grammar alone, as the door reads its settings (no rule spanning
-/// registrations): what one server's well-formedness is judged by.
 fn grammar(section: Value) -> Result<ToolsCfg, String> {
     serde_json::from_value::<ToolsCfg>(section).map_err(|e| e.to_string())
 }
@@ -36,9 +23,6 @@ fn door_validate(section: &Value) -> Result<ToolsCfg, String> {
 }
 
 /// An ABSOLUTE program path AS THIS PLATFORM SPELLS ONE (the check is `Path::is_absolute`; see the
-/// root battery's `ABS_PROGRAM` for why a hardcoded unix spelling would pass on the wrong assertion
-/// on Windows). Unquoted here: a JSON string carries the backslashes byte for byte. Chosen by
-/// `cfg!` rather than a `#[cfg]` item: this crate compiles every item one way (`tests/invariance.rs`).
 const ABS_PROGRAM: &str = if cfg!(windows) {
     r"C:\Windows\System32\cmd.exe"
 } else {
@@ -46,8 +30,6 @@ const ABS_PROGRAM: &str = if cfg!(windows) {
 };
 
 /// THE LOCKED SECTION SHAPE, verbatim: the section knobs, the object pin, the `tools_allow` MAP,
-/// the per-server credential mode and the bare-name hook attach. The same document the root
-/// battery's `LOCKED_EXAMPLE` writes in YAML.
 fn locked_example() -> Value {
     json!({
         "hooks": ["tool-sanitizer"],
@@ -70,17 +52,15 @@ fn the_locked_section_shape_parses_into_the_values_it_declares() {
     assert_eq!(fs.url, "https://tools.internal/fs");
     assert_eq!(fs.pin.mechanism.token(), "cert_spki");
     assert_eq!(fs.pin.key.as_deref(), Some("sha256/PIN=="));
-    // THE MAP, not a list: `read_file` has a SLOT, and it is empty, which is "allowed, no hash
-    // approved yet". A list could not have expressed the slot at all.
+
     assert!(fs.tools_allow.contains_key("read_file"));
     assert_eq!(fs.tools_allow["read_file"].schema_hash, None);
-    // The two attach lists the kernel's `attach_list` merges (the root battery's half): the
-    // section's and the server's own, each read as written.
+
     assert_eq!(
         fs.hooks,
         vec!["tool-sanitizer".to_string(), "dispatch-order".to_string()]
     );
-    // SCALAR ⇒ OVERRIDE.
+
     assert_eq!(
         cfg.effective_upstream_credentials("filesystem"),
         Some(busbar_contract::config::UpstreamCreds::Own)
@@ -89,7 +69,6 @@ fn the_locked_section_shape_parses_into_the_values_it_declares() {
 }
 
 /// THE SEPARATOR RULE, the grammar's half: a server id carrying the separator is refused and a tool
-/// name carrying it is not, and the arithmetic that makes the server-id rule necessary.
 #[test]
 fn the_namespace_separator_is_refused_in_a_server_id_and_allowed_in_a_tool_name() {
     let err = grammar(json!({
@@ -107,9 +86,6 @@ fn the_namespace_separator_is_refused_in_a_server_id_and_allowed_in_a_tool_name(
     }))
     .expect("a tool name may carry the separator — the locked example does");
 
-    // THE COLLISION the server-id rule prevents, stated as the arithmetic it is. `a_b` + `c` and
-    // `a` + `b_c` render the SAME grant value; with `a_b` unregistrable, only one of the two pairs
-    // can exist, and the key splits exactly one way at the FIRST separator.
     assert_eq!(
         namespaced("a_b", "c"),
         namespaced("a", "b_c"),
@@ -123,7 +99,6 @@ fn the_namespace_separator_is_refused_in_a_server_id_and_allowed_in_a_tool_name(
 }
 
 /// DENY-BY-DEFAULT is the `Default` impl, not a rule written down somewhere else and remembered at
-/// each call site. A registry entry that names no grants grants nothing.
 #[test]
 fn server_initiated_grants_default_to_denied() {
     let cfg = grammar(json!({ "s": { "url": "https://x/", "pin": { "mechanism": "unpinned" } } }))
@@ -141,7 +116,7 @@ fn server_initiated_grants_default_to_denied() {
             "an unwritten grant must deny `{method}` — including one this build has never heard of"
         );
     }
-    // And a granted one is granted, so the default is a default and not a hardcoded refusal.
+
     let cfg = grammar(json!({
         "s": {
             "url": "https://x/",
@@ -155,9 +130,6 @@ fn server_initiated_grants_default_to_denied() {
     assert!(!g.allows(ServerAsk::Elicitation) && !g.allows(ServerAsk::Roots));
 }
 
-/// `tools.<server>.sampling_bounds` (owner ruling Q22c): omitted ⇒ the shipped defaults; written ⇒
-/// read as written, round-tripping through the serialised form; a typo'd key fails; zero
-/// `max_messages`/`max_prompt_bytes` and an inverted temperature range are refused naming the key.
 #[test]
 fn sampling_bounds_grammar_defaults_round_trips_and_refuses() {
     let server = |bounds: Value| {
@@ -231,7 +203,6 @@ fn sampling_bounds_grammar_defaults_round_trips_and_refuses() {
 }
 
 /// BOTH TRANSPORTS BOOT, the typed half: a stdio registration carries its command and arguments and
-/// no url (the root battery asserts boot accepts both).
 #[test]
 fn both_transports_are_accepted_at_parse() {
     grammar(json!({
@@ -260,17 +231,7 @@ fn both_transports_are_accepted_at_parse() {
     );
 }
 
-// ── `publish_as` — the OPTIONAL wire-name override, and the invariant it moves ───────────────────
-//
-// `{server}_{tool}` protects one property: ONE PUBLISHED NAME RESOLVES TO EXACTLY ONE
-// `(server, tool)`. Today it holds by construction. With an override it holds by
-// `validate_published_names`, and these tests are what say so — including the case a naive
-// implementation misses, which is an override colliding with a name NOBODY TYPED.
-
 /// Every name the catalogue would PUBLISH for `cfg`, sorted — read off the built snapshot (the
-/// plane's own catalogue, the one its door serves `tools/list` from) rather than recomputed from
-/// the config, so a test cannot agree with a formula the catalogue no longer uses. Asked with every
-/// grant admitted: these tests are about which NAMES are published, not who may see them.
 fn published_names(cfg: &ToolsCfg) -> Vec<String> {
     let cat = crate::catalogue::Catalogue::build(1, cfg);
     let mut names: Vec<String> = cat
@@ -283,8 +244,6 @@ fn published_names(cfg: &ToolsCfg) -> Vec<String> {
 }
 
 /// THE DEFAULT IS UNCHANGED, and this is the test that has to keep passing forever: a config that
-/// writes no `publish_as:` publishes exactly what it published before the field existed. No
-/// migration, no grant to re-audit.
 #[test]
 fn absent_publish_as_publishes_the_namespaced_default_byte_for_byte() {
     let cfg = grammar(locked_example()).expect("the locked example must parse");
@@ -302,7 +261,6 @@ fn absent_publish_as_publishes_the_namespaced_default_byte_for_byte() {
 }
 
 /// The override is READ, and it is the name the CATALOGUE publishes — which is the same string
-/// `tools/call` dispatches on and an `mcp_tool:` grant names.
 #[test]
 fn publish_as_is_the_published_name_and_the_namespaced_default_is_then_gone() {
     let cfg = grammar(json!({
@@ -317,9 +275,7 @@ fn publish_as_is_the_published_name_and_the_namespaced_default_is_then_gone() {
 
     let cat = crate::catalogue::Catalogue::build(1, &cfg);
     let all = cat.tools_for(&|_, _| true);
-    // ONE name, not two: the override REPLACES the default rather than aliasing it. Two names for
-    // one tool would mean an `mcp_tool:` grant on one of them silently missing the other, and the
-    // uniqueness check would then be validating a set that is not what is published.
+
     assert_eq!(
         all.len(),
         1,
@@ -465,7 +421,7 @@ fn two_publish_as_overrides_that_collide_refuse_the_config() {
     let err =
         validate_published_names(&cfg).expect_err("two tools published as `greet` must refuse");
     assert!(err.contains("published as `greet`"), "{err}");
-    // BOTH sides named, because the operator has to know which two lines to look at.
+
     assert!(
         err.contains("tools.alpha.tools_allow.greet_a.publish_as"),
         "{err}"
@@ -482,14 +438,6 @@ fn two_publish_as_overrides_that_collide_refuse_the_config() {
 }
 
 /// RED 2 — THE SUBTLE CASE, and the reason the check is against the WHOLE PUBLISHED SET rather than
-/// override-against-override.
-///
-/// `publish_as: foo_bar` collides with server `foo`'s tool `bar`, which namespaces to `foo_bar`.
-/// NOBODY TYPED `foo_bar` on the `foo` side — it is a name the default MECHANISM produced — so an
-/// implementation that compared overrides only to each other finds nothing to compare against,
-/// accepts this config, and lets one wire name resolve to two `(server, tool)` pairs. Because
-/// `catalogue::granted` keys the `mcp_tool` grant on the published name, that is one grant silently
-/// authorizing two upstreams.
 #[test]
 fn an_override_colliding_with_a_namespaced_default_refuses_the_config() {
     let section = json!({
@@ -509,8 +457,7 @@ fn an_override_colliding_with_a_namespaced_default_refuses_the_config() {
     let err = validate_published_names(&cfg)
         .expect_err("an override must not shadow another server's namespaced default");
     assert!(err.contains("published as `foo_bar`"), "{err}");
-    // The DEFAULT side is described as the default, not as a `publish_as:` the operator can go and
-    // delete — it is a name nothing typed.
+
     assert!(
         err.contains("the default `{server}_{tool}` name of `tools.foo.tools_allow.bar`"),
         "{err}"
@@ -527,7 +474,6 @@ fn an_override_colliding_with_a_namespaced_default_refuses_the_config() {
 }
 
 /// The same collision in the OTHER declaration order. Config order must not decide whether a
-/// config boots: an operator who reorders two server blocks has changed nothing.
 #[test]
 fn the_default_versus_override_collision_is_refused_in_either_declaration_order() {
     let section = json!({
@@ -553,7 +499,6 @@ fn the_default_versus_override_collision_is_refused_in_either_declaration_order(
 }
 
 /// An override that spells the namespaced default is NOT a collision — it publishes the same one
-/// name the default would have. Refusing it would refuse a config that changes nothing.
 #[test]
 fn an_override_equal_to_its_own_namespaced_default_is_not_a_collision() {
     let cfg = grammar(json!({
@@ -569,7 +514,6 @@ fn an_override_equal_to_its_own_namespaced_default_is_not_a_collision() {
 }
 
 /// The three legal ask methods parse into a three-entry round, read as written: the rule refuses
-/// typos, not asks (the refusals themselves are the root battery's, at boot).
 #[test]
 fn every_ask_list_is_validated_and_the_three_legal_methods_still_parse() {
     let cfg = grammar(json!({
@@ -598,16 +542,11 @@ fn every_ask_list_is_validated_and_the_three_legal_methods_still_parse() {
 }
 
 /// Whether `stated` is the tail string built from `word` (the tail's strings are constants of this
-/// crate, so a word is found by address and length, as `tests/statement.rs` reads them).
 fn spells(stated: AbiStr, word: &str) -> bool {
     stated.ptr() == word.as_ptr() && stated.len() == word.len()
 }
 
 /// THE WORDS THE ROOT BATTERY READS OFF THE STATEMENT ARE THE GRAMMAR'S: the declaring section is
-/// `SECTION`, the owned one the endpoint block (which selects the plane), the subject noun `SUBJECT_NOUN`; and the endpoint's
-/// fixed mount and
-/// its RFC 9728 document are spelled from the endpoint block's name (so the root may build them from
-/// the section the Statement owns).
 #[test]
 fn the_statement_names_the_grammars_section_noun_and_endpoint() {
     let sections = crate::statement::SECTIONS;
@@ -639,11 +578,6 @@ fn the_statement_names_the_grammars_section_noun_and_endpoint() {
     assert_eq!(crate::statement::TAIL.dialects_len(), 1, "one wire dialect");
 }
 
-/// RED (ARCHITECT timeout ruling): a server's `timeout:` is the kernel's reserved per-entry key, and
-/// the door reads it — through the kernel's one reading — as the budget of the tool-list fetches it
-/// makes itself: `10s` is 10 000 ms; a server that writes none gets the documented `30s`
-/// (`docs/mcp.md`). One owner judges it: the door does not refuse a value the kernel refuses (a
-/// zero), it never sees one at load.
 #[test]
 fn a_servers_timeout_bounds_the_doors_own_fetches_and_the_kernel_owns_its_judgement() {
     let server = |extra: Value| {
@@ -679,9 +613,6 @@ fn a_servers_timeout_bounds_the_doors_own_fetches_and_the_kernel_owns_its_judgem
 }
 
 /// EVERY CAPABILITY'S PUBLISHED NAME IS IN THE ONE SET. A prompt, a resource and a template are
-/// published under `{server}_{name}` and admitted by an `mcp_tool:` grant on that name, exactly as a
-/// tool is: a tool published as `bar_greet` on `foo` and the prompt `greet` on `bar` would make one
-/// `mcp_tool: bar_greet` grant admit both. RED on a check that walked `tools_allow` alone.
 #[test]
 fn a_tool_override_colliding_with_another_servers_prompt_refuses_the_config() {
     let section = json!({
@@ -716,7 +647,6 @@ fn a_tool_override_colliding_with_another_servers_prompt_refuses_the_config() {
 }
 
 /// The same set holds resources and resource templates: a tool override shadowing another
-/// server's resource URI, or its template, is refused in turn.
 #[test]
 fn a_tool_override_colliding_with_a_resource_or_a_template_refuses_the_config() {
     for (family, key, published) in [
@@ -765,7 +695,6 @@ fn distinct_capability_names_across_families_still_validate() {
 }
 
 /// `mtls` NEEDS A CLIENT IDENTITY: a registration that says its server is behind mutual TLS and
-/// names nothing to present is refused at boot, not at the server's handshake.
 #[test]
 fn mtls_without_a_client_identity_is_refused_and_with_one_reads() {
     let identity = json!({
@@ -794,7 +723,6 @@ fn mtls_without_a_client_identity_is_refused_and_with_one_reads() {
         "the identity is read"
     );
 
-    // Optional under the other roots: a server may ask for a client certificate whatever its pin.
     grammar(json!({
         "fs": {
             "url": "https://fs/",
@@ -806,7 +734,6 @@ fn mtls_without_a_client_identity_is_refused_and_with_one_reads() {
 }
 
 /// A client certificate is a TLS-handshake object: refused where there is no handshake, on an
-/// `http://` url and on `transport: stdio`.
 #[test]
 fn a_client_identity_with_no_handshake_to_present_it_in_is_refused() {
     let identity = json!({ "cert": { "env": "C" }, "key": { "env": "K" } });
@@ -835,12 +762,9 @@ fn a_client_identity_with_no_handshake_to_present_it_in_is_refused() {
 }
 
 /// THE CANARY a credential-echo test plants: bytes that may appear in a config and must appear in
-/// no refusal, error or `Debug` rendering of it.
 const CANARY: &str = "CANARY-plane-mcp-echo-7f3a91";
 
 /// One registration read straight into its typed definition, then judged by [`validate_server`],
-/// the function boot and the admin write path both call. The refusal it answers is what reaches
-/// `busbar --validate`'s stderr and the read-only admin dry-run validate endpoint.
 fn refusal_of(extra: Value) -> String {
     let mut s = json!({
         "pin": { "mechanism": "cert_spki", "key": "sha256/PIN==" },
@@ -854,8 +778,6 @@ fn refusal_of(extra: Value) -> String {
 }
 
 /// A `url:` refused for its scheme names the URL it refused, WITHOUT the userinfo an operator put
-/// in it: the refusal reaches stderr and the read-only admin validate endpoint, so a password in
-/// the URL would be handed to anyone who can read either.
 #[test]
 fn a_refused_url_does_not_echo_its_userinfo() {
     let err = refusal_of(json!({ "url": format!("ftp://user:{CANARY}@tools.internal/mcp") }));
@@ -896,7 +818,6 @@ fn a_refused_token_url_does_not_echo_its_userinfo() {
 }
 
 /// A URL with no userinfo is echoed byte for byte: masking removes credential bytes and nothing
-/// else, so every refusal that never carried a credential reads exactly as it did.
 #[test]
 fn a_refused_url_without_userinfo_is_echoed_verbatim() {
     let err = refusal_of(json!({ "url": "ftp://tools.internal/a@b?c=d@e" }));
@@ -920,8 +841,6 @@ fn a_refused_url_without_userinfo_is_echoed_verbatim() {
 }
 
 /// A stdio child's `env:` literal is not printed by `Debug`: a value an operator pasted there may
-/// be the credential the secret-reference arm exists to keep out of the config, and `Debug` is
-/// what a log line or a panic message renders.
 #[test]
 fn a_child_env_literal_is_not_printed_by_debug() {
     let plain = super::ChildEnvValue::Plain(
@@ -933,8 +852,6 @@ fn a_child_env_literal_is_not_printed_by_debug() {
 }
 
 /// A stdio child's `env:` literal is sealed as it is read (CHIP-DESIGN v4.1 change 12): the
-/// registration holds it as a `Cred`, so neither writing the registration back nor its `Debug`
-/// spells it, and the same literal read twice is still the same registration.
 #[test]
 fn a_child_env_literal_is_sealed_at_parse_and_never_written_back() {
     let section = json!({
@@ -957,7 +874,6 @@ fn a_child_env_literal_is_sealed_at_parse_and_never_written_back() {
 }
 
 /// One network registration `fs`, stating the RFC 8693 exchange (`token_exchange:` with its
-/// `aud:`) when `exchanged`.
 fn registration(exchanged: bool) -> Value {
     let mut fs = json!({
         "url": "https://tools.internal/fs",
@@ -975,7 +891,6 @@ fn registration(exchanged: bool) -> Value {
 }
 
 /// The sentence every refusal of a forwarded caller credential carries: what it would forward and
-/// the two modes that forward nothing of the caller's.
 fn assert_explained(err: &str, server: &str) {
     for word in [
         format!("`tools.{server}`"),
@@ -988,11 +903,6 @@ fn assert_explained(err: &str, server: &str) {
 }
 
 /// THE SECTION DEFAULT NEVER SILENTLY OVERRIDES AN EXCHANGE (website `mcp.md:501-505`): a
-/// section-level `upstream_credentials: passthrough` beside a registration that states
-/// `token_exchange:` used to validate, and the registration was then bound to passthrough with its
-/// exchange dropped. It is refused, naming the registration whose exchange it would have dropped,
-/// in the grammar and in the door's own `validate`; and the Statement tail carries the sentence the
-/// kernel refuses the section default in, so the refusal holds where the kernel reads the key.
 #[test]
 fn a_section_passthrough_default_refuses_a_token_exchange_registration() {
     let section = json!({ "upstream_credentials": "passthrough", "fs": registration(true) });
@@ -1002,8 +912,6 @@ fn a_section_passthrough_default_refuses_a_token_exchange_registration() {
     let err = door_validate(&section).expect_err("the door's validate refuses it too");
     assert_explained(&err, "fs");
 
-    // A section default with no exchange beside it is refused all the same: it would lend the
-    // caller's busbar credential to every registration that does not spell its own mode.
     let err = grammar(json!({ "upstream_credentials": "passthrough", "fs": registration(false) }))
         .expect_err("a section passthrough default is refused");
     assert_explained(&err, "fs");
@@ -1014,14 +922,11 @@ fn a_section_passthrough_default_refuses_a_token_exchange_registration() {
         "the tail states the sentence the kernel refuses a section passthrough default in"
     );
 
-    // `own` beside an exchange is the exchange.
     grammar(json!({ "upstream_credentials": "own", "fs": registration(true) }))
         .expect("an exchange under the `own` default is accepted");
 }
 
 /// A REGISTRATION'S OWN `passthrough` IS REFUSED, alone or beside its own `token_exchange:`, naming
-/// the registration and the alternatives: it would present the caller's busbar credential to that
-/// server.
 #[test]
 fn a_registrations_own_passthrough_is_refused_alone_and_beside_an_exchange() {
     for exchanged in [false, true] {

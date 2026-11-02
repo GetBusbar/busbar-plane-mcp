@@ -2,8 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The subscriptions kept on a carrier session (the stdio line carrier): bounded per caller as on
-//! the HTTP carrier, and stepped under a standing and grants its caller's own units re-ask, never
-//! the ones captured at open.
 
 use serde_json::json;
 
@@ -52,11 +50,6 @@ fn reconfirmed(kept: &mut LineListen, standing: Standing, now_ns: u64) {
 }
 
 /// A LINE SUBSCRIPTION NO UNIT OF ITS CALLER RE-CONFIRMED ENDS. The kernel answers a caller's
-/// standing and grants only on a unit in flight, and a line carrier's subscription outlives the
-/// unit that opened it, so its caller's own lines (each a unit, the answer to busbar's `ping`
-/// among them) are where they are re-asked. A caller whose identity was revoked sends none the
-/// kernel admits: its stream ends with the identity refusal well inside the stream's bound,
-/// never holding the grants captured at open for the whole of it.
 #[test]
 fn a_line_subscription_its_caller_never_reconfirms_ends_on_its_frame() {
     let cat = catalogue();
@@ -76,7 +69,6 @@ fn a_line_subscription_its_caller_never_reconfirms_ends_on_its_frame() {
 }
 
 /// ONE CALLER HOLDS AT MOST THE HTTP CARRIER'S COUNT OF LINE SUBSCRIPTIONS: the next is refused,
-/// another caller is not.
 #[test]
 fn one_caller_holds_at_most_the_http_carriers_count_of_line_subscriptions() {
     let per_owner = crate::plane_door::door_listen::MAX_LISTENS_PER_OWNER;
@@ -95,8 +87,6 @@ fn one_caller_holds_at_most_the_http_carriers_count_of_line_subscriptions() {
 }
 
 /// A UNIT OF ITS CALLER RE-ASKS: a re-confirmed subscription goes on past the window, one whose
-/// caller's unit found it lapsed ends on its next frame, and busbar asks a quiet caller a `ping`
-/// once the window to re-ask is due.
 #[test]
 fn a_unit_of_its_caller_reasks_the_standing_its_frames_are_stepped_under() {
     let cat = catalogue();

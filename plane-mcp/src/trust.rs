@@ -2,32 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE TRUST SURFACE, PLANE SIDE: what a registered server was last seen to OFFER, judged against
-//! what the operator APPROVED in the `tools:` section, and the three admin answers that render it
-//! (`connect`, `changes`, `health`). Pure: the section's registration and
-//! the last sighting in, a state, a changes queue and the views out.
-//!
-//! * **The approval** is the registration as the operator wrote it: an authenticity root (a pin
-//!   whose mechanism is a root and carries its key) and, per tool, the `sha256:` digest approved for
-//!   it. A tool allowed with no digest is absent from the approval, which is `pending`; a
-//!   registration with no root approves nothing.
-//! * **The observation** is a live `tools/list`, each tool re-hashed here from the definition the
-//!   upstream sent ([`tool_digest`]: name, description and input schema, length-framed, the schema in
-//!   canonical JSON), never a digest the upstream supplied.
-//! * **The verdicts are the kernel's**: the plane sights the catalogue
-//!   (`trust.sight`) and each tool (`trust.sight_item`), the kernel's Approve answers every call
-//!   (`trust.serves`), and these views read the kernel's trust state (`trust.state`). A failed
-//!   contact is the one plane fact a view renders on its own (`error`).
-//!
-//! The kernel's trust book records each sighting's catalogue hash ([`catalogue_hash`],
-//! `trust.sight`), which stamps the server's re-verification clock; the operator's view and the
-//! dispatch gate read the comparison above, so both answer the one question the operator is looking
-//! at. The identity axis (`pin_changed`) is reported `false`, and that is the truth rather than a
-//! gap: under `cert_spki` and `mtls` the pin's key is the far end's key
-//! (`PinMechanismDecl::peer_key`), which the host seals into the registration's member route and the
-//! connector holds every connection to, refusing one whose server presents another key before a
-//! request byte is written. A contact that met a substituted key is a failed contact (`error`),
-//! never a sighting, so every sighting this view renders was made against the pinned key.
-//! `pinned_pubkey` verifies no manifest signature in this build and is refused at validation.
 
 use std::collections::BTreeMap;
 
@@ -37,12 +11,10 @@ use serde_json::Value;
 use crate::tools_config::McpServerDefCfg;
 
 /// One tool's identity, as `sha256:<hex>` over its name, description and input schema: one digest,
-/// because the operator's question is "is this the same tool I approved".
 #[must_use]
 pub fn tool_digest(name: &str, description: &str, input_schema: &Value) -> String {
     let mut framed = Vec::new();
-    // Length-prefixed, so a description ending in what the next field starts with cannot forge the
-    // same byte stream as a different split.
+
     for part in [name, description, &canonical_json(input_schema)] {
         framed.extend_from_slice(&(part.len() as u64).to_be_bytes());
         framed.extend_from_slice(part.as_bytes());
@@ -51,7 +23,6 @@ pub fn tool_digest(name: &str, description: &str, input_schema: &Value) -> Strin
 }
 
 /// `value` with every object's keys sorted, recursively: key ORDER is not drift, any change of key,
-/// value or shape is.
 #[must_use]
 pub fn canonical_json(value: &Value) -> String {
     let mut out = String::new();
@@ -96,12 +67,6 @@ pub struct Observation {
 }
 
 /// THE OBSERVATION a `tools/list` result carries, or why it is not one. Strict about the shape: a
-/// missing `description` is the empty string and a missing `inputSchema` is `{}`, both hashed at
-/// their defaulted value, so an upstream that later supplies one has drifted.
-///
-/// # Errors
-///
-/// The result carries no `tools` array, or an entry with no (or an empty) `name`.
 pub fn observe(result: &Value) -> Result<Observation, String> {
     let Some(items) = result.get("tools").and_then(Value::as_array) else {
         return Err("the `tools/list` result carries no `tools` array".to_string());
@@ -138,7 +103,6 @@ pub fn observe(result: &Value) -> Result<Observation, String> {
 }
 
 /// The hash a sighting reports to the kernel's trust book (`trust.sight`): the observed capability
-/// set, `name` and digest per line in name order.
 #[must_use]
 pub fn catalogue_hash(observation: &Observation) -> String {
     let mut bytes = Vec::new();
@@ -152,8 +116,6 @@ pub fn catalogue_hash(observation: &Observation) -> String {
 }
 
 /// The last contact: the SDK's one shape of a sighting
-/// ([`busbar_contract::abi::sdk::trust::Sighting`]), over what the server offered. `Never` is not
-/// a failure: a declaratively approved server has legitimately never been reached.
 pub type Sighting = busbar_contract::abi::sdk::trust::Sighting<Observation>;
 
 /// One item of the kernel's trust state (`trust.state`): the kernel owns every
@@ -170,23 +132,17 @@ pub struct KernelItem {
 
 impl KernelItem {
     /// The kernel serves it: its word is `approved` or `same` and it holds an approved digest. A
-    /// digest beside any other word (`new` for a revoked counterparty or an unapproved pin) is the
-    /// configured approval the kernel is not honouring now.
     fn serves(&self) -> bool {
         self.approved.is_some() && (self.word == "approved" || self.word == "same")
     }
 
     /// The kernel holds it demoted: `drifted`, or `quarantined` (a durable demotion it replayed
-    /// after a restart included), whatever the plane last sighted.
     fn demoted(&self) -> bool {
         self.word == "drifted" || self.word == "quarantined"
     }
 }
 
 /// The view's state word: the SDK's one state word of a trust view
-/// ([`busbar_contract::abi::sdk::trust::State`]). `Approved`: something is approved and the kernel
-/// holds no drift on what the server offers; `Quarantined`: the kernel holds a tool drifted or
-/// quarantined, or the server offers what nothing approved.
 pub use busbar_contract::abi::sdk::trust::State;
 
 /// The changes queue: what the server offers now against what the kernel holds approved.
@@ -201,9 +157,6 @@ pub struct Drift {
 }
 
 /// The changes queue of `sighting` against the kernel's `items`. The verdict on a tool offered at
-/// another digest is the kernel's word, never a comparison here, so a tool the kernel holds demoted
-/// is `changed` with or without a successful sighting (after a restart the plane has sighted
-/// nothing while the kernel replayed the demotion); `added` and `removed` need a sighting.
 #[must_use]
 pub fn drift(items: &[KernelItem], sighting: &Sighting) -> Drift {
     let Sighting::Seen(obs) = sighting else {
@@ -234,8 +187,6 @@ pub fn drift(items: &[KernelItem], sighting: &Sighting) -> Drift {
 }
 
 /// The view's state, read off the verdict the kernel enforces. Order is precedence: a failed
-/// contact is never reported as trust; a tool the kernel holds demoted is quarantine; nothing the
-/// kernel serves is pending; drift is quarantine.
 #[must_use]
 pub fn state(items: &[KernelItem], sighting: &Sighting) -> State {
     if matches!(sighting, Sighting::Failed(_)) {
@@ -308,7 +259,6 @@ struct HealthView<'a> {
 }
 
 /// The trust view of registration `name` (`def`) under `sighting` and the kernel's trust state of
-/// it (`items`), serialized in declaration order.
 #[must_use]
 pub fn trust_view(
     name: &str,
@@ -332,7 +282,7 @@ pub fn trust_view(
             ))
         })
         .collect();
-    // Every other item the kernel holds, and every allowed tool, is not served now: pending.
+
     let others = items.iter().map(|i| i.item.as_str());
     for tool in others.chain(def.tools_allow.keys().map(String::as_str)) {
         capabilities.entry(tool).or_insert(CapabilityView {
@@ -345,8 +295,7 @@ pub fn trust_view(
         name,
         state: state(items, sighting).word(),
         pin_mechanism: def.pin.mechanism.token(),
-        // The connector refused any connection whose server presented another key than the pin's,
-        // so a served sighting is a matching one (the module header).
+
         pin_changed: false,
         added: d.added,
         changed: d.changed,
@@ -359,7 +308,6 @@ pub fn trust_view(
 }
 
 /// The health view of registration `name` under `sighting` and the kernel's trust state of it
-/// (`items`), serialized in declaration order.
 #[must_use]
 pub fn health_view(name: &str, sighting: &Sighting, items: &[KernelItem]) -> String {
     let derived = state(items, sighting);

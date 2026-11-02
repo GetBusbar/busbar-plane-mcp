@@ -2,7 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The negotiator driven against FAKE upstreams, one per revision: the fake hop the adapter
-//! contract describes, answering as each revision's server would.
 
 use super::*;
 use crate::client::jsonrpc::envelope;
@@ -142,7 +141,7 @@ fn a_lost_session_is_reinitialized_once_and_never_looped() {
     ));
     let again = n.on_answer(accepted());
     assert_eq!(header(sent(&again).0, "mcp-session-id"), Some("new"));
-    // The fresh session is lost too: the answer is handed back, not a second re-initialise.
+
     let fin = n.on_answer(answer(404, json!({})));
     assert!(matches!(fin, Action::Finish(ref a) if a.status == 404));
 }
@@ -175,8 +174,6 @@ fn an_offer_this_plane_cannot_carry_is_a_disconnect() {
 }
 
 /// An upstream refusing the stateless request and `initialize` is handed to the `2024-11-05`
-/// event stream, which the driver carries (`door_legacy`); one remembered as `2024-11-05` goes
-/// there straight away.
 #[test]
 fn an_event_stream_upstream_is_handed_to_the_stream() {
     let mut n = Negotiator::new(call(), None, "1.6.0");
@@ -191,10 +188,6 @@ fn an_event_stream_upstream_is_handed_to_the_stream() {
     assert_eq!(n.start(), Action::OpenStream);
 }
 
-/// A REQUEST LOWERED INTO A REMEMBERED SESSION CARRIES THAT SESSION'S OWN ID (row 159 finding 3):
-/// two calls lowered into one session with the ids the session hands out carry two different ids,
-/// neither the stateless round's that every call shares, and each negotiator reports the id its
-/// answer is correlated by. RED: without the session's id, both carry the round's `5`.
 #[test]
 fn red_calls_in_one_session_never_share_an_id() {
     let memo = Remembered {
@@ -214,7 +207,7 @@ fn red_calls_in_one_session_never_share_an_id() {
     assert_ne!(a, b, "two calls in one session carried one id");
     assert_eq!((a, a_sent), (json!(first), Some(first)));
     assert_eq!((b, b_sent), (json!(first + 1), Some(first + 1)));
-    // The stateless shape, for the RED: both carry the round's id, and nothing says otherwise.
+
     assert_eq!(lowered(None), (json!(5), None));
 }
 
@@ -229,9 +222,6 @@ fn a_stateless_request_keeps_its_id() {
 }
 
 /// RED: a STATELESS-MODE server that answers the newest revision's request with the specification's
-/// `400` (an error naming neither the session nor `-32022`) is not taken for a stateless upstream:
-/// the `400` never reaches the caller, nothing is remembered from it, and the older revisions are
-/// tried; the server's `2025-06-18` session then carries the call.
 #[test]
 fn red_a_stateless_400_moves_the_ladder_and_is_never_remembered() {
     let mut n = Negotiator::new(call(), None, "1.6.0");

@@ -23,12 +23,12 @@ fn a_stateless_request_keeps_the_stateless_reading_whatever_else_it_carries() {
     let stateless = json!({"jsonrpc":"2.0","id":1,"method":"tools/list",
         "params":{"_meta":{META_PROTOCOL_VERSION: "2026-07-28"}}});
     assert_eq!(classify_post(&stateless, None, None), PostKind::Stateless);
-    // The stateless revision ignores a session header (it has no sessions).
+
     assert_eq!(
         classify_post(&stateless, Some("abc"), None),
         PostKind::Stateless
     );
-    // A request with no marker, no session and no initialize is answered as it always was.
+
     let bare = json!({"jsonrpc":"2.0","id":1,"method":"tools/list"});
     assert_eq!(classify_post(&bare, None, None), PostKind::Stateless);
 }
@@ -215,8 +215,6 @@ fn the_param_mirror_names_every_annotated_string_integer_and_boolean_argument() 
 }
 
 /// LOWERING CUTS ONLY THE STATELESS-ONLY MEMBERS' SPANS: an answer with nothing to lower is its own
-/// bytes; one with them keeps every other member's order, spacing and number spelling, wherever
-/// the cut members sit (first, between, last, all); an incomplete result is not expressible.
 #[test]
 fn lowering_an_answer_splices_its_own_bytes() {
     let plain = br#"{"id":1,"result":{"z":1.0,"a":1e3}}"#;
@@ -257,7 +255,6 @@ fn lowering_an_answer_splices_its_own_bytes() {
     assert_eq!(lower_answer(b"not json"), None);
 }
 /// M3-1: a bare CR is JSON whitespace, and every event-stream reader ends a line at one; a frame
-/// splits on CR, LF and CRLF alike, so no `data:` line carries a CR.
 #[test]
 fn a_bare_cr_in_framed_data_ends_its_data_line() {
     let framed = frame(None, Some(EVENT_MESSAGE), "{\"a\":1\r,\"b\":2}");

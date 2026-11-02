@@ -2,8 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The scope a `token_exchange:` registration's token is asked for, pure: the caller's down-scope
-//! over its `mcp_tool` grants on the member's server (a wildcard narrowing to the one tool called),
-//! and the registration's approved set for the door's own fetch, each sorted and deduplicated.
 
 use super::*;
 use crate::catalogue::Catalogue;
@@ -26,9 +24,6 @@ fn section() -> crate::tools_config::ToolsCfg {
 }
 
 /// THE CALLER'S DOWN-SCOPE: the tools its `mcp_tool` grants name on the member's server, never
-/// another server's, never one it is not granted, sorted; a wildcard grant is exactly the tool
-/// called, not everything the server offers; a caller granted nothing on the server asks for
-/// nothing.
 #[test]
 fn the_down_scope_is_the_callers_grants_on_the_server_and_a_wildcard_is_the_one_tool() {
     let catalogue = Catalogue::build(1, &section());
@@ -61,7 +56,6 @@ fn the_down_scope_is_the_callers_grants_on_the_server_and_a_wildcard_is_the_one_
 }
 
 /// THE DOOR'S OWN FETCH: every tool the registration approves at a digest, `{server}_{tool}`,
-/// sorted; a tool awaiting approval is not asked for.
 #[test]
 fn the_registrations_scope_is_its_approved_tools() {
     let section = section();

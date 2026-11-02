@@ -192,7 +192,7 @@ pub(super) fn http_reply(url: &str, fields: &[(String, String)], body: &Value) -
     );
     if method != "initialize" || !WRONG_INITIALIZE_ID.load(Ordering::SeqCst) {
         bytes.extend(sse_event("message", r#"{"jsonrpc":"2.0","method":"notifications/message","params":{"level":"info","data":"after result"}}"#));
-        // A valid response to a different typed id must not replace this hop's response either.
+
         bytes.extend(sse_event(
             "message",
             r#"{"jsonrpc":"2.0","id":"unrelated","result":{}}"#,

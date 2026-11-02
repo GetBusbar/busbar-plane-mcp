@@ -2,11 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! `mcp:` validation and derivation, moved with the code from the retired host crate.
-//!
-//! Every refusal here is a BOOT refusal, and the reason they are all tested rather than sampled is
-//! that each one prevents a deployment that would answer requests while being subtly wrong about its
-//! own identity — advertising one audience in its metadata document and enforcing another in its
-//! verifier. That failure is invisible from inside busbar and fatal for every client.
 
 use super::{McpCfg, McpCfgError, McpResource};
 use crate::tool_claims::DEFAULT_MOUNT;
@@ -21,9 +16,6 @@ fn cfg(uri: &str) -> McpCfg {
 }
 
 /// THE DERIVATION, which is the whole reason the mount path is not a separate config key: the path
-/// a client posts to and the identifier its token is bound to come from ONE string, so they cannot
-/// drift. And the RFC 9728 section 3.1 path-INSERTION rule — the resource's path goes AFTER the well-known
-/// prefix, not before it. Getting that backwards 404s every compliant client's discovery.
 #[test]
 fn the_mount_and_the_metadata_path_are_derived_from_the_one_canonical_uri() {
     let r = McpResource::from_cfg(&cfg("https://gateway.example.com/mcp")).unwrap();
@@ -35,7 +27,6 @@ fn the_mount_and_the_metadata_path_are_derived_from_the_one_canonical_uri() {
 }
 
 /// A multi-segment path is refused (below); a trailing slash does not create a second spelling of
-/// one deployment, and the audience stays the string the operator wrote.
 #[test]
 fn a_trailing_slash_derives_the_same_mount() {
     let bare = format!("https://h.example{DEFAULT_MOUNT}");
@@ -48,14 +39,6 @@ fn a_trailing_slash_derives_the_same_mount() {
     assert_eq!(s.canonical_uri(), slashed);
 }
 
-/// CG-17: THE MOUNT IS FIXED, NOT OPERATOR-CONFIGURABLE. The design rules that inbound paths are
-/// compile-time claims, and a configured address naming a path nothing claims refuses boot at
-/// validation.
-///
-/// Such an address used to be accepted: the process advertised that path in its `401` challenge and
-/// bound every token's audience to it, while the claim table served another — a deployment its
-/// clients can never reach. It is a boot refusal now, and the refusal says what to type. Paths
-/// differ by case, so an upper-cased mount is another path, and so is a nested one.
 #[test]
 fn a_canonical_uri_naming_any_other_path_is_refused_at_boot() {
     let upper = DEFAULT_MOUNT.to_uppercase();
@@ -88,9 +71,6 @@ fn a_canonical_uri_naming_any_other_path_is_refused_at_boot() {
 }
 
 /// The canonical URI is NOT normalised, only recognised. It is compared byte-for-byte against the
-/// `aud` an authorization server minted, and a parser that helpfully lower-cased the host or
-/// stripped a default port would hand back a string that no longer equals what the IdP issued —
-/// turning a correct client into a refused one, for a reason nothing logs.
 #[test]
 fn the_canonical_uri_is_preserved_verbatim_rather_than_normalised() {
     let uri = format!("https://Gateway.Example.COM:443{DEFAULT_MOUNT}");
@@ -100,7 +80,6 @@ fn the_canonical_uri_is_preserved_verbatim_rather_than_normalised() {
 }
 
 /// Every refusal arm, with the exact error, because a boot refusal that names the wrong field sends
-/// an operator to edit the wrong line.
 #[test]
 fn every_malformed_canonical_uri_is_refused_with_its_own_diagnosis() {
     let cases: &[(&str, McpCfgError)] = &[
@@ -130,8 +109,6 @@ fn every_malformed_canonical_uri_is_refused_with_its_own_diagnosis() {
                 "https://gateway.example.com/mcp#frag".into(),
             ),
         ),
-        // A query or fragment straight after the authority is diagnosed as such, not as a host
-        // that swallowed it and left no path.
         (
             "https://gateway.example.com?x",
             McpCfgError::CanonicalUriHasQueryOrFragment("https://gateway.example.com?x".into()),
@@ -159,8 +136,6 @@ fn every_malformed_canonical_uri_is_refused_with_its_own_diagnosis() {
 }
 
 /// The MCP plane may not mount at the deployment root. The LLM plane is the RESIDUAL — its catch-all
-/// claims every unclaimed path by construction — so an MCP mount at `/` would sit in front of every
-/// protocol endpoint in the process and answer them all with JSON-RPC errors.
 #[test]
 fn the_plane_cannot_mount_at_the_deployment_root() {
     assert!(matches!(
@@ -170,8 +145,6 @@ fn the_plane_cannot_mount_at_the_deployment_root() {
 }
 
 /// An authorization-server list is the ENTIRE content of the answer a credential-less client came
-/// for. With none, the `401` it receives names nowhere to go, and the discovery loop dead-ends at
-/// step two with no error anyone can act on.
 #[test]
 fn a_resource_with_no_authorization_server_is_refused() {
     let mut c = cfg("https://gateway.example.com/mcp");
@@ -188,8 +161,6 @@ fn a_resource_with_no_authorization_server_is_refused() {
 }
 
 /// The allowlist is the operator's list verbatim: the default is empty, and what the operator wrote
-/// is what the block carries. The verdict on an `Origin` is not the plane's (one rule for every
-/// plane, asserted beside that rule); this holds the data half it reads.
 #[test]
 fn the_origin_allowlist_is_carried_as_written_and_empty_by_default() {
     let base = r#""canonical_uri": "https://gateway.example.com/mcp",
@@ -210,9 +181,6 @@ fn the_origin_allowlist_is_carried_as_written_and_empty_by_default() {
 }
 
 /// The `mcp:` block parses with the field names an operator actually writes, and an unknown key is
-/// REFUSED rather than silently ignored — a typo'd `allowed_origin:` that parsed to an empty
-/// allowlist would look like a working config and be a closed door. (The composition root reads
-/// the block as a parsed value, so a JSON document carries the same shape here.)
 #[test]
 fn the_config_block_parses_and_refuses_an_unknown_key() {
     let parsed: McpCfg = serde_json::from_str(

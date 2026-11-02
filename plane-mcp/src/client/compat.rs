@@ -2,9 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE CLIENT HALF OF THE SESSION REVISIONS: how busbar, calling an upstream that does not speak
-//! the stateless `2026-07-28` revision, speaks `2025-11-25`, `2025-06-18` or `2024-11-05`. A request
-//! is built once, stateless, and LOWERED here ([`lower_request`]); the answers are read back for
-//! the ladder ([`super::negotiate`]). Pure: no I/O, no clock, no randomness.
 
 use serde_json::Value;
 
@@ -19,14 +16,9 @@ use crate::codec::{
 use crate::revision::{Revision, StepOutcome};
 
 /// The id busbar's own `initialize` carries: `2^53 - 1`, the largest integer a JavaScript peer
-/// reads back exactly, above every other id busbar sends.
 pub const INITIALIZE_ID: u64 = (1 << 53) - 1;
 
 /// Reads what a stateless request's answer says about the upstream's revision.
-///
-/// A status in `400..500`, or a JSON-RPC error that says the method, the request shape or the
-/// revision is not understood, is a refusal of the revision and moves the ladder. A `5xx`, or no
-/// answer, says nothing about the revision. Anything else answered.
 #[must_use]
 pub fn probe_outcome(status: u16, body: &[u8]) -> StepOutcome {
     if (500..600).contains(&status) {
@@ -52,26 +44,6 @@ pub fn probe_outcome(status: u16, body: &[u8]) -> StepOutcome {
 }
 
 /// Reads what the answer to busbar's STATELESS request says about the upstream's revision: the
-/// ladder moves on any refusal of the request, and any other answer, an upstream's own JSON-RPC
-/// error at a success status included, is the stateless path's answer, handed on as it came (THE
-/// DESIGN section 2, the mcp bullet: the stateless path of the `2026-07-28` revision stays
-/// byte-identical).
-///
-/// A refusal of the revision is what a server of an earlier revision answers a request that opens
-/// no session:
-///
-/// - ANY `4xx`, whatever its body: the MCP specification (2025-06-18 and 2025-11-25, Streamable
-///   HTTP) has a server that does not support the `MCP-Protocol-Version` it was sent answer
-///   `400 Bad Request` and fixes no JSON-RPC code or wording for it, so no body can tell that
-///   refusal from another; a `2024-11-05` server's `404`/`405` at its event stream's endpoint and a
-///   session server's `400`/`404` for the session it was not named are the same answer. The
-///   earlier revisions are tried before the upstream is taken for a stateless one, and the `4xx`
-///   never reaches the caller as the call's answer;
-/// - a JSON-RPC error `-32022` (the revision is unsupported), at any status;
-/// - an invalid-request/params or generic server error with a recognised missing-session or
-///   uninitialized-server message; an application error mentioning a session is still its answer.
-///
-/// A `5xx`, or no answer, says nothing about the revision.
 #[must_use]
 pub fn stateless_outcome(status: u16, body: &[u8]) -> StepOutcome {
     if (500..600).contains(&status) {
@@ -114,7 +86,6 @@ pub fn stateless_outcome(status: u16, body: &[u8]) -> StepOutcome {
 }
 
 /// The `initialize` request (id [`INITIALIZE_ID`]), sent to `url` with the credential `template`
-/// carries. `client_version` is the caller's own version string.
 #[must_use]
 pub fn initialize_request(
     template: &OutboundRequest,
@@ -148,7 +119,6 @@ pub fn initialized_notification(
 }
 
 /// The revision an `initialize` answer names, when this plane can carry it. `None` is an upstream
-/// busbar must not continue with: the spec's rule for a client offered a revision it cannot speak.
 #[must_use]
 pub fn offered_revision(body: &[u8]) -> Option<Revision> {
     let v: Value = serde_json::from_slice(body).ok()?;
@@ -161,11 +131,6 @@ pub fn offered_revision(body: &[u8]) -> Option<Revision> {
 }
 
 /// LOWERS a stateless request into `revision`: the stateless `_meta` members go (a session
-/// revision states them once, in `initialize`), the stateless mirror headers go, the version
-/// header names `revision` (where the revision has one) and the session header names `session`.
-/// The URL is `url` (the endpoint, or a `2024-11-05` message address). The credential and every
-/// other header `req` carries are kept. `id`, when given, replaces the request's own (a session's
-/// own next id: a session revision forbids reusing one).
 #[must_use]
 pub fn lower_request(
     req: &OutboundRequest,
@@ -177,8 +142,7 @@ pub fn lower_request(
     let mut body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
     if let (Some(id), Some(obj)) = (id, body.as_object_mut()) {
         obj.insert("id".to_string(), Value::from(id));
-        // A progress token the request carries is derived from the id it is sent under, so two
-        // requests in flight never share one.
+
         if let Some(token) = obj
             .get_mut("params")
             .and_then(|p| p.get_mut("_meta"))
@@ -206,7 +170,6 @@ pub fn lower_request(
 }
 
 /// The shared session-revision envelope: `template`'s headers without the stateless mirror, plus
-/// the version and session headers `revision` and `session` call for.
 fn session_envelope(
     template: &OutboundRequest,
     url: &str,
@@ -261,11 +224,6 @@ fn origin_of(url: &str) -> Option<(&str, &str)> {
 }
 
 /// THE MESSAGE ADDRESS a `2024-11-05` stream's `endpoint` event names, resolved against the
-/// registered endpoint `base`. A path is joined to `base`'s origin; an absolute address must have
-/// exactly `base`'s origin. Anything else is refused.
-///
-/// # Errors
-/// [`AddressRefused`] for another origin or an unreadable address.
 pub fn message_address(base: &str, event_data: &str) -> Result<String, AddressRefused> {
     let data = event_data.trim();
     if data.is_empty()
@@ -350,7 +308,6 @@ impl EventReader {
     }
 
     /// Feeds `chunk` and returns every event it completed, in order. Comment lines and events with
-    /// neither a name nor data are skipped.
     pub fn feed(&mut self, chunk: &[u8]) -> Vec<StreamEvent> {
         let mut out = Vec::new();
         if self.overflowed {
@@ -383,7 +340,6 @@ impl EventReader {
     }
 
     /// The current line ended: a blank line ends the event (handed on when it named or carried
-    /// anything), any other line is read as a field.
     fn end_line(&mut self, out: &mut Vec<StreamEvent>) {
         if std::mem::take(&mut self.first_line) && self.line.starts_with(&[0xef, 0xbb, 0xbf]) {
             drop(self.line.drain(..3));

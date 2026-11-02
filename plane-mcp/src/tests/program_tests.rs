@@ -2,10 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE DOOR'S OWN EXCHANGES WITH A STDIO CHILD, driven over a connector that stands in for the
-//! host's one long-lived program per member: a scripted child every lease shares, whose messages
-//! reach every open lease, and whose generation the test moves (a crash and a restart). The
-//! stand-in is the exchange's own seam (`ProgramConn`), a plain Rust value, so this module needs no
-//! raw ABI call.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
@@ -49,7 +45,6 @@ impl Child {
             return Vec::new();
         };
         if message.get("method").is_none() {
-            // A reply to one of the child's own requests.
             return Vec::new();
         }
         let mut out = self.chatter.clone();
@@ -78,7 +73,6 @@ fn with<R>(f: impl FnOnce(&mut Child) -> R) -> R {
 static SERIAL: Mutex<()> = Mutex::new(());
 
 /// THE HOST'S CONNECTOR, standing in for the member's one long-lived program: every lease reads
-/// the stand-in child's messages.
 struct ChildConn;
 
 impl ProgramConn for ChildConn {
@@ -176,7 +170,6 @@ impl Peer for Door {
         fresh
     }
     fn owner(&mut self, generation: u64, id: &Value) -> AskOwner {
-        // No call is relayed here: an ask is no call's, refused by the first exchange to read it.
         if self.claim(generation, id) {
             AskOwner::Refuse
         } else {
@@ -235,8 +228,6 @@ fn reset(generation: u64, chatter: Vec<Value>) {
 }
 
 /// RED: `initialize` (and its acknowledgement) runs ONCE PER GENERATION of the member's child: the
-/// first exchange greets generation 1, the second reuses it, and after the child restarts
-/// (generation 2) the next exchange greets it again.
 #[test]
 fn the_child_is_greeted_once_per_generation() {
     let _one = SERIAL
@@ -259,7 +250,7 @@ fn the_child_is_greeted_once_per_generation() {
             "tools/list"
         ]
     );
-    // The child crashed and was spawned anew: a new generation.
+
     with(|c| c.generation = 2);
     let third = list(&mut door, list_id(3, 0), 3);
     assert_eq!(third.generation, 2);
@@ -271,8 +262,6 @@ fn the_child_is_greeted_once_per_generation() {
 }
 
 /// RED: an exchange's answer is the response carrying ITS id: another exchange's answer and the
-/// child's own messages that the child writes first are passed over or handled — the progress
-/// note dropped, the list-changed notice brought forward, the child's `ping` answered once.
 #[test]
 fn an_exchange_takes_its_own_answer_and_handles_the_childs_messages() {
     let _one = SERIAL
@@ -297,7 +286,7 @@ fn an_exchange_takes_its_own_answer_and_handles_the_childs_messages() {
     let answer: Value = serde_json::from_slice(&done.answer.expect("an answer")).unwrap();
     assert_eq!(answer["id"], json!(id), "its own id, not 424242");
     assert_eq!(answer["result"]["tools"][0]["name"], json!("echo"));
-    // The progress note is dropped: it is no list-changed notice and nothing answers it.
+
     assert_eq!(
         door.noticed, 1,
         "only the list-changed notice is brought forward"

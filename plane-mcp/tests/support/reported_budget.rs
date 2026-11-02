@@ -44,8 +44,7 @@ fn a_task_budget_refusal_keeps_the_kernels_status_and_budget_reason() {
         )
     };
     assert_eq!(result.outcome(), Outcome::Ready);
-    // The refusal ABI delegates status 0 to the kernel's input status. The paired real
-    // kernel admission test separately proves that delegation renders its 429 to the caller.
+
     assert_eq!(
         output.status, 0,
         "the plane preserves the kernel's budget status"

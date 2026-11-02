@@ -2,16 +2,8 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE DOOR'S FACTS THE DOOR-DRIVEN TESTS NAME (`tests/sessions.rs`, `tests/door_audit.rs`,
-//! `tests/tasks.rs`, and the plugin crate's `tests/both_ways.rs`). Those
-//! tests drive the plane only through [`door`](busbar_plane_mcp::door), the crate's one public item,
-//! and need a few of its private constants to build their inputs and read its answers. They are
-//! restated here, plain data, and the crate's own unit test `door_facts_tests`
-//! (`src/tests/door_facts_tests.rs`) includes this same file and asserts every value equals the
-//! private item it restates, so a drift is red in the crate before a door-driven test reads a stale
-//! value.
 
 /// `door::ROUTES` as `(verb, target, carrier)`, in order: a route's index is the claim an arrival
-/// carries.
 pub const ROUTES: &[(&str, &str, &str)] = &[
     ("GET", "/.well-known/oauth-protected-resource/mcp", "http"),
     ("POST", "/mcp", "http"),
@@ -68,10 +60,6 @@ pub const CODE_INTERNAL: i64 = -32603;
 pub const CODE_HEADER_MISMATCH: i64 = -32020;
 
 /// The claim (route index) of `(verb, target)` on `carrier`.
-///
-/// # Panics
-///
-/// When the door states no such route.
 #[must_use]
 pub fn claim(verb: &str, target: &str, carrier: &str) -> u32 {
     let i = ROUTES
@@ -88,7 +76,6 @@ pub const RECORD_CALL: u32 = 0;
 pub const UNGOVERNED: &str = "<ungoverned>";
 
 /// `door::ROUTES`' `open` column, in the same order as [`ROUTES`]: only the discovery document is
-/// served with no inbound credential.
 pub const ROUTES_OPEN: &[bool] = &[true, false, false, false, false, false, false];
 
 /// `door::ADMIN_VERBS`: the admin routes, `(verb, target)`, each stated with flags `0`.
@@ -123,7 +110,6 @@ pub const WITNESS_SECTION: &[u8] =
     br#"{"fs": {"url": "https://mcp.example/fs", "pin": {"mechanism": "unpinned"}}}"#;
 
 /// The catalogue's `tools/list` answer, under id `9`, for [`WITNESS_SECTION`] to a caller entitled
-/// to nothing (`Catalogue::build(1, ..).tools_list(&json!(9), ..)`).
 pub const WITNESS_TOOLS_LIST_ANSWER: &[u8] = br#"{"id":9,"jsonrpc":"2.0","result":{"cacheScope":"private","resultType":"complete","tools":[],"ttlMs":0}}"#;
 
 /// The door witness's relayed call: a `tools/call` of `fs_read_file`, its path argument mirrored.
@@ -133,8 +119,6 @@ pub const RELAY_CALL: &[u8] = br#"{"jsonrpc":"2.0","id":30,"method":"tools/call"
 pub const RELAY_CALL_TEXT_CHARS: usize = 13;
 
 /// `record::call_suffix`: a call record's length-prefixed suffix (`ts, server, tool, outcome,
-/// reason, tool_digest, pin_generation`), each text `u64`-length-prefixed, each number as its
-/// eight big-endian bytes under the same prefix.
 #[must_use]
 pub fn call_suffix(
     ts: u64,
@@ -165,12 +149,9 @@ pub fn call_suffix(
 }
 
 /// THE RELAYED-CALL SCRIPT's server (the plugin crate's `tests/relayed_call.rs`): one server with
-/// one approved tool (its `path` argument mirrored in `Mcp-Param-Path`), one tool awaiting
-/// approval, and the `roots` grant with nothing declared to disclose.
 pub const RELAY_SECTION: &[u8] = br#"{"fs": {"url": "https://mcp.example/fs/rpc?v=1", "pin": {"mechanism": "cert_spki", "key": "sha256/47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU="}, "grants": {"roots": true}, "tools_allow": {"read_file": {"schema_hash": "sha256:aa", "input_schema": {"type": "object", "properties": {"path": {"type": "string", "x-mcp-header": "Path"}}}}, "draft": {}}}}"#;
 
 /// `call::outbound` of [`RELAY_CALL`] admitted over [`RELAY_SECTION`], to `fs` under request id
-/// `0`: the request bound for the member, its body.
 pub const RELAY_REQUEST_BODY: &[u8] = br#"{"id":0,"jsonrpc":"2.0","method":"tools/call","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/protocolVersion":"2026-07-28"},"arguments":{"path":"/a"},"name":"read_file"}}"#;
 
 /// The same request's head fields, in order.
@@ -184,7 +165,6 @@ pub const RELAY_REQUEST_FIELDS: &[(&str, &str)] = &[
 ];
 
 /// The far end's answers to the relayed call: a result, a JSON-RPC error, a result streamed after
-/// a progress frame, and an ask for roots busbar holds the grant for and has nothing to disclose.
 pub const RELAY_FAR_OK: &[u8] =
     br#"{"jsonrpc":"2.0","id":0,"result":{"content":[{"type":"text","text":"hi"}]}}"#;
 /// See [`RELAY_FAR_OK`].

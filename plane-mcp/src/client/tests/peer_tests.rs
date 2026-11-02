@@ -2,13 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! WHAT A CHILD SENDS BUSBAR — classification, the deny-by-default gate on the three authority
-//! asks, and the two facts that stop a well-behaved child from desynchronising the stream.
-//!
-//! The paired end-to-end battery is the engine's `mcp::tests/stdio_client_leg_tests.rs`: this file proves
-//! what the classifier DECIDES, that one proves a real child process's real notifications and real
-//! requests reach it. Neither substitutes for the other, and the reason is the one
-//! `stdio_dispatch_tests.rs` records: a complete, adversarially tested classifier that nothing calls
-//! is what the deleted stdio transport was.
 
 use super::super::jsonrpc::ServerAsk;
 use super::super::peer::{
@@ -22,16 +15,11 @@ fn line(raw: &str) -> serde_json::Value {
 }
 
 /// A RESPONSE IS NOT A SERVER MESSAGE, and this is the assertion that keeps the stream in sync.
-///
-/// If a response could be classified as anything, the read loop would consume it as an interleaved
-/// message and go on waiting for an answer that has already arrived.
 #[test]
 fn a_response_is_never_a_server_message() {
     for raw in [
         r#"{"jsonrpc":"2.0","id":1,"result":{"content":[]}}"#,
         r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"no"}}"#,
-        // The adversarial one: a line carrying BOTH a result and a method. It must read as the
-        // response it claims to be, never be executed as a request the peer did not send.
         r#"{"jsonrpc":"2.0","id":1,"result":{},"method":"sampling/createMessage"}"#,
     ] {
         assert_eq!(
@@ -43,11 +31,6 @@ fn a_response_is_never_a_server_message() {
 }
 
 /// A NOTIFICATION METHOD IS A NOTIFICATION REGARDLESS OF WHAT `id` CARRIES.
-///
-/// Notification-ness is decided by the METHOD, against the closed table, BEFORE `id` is ever read —
-/// see [`classify`]'s header. A peer that sends `notifications/message` with an explicit `id: null`
-/// is still not asking for a reply: the method itself is one the specification defines as
-/// fire-and-forget, and that does not change because the wire happens to carry a stray `id` member.
 #[test]
 fn a_notification_method_is_a_notification_even_with_a_null_id() {
     assert_eq!(
@@ -59,14 +42,6 @@ fn a_notification_method_is_a_notification_even_with_a_null_id() {
 }
 
 /// THE HANG THIS MODULE USED TO PRODUCE: A PRESENT-BUT-NULL `id` ON A REQUEST METHOD MUST STILL BE
-/// ANSWERED.
-///
-/// JSON-RPC 2.0 section 4 defines a notification as a request whose `id` MEMBER IS ABSENT — not one whose
-/// `id` holds `null`. Many JSON-RPC encoders (serde's default among them) spell an absent field as an
-/// explicit `null` when the struct always emits the key. A classifier that filtered `id` by nullness
-/// before consulting the method table read such a peer's `roots/list` as a notification, never
-/// replied, and left the child blocked forever waiting for the response that was never coming — the
-/// defect this module's header now states first.
 #[test]
 fn a_present_but_null_id_on_a_request_method_is_still_a_request() {
     assert_eq!(
@@ -82,10 +57,6 @@ fn a_present_but_null_id_on_a_request_method_is_still_a_request() {
 }
 
 /// A TRUE NOTIFICATION — `id` ABSENT ENTIRELY — STILL GETS NO REPLY.
-///
-/// The fix for the hang above must not be "answer everything": an `id`-absent line is exactly what
-/// the base specification calls a notification, and answering one would put a response on the wire
-/// that nothing sent an id to correlate.
 #[test]
 fn a_true_notification_with_id_absent_is_still_unanswered() {
     assert_eq!(
@@ -97,9 +68,6 @@ fn a_true_notification_with_id_absent_is_still_unanswered() {
 }
 
 /// AN UNKNOWN REQUEST IS ANSWERED `-32601`. AN UNKNOWN NOTIFICATION IS NOT ANSWERED AT ALL.
-///
-/// The asymmetry is the whole point: a dropped request is a child blocked on a reply forever, and a
-/// hang is a worse diagnosis than a refusal. A notification, by definition, has nobody listening.
 #[test]
 fn an_unknown_request_is_answered_and_an_unknown_notification_is_not() {
     let Some(ServerMessage::UnknownRequest { id, method }) = classify(&line(
@@ -122,9 +90,6 @@ fn an_unknown_request_is_answered_and_an_unknown_notification_is_not() {
 }
 
 /// `ping` IS ANSWERED UNCONDITIONALLY, and it is the ONLY request that is.
-///
-/// A ping carries no authority and its whole purpose is to let a peer tell a live process from a
-/// wedged one; gating it would make busbar look dead to every child that probes.
 #[test]
 fn ping_is_answered_with_an_empty_result_under_no_grants() {
     let id = serde_json::json!(9);
@@ -149,9 +114,6 @@ fn ping_is_answered_with_an_empty_result_under_no_grants() {
 }
 
 /// THE THREE AUTHORITY ASKS ARE DENY-BY-DEFAULT, and the refusal NAMES THE GRANT TO SET.
-///
-/// All three, not a sample. A gate proven on one kind is a gate whose other two arms have never been
-/// executed, and the arm that is never executed is the arm that says yes.
 #[test]
 fn the_three_authority_asks_are_denied_by_default_and_name_their_grant() {
     let none = ServerRequestGrants::default();
@@ -183,10 +145,6 @@ fn the_three_authority_asks_are_denied_by_default_and_name_their_grant() {
 }
 
 /// LAW 11: A GRANTED ASK IS THE CALLER'S, AND BUSBAR WRITES NOTHING IN ITS PLACE. The grant is a
-/// relay permission: held, the ask is relayed to busbar's caller and the child gets no reply from
-/// busbar at all (the caller's answer is written under the child's id); not held, the child is
-/// refused (`ask_ungranted`, the operator's policy). RED against the deleted "no satisfier" reply,
-/// which answered a granted ask on the caller's behalf.
 #[test]
 fn a_granted_ask_is_relayed_and_never_answered_by_busbar() {
     let all = ServerRequestGrants {
@@ -224,7 +182,6 @@ fn a_granted_ask_is_relayed_and_never_answered_by_busbar() {
 }
 
 /// ONE GRANT DOES NOT OPEN THE OTHER TWO. The three are independent authorities and a table that
-/// leaked between them would let `roots: true` buy an LLM completion.
 #[test]
 fn each_grant_opens_only_its_own_ask() {
     let roots_only = ServerRequestGrants {
@@ -237,10 +194,6 @@ fn each_grant_opens_only_its_own_ask() {
 }
 
 /// THE FOUR "SOMETHING CHANGED" NOTIFICATIONS CAN ONLY BRING A REFRESH FORWARD, and no others can.
-///
-/// The set matters in both directions. A fifth notification mapped to `BringRefreshForward` would
-/// give a peer another lever on busbar's outbound fetch rate; one of these four mapped to `Log`
-/// would silently stop rug-pull detection reacting to the signal that exists to trigger it.
 #[test]
 fn only_the_change_notifications_trigger_a_refresh() {
     let expected = [
@@ -269,9 +222,7 @@ fn only_the_change_notifications_trigger_a_refresh() {
             "{n:?} maps to the wrong effect"
         );
     }
-    // `ResourcesUpdated` is the ONE arm with a second, named effect — the recorded uri for the
-    // server-leg relay — and it must be exactly one: a second recording arm is a second reader of
-    // peer-chosen content.
+
     for n in expected.map(|(n, _)| n) {
         assert_eq!(
             n.effect() == NotificationEffect::RelayResourceUpdate,

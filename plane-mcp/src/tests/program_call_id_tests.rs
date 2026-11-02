@@ -73,8 +73,6 @@ fn distinguish_calls(first: (u64, u32), second: (u64, u32)) {
         high_json.pointer("/params/_meta/progressToken")
     );
 
-    // Cancelling the first exchange closes its own lease. The shared child and the other call's
-    // correlation remain live, including progress under the token actually sent on that call.
     assert!(ChildConn.close(leases[0].0, 4, leases[0].1).is_ready());
     assert!(with(|child| child.leases.contains_key(&leases[1].1)));
     with(|child| {

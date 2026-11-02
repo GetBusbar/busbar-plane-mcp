@@ -2,22 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! `subscriptions/listen` on the HTTP carrier: a duplex session. `arrive` states `ROUTE_SESSION` for it, so the driver
-//! serves the unit as a duplex session whose caller leg is the long-lived response; every rule of
-//! the subscription is [`crate::subscribe`]'s, the same state machine the line carrier drives.
-//!
-//! - THE CALLER'S PIECE (the request's body, read once) OPENS the subscription ([`Listen::open`]):
-//!   a request that can deliver nothing is refused `400` with its JSON-RPC error; one that opens is
-//!   answered `200` as an event stream (`content-type: text/event-stream`,
-//!   `cache-control: no-cache, no-store`) whose first event is the acknowledgement.
-//! - THE TICK ([`tick`]) is the subscription's clock: every [`POLL_NS`] each held subscription is
-//!   named on the instance's driver ticket (`drive`, [`drive`]), and the session collects
-//!   (`FROM_KERNEL`): one step, its permission re-asked through the kernel's live re-resolution
-//!   ([`standing`]), a change frame when the catalogue its caller can see moved, a
-//!   keepalive comment (`: keepalive`) when it has been quiet for
-//!   [`crate::subscribe::KEEPALIVE_NS`], and its last frame at its bound or on a lapsed permission,
-//!   after which the session is done. A new generation (`refresh`) names them at once ([`wake_all`]).
-//! - Every frame is one `message` event (`event: message`, `data: <json>`).
-//! - The session's one line carries the request's fee unit, reported with the acknowledgement.
 
 use super::{admit, ask_entitlements, write, CallUnit, Held, McpDoor, Pending, Written, MAX_UNITS};
 use crate::catalogue::Lookup;
@@ -33,12 +17,9 @@ use busbar_contract::abi::sdk::{Lent, Out, StaticServices};
 use serde_json::Value;
 
 /// How often the instance's tick steps its held subscriptions (the generation is re-read and
-/// the permission re-asked every 250 ms of a stream's life).
 pub(super) const POLL_NS: u64 = 250_000_000;
 
 /// The most subscriptions one caller holds open at once. A caller at it is refused its next one:
-/// a quota is a refusal its caller can act on (close one, then open), where an eviction of another
-/// caller's stream is not.
 pub(super) const MAX_LISTENS_PER_OWNER: usize = 64;
 
 /// One held subscription, by its session's stream.
@@ -76,9 +57,6 @@ pub(super) fn hold_update(updates: &mut Vec<(String, String)>, server: &str, uri
 }
 
 /// AN UPSTREAM ANNOUNCED that `uri` of its registration `server` changed: every held subscription on
-/// the HTTP carrier is asked for a step that relays it (the step relays it only to a subscription
-/// that asked for the uri, under the caller's grant re-asked that frame), and so is every one kept
-/// on a line carrier ([`super::door_line::announced`]).
 pub(super) fn announced(plane: &McpDoor, server: &str, uri: &str) {
     let any = plane.listens.with_all(|m| {
         for l in m.values_mut() {
@@ -111,7 +89,6 @@ pub(super) fn frame(bytes: Vec<u8>, done: bool, headed: bool) -> Pending {
 }
 
 /// ONE PIECE OF A LISTEN SESSION (`stream != 0`): the caller's piece opens it, a collection steps
-/// it, and the caller's side ending ends it. A re-call after `more = 1` writes what is pending.
 pub(super) fn piece(
     plane: &McpDoor,
     input: Lent<'_, OnPieceIn>,
@@ -128,7 +105,6 @@ pub(super) fn piece(
             return Some(true);
         }
         match given.from() {
-            // The caller went away: the session ends with nothing more to say.
             FROM_CALLER if given.flags() & PIECE_LAST != 0 => {
                 unit.pending = Some(frame(Vec::new(), true, true));
                 Some(true)
@@ -140,7 +116,7 @@ pub(super) fn piece(
                 }
                 step(plane, ticket, principal, unit)
             }
-            // A listen session dials nothing: an ATTEMPT carries nothing.
+
             FROM_KERNEL => Some(false),
             _ => None,
         }
@@ -175,7 +151,6 @@ pub(super) fn piece(
 }
 
 /// OPEN the subscription the unit's request asks for: refused in its own words, or held and
-/// stepped once (the acknowledgement). `None` for a unit that is not a `subscriptions/listen`.
 fn open(plane: &McpDoor, ticket: Ticket, principal: &str, unit: &mut CallUnit) -> Option<bool> {
     let id = listen_id(unit)?;
     if plane.listens.with(&unit.key, |l| l.is_some()) {
@@ -198,7 +173,7 @@ fn open(plane: &McpDoor, ticket: Ticket, principal: &str, unit: &mut CallUnit) -
         headed: false,
         updates: Vec::new(),
     };
-    // THE QUOTA REFUSES THE NEW STREAM, never evicts a held one.
+
     let admitted = plane.listens.with_all(|held| {
         let full = quota_full(held.values().map(|l| &l.owner), principal);
         if full {
@@ -226,8 +201,6 @@ pub(super) fn listen_id(unit: &CallUnit) -> Option<Value> {
 }
 
 /// OPENS the subscription `id` over `held`, on either carrier: the unit's grants entitled afresh and
-/// the clock read. `Err` the answer refusing it: `503` for a clock read that failed (never opened
-/// at the epoch), `400` in the request's own words.
 pub(super) fn open_listen(
     plane: &McpDoor,
     ticket: Ticket,
@@ -257,7 +230,6 @@ pub(super) fn open_listen(
 }
 
 /// Whether `owner` holds as many subscriptions among the held ones' `owners` as one caller may
-/// ([`MAX_LISTENS_PER_OWNER`]), or the instance its total ([`MAX_UNITS`]), on either carrier.
 pub(super) fn quota_full<'a>(
     owners: impl ExactSizeIterator<Item = &'a String>,
     owner: &str,
@@ -266,7 +238,6 @@ pub(super) fn quota_full<'a>(
 }
 
 /// THE QUOTA'S REFUSAL of subscription `id`, on either carrier: its caller holds the most open
-/// subscriptions one caller may, or the instance its total.
 pub(super) fn quota_refusal_for(id: Value, instance_full: bool) -> crate::tool_arrival::Refusal {
     crate::tool_arrival::Refusal {
         status: 429,
@@ -288,11 +259,10 @@ pub(super) fn quota_refusal_for(id: Value, instance_full: bool) -> crate::tool_a
 }
 
 /// ONE STEP of the unit's subscription over the live catalogue, its permission re-asked: what it
-/// writes, if anything. `Some(false)` when it has nothing to say.
 fn step(plane: &McpDoor, ticket: Ticket, principal: &str, unit: &mut CallUnit) -> Option<bool> {
     let held = plane.current().or_else(|| unit.held.clone())?;
     entitled_afresh(plane, ticket, unit, &held);
-    // A step whose clock read failed says nothing: the next one reads it again.
+
     let Some(now) = mono_ns(plane.services, ticket, unit) else {
         return Some(false);
     };
@@ -311,16 +281,14 @@ fn step(plane: &McpDoor, ticket: Ticket, principal: &str, unit: &mut CallUnit) -
             &updates,
             now,
         );
-        // The head goes with the stream's first frame (its acknowledgement, or the last frame of a
-        // stream whose permission lapsed before it).
+
         let headed = l.headed;
         l.headed |= stepped != ListenStep::Quiet;
         Some((stepped, headed))
     })?;
     let (bytes, done) = match stepped {
         ListenStep::Frames(frames) => (events(&frames), false),
-        // An event-stream comment, which every reader drops, so an intermediary does not reclaim a
-        // working connection.
+
         ListenStep::Keepalive => (b": keepalive\n\n".to_vec(), false),
         ListenStep::Quiet => return Some(false),
         ListenStep::End(frames) => (events(&frames), true),
@@ -331,8 +299,6 @@ fn step(plane: &McpDoor, ticket: Ticket, principal: &str, unit: &mut CallUnit) -
 }
 
 /// THE TICK: the instance's driver ticket and the tick clock noted, every held subscription asked
-/// for a step (a subscription past its bound that never ended is dropped), and the driver ticket
-/// woken when any is held. The next tick is [`POLL_NS`] on.
 pub(super) fn tick(plane: &McpDoor, driver: Ticket, now_ns: u64) -> u64 {
     plane.driver.insert((), (driver, now_ns));
     let stale = MAX_LIFETIME_NS.saturating_add(KEEPALIVE_NS);
@@ -355,7 +321,7 @@ pub(super) fn tick(plane: &McpDoor, driver: Ticket, now_ns: u64) -> u64 {
     for key in gone {
         plane.units.remove(&key);
     }
-    // A held 2024-11-05 stream is read on the driver ticket too.
+
     if any || super::door_legacy::any(plane) {
         wake_driver(plane);
     }
@@ -376,7 +342,6 @@ pub(super) fn wake_all(plane: &McpDoor) {
 }
 
 /// `drive`: the sessions whose step is due, by stream, as many as the host's buffer takes; each one
-/// named collects on its caller-side ticket.
 pub(super) fn drive(
     plane: &McpDoor,
     input: Lent<'_, PlaneDriveIn>,
@@ -388,7 +353,7 @@ pub(super) fn drive(
             .map(|(stream, _)| *stream)
             .collect()
     });
-    // The session revisions' held streams owe their collections on the same driver ticket.
+
     let streams = super::door_sessions::due_streams(plane);
     due.extend(&streams);
     let mut buf = input.sessions_buf();
@@ -428,11 +393,7 @@ pub(super) fn wake_driver(plane: &McpDoor) {
     }
 }
 
-// ── what a held unit re-asks each frame, and the round busbar's own ask costs ──────────────────
-
 /// Whether a request asks busbar's own round before it is answered: a `prompts/get` of a prompt
-/// whose operator asks its caller first, presenting no answers yet (the served engine charged that
-/// round on the caller's budget).
 pub(super) fn asks_a_round(
     op: busbar_contract::ids::OpClassId,
     held: &Held,
@@ -453,7 +414,6 @@ pub(super) fn asks_a_round(
 }
 
 /// The host's monotonic clock on a fresh handle of the unit's ticket; `None` with no clock or a
-/// failed read, which is never a time: no timer is armed at it.
 pub(super) fn mono_ns(
     services: Option<StaticServices>,
     ticket: Ticket,
@@ -463,23 +423,18 @@ pub(super) fn mono_ns(
 }
 
 /// The catalogue's every grant, entitled afresh for this frame: a held unit re-asks what its caller
-/// may see each time it looks.
 pub(super) fn entitled_afresh(plane: &McpDoor, ticket: Ticket, unit: &mut CallUnit, held: &Held) {
     unit.entitled.clear();
     ask_entitlements(plane.services, ticket, unit, &held.catalogue.grants());
 }
 
 /// The permission, re-asked this frame: the kernel re-resolves the unit's principal live; one
-/// that no longer stands is lapsed and ends the subscription on
-/// this frame (on either carrier).
 pub(super) fn standing(
     plane: &McpDoor,
     ticket: Ticket,
     principal: &str,
     unit: &mut CallUnit,
 ) -> Standing {
-    // The kernel's live re-resolution (`entitlement.check` of `ENTITLEMENT_STANDING`): a host that
-    // serves no entitlement stands nothing.
     let stands = plane.services.and_then(|services| {
         let h = super::door_tasks::handle(ticket, &mut unit.issued, &mut None);
         services

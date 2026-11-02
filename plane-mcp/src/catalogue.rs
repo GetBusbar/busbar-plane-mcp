@@ -2,19 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE CATALOGUE THE DOOR ANSWERS FROM: every capability the operator's `tools:` section
-//! registers, built once per generation from the section that generation's snapshot was published
-//! over. An approval is a change to the section, so it is visible from the generation that carries
-//! it and from no earlier one.
-//!
-//! Pure. What a caller may see is not judged in this module: each listing asks an `admit`
-//! predicate, once per grant, with the two grants every capability needs (the server first, then
-//! the capability's published name). The door binds the predicate to the kernel's entitlement
-//! service; a test binds it to a table. The rendering is the served engine's, member for member,
-//! and every cacheable result carries the same two caching hints.
-//!
-//! The catalogue LISTS what it will not dispatch: a tool with no approved hash is listed, so an
-//! operator can see what is waiting. Only a tool whose live sighting is quarantined is hidden, and
-//! that verdict is a second predicate, asked after the grants and never in place of them.
 
 use std::collections::BTreeMap;
 
@@ -139,7 +126,6 @@ impl<T> Lookup<T> {
 }
 
 /// MATCH one level-1 uri template against a concrete uri. A binding is non-empty and holds no `/`,
-/// so one template approves one shape and never a subtree.
 #[must_use]
 pub fn match_uri_template(template: &str, uri: &str) -> Option<BTreeMap<String, String>> {
     let mut bindings = BTreeMap::new();
@@ -317,8 +303,6 @@ impl Catalogue {
     }
 
     /// EVERY GRANT A REQUEST ON THIS CATALOGUE CAN ASK, `(scope kind, name)`: each server, then each
-    /// capability's published name. The door asks the kernel each one once, so the `admit`
-    /// predicate it hands the listings is a table rather than a call.
     #[must_use]
     pub fn grants(&self) -> Vec<(&'static str, &str)> {
         let servers = self.servers.iter().map(|s| (SCOPE, s.as_str()));
@@ -344,7 +328,6 @@ impl Catalogue {
     }
 
     /// The entry of the tool the upstream spells `bare` on `server` (a pool member's own twin of a
-    /// tool called on another member), whatever it is published as.
     #[must_use]
     pub fn tool_on(&self, server: &str, bare: &str) -> Option<&ToolEntry> {
         self.tools
@@ -353,7 +336,6 @@ impl Catalogue {
     }
 
     /// Every tool registration `server` publishes, whoever asks, in published-name order: the items
-    /// a live re-fetch of that server sights on the kernel's trust book.
     pub fn tools_of<'a>(&'a self, server: &'a str) -> impl Iterator<Item = &'a ToolEntry> + 'a {
         self.tools.values().filter(move |t| t.server == server)
     }
@@ -384,7 +366,6 @@ impl Catalogue {
     }
 
     /// The prompt a published name names, under the caller's grants. `None` covers no such prompt
-    /// and not the caller's alike, so the answer leaks nothing about what the grant hides.
     pub fn prompt_for(
         &self,
         admit: &impl Fn(&str, &str) -> bool,
@@ -396,7 +377,6 @@ impl Catalogue {
     }
 
     /// The resource a caller's uri names, among those its grants reach. Two reachable approvals of
-    /// one uri are named, sorted by server, never picked between.
     pub fn resource_by_uri(
         &self,
         admit: &impl Fn(&str, &str) -> bool,
@@ -410,7 +390,6 @@ impl Catalogue {
     }
 
     /// The template a caller's expanded uri matches, among those its grants reach, with its
-    /// bindings. Two matches are named by their namespaced approvals, sorted, never picked between.
     pub fn resource_template_for(
         &self,
         admit: &impl Fn(&str, &str) -> bool,

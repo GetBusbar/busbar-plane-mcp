@@ -2,8 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The catalogue answers as the served engine does: both grants for every capability, the
-//! published name, the normalised description, the caching hints, and an approval visible from the
-//! generation that carries it and no earlier one.
 
 use serde_json::{json, Value};
 
@@ -11,7 +9,6 @@ use super::*;
 use crate::tests::everyone;
 
 /// Two servers: `fs` with an approved tool, a pending tool, a renamed tool, a prompt, a resource
-/// and a template; `db` with one approved tool.
 const SECTION: &[u8] = br#"{
   "fs": {
     "url": "https://mcp.example/fs",
@@ -58,7 +55,6 @@ fn names(listing: &Value, member: &str, key: &str) -> Vec<String> {
 }
 
 /// Every capability is listed under its published name, in published-name order, pending ones
-/// included, and each is rendered as the served engine renders it.
 #[test]
 fn the_whole_catalogue_is_listed_under_published_names_pending_included() {
     let c = catalogue(1, SECTION);
@@ -74,7 +70,7 @@ fn the_whole_catalogue_is_listed_under_published_names_pending_included() {
         read_file["_meta"],
         json!({"io.busbar/schemaHash": "sha256:aa"})
     );
-    // A pending tool, and a blank hash, publish no hash.
+
     assert!(tools["result"]["tools"][3].get("_meta").is_none());
     assert!(tools["result"]["tools"][1].get("_meta").is_none());
     assert_eq!(c.tool("file_stat").map(|t| t.tool.as_str()), Some("stat"));
@@ -119,7 +115,6 @@ fn two_grants_see_two_catalogues_and_a_third_sees_none() {
 }
 
 /// The server grant alone reaches nothing, and the capability grant alone reaches nothing: both
-/// are asked for every kind of capability.
 #[test]
 fn the_server_grant_and_the_capability_grant_are_both_required() {
     let c = catalogue(1, SECTION);
@@ -136,7 +131,7 @@ fn the_server_grant_and_the_capability_grant_are_both_required() {
     }
     let prompt = holding(&["mcp_server:fs", "mcp_tool:fs_summarise"]);
     assert_eq!(c.prompts_for(&prompt).len(), 1);
-    // The grant value of a resource is its namespaced uri; the wire carries the raw one.
+
     let resource = holding(&["mcp_server:fs", "mcp_tool:fs_file:///readme"]);
     let listed = read(c.resources_list(&json!(1), &resource));
     assert_eq!(names(&listed, "resources", "uri"), ["file:///readme"]);
@@ -172,8 +167,6 @@ fn a_quarantined_tool_is_hidden_and_only_granted_tools_are_asked() {
 }
 
 /// An APPROVAL IS VISIBLE FROM THE GENERATION THAT CARRIES IT, AND NOT BEFORE: the hash an
-/// operator approves appears in the listing built over the section that holds it, while the
-/// catalogue built before it still lists the tool as pending.
 #[test]
 fn an_approval_is_visible_from_its_generation_and_not_before() {
     let before = catalogue(1, SECTION);

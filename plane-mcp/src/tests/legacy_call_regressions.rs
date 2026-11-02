@@ -182,7 +182,7 @@ fn run(generation: u64) {
             },
         )
         .set(|i| &i.generation, generation);
-    // The descriptor proves the slot types; TestIn owns every input loan.
+
     let mut result = reply::call_in(
         view()
             .op::<busbar_contract::abi::export::Ops>(|o| &o.head.open)
@@ -196,7 +196,7 @@ fn run(generation: u64) {
         .take_instance()
         .expect("the safe open owns an instance");
     let input = TestIn::<InHead>::new().set(|i| &i.op, slot::CLOSE);
-    // Consume the one instance proof only after all calls and input loans ended.
+
     let closed = reply::close_in(
         view()
             .op::<busbar_contract::abi::export::Ops>(|o| &o.head.close)

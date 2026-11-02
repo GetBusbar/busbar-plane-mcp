@@ -2,16 +2,7 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE STATELESS REVISION'S ENVELOPE CHECKS: `params._meta` and its required members, the mirrored
-//! request fields, and the revision the request names. Pure: the request body and a reader over the
-//! request's head fields in, the first refusal out.
-//!
-//! The order is the served engine's, and so are the words: a body defect is answered in the body's
-//! own vocabulary (`-32602`), a disagreement between an intermediary's mirror and the body is one
-//! class of its own (`-32020`), and an unsupported revision is judged last, only once the request is
-//! otherwise well formed, because its `data.supported` is an invitation to retry (`-32022`). Every
-//! refusal here is `400`.
 
-// The crate's only public item is `door`: the accessors and variants below were this module's public API; the tests hold them, the door does not reach them.
 #![cfg_attr(not(test), allow(dead_code))]
 
 use serde_json::Value;
@@ -23,9 +14,6 @@ use crate::codec::{
 };
 
 /// The revisions the STATELESS dispatch serves, as `data.supported` names them: the revision a
-/// request's own `_meta` may name. The session revisions are never named there, because none of
-/// them is carried in `_meta`: a client of theirs opens a session with `initialize`, whose answer
-/// negotiates the revision ([`crate::revision::negotiate`]).
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &[PROTOCOL_VERSION];
 
 /// The status every refusal here is answered with.
@@ -61,8 +49,6 @@ impl Refused {
 }
 
 /// A `Mcp-Name` (or `Mcp-Param-*`) value with this revision's `=?base64?…?=` sentinel decoded, or the
-/// value as it stands when it carries none. `None` when the sentinel is not valid Base64 or not
-/// UTF-8.
 #[must_use]
 pub fn decode_sentinel(value: &str) -> Option<String> {
     use base64::Engine as _;
@@ -79,16 +65,11 @@ pub fn decode_sentinel(value: &str) -> Option<String> {
 }
 
 /// THE CHECKS, in the served order. `field` reads one request head field by its lower-case name.
-///
-/// # Errors
-///
-/// The first refusal the request earns.
 pub fn check_request<'a>(
     value: &Value,
     method: &str,
     field: impl Fn(&str) -> Option<&'a str>,
 ) -> Result<(), Refused> {
-    // `params._meta` AND ITS REQUIRED MEMBERS: a body defect, `-32602`.
     let Some(meta) = value.get("params").and_then(|p| p.get("_meta")) else {
         return Err(Refused::invalid_params(
             "`params._meta` is required on every request. This revision has no handshake, so each \
@@ -114,8 +95,6 @@ pub fn check_request<'a>(
         ));
     }
 
-    // THE MIRRORED FIELDS: one class, an intermediary and the executor disagreeing, `-32020`.
-    // Values are compared case-sensitively.
     let Some(header_version) = field(H_PROTOCOL_VERSION) else {
         return Err(Refused::header_mismatch(
             "Every POST to the MCP endpoint must carry an `MCP-Protocol-Version` header.",
@@ -159,7 +138,6 @@ pub fn check_request<'a>(
         }
     }
 
-    // VERSION SUPPORT, only now, with a well-formed request in hand: `-32022`.
     if !SUPPORTED_PROTOCOL_VERSIONS.contains(&body_version) {
         return Err(Refused {
             code: CODE_UNSUPPORTED_PROTOCOL_VERSION,

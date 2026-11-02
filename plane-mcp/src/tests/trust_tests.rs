@@ -2,7 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The trust surface's derivations: the digest, the observation, the state, the changes queue and
-//! the views.
 
 use serde_json::json;
 
@@ -38,7 +37,6 @@ fn seen(tools: Value) -> Sighting {
 }
 
 /// The digest frames its three parts and reads the schema canonically: key order is not drift, a
-/// changed description or schema is.
 #[test]
 fn the_digest_frames_its_parts_and_reads_the_schema_canonically() {
     let a = tool_digest("read", "reads", &json!({"a": 1, "b": [true, null]}));
@@ -60,7 +58,6 @@ fn the_digest_frames_its_parts_and_reads_the_schema_canonically() {
 }
 
 /// A tool list is strict about names and defaults the optional fields, which are hashed at their
-/// default.
 #[test]
 fn an_observation_is_read_strictly() {
     assert!(observe(&json!({})).is_err());
@@ -83,7 +80,6 @@ fn item(name: &str, word: &str, approved: Option<&str>) -> KernelItem {
 }
 
 /// The view's state, in precedence order, and the changes queue on each axis, read off the
-/// KERNEL's trust state (ARCHITECT Q3): the plane derives no verdict of its own.
 #[test]
 fn the_views_state_reads_the_kernels_trust_state_and_the_last_sighting() {
     let digest = tool_digest("read", "reads a file", &schema());
@@ -97,7 +93,7 @@ fn the_views_state_reads_the_kernels_trust_state_and_the_last_sighting() {
         { "name": "read", "description": "reads a file", "inputSchema": { "type": "object" } },
         { "name": "extra" }
     ]));
-    // The kernel holds `read` drifted; `extra` is offered and approved at nothing.
+
     let drifted = [item("read", "drifted", Some(&digest))];
     assert_eq!(state(&drifted, &pulled), State::Quarantined);
     let d = drift(&drifted, &pulled);
@@ -105,8 +101,7 @@ fn the_views_state_reads_the_kernels_trust_state_and_the_last_sighting() {
         (d.changed, d.added, d.removed),
         (vec!["read".to_string()], vec!["extra".to_string()], vec![])
     );
-    // RED of the old comparison: a digest the plane alone sees differ, the kernel holding the tool
-    // `same`, is no drift here; the verdict is the kernel's word.
+
     assert_eq!(
         state(&same, &pulled),
         State::Quarantined,
@@ -154,8 +149,6 @@ fn the_views_render_the_served_engines_fields_in_its_order() {
 }
 
 /// THE CATALOGUE HASH the kernel's trust book records is the SHA-256 of the observed set, one
-/// `name NUL digest LF` line per capability in name order: pinned to the bytes, so a change of
-/// framing or order is a different hash.
 #[test]
 fn the_catalogue_hash_is_the_sha256_of_the_name_ordered_lines() {
     assert_eq!(
@@ -169,7 +162,7 @@ fn the_catalogue_hash_is_the_sha256_of_the_name_ordered_lines() {
             .map(|(n, d)| ((*n).to_string(), (*d).to_string()))
             .collect(),
     };
-    // sha256(b"read\0sha256:aa\nwrite\0sha256:bb\n"), whichever order the tools were seen in.
+
     let both = "sha256:565ff8ab7ea738e662ae1bcc2a51a3cdab3a59a386ef2bb3b3727c15e63470fd";
     assert_eq!(
         catalogue_hash(&observed(&[("read", "sha256:aa"), ("write", "sha256:bb")])),
@@ -187,17 +180,13 @@ fn the_catalogue_hash_is_the_sha256_of_the_name_ordered_lines() {
 }
 
 /// THE VIEWS READ THE VERDICT THE KERNEL ENFORCES. After a restart the kernel replays a durable
-/// demotion (every item `quarantined`) while the plane has sighted nothing (`Never`), and a revoked
-/// counterparty or an unapproved pin answers every item `new` beside the configured digest. The
-/// kernel's `trust.serves` refuses every call in both; the health view says so (not serving) and the
-/// trust view renders no tool approved.
 #[test]
 fn the_views_read_the_verdict_the_kernel_enforces() {
     let digest = tool_digest("read", "reads a file", &schema());
     let def = rooted(&digest);
     let good =
         seen(json!([{ "name": "read", "description": "reads a file", "inputSchema": schema() }]));
-    // A quarantine the kernel restored, the plane's sightings empty after the restart.
+
     let restored = [item("read", "quarantined", Some(&digest))];
     assert_eq!(state(&restored, &Sighting::Never), State::Quarantined);
     let health: Value =
@@ -211,7 +200,7 @@ fn the_views_read_the_verdict_the_kernel_enforces() {
         serde_json::from_str(&trust_view("fs", &def, &Sighting::Never, &restored)).unwrap();
     assert_eq!(view["changed"], json!(["read"]), "{view}");
     assert_ne!(view["capabilities"][0]["status"], "approved", "{view}");
-    // A revoked counterparty, or a pin the kernel holds unapproved: every item `new`.
+
     let revoked = [item("read", "new", Some(&digest))];
     for sighting in [Sighting::Never, good] {
         assert_eq!(state(&revoked, &sighting), State::Pending, "{sighting:?}");

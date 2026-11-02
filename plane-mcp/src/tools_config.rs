@@ -2,21 +2,15 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE `tools:` SECTION: the MCP plane's config grammar, and the one place its values are judged.
-//! Which plane an entry is on is decided by the map it is written in; `hooks` and
-//! `upstream_credentials` are reserved at the section level as on every plane. A published wire
-//! name resolves to exactly one `(server, tool)`, enforced by [`validate_published_names`].
 
 use busbar_contract::{config::UpstreamCreds, section::split_section};
 
 use serde::{Deserialize, Serialize};
 
 /// The separator between a server id and a tool name in the `{server}_{tool}` namespaced routing
-/// key. Stated once because it is the ROUTING KEY: the catalogue builds it, the scope
-/// grant `mcp_tool` names it, and dispatch parses nothing back out of it.
 pub const NAMESPACE_SEP: &str = "_";
 
 /// `{server}_{tool}`: the routing key. One function, so the catalogue, the grant value and every
-/// operator-facing rendering are the same string by construction.
 pub fn namespaced(server: &str, capability: &str) -> String {
     format!("{server}{NAMESPACE_SEP}{capability}")
 }
@@ -37,7 +31,6 @@ pub const ASK_SAMPLING: &str = "sampling/createMessage";
 pub const ASK_ROOTS: &str = "roots/list";
 
 /// THE CLOSED SET of methods a `tools_allow.<tool>.ask_caller` round may name. Boot refuses any
-/// other: dispatch would silently drop it and the confirmation gate with it.
 pub const ASK_METHODS: &[&str] = &[ASK_ELICITATION, ASK_SAMPLING, ASK_ROOTS];
 
 /// `tools.<server>.pin.mechanism`: which authenticity root this registration has. The `Mcp` prefix
@@ -119,8 +112,6 @@ pub struct ClientIdentityCfg {
 }
 
 /// `Eq` is asserted rather than derived because [`busbar_contract::secret_ref::SecretRef`] derives
-/// only `PartialEq`; every field compares structurally and none is a float, and the registration
-/// this rides in must be comparable so a config apply can be recognised as a no-op.
 impl Eq for ClientIdentityCfg {}
 
 /// `tools.<server>.tools_allow.<tool>` — one approved tool, and the slot its approved schema hash
@@ -176,17 +167,11 @@ pub enum TaskSupport {
 
 impl TaskSupport {
     /// Serde skip predicate — `none` is the default, so writing it back out would put a key into
-    /// every serialised tool that no operator typed.
     pub fn is_none(&self) -> bool {
         matches!(self, TaskSupport::None)
     }
 
     /// Whether a `tools/call` on this tool creates a task, given what the caller declared.
-    ///
-    /// The caller's declaration is read from the ONE place this revision puts it —
-    /// `params._meta['io.modelcontextprotocol/clientCapabilities']` — so a session-level
-    /// declaration and SEP-2575's per-request override are literally the same field and cannot
-    /// disagree.
     pub fn creates_task(&self, client_declared: bool) -> bool {
         match self {
             TaskSupport::None => false,
@@ -434,7 +419,6 @@ pub const DEFAULT_MAX_INPUT_REQUIRED_ROUNDS: u32 = 3;
 pub const DEFAULT_MAX_CALLER_ASK_ROUNDS: u32 = 3;
 
 /// The registration key holding its tool approvals (`tools_allow:`), declared to the kernel as its
-/// item-approvals trust key.
 pub const TOOL_APPROVALS_KEY: &str = "tools_allow";
 /// The field of each `tools_allow` entry holding the digest the operator approved the tool at.
 pub const TOOL_APPROVAL_FIELD: &str = "schema_hash";
@@ -443,12 +427,11 @@ pub const TOOL_APPROVAL_FIELD: &str = "schema_hash";
 pub const DEFAULT_MCP_VERIFY_TTL: &str = "5s";
 
 /// THE DEFAULT BUDGET of a fetch this door makes of a server that writes no `timeout:` (30 s,
-/// `docs/mcp.md`'s `timeout` row).
 pub const DEFAULT_UPSTREAM_TIMEOUT_MS: u64 = 30_000;
 
 /// One entry in the top-level `tools:` map: one registered external MCP server (operator intent only).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)] // a typo'd key must fail boot, not silently un-pin a server.
+#[serde(deny_unknown_fields)]
 pub struct McpServerDefCfg {
     /// The remote MCP endpoint. Required for `streamable_http`, refused for `stdio` (see [`validate_server`]).
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -559,7 +542,6 @@ pub enum ServerTransport {
 
 impl ServerTransport {
     /// Whether a registration on this transport is reached by spawning a child (the one question
-    /// the grammar asks of the transport: the `structure-lint` gate bans branching on it).
     pub fn spawns_child(self) -> bool {
         match self {
             ServerTransport::StreamableHttp => false,
@@ -625,16 +607,6 @@ pub(crate) fn url_for_display(url: &str) -> std::borrow::Cow<'_, str> {
 }
 
 /// THE REFUSAL OF `upstream_credentials: passthrough` ON THIS PLANE, as the section default (the
-/// Statement tail's `caller_credential_refusal`: the kernel reads that reserved key and emits this
-/// sentence verbatim).
-///
-/// `passthrough` lends the caller's VERIFIED front-door credential (the one the auth gate took
-/// from the caller: their busbar virtual key, or a token whose audience is busbar) to the
-/// registration's outbound auth call, presented as its bearer. That credential authenticates the
-/// caller TO busbar; handed to an MCP server it is a working busbar credential in a third party's
-/// hands, which is the token-passthrough pattern the MCP authorization spec forbids. The word stays
-/// reserved (the vocabulary is the same on every plane); the value is refused, never accepted and
-/// quietly turned into something else.
 pub const REFUSE_PASSTHROUGH_SECTION: &str =
     "`tools.upstream_credentials: passthrough` is refused: it would present each caller's own \
      busbar credential (the virtual key or busbar-audience token they authenticated to busbar \
@@ -644,7 +616,6 @@ pub const REFUSE_PASSTHROUGH_SECTION: &str =
      busbar presents no caller credential).";
 
 /// The refusal of a registration's own `passthrough` (at `at`), naming the exchange it sits
-/// beside when it states one.
 fn refuse_passthrough(at: &str, exchanged: bool) -> String {
     let beside = if exchanged {
         " It also contradicts this registration's `token_exchange:`, which mints busbar's own \
@@ -663,7 +634,6 @@ fn refuse_passthrough(at: &str, exchanged: bool) -> String {
 }
 
 /// The refusal of a section-level `passthrough` default, naming every registration it would lend
-/// the caller's credential to, and every `token_exchange:` it would have overridden.
 fn refuse_section_passthrough(lent: &[&str], exchanging: &[&str]) -> String {
     let named = |names: &[&str]| {
         names
@@ -714,7 +684,6 @@ impl<'de> Deserialize<'de> for ToolsCfg {
     where
         D: serde::Deserializer<'de>,
     {
-        // The neutral section split, with this plane's value rules (`validate_server`).
         let section = split_section::<D, McpServerDefCfg>(
             deserializer,
             SECTION,
@@ -722,9 +691,6 @@ impl<'de> Deserialize<'de> for ToolsCfg {
             validate_server,
         )?;
 
-        // A section default applies to every registration that does not spell its own mode: it
-        // would lend the caller's credential to each of them, and silently override the exchange
-        // of any that states `token_exchange:`.
         if section.upstream_credentials == Some(UpstreamCreds::Passthrough) {
             let exchanging: Vec<&str> = section
                 .entries
@@ -753,9 +719,7 @@ impl<'de> Deserialize<'de> for ToolsCfg {
 }
 
 /// Which endpoint keys this registration may carry: the two transports take disjoint halves of the
-/// grammar, and everything spawn-related is checked here at boot.
 fn validate_endpoint(at: &str, def: &McpServerDefCfg) -> Result<(), String> {
-    // The transport answers the one question the grammar has of it (`structure-lint`).
     if !def.transport.is_some_and(ServerTransport::spawns_child) {
         for (key, present) in [
             ("command:", def.command.is_some()),
@@ -774,8 +738,7 @@ fn validate_endpoint(at: &str, def: &McpServerDefCfg) -> Result<(), String> {
         if def.url.trim().is_empty() {
             return Err(format!("{at}: `url:` must name the MCP server's endpoint"));
         }
-        // Scheme is checked here rather than at dispatch so the failure lands on the operator who
-        // wrote it, at boot, rather than on a tool call an hour later.
+
         if !(def.url.starts_with("https://") || def.url.starts_with("http://")) {
             return Err(format!(
                 "{at}: `url:` must be an http:// or https:// endpoint, got `{}`",
@@ -800,8 +763,7 @@ fn validate_endpoint(at: &str, def: &McpServerDefCfg) -> Result<(), String> {
     if program.trim() != program {
         return Err(format!("{at}: `command:` has leading or trailing whitespace; write the exact absolute path without padding"));
     }
-    // ABSOLUTE (`Path::is_absolute`): a bare name is resolved through `PATH`, a relative one against
-    // the working directory, so the environment would choose the binary.
+
     if !std::path::Path::new(program).is_absolute() {
         return Err(format!(
             "{at}: `command: {program}` must be an ABSOLUTE path. A bare name is resolved through \
@@ -821,7 +783,6 @@ fn validate_endpoint(at: &str, def: &McpServerDefCfg) -> Result<(), String> {
         }
     }
     for name in def.env.keys() {
-        // An empty name, or one containing `=` or NUL, is not a variable an exec can carry.
         if name.is_empty() || name.contains('=') || name.contains('\0') {
             return Err(format!(
                 "{at}: `env:` name `{name}` is not a usable environment variable name — it must be \
@@ -829,8 +790,7 @@ fn validate_endpoint(at: &str, def: &McpServerDefCfg) -> Result<(), String> {
             ));
         }
     }
-    // The network keys are refused rather than ignored: a pipe has no header to carry a
-    // credential, and no address for `allow_private:` to widen.
+
     for (set, why) in [
         (
             def.token_exchange.is_some(),
@@ -868,12 +828,6 @@ fn validate_endpoint(at: &str, def: &McpServerDefCfg) -> Result<(), String> {
 }
 
 /// THE CLIENT IDENTITY, matched against the pin's mechanism and the url's scheme.
-///
-/// `mtls` means the server is served behind mutual TLS: a registration that says so and names no
-/// certificate is refused at the server's handshake (`CertificateRequired`), on the first call,
-/// rather than here where the operator is. And a client certificate is a TLS-handshake object:
-/// over `http://` there is no handshake to present it in, so one written there would read as a
-/// protection that is not applied.
 fn validate_client_identity(at: &str, def: &McpServerDefCfg) -> Result<(), String> {
     if def.pin.mechanism == McpPinMechanism::ClientCertBinding && def.client_identity.is_none() {
         return Err(format!(
@@ -919,8 +873,6 @@ fn refuse_unknown_ask_methods(
 
 impl McpServerDefCfg {
     /// The budget of one fetch this door makes of the server, milliseconds: its `timeout:` as the
-    /// kernel judged it (the one reading, `busbar_contract::section::entry_timeout_ms`), else
-    /// [`DEFAULT_UPSTREAM_TIMEOUT_MS`].
     #[must_use]
     pub fn timeout_ms(&self) -> u64 {
         self.timeout
@@ -931,7 +883,6 @@ impl McpServerDefCfg {
 }
 
 /// A configured-launch root is confined to a host-owned stdio program. The public material names
-/// only its path; the host privately enforces arguments, environment and explicit working directory.
 fn validate_local_program(at: &str, def: &McpServerDefCfg) -> Result<(), String> {
     if def.transport.is_some_and(ServerTransport::spawns_child)
         && matches!(
@@ -966,7 +917,6 @@ fn validate_local_program(at: &str, def: &McpServerDefCfg) -> Result<(), String>
 pub fn validate_server(name: &str, def: &McpServerDefCfg) -> Result<(), String> {
     let at = format!("`tools.{name}`");
 
-    // The server id may not contain the separator, so `{server}_{tool}` splits exactly one way.
     if name.contains(NAMESPACE_SEP) {
         return Err(format!(
             "{at}: an MCP server id may not contain `{NAMESPACE_SEP}`. The id is the first half of \
@@ -978,7 +928,7 @@ pub fn validate_server(name: &str, def: &McpServerDefCfg) -> Result<(), String> 
             name.replace(NAMESPACE_SEP, "-")
         ));
     }
-    // The routing key's spelling ([`crate::identity::ToolKey`]), refused here in its words.
+
     let id = crate::identity::ServerId::new(name).map_err(|e| format!("{at}: {e}"))?;
 
     if def.pin.mechanism == McpPinMechanism::PinnedPubkey {
@@ -990,16 +940,9 @@ pub fn validate_server(name: &str, def: &McpServerDefCfg) -> Result<(), String> 
     def.sampling_bounds.validate(&at)?;
     validate_client_identity(&at, def)?;
 
-    // THE CALLER'S BUSBAR CREDENTIAL NEVER TRAVELS UPSTREAM ([`REFUSE_PASSTHROUGH_SECTION`]).
     if def.upstream_credentials == Some(UpstreamCreds::Passthrough) {
         return Err(refuse_passthrough(&at, def.token_exchange.is_some()));
     }
-
-    // The pin,`verify_ttl:` and `timeout:` are the kernel's keys, judged before this validator.
-
-    // THE DEADLINE (`timeout:`) is not judged here either: it is the kernel's reserved per-entry key
-    // (`busbar_contract::section::ENTRY_TIMEOUT_KEY`), judged by the kernel before the section
-    // reaches this validator, and read through the one reading it judged ([`McpServerDefCfg::timeout_ms`]).
 
     for (tool, allow) in &def.tools_allow {
         validate_capability_name(&at, "tools_allow", tool)?;
@@ -1011,7 +954,7 @@ pub fn validate_server(name: &str, def: &McpServerDefCfg) -> Result<(), String> 
         ] {
             refuse_unknown_ask_methods(&at, "tools_allow", tool, field, rounds)?;
         }
-        // A task-scoped ask on a tool that never creates a task would never be emitted.
+
         if !allow.task_ask_caller.is_empty() && allow.task_support.is_none() {
             return Err(format!(
                 "{at}: `tools_allow.{tool}.task_ask_caller:` is the input busbar asks its caller for \
@@ -1020,7 +963,7 @@ pub fn validate_server(name: &str, def: &McpServerDefCfg) -> Result<(), String> 
                  `required`), or move the rounds to `ask_caller:` for the synchronous exchange."
             ));
         }
-        // The shape of an override; its uniqueness is `validate_published_names`'s.
+
         if let Some(publish_as) = &allow.publish_as {
             if publish_as.trim().is_empty() {
                 return Err(format!(
@@ -1038,7 +981,7 @@ pub fn validate_server(name: &str, def: &McpServerDefCfg) -> Result<(), String> 
                      cannot see would make both silently miss. Write it without the spaces."
                 ));
             }
-            // OAuth scope-token grammar: each published name becomes one token in the exchange's scope list.
+
             if def.token_exchange.is_some()
                 && !publish_as
                     .bytes()
@@ -1068,7 +1011,7 @@ pub fn validate_server(name: &str, def: &McpServerDefCfg) -> Result<(), String> 
         if uri.trim().is_empty() {
             return Err(format!("{at}: `resources_allow:` has an empty URI key"));
         }
-        // THE TWO FORMS ARE ALTERNATIVES. See `ResourceAllowCfg::blob`.
+
         if allow.text.is_some() && allow.blob.is_some() {
             return Err(format!(
                 "{at}: `resources_allow.{uri}` declares both `text:` and `blob:`. Those are the two \
@@ -1083,7 +1026,7 @@ pub fn validate_server(name: &str, def: &McpServerDefCfg) -> Result<(), String> 
     }
     for (template, allow) in &def.resource_templates_allow {
         let names = validate_uri_template(&at, template)?;
-        // A template whose content names no parameter is a concrete resource behind a wildcard.
+
         if let Some(text) = &allow.text {
             if !names.iter().any(|n| text.contains(&format!("{{{n}}}"))) {
                 return Err(format!(
@@ -1098,7 +1041,6 @@ pub fn validate_server(name: &str, def: &McpServerDefCfg) -> Result<(), String> 
     }
 
     if let Some(tx) = &def.token_exchange {
-        // This endpoint receives busbar's own subject token: https, or http only with `allow_private`.
         let private_ok = def.allow_private && tx.token_url.starts_with("http://");
         if !(tx.token_url.starts_with("https://") || private_ok) {
             return Err(format!(
@@ -1108,7 +1050,7 @@ pub fn validate_server(name: &str, def: &McpServerDefCfg) -> Result<(), String> 
                 url_for_display(&tx.token_url)
             ));
         }
-        // RFC 8707 is required on an exchange, so the token is audience-bound.
+
         if def.aud.is_none() {
             return Err(format!(
                 "{at}: `token_exchange:` requires `aud:` — the RFC 8707 resource indicator the \
@@ -1127,25 +1069,17 @@ pub fn validate_server(name: &str, def: &McpServerDefCfg) -> Result<(), String> 
         }
     }
 
-    // A dotted hook reference is refused by the kernel, which sees every section; this validator
-    // sees only its own.
     Ok(())
 }
 
 /// Where a published wire name CAME FROM, so a collision error can name both sides the way the
-/// operator will have to fix them: one of them is a line they typed, the other may be a name nobody
-/// typed at all.
 struct PublishedName {
     server: String,
     /// The map the capability is declared in: `tools_allow`, `prompts_allow`, `resources_allow`
-    /// or `resource_templates_allow`.
     family: &'static str,
     /// The capability's key in that map: a tool or prompt name, a URI or a URI template.
     capability: String,
     /// `true` when the name came from `publish_as:`, `false` when it is the `{server}_{tool}`
-    /// default. Carried rather than re-derived, because re-deriving means comparing the name to
-    /// `namespaced(server, tool)` and getting the wrong answer for the one config where it matters:
-    /// `publish_as:` set to exactly the default.
     overridden: bool,
 }
 
@@ -1204,10 +1138,6 @@ pub fn validate_published_names(cfg: &ToolsCfg) -> Result<(), String> {
     let mut published: std::collections::BTreeMap<String, PublishedName> =
         std::collections::BTreeMap::new();
     for (server, def) in &cfg.servers {
-        // THE SAME LINES `Catalogue::build` runs, through the SAME function, and that is
-        // load-bearing rather than tidy: this check is only meaningful if the set it walks is
-        // byte-identical to the set that is published. A second local `{server}_{tool}` formula
-        // here would validate one set and publish another the day either changed.
         let tools = def.tools_allow.iter().map(|(tool, allow)| {
             let name = allow
                 .publish_as
@@ -1276,7 +1206,6 @@ fn validate_prompt(at: &str, name: &str, allow: &PromptAllowCfg) -> Result<(), S
         ));
     }
     for (i, message) in allow.messages.iter().enumerate() {
-        // The schema names exactly two roles.
         if !matches!(message.role.as_str(), "user" | "assistant") {
             return Err(format!(
                 "{at}: `prompts_allow.{name}.messages[{i}].role` is `{}`; a PromptMessage role is \
@@ -1324,7 +1253,6 @@ fn validate_base64(at: &str, field: &str, value: &str) -> Result<(), String> {
 }
 
 /// THE URI-TEMPLATE RULES: RFC 6570 level 1 (`{name}`) only, since the higher levels match
-/// differently and a mis-match would serve content under an approval nobody gave. Its parameter names.
 fn validate_uri_template<'t>(at: &str, template: &'t str) -> Result<Vec<&'t str>, String> {
     if template.trim().is_empty() {
         return Err(format!(

@@ -2,8 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The held `2024-11-05` link's reading of its stream: the message address named once and only on
-//! the endpoint's origin, answers handed only to the call waiting for their id, once, and the
-//! waiting calls bounded.
 
 use super::*;
 

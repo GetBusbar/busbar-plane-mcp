@@ -2,15 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE STDIO CLIENT LEG AGAINST THE METHOD INVENTORY: `tests/data/method-inventory.json` (generated
-//! from rmcp's own model; it moved here from busbar's `qa/`).
-//!
-//! * `the_issued_set_is_what_production_constructs`: the client-originated methods busbar issues
-//!   are counted at their PRODUCTION construction sites in the shipped source (never from the
-//!   enum's own list), each is in the inventory's busbar-as-client column, and every method of that
-//!   column production does not construct is named, so the column claims nothing the plane does not
-//!   send.
-//! * `every_server_originated_method_in_the_inventory_is_classified`: every
-//!   `mcp|stdio|client|server` method is recognised by the classifier in one of its shapes.
 
 use crate::client::peer::{classify, ServerMessage};
 use crate::client::verb::UpstreamVerb;
@@ -25,11 +16,6 @@ fn line(raw: &str) -> serde_json::Value {
 }
 
 /// Every `mcp|<transport>|client|client|<method>` cell the generated inventory names, over both
-/// transports: the methods a client may originate. (The streamable-HTTP column's verb rows,
-/// `GET /mcp` and `DELETE /mcp`, are no methods.)
-///
-/// Read from the file rather than restated, for the reason the coverage gate itself gives: a list
-/// written from knowledge of the specification is exactly how a list ends at J with nobody noticing.
 fn inventory_methods() -> std::collections::BTreeSet<String> {
     let raw = inventory();
     let doc: serde_json::Value = serde_json::from_str(&raw).expect("method-inventory.json parses");
@@ -49,8 +35,6 @@ fn inventory_methods() -> std::collections::BTreeSet<String> {
 }
 
 /// The client-originated methods of the inventory busbar does NOT send an upstream: no production
-/// site constructs them. A method issued and still named here fails, and so does one neither
-/// issued nor named.
 const NOT_ISSUED: &[&str] = &[
     "completion/complete",
     "logging/setLevel",
@@ -74,7 +58,6 @@ const NOT_ISSUED: &[&str] = &[
 ];
 
 /// The shipped source, every file under `src/` but the test modules: `(path, code)`, its `//`
-/// comments stripped so a name in prose is never a construction site.
 fn production_source() -> Vec<(String, String)> {
     fn walk(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
         for entry in std::fs::read_dir(dir).expect("src reads") {
@@ -102,13 +85,6 @@ fn production_source() -> Vec<(String, String)> {
 }
 
 /// THE ISSUED SET IS WHAT PRODUCTION CONSTRUCTS, and the inventory column is accounted for.
-///
-/// A variant of [`UpstreamVerb`] is issued only where the shipped source outside the builder
-/// constructs it (`UpstreamVerb::<Variant>`); `tools/call` and `tools/list` are issued where the
-/// dispatch and verify paths call their own builders. Every variant must have such a site (a
-/// variant no production path builds does not ship), every issued method must be in the inventory
-/// (busbar sends no made-up verb), and the inventory's remaining methods must be exactly
-/// [`NOT_ISSUED`].
 #[test]
 fn the_issued_set_is_what_production_constructs() {
     let owed = inventory_methods();
@@ -172,10 +148,6 @@ fn the_issued_set_is_what_production_constructs() {
 }
 
 /// EVERY server-originated method in the inventory column is classified, and none of them lands in
-/// an "unknown" arm.
-///
-/// Read from the GENERATED matrix for the reason `verb_tests` gives: a list written from knowledge
-/// of the specification is how a column silently ends early.
 #[test]
 fn every_server_originated_method_in_the_inventory_is_classified() {
     let raw = inventory();
@@ -200,10 +172,6 @@ fn every_server_originated_method_in_the_inventory_is_classified() {
         owed.len()
     );
     for method in &owed {
-        // A NOTIFICATION-SHAPED LINE (no id) and a REQUEST-SHAPED one (with id) are BOTH tried, and
-        // exactly one of them must be recognised: `ping` is only ever a request and
-        // `notifications/message` is only ever a notification, so requiring both to work would be
-        // requiring busbar to accept a shape the specification does not define.
         let as_notification = classify(&line(&format!(
             r#"{{"jsonrpc":"2.0","method":"{method}","params":{{}}}}"#
         )));

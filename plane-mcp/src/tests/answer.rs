@@ -193,14 +193,13 @@ fn a_notice_is_acknowledged_and_a_refusal_answered() {
             body: Vec::new()
         }
     );
-    // A body that is not JSON parses to nothing.
+
     let d = decide(None, |_| None);
     let a = answer(&d, None, &catalogue(), &everyone, |_| false);
     assert!(matches!(a, Answer::Here { status: 400, .. }));
     assert_eq!(body(&a)["error"]["code"], -32700);
 }
 /// M3-5: a tool the kernel's verdict hides is gone from `server/discover`'s count as it is from
-/// `tools/list`: the two answers agree on what this caller reaches.
 #[test]
 fn discover_counts_no_tool_the_verdict_hides() {
     let hide_all = |_: &crate::catalogue::ToolEntry| true;
@@ -215,7 +214,6 @@ fn discover_counts_no_tool_the_verdict_hides() {
 }
 
 /// M3-6: the server's identity rides where the schema carries it on every result,
-/// `_meta["io.modelcontextprotocol/serverInfo"]`.
 #[test]
 fn discover_carries_server_info_in_meta() {
     let v = body(&run("server/discover", json!({})));

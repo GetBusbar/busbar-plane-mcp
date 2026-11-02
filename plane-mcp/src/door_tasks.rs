@@ -2,21 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE TASKS EXTENSION ON THE DOOR: who creates a task, who runs it, and how the `tasks/*` verbs
-//! read and move it; the task itself (state, shapes, sweep, durable rows) is [`crate::tool_tasks`].
-//!
-//! * The CREATING UNIT opens a work handle (`work.open`; its reference is the `taskId`), nests the
-//!   continuation on the task-run claim (`unit.nest`) and answers `CreateTaskResult`.
-//! * The CONTINUATION is a new unit: it finds the handle, checks it carries the admitted call (the
-//!   digest in the row), takes the run once, binds the handle, asks its caller the task's own rounds
-//!   (answered through `tasks/update`, which nests the resume), sends the call, and settles the
-//!   handle. An upstream's ask is relayed: the task parks `input_required` under busbar's
-//!   sealed state, and the `tasks/update` that answers it nests the retry.
-//! * The TASK STORE IS HOST RECORDS: `tasks/get` is `work.find` plus the task's records;
-//!   `tasks/cancel` settles the handle `cancelled`. A settle that does not land is owed to the next
-//!   create's sweep, which also settles the tasks a process that is gone left behind. A task's
-//!   terminal state is in the records all the while (its result, or the failure's words, written
-//!   where it ended), so `tasks/get` answers it on any node; a settled row whose result the records
-//!   do not hold is answered `failed` in words, never as a task that does not exist.
 
 use std::task::Poll;
 
@@ -71,7 +56,6 @@ pub(super) enum Retry {
 
 impl TaskUnit {
     /// A continuation of task `reference`, running `params`; `retry` = the caller's answer to the
-    /// upstream's ask it carries back (the retry of a relayed ask).
     pub(super) fn run(reference: String, params: Value, retry: Option<Retry>) -> Self {
         TaskUnit::Run(Box::new(Run {
             digest: run_digest(&params),
@@ -116,7 +100,6 @@ struct Clean {
 }
 
 /// A task left behind, being settled: its reference, the handle number its find was issued under,
-/// the live handle and row it found, its live state's records read, and whether it is done.
 pub(super) struct Left {
     reference: String,
     find: Option<u32>,
@@ -221,7 +204,6 @@ enum End {
 }
 
 /// The words of a task this caller has no task under: the one answer for an id that does not
-/// exist and one that is another caller's (anti-enumeration).
 const UNKNOWN_TASK: &str = "No task with that `taskId` exists for this caller.";
 
 /// The status of a `400` answer.
@@ -262,7 +244,6 @@ pub(super) fn handle(ticket: Ticket, issued: &mut u32, slot: &mut Option<u32>) -
 }
 
 /// Whether `entry` answers this caller's call (`params`) with a task: the operator's declaration
-/// crossed with the caller's.
 pub(super) fn creates(entry: &crate::catalogue::ToolEntry, params: Option<&Value>) -> bool {
     entry
         .task_support
@@ -272,7 +253,6 @@ pub(super) fn creates(entry: &crate::catalogue::ToolEntry, params: Option<&Value
 }
 
 /// Whether `unit`'s arrival is a `tools/call` that creates a task (its refusal by the caller's
-/// budget is said as the served engine's task path said it).
 pub(super) fn creates_task(unit: &CallUnit) -> bool {
     let (Some(held), crate::tool_arrival::Disposition::Request { row, .. }) =
         (unit.held.as_ref(), &unit.disposition)
@@ -302,10 +282,6 @@ pub(super) fn budget_refused(id: Option<Value>, status: u32, message: &str) -> R
 }
 
 /// THE CONTINUATION'S ARRIVAL on the task-run claim: its reference, the call it runs, and that call
-/// as the `tools/call` body the one dispatch decides (its head fields mirrored from it), and — the
-/// retry of a relayed ask — `relay: {requestState, inputResponses}`, or — the resume of an answered
-/// round of the task's own asks — `resume: <round>` and its `seal`. `None` for a body that is not
-/// one (a resume with no seal included).
 pub(super) fn run_arrival(body: &[u8]) -> Option<(String, Value, Vec<u8>, Option<Retry>)> {
     let value: Value = serde_json::from_slice(body).ok()?;
     let reference = value.get("taskId")?.as_str()?.to_string();
@@ -342,8 +318,6 @@ pub(super) fn unknown_arrival() -> Refusal {
 }
 
 /// The call a continuation runs: the published name, the arguments as admitted (the answers to
-/// busbar's own asks merged in), and the caller's `_meta` (its capabilities), its progress token cut
-/// (nobody is listening for the continuation's progress).
 fn run_params(admitted: &AdmittedCall, params: Option<&Value>) -> Value {
     let mut out = Map::new();
     out.insert("name".into(), admitted.entry.namespaced.clone().into());
@@ -380,8 +354,6 @@ fn invalid(id: &Value, message: &str) -> Refusal {
 }
 
 /// SETTLE handle `work` with `row`, on a fresh handle of `ticket`: whether it LANDED (settled now, or
-/// settled first by another unit). One that pends or fails is owed ([`owe`]): its task is held
-/// unsettled and the next create's sweep settles it again, until it lands.
 fn settled(
     services: StaticServices,
     ticket: Ticket,
@@ -394,7 +366,6 @@ fn settled(
 }
 
 /// SETTLE handle `work` with `row` on `h`: `Some(true)` settled now, `Some(false)` settled first by
-/// another unit, `None` the host could not say.
 fn settle(
     services: StaticServices,
     h: CompletionHandle,
@@ -411,7 +382,6 @@ fn settle(
 }
 
 /// A settle of `task` that did not land, OWED: the instance holds the task unsettled, for the next
-/// create's sweep.
 fn owe(plane: &McpDoor, task: &Task) {
     plane.tasks.with_all(|m| {
         m.entry(task.id.clone())
@@ -421,10 +391,6 @@ fn owe(plane: &McpDoor, task: &Task) {
 }
 
 /// The task's live state as its records: its live chunks, any this instance wrote past them struck, and — `until` given — its caller's index row,
-/// its run's lease `until` (`0`: no run holds it).
-///
-/// `Err` the state's length when the host's records do not keep it: the
-/// caller refuses what would make it, and nothing earlier is struck.
 fn live_records(plane: &McpDoor, task: &Task, until: Option<u64>) -> Result<tasks::Records, usize> {
     let mut out = tasks::live_parts(&task.id, &task.live())?;
     let wrote = u32::try_from(out.len()).unwrap_or(u32::MAX);
@@ -446,7 +412,6 @@ fn not_kept(what: &str, bytes: usize) -> String {
 }
 
 /// ITS CALLER'S INDEX ROW alone, its run's lease `until`: what rides a request whose task's live
-/// state is already in the records.
 fn lease_record(task: &Task, until: u64) -> (Vec<u8>, Vec<u8>) {
     let lease = tasks::TaskLease {
         until_ms: until,
@@ -456,8 +421,6 @@ fn lease_record(task: &Task, until: u64) -> (Vec<u8>, Vec<u8>) {
 }
 
 /// A settled task's live chunks are struck. Its existing caller index remains as durable cleanup
-/// intent until an authorized lookup says the host no longer retains the task and all result
-/// chunks have been removed.
 fn struck_records(task: &Task) -> Vec<(Vec<u8>, Vec<u8>)> {
     let mut out: Vec<(Vec<u8>, Vec<u8>)> = (0..task.live_chunks.max(tasks::LIVE_STRIKES))
         .map(|n| (tasks::live_key(&task.id, n), Vec::new()))
@@ -467,10 +430,6 @@ fn struck_records(task: &Task) -> Vec<(Vec<u8>, Vec<u8>)> {
 }
 
 /// The records a terminal state leaves: `task`'s result chunks, written whether or not its settle `landed`, the count kept in
-/// hand. A settle that landed strikes its live chunks and retains its cleanup index; one that is
-/// owed leaves its live state, terminal, and its index row with its run's lease lapsed at its last
-/// update: every node then answers its result from the records, and the next create of its caller
-/// on any node settles it with that state, a restart between them included.
 fn ended_records(plane: &McpDoor, task: &Task, landed: bool) -> tasks::Records {
     let mut out = task
         .terminal()
@@ -487,7 +446,6 @@ fn ended_records(plane: &McpDoor, task: &Task, landed: bool) -> tasks::Records {
     if landed {
         out.extend(struck_records(task));
     } else {
-        // `0` is a lease no run holds (parked on its caller): a lapsed one is never `0`.
         let lapsed = task.stamps().1.max(1);
         out.extend(
             live_records(plane, task, Some(lapsed))
@@ -506,7 +464,6 @@ fn ride(unit: &mut CallUnit, records: Vec<(Vec<u8>, Vec<u8>)>) {
 }
 
 /// THE TASK KIND'S RECORDS under `prefix`, read page by page into `l.rows` in key order.
-/// `Ready(false)`: the host could not list them.
 fn list_records(
     services: StaticServices,
     ticket: Ticket,
@@ -562,10 +519,6 @@ fn list_records(
 }
 
 /// A TASK LEFT BEHIND, settled: found (scoped to this caller) and its live state read from the
-/// plane's records; one whose run reached its terminal state but whose settle never landed (the
-/// process that ran it gone) is settled with that state, its result already in the records; any
-/// other is cancelled and settled. Settled handles keep their index until actual absence permits
-/// chunk cleanup; read errors defer the check.
 fn settle_left(
     plane: &McpDoor,
     services: StaticServices,
@@ -598,7 +551,7 @@ fn settle_left(
                 return Poll::Ready(Vec::new());
             }
             Ok(None) => left.absent = true,
-            // The host could not say: the next create reads it again.
+
             Err(_) => {
                 left.done = true;
                 return Poll::Ready(Vec::new());
@@ -689,11 +642,7 @@ fn settle_left(
     }
 }
 
-// ── the creating unit ─────────────────────────────────────────────────────────────────────────
-
 /// THE CREATING UNIT: the sweep, the handle opened, the task held, the continuation nested, and the
-/// `CreateTaskResult` written (with the call-log line `refused`/`task_created`, as the served engine
-/// recorded it: at the moment the caller is answered nothing has gone out).
 pub(super) fn create(
     plane: &McpDoor,
     ticket: Ticket,
@@ -723,7 +672,7 @@ fn creating(
     st: &mut Create,
 ) -> Step {
     let generation = unit.held.as_ref().map_or(0, |h| h.catalogue.generation());
-    // The refusal of a task that could not be started, the records the sweep left to strike riding it.
+
     let unavailable = |unit: &mut CallUnit, struck: &mut tasks::Records, why: &str| {
         let refusal = Refusal {
             status: 503,
@@ -762,11 +711,7 @@ fn creating(
             at
         }
     };
-    // THE SWEEP, as the served engine ran it, on a create: abandoned tasks cancelled (their
-    // continuations woken to see it), expired ones dropped. A task that reached its terminal state
-    // in hand with its handle unsettled is settled now; one whose settle does not land is owed
-    // again, until it lands. A terminal state whose result is not yet in the records is written
-    // with this settle, landed or not.
+
     if !st.swept {
         st.swept = true;
         let mut swept = plane.tasks.with_all(|m| tasks::sweep(m, now));
@@ -799,12 +744,7 @@ fn creating(
             }
         });
     }
-    // The tasks left behind (admission bounds live work; nothing evicts it): this
-    // caller's live tasks no unit here runs whose run's lease lapsed — the process running it is gone — or
-    // that nothing moved past the abandonment ceiling, read from the plane's records and settled
-    // `cancelled` before the handle is opened, so the handles an earlier process left never exhaust
-    // `work.open`. From a submit, never a read or a timer.
-    // Every page of them, read once.
+
     let prefix = tasks::index_prefix(principal);
     if !st.indexed {
         if list_records(services, ticket, &mut unit.issued, &prefix, &mut st.index).is_pending() {
@@ -929,8 +869,6 @@ fn creating(
     if !st.nested {
         let h = handle(ticket, &mut unit.issued, &mut st.nest);
         if !nest(services, h, &json!({ "taskId": reference, "params": run })) {
-            // The host runs no continuation for it (no nesting, too deep, too many at once): the
-            // task is settled failed — owed until the settle lands — and the call refused.
             if let Some(mut task) = plane.tasks.remove(&reference) {
                 task.fail(
                     TASK_PROTOCOL_ERROR_CODE,
@@ -950,8 +888,7 @@ fn creating(
     let Some(created) = plane.tasks.get(&reference).map(|t| t.created()) else {
         return Step::Declined;
     };
-    // Cache eviction only queues result cleanup. The host's current scoped absence, after this
-    // create opened work and ran the host's sweep, is the authority to strike durable chunks.
+
     match clean_chunks(plane, services, ticket, &mut unit.issued, principal, st) {
         Poll::Pending => return Step::Pending,
         Poll::Ready(()) => {}
@@ -972,7 +909,7 @@ fn creating(
         generation,
         ts,
     );
-    // ITS INDEX ROW, the run's lease taken: the continuation is nested at once.
+
     let lease = tasks::TaskLease {
         until_ms: now.saturating_add(tasks::RUN_LEASE_MS),
         updated_ms: now,
@@ -986,8 +923,6 @@ fn creating(
     ride(unit, std::mem::take(&mut st.struck));
     Step::Write
 }
-
-// ── the continuation ──────────────────────────────────────────────────────────────────────────
 
 fn clean_chunks(
     plane: &McpDoor,
@@ -1067,10 +1002,7 @@ pub(super) fn is_run(unit: &CallUnit) -> bool {
 }
 
 /// THE CONTINUATION'S CALLER BODY has arrived (or arrived again, for another member of its walk):
-/// its phases run from where they are.
 pub(super) fn begin(plane: &McpDoor, ticket: Ticket, principal: &str, unit: &mut CallUnit) -> Step {
-    // A CALL WAITING ITS TURN on a stdio child whose asks are relayed, called again: sent once it
-    // is first in line, as the synchronous call's is; never sent once its deadline passed.
     let far = matches!(unit.task.as_ref(), Some(TaskUnit::Run(r)) if r.phase == Phase::Far);
     let turn = if far {
         super::queued_turn(plane, ticket, unit)
@@ -1088,7 +1020,6 @@ pub(super) fn begin(plane: &McpDoor, ticket: Ticket, principal: &str, unit: &mut
             run.end = Some(End::Failed(words));
             run.phase = Phase::Settle;
         } else if run.phase == Phase::Far {
-            // Another member of the walk: the call is sent again, to it.
             run.phase = Phase::Call;
         }
     }
@@ -1096,7 +1027,6 @@ pub(super) fn begin(plane: &McpDoor, ticket: Ticket, principal: &str, unit: &mut
 }
 
 /// A continuation called again part way through a phase that waits on the host (a pend's wake): the
-/// phase goes on. `None` for any other unit.
 pub(super) fn resume(
     plane: &McpDoor,
     ticket: Ticket,
@@ -1112,12 +1042,6 @@ pub(super) fn resume(
 }
 
 /// The far end asked the continuation's caller, the ask granted
-/// ([`crate::call::settle_call_as`]): the task parks `input_required` with the upstream's `result`'s
-/// `inputRequests` verbatim under busbar's sealed state, bound to the principal, the tool (`digest`:
-/// the arguments as sent) and the member that asked, nesting the upstream's own state; the
-/// continuation ends with the handle live, and `tasks/update` answers it. A deployment that cannot
-/// seal the state fails the task in the refusal's words. `server` is the asking registration's,
-/// `answered` the length of the document it answered with.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn continuation_asked(
     plane: &McpDoor,
@@ -1202,13 +1126,11 @@ fn asking(
         Some(t) => Err(t.status()),
         None => Err(Status::Cancelled),
     });
-    // THE CONTINUATION ENDS with the handle live, its live state in the plane's records: the
-    // caller's answer, on whichever node, runs the next one.
+
     match parked {
         Ok(task) => match live_records(plane, &task, Some(0)) {
             Ok(records) => reply(unit, run, Status::InputRequired, records),
-            // The task store is host records: an ask the records cannot keep fails the
-            // task in words, never parks it in hand only.
+
             Err(bytes) => {
                 run.end = Some(End::Failed(not_kept("upstream's ask", bytes)));
                 run.phase = Phase::Settle;
@@ -1220,8 +1142,6 @@ fn asking(
 }
 
 /// What a task's relayed-ask state is bound to: the principal, the tool (`name`, as published) and,
-/// in the state's leg, the member; not the catalogue generation, because a task parked on a human
-/// outlives a configuration move.
 fn relay_bind<'a>(principal: &'a str, name: &'a str, now: u64) -> crate::ask::Bind<'a> {
     crate::ask::Bind {
         principal,
@@ -1234,8 +1154,6 @@ fn relay_bind<'a>(principal: &'a str, name: &'a str, now: u64) -> crate::ask::Bi
 }
 
 /// THE FAR END ANSWERED THE CONTINUATION'S CALL: the tool's result as it came is `completed`
-/// (`isError` and all); an upstream failure or a refused ask, `failed`; then the handle settled.
-/// `answered` is the length of the document a far end answered with (`None`: none answered).
 pub(super) fn continuation_answered(
     plane: &McpDoor,
     ticket: Ticket,
@@ -1283,7 +1201,6 @@ fn with_run(unit: &mut CallUnit, f: impl FnOnce(&mut CallUnit, &mut Run) -> Step
 }
 
 /// The continuation's reply: `{taskId, status}`, the tool call it made reported (never a fee: the
-/// unit that drew the fee is the one that created the task), and the result's chunks.
 fn reply(
     unit: &mut CallUnit,
     run: &mut Run,
@@ -1307,7 +1224,6 @@ fn reply(
 }
 
 /// A continuation that may not run (no such task for its principal, not the admitted call, or run
-/// already): the unknown-task answer, nothing moved.
 fn not_run(unit: &mut CallUnit, run: &mut Run) -> Step {
     run.phase = Phase::Done;
     let refusal = unknown_arrival();
@@ -1334,10 +1250,6 @@ fn claim_unavailable(unit: &mut CallUnit, run: &mut Run) -> Step {
 }
 
 /// THE RETRY'S STATE, opened ([`crate::ask::open_relayed`]): busbar's own, sealed for this
-/// principal and this task's tool over the arguments it sends (the admitted ones with busbar's own
-/// answers merged), nesting an upstream leg, and spent once. `None` for a state that is forged,
-/// spent, another caller's or another call's, or for a task that is not this principal's or has
-/// ended.
 fn relayed_leg(
     plane: &McpDoor,
     services: StaticServices,
@@ -1361,7 +1273,7 @@ fn relayed_leg(
     let digest = crate::ask::digest_arguments(&arguments);
     let name = run.params.get("name").and_then(Value::as_str).unwrap_or("");
     let mut seal = door_seal(plane, services, ticket, (&mut unit.issued, &mut unit.claim));
-    // A clock that cannot be read opens nothing: the state's window is not judged at the epoch.
+
     let opened = seal.now().map(|now| {
         crate::ask::open_relayed(state, relay_bind(principal, name, now), &digest, &mut seal)
     });
@@ -1407,20 +1319,18 @@ fn running(
                             };
                             run.handle = work;
                             run.end = Some(End::Failed("the host's work.find failed".to_string()));
-                            // The known task must still pass the local take, any retry seal, and
-                            // the one-time host claim before this continuation may fail it.
+
                             continue 'phases;
                         }
                     };
                     let Some(row) = WorkRow::read(found.record) else {
                         return not_run(unit, run);
                     };
-                    // THE CALL IT CARRIES IS THE CALL THAT WAS ADMITTED.
+
                     if row.digest != run.digest {
                         return not_run(unit, run);
                     }
                     if found.state == WORK_SETTLED {
-                        // Cancelled before it started: nothing to run.
                         return reply(unit, run, row.status, Vec::new());
                     }
                     run.handle = found.handle;
@@ -1433,8 +1343,7 @@ fn running(
                         });
                     });
                 }
-                // THE RUN, TAKEN ONCE: the instance's own half, then the host's one-time claim. The
-                // retry of a relayed ask is taken by its state instead, spent once.
+
                 if !run.local {
                     match run.retry.clone() {
                         Some(Retry::Relayed { state, .. }) => {
@@ -1445,12 +1354,7 @@ fn running(
                                 Poll::Ready(None) => return not_run(unit, run),
                             }
                         }
-                        // The resume of an answered round of the task's own asks: the update that
-                        // answered it nested it once under the plane's seal (a resume its caller
-                        // posted on the task-run claim itself carries none), and the round is the one that update answered on this instance,
-                        // taken here once; then the host's one-time claim of that round takes it.
-                        // The seal is opened first, so a resume that carries none spends nothing.
-                        // It asks from that round on.
+
                         Some(Retry::Asked { round, seal }) => {
                             let data = resume_data(principal, &run.reference, round, &run.digest);
                             let mut signer = door_seal(
@@ -1499,8 +1403,7 @@ fn running(
                         RUN_CLAIM_TTL_MS,
                     ) {
                         Poll::Pending => return Step::Pending,
-                        // The host's ledger said this unit takes the run; or no store is bound, and
-                        // the instance's own half was the whole gate.
+
                         Poll::Ready(
                             Ok(true)
                             | Err(
@@ -1516,7 +1419,7 @@ fn running(
                     run.phase = Phase::Settle;
                     continue 'phases;
                 }
-                // THE HANDLE, BOUND to this unit (principal-checked).
+
                 let h = handle(ticket, &mut unit.issued, &mut run.resume);
                 let (mut buf, mut spans) = ([0u8; WORK_BYTES], [blank(); 1]);
                 match services.work_resume(h, run.handle, &mut buf, &mut spans) {
@@ -1535,7 +1438,7 @@ fn running(
                         t.runner = Some(runner);
                     }
                 });
-                // The retry's caller already answered busbar's own rounds before the first call.
+
                 run.phase = if run.leg.is_some() {
                     Phase::Call
                 } else {
@@ -1575,14 +1478,12 @@ fn running(
                     });
                     match then {
                         Then::Gone(status) => return reply(unit, run, status, Vec::new()),
-                        // PARKED ON ITS CALLER: the continuation ends with the handle live and the
-                        // task's live state in the plane's records; the `tasks/update` that answers
-                        // the round, on whichever node, nests the resume.
+
                         Then::Park(task) => match live_records(plane, &task, Some(0)) {
                             Ok(records) => {
                                 return reply(unit, run, Status::InputRequired, records);
                             }
-                            // An ask the records cannot keep fails the task in words.
+
                             Err(bytes) => {
                                 run.end = Some(End::Failed(not_kept("round of asks", bytes)));
                                 run.phase = Phase::Settle;
@@ -1600,7 +1501,6 @@ fn running(
                 run.phase = Phase::Call;
             }
             Phase::Call => {
-                // A cancel that landed while it waited: observed here, before anything goes out.
                 if let Some(status) = plane
                     .tasks
                     .get(&run.reference)
@@ -1623,8 +1523,6 @@ fn running(
                     run,
                     (services, &answers),
                 ) {
-                    // THE RUN'S LEASE, renewed as its call goes out: the task's live state and its
-                    // index row ride the request.
                     Ok(Step::Write) => {
                         if let Some(task) = plane.tasks.get(&run.reference) {
                             let timeout = unit
@@ -1632,8 +1530,7 @@ fn running(
                                 .as_ref()
                                 .and_then(|m| held.section.servers.get(m))
                                 .map_or(0, crate::tools_config::McpServerDefCfg::timeout_ms);
-                            // A clock that cannot be read renews no lease: its end would be a
-                            // time the plane made up.
+
                             if let Some(now) = wall_ms(Some(services), ticket, &mut unit.issued) {
                                 let until = now
                                     .saturating_add(timeout)
@@ -1660,8 +1557,6 @@ fn running(
                 let at = match run.at {
                     Some(at) => at,
                     None => {
-                        // A failed read keeps the task's own last time; with no task held here
-                        // there is none, and the run settles nothing.
                         let at = wall_ms(Some(services), ticket, &mut unit.issued)
                             .or_else(|| plane.tasks.get(&run.reference).map(|t| t.stamps().1));
                         let Some(at) = at else {
@@ -1681,8 +1576,7 @@ fn running(
                 let mut settled = principal_task.clone();
                 apply(&mut settled);
                 let h = handle(ticket, &mut unit.issued, &mut run.settle);
-                // Settled first: `tasks/cancel` won. The host could not say: the instance's word
-                // stands, and the settle is owed to the next create's sweep.
+
                 let Poll::Ready(won) = settle(services, h, run.handle, &settled.row()) else {
                     return Step::Pending;
                 };
@@ -1702,10 +1596,7 @@ fn running(
                         }
                     }
                 });
-                // THE TERMINAL STATE IS WRITTEN TO THE HOST'S RECORDS whether or not the settle
-                // landed: a settle the host could not take at once is owed to the next create's
-                // sweep, and the result meanwhile answers from the records on every node. A
-                // cancel that won leaves the task's live state and index row to strike.
+
                 let records = match ended {
                     Some(task) => ended_records(plane, &task, won == Some(true)),
                     None => plane
@@ -1721,8 +1612,6 @@ fn running(
 }
 
 /// The terminal state as the host's records keep it: a result longer than they keep settles the task
-/// `failed` in words, the same on every node, never held only in hand; a failure's words longer
-/// than they keep are cut to what they keep.
 fn kept_end(reference: &str, end: End) -> End {
     let terminal = match &end {
         End::Completed(value) => json!({ "result": value }),
@@ -1734,7 +1623,7 @@ fn kept_end(reference: &str, end: End) -> End {
         Ok(_) => end,
         Err(bytes) => match end {
             End::Completed(_) => End::Failed(not_kept("result", bytes)),
-            // Escaped, a character is at most six bytes, plus room for the envelope.
+
             End::Failed(message) => {
                 End::Failed(message.chars().take(tasks::kept_bytes() / 8).collect())
             }
@@ -1743,12 +1632,6 @@ fn kept_end(reference: &str, end: End) -> End {
 }
 
 /// THE CALL, sent to the member the continuation's walk picked: the arguments as admitted with the
-/// answers to the task's own rounds merged in (`answers`, never over an admitted argument), judged
-/// again by the argument guard on what is actually about to be dispatched (the answers were never
-/// screened), a pool's twin taken as the synchronous path takes it, and sent by the one
-/// member-send the synchronous call uses ([`super::send_to_member`]): the caller's down-scope to a `token_exchange:` member, the client ladder, a stdio
-/// member's child, the bound on the caller's reply to a relayed ask. Every host the arguments name
-/// is asked of `dest.judge` on `ticket`. `Err` = the task ends here, in the engine's words.
 #[allow(clippy::too_many_lines)]
 fn call(
     plane: &McpDoor,
@@ -1773,10 +1656,9 @@ fn call(
         answers,
     );
     let Some(member) = unit.member.clone() else {
-        // No member to send it to: the walk's terminal is the kernel's to render.
         return Ok(Step::Taken);
     };
-    // A RELAYED ASK'S RETRY goes back to the member that asked, and no other.
+
     if run.leg.as_ref().is_some_and(|leg| leg.member != member) {
         return Ok(Step::Decline);
     }
@@ -1791,13 +1673,12 @@ fn call(
     if !held.section.servers.contains_key(&member) {
         return Ok(Step::Decline);
     }
-    // A stdio member's child is greeted (once per generation) before the call, as the synchronous
-    // call's is.
+
     if let super::Looked::Pending = super::door_program::ready(plane, ticket, unit, held, &member) {
         return Ok(Step::Pending);
     }
     super::admit_task_send(plane, ticket, unit, held, &entry, &arguments).map_err(End::Failed)?;
-    // THE RETRY: the caller's answers and the upstream's own state, verbatim, on the next round.
+
     let relay = run.leg.as_ref().map(|leg| {
         let mut continuation = Map::new();
         if let Some(Retry::Relayed { responses, .. }) = &run.retry {
@@ -1819,12 +1700,11 @@ fn call(
         arguments,
         id: json!(0),
         progress_token: None,
-        // The caller's declared capabilities: what an upstream's ask may be relayed to it for.
+
         capabilities: client_capabilities(Some(&run.params)),
         relay,
     };
-    // The binding the caller's upstream sessions are kept under: its reference, as the
-    // synchronous call's (an ungoverned caller's is the empty one).
+
     let binding = if principal == crate::ask::UNGOVERNED {
         ""
     } else {
@@ -1848,12 +1728,7 @@ fn call(
     }
 }
 
-// ── the verbs ─────────────────────────────────────────────────────────────────────────────────
-
 /// THE RUN THAT CONTINUES A TASK, nested by the `tasks/update` that answered it (under the updating
-/// caller's principal, the task's own) on the task-run claim: `body` names the task, its call and
-/// what continues it. The records the update leaves: the task's live state, its run's lease taken;
-/// a host that runs no continuation for it fails the task, its settle owed until it lands.
 fn nest_run(
     plane: &McpDoor,
     services: StaticServices,
@@ -1879,7 +1754,6 @@ fn nest_run(
 }
 
 /// THE CONTINUATION `body`, nested on the task-run claim on `h`: whether it runs (its answer is its
-/// own, and nobody waits for it here).
 fn nest(services: StaticServices, h: CompletionHandle, body: &Value) -> bool {
     let body = serde_json::to_vec(body).unwrap_or_default();
     let (mut buf, mut spans) = (vec![0u8; 1024], vec![blank(); 8]);
@@ -1891,7 +1765,6 @@ fn nest(services: StaticServices, h: CompletionHandle, body: &Value) -> bool {
 }
 
 /// A TASK NOTHING CAN CONTINUE, failed in `why` and its handle settled (owed until it lands): the
-/// records its terminal state leaves ([`ended_records`]).
 fn fail_unrun(
     plane: &McpDoor,
     (services, ticket, issued): (StaticServices, Ticket, &mut u32),
@@ -1940,9 +1813,6 @@ pub(super) fn door_seal<'a>(
 }
 
 /// A `tasks/*` VERB (`op`) under the caller's request id `id`: behind the `-32021` gate, then
-/// `params.taskId`, then the task — `tasks/get` the detailed task with its result INLINED when
-/// terminal, `tasks/update` the input delivered (an empty ack), `tasks/cancel` the handle settled
-/// `cancelled` (an empty ack, idempotent on a settled task).
 pub(super) fn verb(
     plane: &McpDoor,
     ticket: Ticket,
@@ -2070,7 +1940,6 @@ fn verbing(
     let at = match st.at {
         Some(at) => at,
         None => {
-            // A failed read keeps the task's own last time, never the epoch.
             let at = wall_ms(Some(services), ticket, &mut unit.issued).unwrap_or(task.stamps().1);
             st.at = Some(at);
             at
@@ -2081,7 +1950,6 @@ fn verbing(
         return answer(unit, 200, crate::catalogue::complete(id, task.detailed()));
     }
     if op == crate::tool_ops::OP_TASK_UPDATE {
-        // ABSENT is treated as empty rather than refused.
         let responses = params
             .and_then(|p| p.get("inputResponses"))
             .and_then(Value::as_object)
@@ -2102,8 +1970,7 @@ fn verbing(
                 } else {
                     None
                 };
-                // The task store is host records: answers that would
-                // make a state the records do not keep are refused whole, and nothing moves.
+
                 if !t.status().is_terminal() {
                     if let Err(bytes) = tasks::live_parts(&t.id, &t.live()) {
                         *t = before;
@@ -2138,11 +2005,8 @@ fn verbing(
             None => return ack(unit),
         };
         let records = if t.status().is_terminal() {
-            // A terminal task takes no input: nothing moved.
             Vec::new()
         } else if let Some(park) = park {
-            // THE CALLER'S ANSWER TO THE UPSTREAM'S ASK continues the task as a NEW unit: the
-            // retry, back to the member that asked.
             let body = json!({
                 "taskId": t.id,
                 "params": park.params,
@@ -2153,11 +2017,6 @@ fn verbing(
             });
             nest_run(plane, services, ticket, unit, &t, &body, at)
         } else if let Some((round, call)) = resume {
-            // THE ROUND OF ITS OWN ASKS, ANSWERED: the run resumes there, as a NEW unit, under
-            // the plane's seal (P-M9).
-            // THE SEAL OF A RESUME (P-M9): the task-run claim is an ordinary claim and the arrival
-            // says nothing of who nested it, so the plane's own signature over `resume_data` is what
-            // tells the resume this update nested from one its caller posted itself.
             let data = resume_data(principal, &t.id, round, &run_digest(&call));
             let mut seal = door_seal(plane, services, ticket, (&mut unit.issued, &mut unit.claim));
             match crate::seal::seal_bytes(&data, &mut |d| seal.sign(d)) {
@@ -2177,15 +2036,13 @@ fn verbing(
         } else if t.status() == Status::InputRequired {
             live_records(plane, &t, Some(0)).unwrap_or_default()
         } else {
-            // A run holds it: its state is written, its lease left as the run took it.
             live_records(plane, &t, None).unwrap_or_default()
         };
         let step = ack(unit);
         ride(unit, records);
         return step;
     }
-    // `tasks/cancel`: idempotent on a settled task, and audited either way (the served engine's
-    // `mcp_task.cancel` row on every cancel of a task the caller holds).
+
     let cancel_ack = |unit: &mut CallUnit| {
         let step = ack(unit);
         if let Some(p) = unit.pending.take() {
@@ -2199,8 +2056,7 @@ fn verbing(
     let mut cancelled = task.clone();
     cancelled.cancel(at);
     let h = handle(ticket, &mut unit.issued, &mut st.settle);
-    // Settled first by the continuation: its terminal state stands. Unsaid: owed to the next
-    // create's sweep, until it lands.
+
     let Poll::Ready(landed) = settle(services, h, task.handle, &cancelled.row()) else {
         return Step::Pending;
     };
@@ -2224,11 +2080,6 @@ fn verbing(
 }
 
 /// The task `task_id` names for this caller, from the host's rows: `work.find` (scoped to the instance and the principal; every denial alike); a
-/// live handle's live state in the plane's records (and its result, when that state is terminal and
-/// its settle owed); a settled one's row and the result written there (or the result this instance
-/// holds, when it holds one the records could not), a result they do not hold answered `failed` in
-/// words. The instance's own halves of the task are kept beside what the host says.
-/// `None`: no task of this caller's.
 fn resolve(
     plane: &McpDoor,
     services: StaticServices,
@@ -2255,23 +2106,19 @@ fn resolve(
             return Poll::Ready(Ok(Some(Box::new(task.clone()))));
         }
     }
-    // A TERMINAL STATE THIS INSTANCE HOLDS AND STILL OWES THE HOST (a continuation the kernel
-    // refused, its settle owed to the next create's sweep) is newer than the live row the host
-    // keeps until then: the instance's own word answers, as the served engine's runner answered a
-    // call it could not carry at once. The host's live row would otherwise overwrite it.
+
     if let Some(task) = held
         .as_ref()
         .filter(|t| t.unsettled && t.status().is_terminal())
     {
         return Poll::Ready(Ok(Some(Box::new(task.clone()))));
     }
-    // A host that lists none of the plane's records: what the instance holds answers.
+
     let unlisted = |held: Option<Task>| Poll::Ready(Ok(held.map(Box::new)));
     let Some(row) = row else {
         return Poll::Ready(Ok(None));
     };
-    // ITS LIVE STATE, read back from its chunks: on a live handle, what the task holds now; a
-    // terminal one there is a run whose settle is still owed, its result already in the records.
+
     let row = if state == WORK_LIVE {
         let prefix = tasks::live_prefix(task_id);
         match list_records(services, ticket, &mut unit.issued, &prefix, &mut st.live) {
@@ -2298,7 +2145,6 @@ fn resolve(
     };
     let task = match row.status {
         Status::Completed | Status::Failed => {
-            // THE RESULT, read back from its chunks.
             let prefix = tasks::chunk_prefix(task_id);
             match list_records(services, ticket, &mut unit.issued, &prefix, &mut st.result) {
                 Poll::Pending => return Poll::Pending,
@@ -2317,8 +2163,6 @@ fn resolve(
 const RESULT_NOT_KEPT: &str = "this task ended, but its result is not in the host's records";
 
 /// A TERMINAL TASK read back from its `row` (completed or failed) and its result chunks
-/// (`terminal`); a result the records do not hold is said `failed` in words, never as a task that
-/// does not exist.
 fn ended_task(
     task_id: &str,
     principal: &str,
@@ -2342,8 +2186,6 @@ fn ended_task(
 }
 
 /// The task the host's rows and records made (`host`), laid over what the instance holds of
-/// `task_id`, the instance keeping its own halves ([`Task::hosted`]).
-/// A host-only view is returned without retaining it; an update retains the state it will mutate.
 fn hosted(plane: &McpDoor, task_id: &str, host: Task) -> Poll<Option<Box<Task>>> {
     let mut task = host.clone();
     plane.tasks.with_all(|m| {
@@ -2355,15 +2197,7 @@ fn hosted(plane: &McpDoor, task_id: &str, host: Task) -> Poll<Option<Box<Task>>>
     Poll::Ready(Some(Box::new(task)))
 }
 
-// ── the kernel's own ends of a continuation ───────────────────────────────────────────────────
-
 /// The kernel cancelled the unit on `ticket` (its caller went, its deadline passed, the node
-/// drains): a continuation running on it leaves its task `cancelled` — the transition a caller's
-/// `tasks/cancel` makes, as the served engine's runner settled a task its shutdown stopped. The
-/// handle is settled by the next create's sweep.
-///
-/// Answers the ids of the tasks it moved to `cancelled`: each is audited as the served engine's
-/// runner audited a task its shutdown stopped (`mcp_task.cancel`).
 pub(super) fn cancelled(plane: &McpDoor, ticket: Ticket) -> Vec<String> {
     let now = clock_now(plane);
     let mut moved = Vec::new();
@@ -2406,13 +2240,6 @@ pub(super) fn abandoned_create(
 }
 
 /// The kernel refused the continuation `unit` (`text`: its walk was exhausted, its budget said no)
-/// before it settled its task: the task fails, as the served engine's runner failed a call that
-/// could not be carried. Only an actually bound runner may change its task. A refusal before
-/// Bind has no principal or exclusive custody receipt and changes no task named by its body.
-///
-/// Answers the records the refusal writes: the failure, its settle owed to the next create's sweep, is written at the refusal
-/// ([`ended_records`]), so every node answers it before that sweep and across a restart. A re-call
-/// of the same refusal (its buffers were short) answers them again.
 pub(super) fn continuation_refused(
     plane: &McpDoor,
     unit: u64,
@@ -2430,8 +2257,7 @@ pub(super) fn continuation_refused(
             return None;
         }
         let ran_here = t.runner == Some((unit, ticket));
-        // A different runner is never ours to end. The receipt remains on this CallUnit after
-        // the first refusal clears Task.runner, so only that bound unit can re-call short output.
+
         if t.runner.is_some() && !ran_here {
             return None;
         }
@@ -2453,8 +2279,6 @@ pub(super) fn continuation_refused(
 }
 
 /// The run's retained bind receipt, including across a short refusal re-call after its runner was
-/// cleared. A body naming a task without a positive claim or successful authenticated bind
-/// carries no custody.
 pub(super) fn refusal_receipt(unit: &CallUnit) -> Option<(u64, String, Ticket)> {
     let Some(TaskUnit::Run(run)) = unit.task.as_ref() else {
         return None;

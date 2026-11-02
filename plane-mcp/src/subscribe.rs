@@ -2,22 +2,7 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! `subscriptions/listen`: THE SERVER-TO-CLIENT CHANNEL OF REVISION `2026-07-28`, as a pure state
-//! machine the door drives on whichever carrier holds it open (the served engine's
-//! `subscribe.rs`, every rule kept).
-//!
-//! - THE ACKNOWLEDGEMENT IS A NARROWING ([`Listen::open`]): it carries the ACCEPTED subset, never
-//!   the requested one: the three list-changed categories, and `resourceSubscriptions` narrowed per
-//!   uri to what this caller is entitled to read. A request that opts in to nothing deliverable is
-//!   refused: a stream that can deliver nothing is a connection held open to say nothing.
-//! - WHAT COUNTS AS A CHANGE IS THIS CALLER'S CHANGE: compare the catalogue THIS CALLER CAN SEE
-//!   ([`change_keys`]) after re-asking its grants, including role changes within one generation.
-//! - THE PERMISSION IS RE-ASKED ON EVERY FRAME (the door passes [`Standing`]): a principal that has
-//!   stopped resolving live ends the stream on that frame, with the reason.
-//! - THE STREAM IS BOUNDED ([`MAX_LIFETIME_NS`]) and ends by saying so: the revision's own
-//!   `SubscriptionsListenResult`, correlated to the request that opened it.
-//! - QUIET IS NOT NOTHING: an idle stream says it is alive every [`KEEPALIVE_NS`].
 
-// The crate's only public item is `door`: the accessors and variants below were this module's public API; the tests hold them, the door does not reach them.
 #![cfg_attr(not(test), allow(dead_code))]
 
 use std::collections::BTreeSet;
@@ -28,15 +13,12 @@ use serde_json::{json, Map, Value};
 use crate::catalogue::{Catalogue, Lookup};
 
 /// How long one subscription is held before it is closed with a graceful result. LOAD-BEARING FOR
-/// AUTHORISATION as well as liveness: it bounds everything a frame cannot re-derive.
 pub const MAX_LIFETIME_NS: u64 = 300 * 1_000_000_000;
 
 /// How often a stream that has nothing to say says it is alive.
 pub const KEEPALIVE_NS: u64 = 15 * 1_000_000_000;
 
 /// The ceiling on distinct uris one `subscriptions/listen` may name under `resourceSubscriptions`,
-/// checked on the raw (deduplicated) request, before entitlement narrows it, and refused, never
-/// truncated.
 pub const MAX_SUBSCRIBED_URIS: usize = 64;
 
 /// The notification that acknowledges a subscription.
@@ -96,8 +78,6 @@ impl Filter {
         let resources = match n.get("resourceSubscriptions") {
             None => None,
             Some(Value::Array(a)) => {
-                // Deduplicated through a set, and read no further than the first uri past the
-                // ceiling: the request is refused for it, so the rest of a long array costs nothing.
                 let mut seen = BTreeSet::new();
                 let mut uris = Vec::new();
                 for u in a {
@@ -187,12 +167,6 @@ impl Listen {
             .is_some_and(|uris| uris.iter().any(|u| u == uri))
     }
     /// OPEN one subscription for `params` under `id` at `now_ns`: the requested filter read,
-    /// bounded, and narrowed by `entitled` (whether this caller's grant reaches a resource at a uri);
-    /// `Err` is the refusal envelope.
-    ///
-    /// # Errors
-    ///
-    /// Too many uris, or nothing deliverable for this caller.
     pub fn open(
         params: Option<&Value>,
         id: Value,
@@ -261,8 +235,6 @@ impl Listen {
     }
 
     /// THE NEXT STEP at `now_ns`, over the live `catalogue` under the caller's grants `admit`,
-    /// with its permission re-asked (`standing`), and the upstream announcements `updates` (each
-    /// `(server, uri)`) recorded since the last step.
     pub fn step(
         &mut self,
         catalogue: &Catalogue,
@@ -298,7 +270,7 @@ impl Listen {
         }
         if let Standing::Lapsed { message, reason } = standing {
             self.phase = Phase::Ended;
-            // The base protocol's invalid request closes it.
+
             let data = Some(json!({ "reason": reason }));
             return Step::End(vec![error_body(
                 self.id.clone(),
@@ -346,9 +318,7 @@ impl Listen {
                     .into_iter()
                     .map(|m| self.notification(m, json!({})))
                     .collect();
-                // THE RESOURCE-UPDATE RELAY: an upstream's announcement reaches a subscriber only
-                // when the subscriber asked for the uri, the uri resolves under its live grant to an
-                // operator-declared resource, and that resource is the announcing server's.
+
                 if let Some(uris) = &self.accepted.resources {
                     for (server, uri) in updates {
                         if !uris.iter().any(|u| u == uri) {
@@ -382,7 +352,6 @@ impl Listen {
 }
 
 /// A change key over one grant-scoped catalogue slice: FNV-1a, trusted for nothing (a collision
-/// costs one missed re-read of a list the caller can re-read at any time).
 fn change_key(parts: &[Vec<u8>]) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for part in parts {
@@ -405,8 +374,6 @@ fn change_keys_visible(
     admit: &impl Fn(&str, &str) -> bool,
     hidden: &impl Fn(&crate::catalogue::ToolEntry) -> bool,
 ) -> [u64; 3] {
-    // Use the wire renderers: descriptions, schemas, media types, aliases and templates all
-    // matter when they change a visible listing. Bodies/text omitted from lists do not.
     let id = Value::Null;
     [
         change_key(&[catalogue.tools_list(&id, admit, hidden)]),

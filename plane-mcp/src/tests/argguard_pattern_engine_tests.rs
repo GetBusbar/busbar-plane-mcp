@@ -8,7 +8,6 @@ use std::collections::BTreeMap;
 
 #[test]
 fn a_real_pattern_engine_error_is_refused_while_an_ordinary_nonmatch_is_not() {
-    // The dependency's own backtrack-error fixture, with its limit only in this test matcher.
     let pattern = r"(?<=ab)c";
     let validator = jsonschema::options()
         .with_pattern_options(jsonschema::PatternOptions::fancy_regex().backtrack_limit(1))

@@ -2,21 +2,10 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! MCP plane diagnostics: the catalog entries for the codes this plane RAISES, and no other.
-//!
-//! The catalog reaches the host through the plane's `declares.json` (its `diagnostics`), which the
-//! door's Statement carries under `EXT_DECLARES` and the release signs into a dropped-in plane's
-//! manifest; the composition root installs each declared code into the runtime catalog. This
-//! module is the same catalog as Rust values, for the tests: they hold `declares.json` equal to
-//! [`DIAGNOSTICS`] field for field, and the codes the door raises (its Statement's diagnostic ids,
-//! each spelled `BUSBAR-NNNN` so the host's log resolves its catalog entry) equal to the codes
-//! [`DIAGNOSTICS`] holds. A code is REGISTERED, never renumbered; a code nothing raises is not
-//! declared.
 
 use busbar_contract::diagnostic::{Class, Diagnostic, Severity};
 
 /// An MCP `2024-11-05` event stream opened on the ungoverned chain: raised once per plane instance,
-/// on its first such stream (an ungoverned chain is unisolated and says
-/// so, with a per-instance boot diagnostic latched on the first legacy stream).
 pub const MCP_LEGACY_STREAM_UNGOVERNED: Diagnostic = Diagnostic {
     code: 7108,
     class: Class::Plane,

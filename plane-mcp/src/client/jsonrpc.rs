@@ -2,13 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE OUTBOUND WIRE for MCP revision `2026-07-28`: the JSON-RPC envelope busbar sends to an
-//! upstream, and how its answer is read.
-//!
-//! The `_meta` keys and the mirror headers are `crate::codec`'s, the ones the ingress enforces, so
-//! a request busbar sends satisfies the MUSTs busbar enforces. There is no session: every request
-//! is self-describing. `params.name` is the UN-namespaced tool (busbar's `{server}_{tool}` is its
-//! own). An upstream's `InputRequiredResult` is relayed to the caller only under the operator's
-//! per-server grant ([`ServerRequestGrants`], deny by default), re-read every round.
 
 use crate::codec::{
     json, H_MCP_METHOD, H_MCP_NAME, H_PROTOCOL_VERSION, META_CLIENT_CAPABILITIES,
@@ -42,12 +35,6 @@ pub struct AdvertisedCaps {
 }
 
 /// Build a `tools/call` for `key` against `url`.
-///
-/// `authorization` is the already-planned credential header value: this builder never sees the
-/// caller's busbar key. `continuation` is the caller's answer to a relayed `InputRequiredResult`
-/// (its `inputResponses` and the upstream's `requestState`), echoed onto the retry; `None` is every
-/// first round. `advertise` declares the client capabilities in `_meta`.
-/// A call whose complete stdio identity may be a JSON-RPC string instead of a legacy number.
 pub fn tools_call_id(
     url: &str,
     key: &ToolKey,
@@ -58,11 +45,7 @@ pub fn tools_call_id(
     continuation: Option<&serde_json::Value>,
 ) -> OutboundRequest {
     let name = key.tool();
-    // BUSBAR'S OWN TOKEN, never the caller's, and only when the caller asked for progress. Written
-    // here from `request_id`, which is NOT unique across calls (on the HTTP carrier it is the round):
-    // the relayed call's negotiation replaces it with a token no other request of the instance
-    // carries (`door_sessions::Negotiating::begin`, or the id a session sends it under), and a stdio
-    // child's call carries the unit's own id.
+
     let progress_token: Option<String> = advertise.progress.then(|| progress_token(request_id));
     let mut capabilities = serde_json::Map::new();
     for (on, cap) in [
@@ -86,7 +69,7 @@ pub fn tools_call_id(
         "arguments": arguments,
         "_meta": meta,
     });
-    // EXACTLY TWO members of the continuation cross, by name.
+
     if let (Some(params), Some(responses)) = (
         params.as_object_mut(),
         continuation.and_then(|c| c.get("inputResponses")),
@@ -113,8 +96,6 @@ pub fn progress_token(id: &serde_json::Value) -> String {
 }
 
 /// Build a `tools/list` for one server: the request an operator `connect` and a call's
-/// verify-on-call fetch send a member over HTTP (`crate::plane_door`), and the one a stdio child is
-/// asked over its pipe (`crate::plane_door`'s program leg).
 pub fn tools_list(url: &str, request_id: u64, authorization: Option<&str>) -> OutboundRequest {
     tools_list_id(url, &serde_json::Value::from(request_id), authorization)
 }
@@ -261,7 +242,6 @@ pub fn next_list_request(
 }
 
 /// The shared envelope: the mirrored headers this revision REQUIRES, written from the same values
-/// that went into the body so they cannot disagree. `super::verb` builds through it too.
 pub fn envelope(
     url: &str,
     method: &str,
@@ -293,7 +273,6 @@ pub fn envelope(
 }
 
 /// Encode a name for a mirror header using this revision's `=?base64?…?=` sentinel when the value
-/// is not plain visible ASCII (or holds `=` or `?`).
 pub fn encode_sentinel(name: &str) -> String {
     use base64::Engine as _;
     if name
@@ -355,7 +334,6 @@ impl ServerAsk {
     }
 
     /// The ask a request's `method` makes; one that names no method, or one this plane does not
-    /// know, is judged as `sampling`, so the refusal lands on a grant set deliberately.
     pub fn of_method(method: Option<&str>) -> Self {
         match method {
             Some("elicitation/create") => ServerAsk::Elicitation,
@@ -364,10 +342,6 @@ impl ServerAsk {
         }
     }
 }
-
-// THE OUTBOUND ID SPACE. A dispatch's id is its round (`0..=u32::MAX` by type); the child-process
-// handshake's sits above every one of them, so a spare `initialize` answer left in a child's pipe
-// can never correlate as a tool's result. The `const` assertion fails the build if they meet.
 
 /// THE ID BUSBAR PUTS ON AN OUTBOUND DISPATCH: the round number, widened, and nothing else.
 pub const fn dispatch_request_id(round: u32) -> u64 {
@@ -380,8 +354,6 @@ pub const HANDSHAKE_REQUEST_ID: u64 = u32::MAX as u64 + 1;
 const _: () = assert!(HANDSHAKE_REQUEST_ID > dispatch_request_id(u32::MAX));
 
 /// Parse an upstream response body AS THE ANSWER TO THE REQUEST `sent_id` NAMES. The envelope rules
-/// (the `jsonrpc` member, the `id` cases, exactly one of `result`/`error`) are
-/// [`busbar_contract::jsonrpc::read_response`]'s.
 pub fn parse_response(body: &[u8], sent_id: u64) -> RpcOutcome {
     parse_response_id(body, &serde_json::Value::from(sent_id))
 }
@@ -405,7 +377,7 @@ pub fn parse_response_id(body: &[u8], sent_id: &serde_json::Value) -> RpcOutcome
     match reply {
         Reply::Error { code, message } => match code.as_ref().and_then(serde_json::Value::as_i64) {
             Some(code) => RpcOutcome::Error { code, message },
-            // JSON-RPC 2.0 section 5.1: `code` MUST be an integer; none is never invented.
+
             None => RpcOutcome::Malformed(format!(
                 "upstream error object has no integer `code` (message: {message})"
             )),
@@ -418,11 +390,10 @@ pub fn parse_response_id(body: &[u8], sent_id: &serde_json::Value) -> RpcOutcome
 }
 
 /// Recognise an `InputRequiredResult` (MRTR: `resultType: "input_required"`, its asks a map at
-/// `inputRequests`) and the MOST PRIVILEGED ask it names ([`ServerAsk::of_method`]).
 fn input_required_kind(result: &serde_json::Value) -> Option<ServerAsk> {
     let obj = result.as_object()?;
     let by_spec = obj.get("resultType").and_then(|v| v.as_str()) == Some("input_required");
-    // The shape busbar once invented: only a non-conformant upstream sends it, and it is refused.
+
     let legacy = obj.get("type").and_then(|v| v.as_str()) == Some("input_required");
     if !by_spec && !legacy {
         return None;

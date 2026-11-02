@@ -2,35 +2,19 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The plane's vocabulary against the conformance battery: its method names, error code table,
-//! metadata keys and revision, read from the battery's own sources (this repo's
-//! `testing/mcp-conformance`, moved here from busbar by busbar 7f43d8a777), so a battery that starts
-//! sending something new fails HERE rather than in a run someone has to interpret.
-//!
-//! Moved in from the plugin crate's `tests/both_ways.rs` when this crate's only public item
-//! became `door`: these tests read the plane's own tables. The door driven both ways stays there.
 
 use crate::{codec, tool_ops as ops};
 use std::path::PathBuf;
 
 /// The battery's own source tree: this repo's `testing/mcp-conformance` (busbar at the pin no
-/// longer carries it). A missing directory is a failure, never a skip: each reader below panics on
-/// a battery file it cannot read.
 fn battery() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../testing/mcp-conformance")
 }
 
 /// Every method name the battery's suites and fake peers name.
-///
-/// Read out of the battery rather than restated, which is the whole point: a battery that starts
-/// sending a method this plane does not carry must fail at build time, not in a run.
 fn battery_methods() -> Vec<String> {
     let mut found = Vec::new();
     let mut walk = |dir: PathBuf| {
-        // A directory that is not there is NOT "no methods here". The three below are the three
-        // places the battery keeps the names this plane is checked against, and a missing one used
-        // to return quietly: the surviving two still filled `found`, the non-empty floor below
-        // still held, and the coverage this test claims silently shrank to whatever was left. If
-        // the battery moves a directory, that must be a red here rather than a smaller test.
         let entries = std::fs::read_dir(&dir)
             .unwrap_or_else(|e| panic!("the battery's {} is readable ({e})", dir.display()));
         for entry in entries.flatten() {
@@ -93,8 +77,7 @@ fn battery_method_names_are_complete_and_unknown_names_still_reach_the_coverage_
 fn every_method_the_battery_sends_is_carried() {
     for method in battery_methods() {
         let carried = ops::method_row_for(&method).is_some() || NOTICES.contains(&method.as_str());
-        // The battery names three notices this node emits rather than receives, and one deliberate
-        // nonsense name. Everything else it names, it sends.
+
         let emitted_only = matches!(
             method.as_str(),
             "notifications/message"
@@ -110,11 +93,6 @@ fn every_method_the_battery_sends_is_carried() {
 }
 
 /// How many rows of each role the method table declares, and how many notices this plane knows.
-///
-/// Every loop below is a FILTER over a declared table, so a table that lost the rows a loop selects
-/// would leave that loop iterating zero times — and a conformance test that drove nothing reports
-/// `ok`. These three numbers are what turns "the loop found nothing" into a failure. Raise one
-/// deliberately, in the commit that adds the row.
 const CLIENT_ROWS: usize = 13;
 /// The rows only a paired server may send. See [`CLIENT_ROWS`].
 const PROVIDER_ROWS: usize = 3;
@@ -131,10 +109,6 @@ fn rows_of(sender: ops::Sender) -> Vec<&'static ops::RpcMethodRow> {
 }
 
 /// The method table keeps the roles the door serves: how many rows each role has, and every row's
-/// class is one the plane declares.
-///
-/// The surviving, plane-free half of what the decode-driven tests asserted (finding 12): the door
-/// reads this same table (`ops::method_row_for`), so the table is what is pinned here.
 #[test]
 fn the_method_table_keeps_its_roles_and_its_declared_classes() {
     assert_eq!(rows_of(ops::Sender::Client).len(), CLIENT_ROWS);
@@ -180,7 +154,7 @@ fn the_error_codes_are_the_batterys_own() {
             "the battery no longer names the code {code}"
         );
     }
-    // And the two the battery calls RETIRED are two this plane cannot write.
+
     let written = [
         busbar_contract::jsonrpc::PARSE_ERROR,
         codec::CODE_INVALID_REQUEST,
@@ -203,11 +177,6 @@ fn the_error_codes_are_the_batterys_own() {
 }
 
 /// Whether a source file names EXACTLY this number, rather than merely containing its digits.
-///
-/// A bare substring search answers yes for a code that is a prefix of a longer one — `-32700` is
-/// inside `-327001` — and yes for the digits of a code that appears in a version string, a byte
-/// count or a comment. Either way the check would report the battery still names a code it had
-/// dropped. Requiring a non-digit on each side is what makes the match the number itself.
 fn names_the_number(source: &str, code: i64) -> bool {
     let needle = code.to_string();
     let bytes = source.as_bytes();

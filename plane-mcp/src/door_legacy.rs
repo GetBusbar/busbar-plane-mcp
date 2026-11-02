@@ -2,24 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The `2024-11-05` HTTP+SSE client rung, held: busbar reaches a registered
-//! server that speaks only the legacy event-stream revision.
-//!
-//! * ONE HELD STREAM per member AND caller binding: its `GET`, its `endpoint` event, the message
-//!   address, the `initialize` handshake and correlation by JSON-RPC id are the plane's.
-//! * The connector holds the connection; the stream is read on the instance's ONE driver ticket
-//!   ([`drive`]). Each pending operation retains its handle and its own read buffers across ticks;
-//!   completed handles are recycled only after negotiated host retirement confirms their receipt.
-//! * A call POSTs its own request on its own ticket, its id registered BEFORE the POST leaves, and
-//!   waits for the driver to hand it the answer under that id.
-//! * A reply whose id no call waits for is dropped and counted: the next answer on that link
-//!   carries one rejected `mcp_upstream.reply` audit row per reply, at most
-//!   [`MAX_DROPPED_AUDITED`].
-//! * The server's own messages are routed as the other rungs route them (`ping` answered, an ask
-//!   refused, an unknown request `-32601`, each reply POSTed on the driver ticket); a resource
-//!   update is announced, and a call's progress and the stream's log records ride its answer.
-//! * The stream dropping fails every waiting call with [`STREAM_CLOSED`]'s words.
-//! * BOUNDED: at most [`MAX_LINKS`] live streams (past it an idle one is let go; with none idle the
-//!   call is refused), and a stream unused for [`IDLE_NS`] is closed.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::task::Poll;
@@ -46,7 +28,6 @@ use crate::client::peer::{NotificationEffect, ServerMessage, ServerNotification}
 use crate::revision::Revision;
 
 /// The words every call waiting on a held stream fails with when the stream drops before its
-/// answer arrives.
 pub const STREAM_CLOSED: &str =
     "the MCP server's 2024-11-05 event stream closed before it answered this call";
 
@@ -54,8 +35,6 @@ pub const STREAM_CLOSED: &str =
 pub const ACTION_REPLY_DROPPED: &str = "mcp_upstream.reply";
 
 /// The most rejected `mcp_upstream.reply` rows one answer carries: replies dropped past it are
-/// counted no further, so an upstream that floods replies no call waits for grows neither the count
-/// nor the caller's answer.
 pub const MAX_DROPPED_AUDITED: u32 = 4;
 
 /// The most calls one held stream waits answers for at once.
@@ -239,7 +218,6 @@ pub(super) struct Link {
     end_piece: Box<RequestPiece>,
     body_piece: Box<RequestPiece>,
     /// The head fields every POST of the link carries (the credential and the rest, lowered into
-    /// the revision: no stateless mirror).
     fields: Vec<(String, String)>,
     /// The connector's stream, once established.
     stream: Option<u64>,
@@ -247,7 +225,6 @@ pub(super) struct Link {
     /// Why the stream is gone, once it is.
     dead: Option<String>,
     /// Connector streams this key's earlier (dead) links held, still to close: a dropped stream
-    /// is let go at the connector, never left open behind a new one.
     stale: Vec<u64>,
     reader: EventReader,
     /// The message address, once the stream named an acceptable one.
@@ -256,7 +233,6 @@ pub(super) struct Link {
     /// The ticket of the call running `initialize`, while one is.
     init_by: Option<Ticket>,
     /// Answers read, by their id's JSON text, with the ticket of the call they are for, until it
-    /// takes them.
     answers: BTreeMap<String, (Ticket, Vec<u8>)>,
     /// The ticket of the call waiting for each id (at most [`MAX_WAITING`]).
     waiters: BTreeMap<String, Ticket>,
@@ -291,9 +267,6 @@ type Announced = Vec<Announcement>;
 
 impl Link {
     fn new(generation: u64, url: &str, member: &str, template: &OutboundRequest) -> Self {
-        // The GET carries the request's own head (its credential and the rest) lowered into the
-        // revision (no stateless mirror: a 2024-11-05 server reads none of it), minus what a body
-        // states, and asks for the event stream.
         let fields = lower_request(template, url, Revision::R2024_11_05, None, None).headers;
         let kept = fields.iter().filter(|(n, _)| {
             !n.eq_ignore_ascii_case("content-type") && !n.eq_ignore_ascii_case("accept")
@@ -363,7 +336,6 @@ impl Link {
     }
 
     /// Registers the call on `ticket` as waiting for `id`: `false` when the link already waits on
-    /// [`MAX_WAITING`] calls.
     fn wait(&mut self, id: u64, ticket: Ticket) -> bool {
         if self.waiters.len() >= MAX_WAITING {
             return false;
@@ -395,8 +367,7 @@ impl Link {
             if self.dead.is_some() {
                 break;
             }
-            // The `endpoint` event names the message address, once; a path joins the endpoint's
-            // origin, and another origin is refused.
+
             if event.event.as_deref() == Some("endpoint") {
                 if self.address.is_none() {
                     match message_address(&self.url, &event.data) {
@@ -442,8 +413,6 @@ impl Link {
     }
 
     /// One message of the server's own, routed as the other rungs route it (busbar answers
-    /// only the protocol's housekeeping, and an ask it cannot carry to the caller is refused, never
-    /// answered for the caller).
     fn peer_message(
         &mut self,
         v: &Value,
@@ -461,7 +430,7 @@ impl Link {
                                 .push(Announcement::Resource(self.member.clone(), uri.to_string()));
                         }
                     }
-                    // Progress reaches only the call whose request carried the token.
+
                     NotificationEffect::RelayProgress => {
                         let id = v
                             .pointer("/params/progressToken")
@@ -520,7 +489,7 @@ impl Link {
                 self.outbox
                     .push_back(serde_json::to_vec(&reply).unwrap_or_default());
             }
-            // The driver POSTs it; a call waiting on the link is woken to look again.
+
             woken.extend(self.waiters.values().next().copied());
         }
     }
@@ -545,8 +514,6 @@ impl Link {
     }
 
     /// DRIVES the link on the driver ticket, its services numbered on from `issued` (the
-    /// instance's one counter for this tick cycle): an idle stream let go, the replies it owes
-    /// POSTed, and the stream dialled, its `GET` written, and its reply read until it pends or ends.
     fn drive(
         &mut self,
         (host, driver, now): (&Host, Ticket, u64),
@@ -569,7 +536,6 @@ impl Link {
     }
 
     /// Reserve the current operation's handle before invoking the host. A pending service owns
-    /// it across links and ticks; a completed service clears it before starting its next step.
     fn next<'h>(
         host: &'h Host,
         driver: Ticket,
@@ -600,8 +566,6 @@ impl Link {
         announced: &mut Announced,
     ) {
         loop {
-            // Establish may have pended before the link died. Redeem its stream before closing
-            // it; a dead link keeps all of the operation's inputs until that result arrives.
             if self.dead.is_some()
                 && self.stream.is_none()
                 && self.step == Step::Establish
@@ -624,7 +588,7 @@ impl Link {
                     }
                 }
             }
-            // A dead stream is closed at the connector before anything else.
+
             if self.dead.is_some() {
                 if let Some(stream) = self.stream {
                     if host.connector(Ticket::NONE).close(stream).is_pending() {
@@ -756,7 +720,6 @@ impl Link {
     }
 
     /// THE REPLIES the link owes the server, POSTed one after another to the message address on the
-    /// driver ticket, each service numbered on from `issued`; a dead stream owes nothing more.
     fn post_replies(&mut self, host: &Host, driver: Ticket, issued: &mut Driver) {
         if self.dead.is_some() {
             self.outbox.clear();
@@ -782,8 +745,7 @@ impl Link {
                         }
                     }
                 }
-                // CLOSE never pends on a conforming connector. Keep the reply and its parked
-                // buffers alive until this close has released any pending read or write.
+
                 if let Some(stream) = r.stream {
                     if host.connector(Ticket::NONE).close(stream).is_pending() {
                         return;
@@ -842,8 +804,7 @@ impl Link {
                 return;
             };
             let stream = r.stream.unwrap_or_default();
-            // Each step is one service: PENDING leaves it for the next drive; anything else is
-            // taken (a failed reply is let go: the stream itself says whether the server is there).
+
             let done = match r.step {
                 ReplyStep::Establish => match c.establish_as(
                     crate::statement::NEED_UPSTREAM,
@@ -881,7 +842,7 @@ impl Link {
                 },
                 ReplyStep::Read => match c.read_reply(stream, &mut r.buf, &mut r.slot) {
                     Poll::Pending => return,
-                    // Interim heads are followed; the unused final response body need not end.
+
                     Poll::Ready(Ok(got))
                         if got.piece.kind == REPLY_HEAD
                             && (got.piece.code >= 200 || got.piece.code == 101) =>
@@ -988,9 +949,6 @@ pub(super) fn any(plane: &McpDoor) -> bool {
 }
 
 /// THE DRIVER'S PART, on the instance's driver ticket (`drive`): every held stream read as far as
-/// it goes, child work whose state lapsed settled, and every waiting call reached woken. A dead stream no call
-/// waits on any more is let go. Pending operations retain their handles. A terminal handle is
-/// acknowledged through the SDK and reused only after the host confirms its result was retired.
 pub(super) fn drive(
     instance: &Instance<'_, McpDoor>,
     plane: &McpDoor,
@@ -1062,8 +1020,7 @@ pub(super) fn acknowledge(
         let Some(state) = states.get_mut(&()) else {
             return Ok(false);
         };
-        // Only a successful session-buffer answer reaches this point. A short answer retains
-        // consumed results for its retry and never exposes an ACK on Failed/SHORT.
+
         if let Some(ack) = state.retirement.acknowledgement(0)? {
             out.completion_ack(&plane.inspection_leases, &ack)?;
         }
@@ -1084,7 +1041,6 @@ fn pending(plane: &McpDoor) -> bool {
 }
 
 /// `dropped` replies a call took from the stream of `key` but has no answer to audit them on: counted
-/// on the stream again, for the next call's answer.
 pub(super) fn recount(plane: &McpDoor, key: &str, dropped: u32) {
     if dropped == 0 {
         return;
@@ -1097,9 +1053,6 @@ pub(super) fn recount(plane: &McpDoor, key: &str, dropped: u32) {
 }
 
 /// The op on `ticket` was cancelled: no call waits there any more, an answer still to come for it
-/// is a reply no call waits for, and one already read for it is dropped. A cancelled call that was
-/// running the stream's `initialize` hands it back: the next call runs it, and the calls parked
-/// behind it are woken to.
 pub(super) fn cancelled(plane: &McpDoor, ticket: Ticket) {
     let woken = plane.legacy.with_all(|m| {
         let mut woken = Vec::new();
@@ -1163,17 +1116,14 @@ pub(super) struct Calling {
 }
 
 /// What a call came to: the answer under the id it carried (an event stream, its progress and the
-/// link's log records ahead of the answer, when the server said any: the `bool`), the replies dropped
-/// on its link since the last answer, or why it failed.
 pub(super) type Called = Result<(Vec<u8>, bool, u64, u32), String>;
 
 /// The answer `body`, with `frames` ahead of it as one event stream when there are any: `(bytes,
-/// is an event stream)`.
 fn framed_answer(body: Vec<u8>, frames: Vec<Value>) -> (Vec<u8>, bool) {
     if frames.is_empty() {
         return (body, false);
     }
-    // The answer rides as its own bytes, as the stateless path frames one.
+
     match crate::framing::event_stream(&body, &frames) {
         Some(stream) => (stream, true),
         None => (body, false),
@@ -1181,9 +1131,6 @@ fn framed_answer(body: Vec<u8>, frames: Vec<Value>) -> (Vec<u8>, bool) {
 }
 
 /// A CALL OVER THE HELD STREAM of `key` (a member and a caller binding), on the call's own ticket:
-/// the stream opened if none is, its `initialize` run by the first call that finds none done, the
-/// call's request POSTed to the message address under an id of the stream's, and its answer taken
-/// once the driver read it. PENDING meanwhile.
 pub(super) fn call(
     instance: &Instance<'_, McpDoor>,
     plane: &McpDoor,
@@ -1214,9 +1161,6 @@ pub(super) fn call(
             }
             let usable = m.get(key).is_some_and(|l| l.dead.is_none());
             if !usable {
-                // ADMISSION BOUNDS THE TABLE: past its bound an idle stream (no call on it) is let
-                // go for this one; with none idle the call is refused, and no stream a call waits
-                // on is closed for another.
                 let live = m.values().filter(|l| l.dead.is_none()).count();
                 if !m.contains_key(key) && live >= MAX_LINKS {
                     let mut woken = Vec::new();
@@ -1231,7 +1175,7 @@ pub(super) fn call(
                         }
                     }
                 }
-                // A dead link's stream, and any it still had to close, are closed by its successor.
+
                 let (generation, stale) = m.remove(key).map_or((1, Vec::new()), |old| {
                     let mut stale = old.stale;
                     stale.extend(old.stream);
@@ -1266,7 +1210,6 @@ pub(super) fn call(
     }
     let st = state.as_mut().expect("set above");
     loop {
-        // What the link says now, under its lock; the POSTs run outside it.
         let next = plane.legacy.with(&key.to_string(), |l| {
             let Some(l) = l.filter(|l| l.generation == st.generation) else {
                 return Next::Fail(STREAM_CLOSED.to_string());
@@ -1274,7 +1217,6 @@ pub(super) fn call(
             if let Some(id) = st.id {
                 let text = Value::from(id).to_string();
                 if let Some((_, body)) = l.answers.remove(&text) {
-                    // The call's own progress, and the link's log records, ride its answer.
                     let mut frames = l.notes.remove(&text).unwrap_or_default();
                     l.notes_bytes.remove(&text);
                     frames.append(&mut l.logs);
@@ -1301,8 +1243,6 @@ pub(super) fn call(
             };
             match (l.init, st.init) {
                 (Init::Idle, CallInit::Waiting) => {
-                    // This call runs the link's `initialize`: its answer is waited for under its id,
-                    // registered before the POST leaves.
                     l.init = Init::Running;
                     l.init_by = Some(ticket);
                     st.init = CallInit::Posting;
@@ -1480,7 +1420,6 @@ fn fail_link(plane: &McpDoor, key: &str, why: &str) -> String {
 }
 
 /// ONE POST to the message address on the call's ticket: taken when the server answered it 2xx (the
-/// answer itself arrives on the stream).
 fn post(
     instance: &Instance<'_, McpDoor>,
     plane: &McpDoor,

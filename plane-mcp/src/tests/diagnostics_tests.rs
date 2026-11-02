@@ -2,19 +2,10 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! Per-plane diagnostics-catalog invariants for the MCP plane: code/slug uniqueness, the
-//! class↔code thousands-digit contract, and the live-entry documentation floor. The committed
-//! markdown/JSON snapshot tests render through the host's renderers, which this crate does not
-//! link, so they run where those renderers are linked.
 
 use super::*;
 
 /// THE CATALOG IS NOT EMPTY, AND NOT ENTIRELY RETIRED.
-///
-/// Every other test in this file is a `for d in DIAGNOSTICS` loop whose assertions live INSIDE the
-/// loop, and `every_live_entry_documents_meaning_and_action` additionally `continue`s past every
-/// retired entry. A catalog that regressed to empty — a bad `cfg` gate, a botched merge — would
-/// therefore make all four of them pass green while every documented diagnostic silently
-/// disappeared. This is the floor that makes those loops mean something.
 #[test]
 fn the_catalog_is_not_empty() {
     assert!(
@@ -114,8 +105,6 @@ fn every_live_entry_documents_meaning_and_action() {
 }
 
 /// THE PLANE'S `declares.json` IS ITS CATALOG: the static declared metadata the root reads for this
-/// linked plugin (its `declares` section: every code this plane raises) states exactly the entries
-/// [`DIAGNOSTICS`] holds, field for field, so the two cannot drift — and the plane's breaker fact.
 #[test]
 fn the_declares_file_states_the_catalog() {
     let declared: serde_json::Value =
@@ -134,9 +123,7 @@ fn the_declares_file_states_the_catalog() {
             })
         })
         .collect();
-    // Beside the catalog, the plane's one breaker fact (ARCHITECT Q4): a transient failure below
-    // the trip threshold never benches a member (the posture ruled for this plane); and the
-    // carriers it needs, which the one document states for the dropped-in manifest too.
+
     let whole = serde_json::json!({
         "breaker": { "bench_below_trip_threshold": false },
         "diagnostics": want,
@@ -151,10 +138,6 @@ fn the_declares_file_states_the_catalog() {
 }
 
 /// THE DECLARED CODES ARE THE RAISED CODES: every diagnostic the door can raise is one of its
-/// Statement's diagnostic ids (`out.diag` indexes them), each spelled `BUSBAR-NNNN` so the host's
-/// log resolves its catalog entry, and the set of those codes equals the set `declares.json`
-/// states. A declared code nothing raises, or a raised one nothing declares, fails here; so does a
-/// retired entry.
 #[test]
 fn the_declared_codes_are_exactly_the_raised_codes() {
     let names = crate::plane_door::DIAG_NAMES;
@@ -193,10 +176,6 @@ fn the_declared_codes_are_exactly_the_raised_codes() {
 }
 
 /// NO DECLARED CODE IS ONE THE CORE'S CATALOGUE HOLDS: the core at `.busbar-ref`
-/// (`BUSBAR_CHECKOUT`, `crates/busbar-kernel/src/diagnostics/catalog.toml`) refuses a plane that
-/// declares a code its catalogue already holds ("plugin 'busbar-plane-mcp' declares BUSBAR-NNNN:
-/// the catalogue already holds that code"), linked or dropped in, so a collision is a busbar that
-/// does not boot. An unset variable is a failure, never a skip.
 #[test]
 fn no_declared_code_is_one_the_core_catalogue_holds() {
     let busbar = std::env::var_os("BUSBAR_CHECKOUT").expect(

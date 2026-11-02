@@ -288,7 +288,7 @@ fn exact_generations_and_stale_completions_do_not_regreet_the_latest_child() {
     assert!(drive(&plane, &conn, &mut older, 1).is_pending());
     {
         let mut child = conn.0.lock().unwrap();
-        child.instance = 2; // A replacement Member starts a distinct child generation space.
+        child.instance = 2;
         child.generation = 3;
         child.hold_initialized = false;
     }

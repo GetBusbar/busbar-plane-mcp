@@ -1,20 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE PLANE DECLARES ITSELF ONCE, AND THE DECLARATION RIDES THE STATEMENT (ARCHITECT ruling
-//! 2026-10-21; BUSBAR-1.6.0.md l.246; THE DESIGN: "Each fact is declared once"; "Compiled-in =
-//! dropped-in through the same table ... NOTHING CHANGES about the plugin itself").
-//!
-//! A busbar build that links the plane reads its `declares` off the door's Statement
-//! (`EXT_DECLARES`); the release signs the file its recipe's `declares:` names into the dropped-in
-//! plane's manifest. Both must be the same document, byte for byte, or a dropped-in plane states
-//! other facts than the linked one: the breaker posture and the diagnostic codes the linked door
-//! carries, which the signed file once lacked.
+//! Checks that the Statement and release recipe use the same declares document.
 
 /// The declaration the release signs: the `declares:` of this plugin's entry in busbar's
-/// `plugins.yaml` (which replaced the per-repo `release.yml`'s `declares_file:`), and its bytes read
-/// from the repo. The recipe's path is pinned here; when the busbar tree is at hand
-/// (`BUSBAR_PLUGINS_YAML`, or a sibling checkout) the entry itself is read and must name it.
 fn signed() -> (String, Vec<u8>) {
     const NAMED: &str = "plane-mcp/declares.json";
     let root = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
@@ -97,7 +86,6 @@ fn the_signed_declaration_states_the_breaker_and_the_diagnostics_and_no_contract
 
 /// This plugin's own door, named for the loader.
 fn loaded_door() -> busbar_plugin_loader::dispatch::LoadedDoor {
-    // This crate's sealed door function (`&'static Door`), taken by the loader's safe conversion.
     let door: busbar_contract::abi::mechanism::door::DoorFn = busbar_plane_mcp::door;
     busbar_plugin_loader::dispatch::LoadedDoor::from(door)
 }

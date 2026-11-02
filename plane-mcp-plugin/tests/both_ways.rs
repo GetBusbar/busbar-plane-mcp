@@ -2,35 +2,12 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The plane's door driven both ways: linked and dropped in, one script through every plane op.
-//!
-//! The dropped-in door is this crate's own cdylib. This file reaches the logic crate through
-//! `door` alone (its only public item, BUSBAR-1.6.0.md l.3567): the door's private constants it
-//! needs are `plane-mcp/tests/support/door_facts.rs`, held to the crate's own items by the logic
-//! crate's unit test `door_facts_tests`. The checks that read the plane's own functions (the
-//! vocabulary against the battery, and the transcript against what the plane's pure functions say)
-//! live in the logic crate (`plane-mcp/src/tests/`).
 
-// The door's private constants this file needs, restated and held to the crate's own items by
-// the logic crate's unit test `door_facts_tests`.
 #[path = "../../plane-mcp/tests/support/door_facts.rs"]
 #[allow(dead_code)]
 mod door_facts;
 
-/// THE MCP PLANE'S CONFORMANCE RIG, BOTH WAYS (BUSBAR-1.6.0.md, the plane driver's "Proven by":
-/// the plane conformance suite, compiled-in and dropped-in through one table).
-///
-/// The linked door and this crate's dropped-in image (its built cdylib, the same door behind
-/// `export_door!`) are each admitted through the one loader on one dispatcher and run ONE script
-/// through every plane op, each answer read back. The two transcripts must be identical, step for
-/// step. The door's answers are also held to what the plane states on the wire: its sections, its
-/// refusal family, its fee unit, its entitlement binding.
-///
-/// RED ARM, kept: the same door with `on_piece` swapped for one that relays the caller's bytes
-/// back instead of answering from the catalogue. Its transcript differs at the answer, so a door
-/// that stopped answering from what the plane holds cannot pass for this one.
-/// This plugin's own door, named for the loader.
 fn loaded_door() -> busbar_plugin_loader::dispatch::LoadedDoor {
-    // This crate's sealed door function (`&'static Door`), taken by the loader's safe conversion.
     let door: busbar_contract::abi::mechanism::door::DoorFn = busbar_plane_mcp::door;
     busbar_plugin_loader::dispatch::LoadedDoor::from(door)
 }
@@ -80,7 +57,6 @@ mod both_ways {
     use busbar_test_kit::services_double::{Double, ServicesDouble};
     use serde_json::{json, Value};
 
-    // The door: this plugin's one public item.
     use busbar_plane_mcp::door;
 
     use crate::door_facts::{
@@ -95,7 +71,7 @@ mod both_ways {
             max_inflight_cap: 64,
             sink: Arc::new(NoSink),
             dispatcher: d.adopter(),
-            // The conformance door is driven op by op and opens nothing: bound as a probe.
+
             conns: busbar_plugin_loader::dispatch::ConnTable::Probe,
         }
     }
@@ -104,12 +80,9 @@ mod both_ways {
         String::from_utf8_lossy(&buf[s.offset as usize..(s.offset + s.len) as usize]).into_owned()
     }
 
-    // ── the fixtures ─────────────────────────────────────────────────────────────────────────────────
-
     /// One fronted server, the section the door's own tests read.
     const SECTION: &[u8] = door_facts::WITNESS_SECTION;
     /// [`SECTION`] as stage 3g deals it to `validate` (`{tools: <section>}`), and a dealt section
-    /// the grammar refuses: a server id holding the routing-key separator.
     const DEALT: &[u8] =
         br#"{"tools": {"fs": {"url": "https://mcp.example/fs", "pin": {"mechanism": "unpinned"}}}}"#;
     const BAD_DEALT: &[u8] =
@@ -144,12 +117,9 @@ mod both_ways {
     ];
 
     /// The route index of `(verb, target)` in the door's route table (its first such row), the claim
-    /// an arrival carries.
     fn claim(verb: &str, target: &str) -> u32 {
         route_of(verb, target, "http")
     }
-
-    // ── one step of the transcript ───────────────────────────────────────────────────────────────────
 
     /// What one op answered, read back: the outcome, the status it stated, the bytes it wrote and
     /// the head fields, and anything else the op answers in its own out struct.
@@ -260,7 +230,6 @@ mod both_ways {
         }
 
         /// The far end ended with no answer at all: the kernel's `Ok(None)` piece (last, no
-        /// status, no bytes; `busbar-kernel` `plane_driver/route.rs`, the far walk's read loop).
         const fn unanswered() -> Self {
             Push {
                 from: FROM_FAR_END,
@@ -288,8 +257,6 @@ mod both_ways {
     }
 
     /// One `on_piece` of `unit` with a reply buffer of `cap` bytes, then re-called with the same
-    /// `from` and zero bytes while the door answers `more = 1`. The bytes of every call, in order,
-    /// the head fields and the request line it wrote, and its flags.
     fn push(p: &Plugin<Plane>, what: &'static str, unit: u64, given: Push, cap: usize) -> Step {
         let mut reply = vec![0_u8; cap];
         let (mut fields, mut arena) = ([z::<OutField>(); 16], vec![0_u8; 4096]);
@@ -458,7 +425,6 @@ mod both_ways {
             t.push(Step::new(what, p.call(op, &mut g).outcome));
         }
 
-        // A request the plane answers from what it holds, written 32 bytes at a time.
         let post = ("POST", "/mcp");
         t.push(arrive(p, "arrive tools/list", 7, post, TOOLS_LIST, LIST_FIELDS).0);
         t.push(piece(
@@ -469,10 +435,10 @@ mod both_ways {
             TOOLS_LIST,
             32,
         ));
-        // A notification: acknowledged with no body.
+
         t.push(arrive(p, "arrive notice", 8, post, NOTICE, &[]).0);
         t.push(piece(p, "answer notice", 8, FROM_CALLER, NOTICE, 256));
-        // A call the plane sends on: not answered here.
+
         t.push(arrive(p, "arrive tools/call", 9, post, TOOLS_CALL, CALL_FIELDS).0);
         t.push(piece(
             p,
@@ -482,11 +448,10 @@ mod both_ways {
             TOOLS_CALL,
             256,
         ));
-        // A far end's piece for a unit the plane answered itself.
+
         t.push(arrive(p, "arrive again", 10, post, TOOLS_LIST, LIST_FIELDS).0);
         t.push(piece(p, "far end", 10, FROM_FAR_END, b"{}", 256));
 
-        // Refused arrivals, each rendered in the plane's own words.
         let (s, words) = arrive(p, "arrive not json", 11, post, NOT_JSON, &[]);
         t.push(s);
         let words = words.unwrap_or_default();
@@ -497,10 +462,9 @@ mod both_ways {
         t.push(refusal(p, "refusal GET /mcp", REFUSAL_ARRIVE, 0, &words));
         let metadata = ("GET", DEFAULT_METADATA);
         t.push(arrive(p, "arrive metadata", 13, metadata, b"", &[]).0);
-        // A refusal the kernel decided (a gate), in the one error envelope.
+
         t.push(refusal(p, "refusal gate", REFUSAL_GATE, 403, b"denied"));
 
-        // A trust verb naming no registration: `404`, before anything else.
         let mut s: Frame<ServeIn, ServeOut> = Frame::new(z(), z());
         (s.input.head, s.out.head) = (in_head(), out_head());
         let (mut reply, mut fields, mut arena) = (
@@ -587,8 +551,6 @@ mod both_ways {
         serde_json::from_slice(bytes).expect("a JSON document")
     }
 
-    // ── the doors ────────────────────────────────────────────────────────────────────────────────────
-
     fn linked(d: &Dispatcher) -> Plugin<Plane> {
         let row = LinkedRow::of_loaded(crate::loaded_door())
             .expect("the linked door states its Statement");
@@ -596,8 +558,6 @@ mod both_ways {
     }
 
     /// This crate's dropped-in image, the cdylib `cargo test` builds beside the test
-    /// (`conformance::cdylib_of`). A missing artifact is a failure, never a skip: this test IS the
-    /// dropped-in door's proof.
     fn dropped(d: &Dispatcher) -> Plugin<Plane> {
         let path = busbar_test_kit::conformance::cdylib_of("busbar_plane_mcp_plugin");
         let stated = LinkedRow::of_loaded(crate::loaded_door())
@@ -607,8 +567,6 @@ mod both_ways {
     }
 
     /// The Statement's sections, as the loader reads them, are the grammar's: `tools:` declared and
-    /// the `mcp:` endpoint block owned beside it (the door states them as literals, which the
-    /// config-schema census reads).
     #[test]
     fn the_statements_sections_are_the_grammars() {
         let d = Dispatcher::new(DispatchConfig::default());
@@ -618,13 +576,11 @@ mod both_ways {
     }
 
     /// The linked transcript is the one the plane's own pure functions say the door answers: each
-    /// expectation those functions build is restated in `door_facts` and held to them in the crate.
     #[test]
     fn the_door_answers_what_the_plane_says() {
         let d = Dispatcher::new(DispatchConfig::default());
         let t = script(&linked(&d));
 
-        // Lifecycle: the grammar judges the section; the snapshot is the door's own.
         assert_eq!(step(&t, "validate refused").outcome, Outcome::Refused);
         assert_eq!(step(&t, "validate").outcome, Outcome::Ready);
         let open = step(&t, "open");
@@ -643,7 +599,7 @@ mod both_ways {
                 )
             })
             .collect();
-        // The door's routes as the contract states a route's claim (`ServedRoute::claim_spec`).
+
         let specs: Vec<_> = door_facts::ROUTES
             .iter()
             .zip(door_facts::ROUTES_OPEN)
@@ -680,7 +636,7 @@ mod both_ways {
             .map(|&(verb, target)| (verb, target, 0))
             .collect();
         assert_eq!(admin, want, "the admin routes are the door's");
-        // The endpoint mounted under the public base URL `open` was lent (`door::under_public_url`).
+
         let audience = Some(format!("{PUBLIC_URL}/mcp"));
         assert_eq!(snapshot.audience, audience);
         assert_eq!(
@@ -692,7 +648,6 @@ mod both_ways {
             Some("https://busbar.example/mcp")
         );
 
-        // A request answered from what the plane holds: the catalogue's answer, written whole.
         let a = step(&t, "arrive tools/list");
         assert_eq!(a.outcome, Outcome::Ready);
         assert_eq!(
@@ -733,7 +688,6 @@ mod both_ways {
             "a JSON document says so, and states its length"
         );
 
-        // A notification: acknowledged, no body.
         let a = step(&t, "arrive notice");
         assert_eq!(a.outcome, Outcome::Ready);
         assert!(a
@@ -745,9 +699,6 @@ mod both_ways {
             (Outcome::Ready, 202, &b""[..])
         );
 
-        // A call naming a tool the section does not approve is the catalogue's refusal, written
-        // here, in the words an ungranted tool gets (the wire says nothing of what exists); a far
-        // end's piece for a unit the plane answered itself is declined.
         assert_eq!(step(&t, "arrive tools/call").outcome, Outcome::Ready);
         let c = step(&t, "answer tools/call");
         assert_eq!((c.outcome, c.status), (Outcome::Ready, 404));
@@ -757,7 +708,6 @@ mod both_ways {
         );
         assert_eq!(step(&t, "far end").outcome, Outcome::Refused);
 
-        // Refused arrivals: the plane's own words at its own status.
         let a = step(&t, "arrive not json");
         assert_eq!((a.outcome, a.status), (Outcome::Refused, 400));
         let r = step(&t, "refusal not json");
@@ -794,17 +744,13 @@ mod both_ways {
         assert_eq!(body["error"]["code"], json!(CODE_REFUSED));
         assert_eq!(body["error"]["message"], json!("denied"));
 
-        // The ops the driver does not call on this door yet, and the rest of the lifecycle.
-        // Nothing to restore and no background work; no admin route is served yet, and a body that
-        // carries no invocation projects an empty view (no entry, no body: no hook fires on it).
         for what in ["hydrate", "start"] {
             assert_eq!(step(&t, what).outcome, Outcome::Ready, "{what}");
         }
         let serve = step(&t, "serve");
         assert_eq!((serve.outcome, serve.status), (Outcome::Ready, 404));
         assert_eq!(step(&t, "project").outcome, Outcome::Ready, "project");
-        // The tick is the clock of the subscriptions held as sessions (ARCHITECT round 5
-        // Q-L3B-K6-HTTP (a)): it asks to run again a poll interval on (250 ms).
+
         assert_eq!(
             step(&t, "tick").detail,
             format!("next={}", 1_000 + 250_000_000)
@@ -824,8 +770,6 @@ mod both_ways {
     }
 
     /// `refresh` of [`SECTION`] to `generation`, the applied document's other owned sections
-    /// `owned` riding the head's extensions under `EXT_OWNED` as the loader's `refresh_door` lays
-    /// them (absent when empty): the outcome, the generation it published, and its words.
     fn refresh_owning(p: &Plugin<Plane>, generation: u64, owned: &[u8]) -> String {
         use busbar_contract::abi::mechanism::call::{Blob, BLOB_OCTETS};
         let extensions = if owned.is_empty() {
@@ -852,9 +796,6 @@ mod both_ways {
     }
 
     /// G4: AN APPLY CARRYING A MALFORMED `mcp:` BLOCK IS REFUSED AT `refresh`, in the block's own
-    /// words, linked and dropped in alike, and publishes nothing; the same apply with a well-formed
-    /// block, or with none, refreshes. The applied block rides the refresh's extensions under
-    /// `EXT_OWNED` (the refresh-time twin of `PlaneOpenIn::owned`), judged as `open` judges it.
     #[test]
     fn an_apply_carrying_a_malformed_endpoint_block_is_refused_at_refresh() {
         let d = Dispatcher::new(DispatchConfig::default());
@@ -908,7 +849,6 @@ mod both_ways {
     }
 
     /// The kernel refuses with `reason` at its own `status` (no unit had arrived), and the door
-    /// renders it.
     fn kernel_refusal(p: &Plugin<Plane>, reason: u32, status: u32) -> Step {
         let words = b"refused";
         let (mut reply, mut fields, mut arena) = ([0_u8; 512], [z::<OutField>(); 2], [0_u8; 64]);
@@ -926,16 +866,6 @@ mod both_ways {
         s
     }
 
-    /// P-ITEM: REFUSAL-REASON COLLAPSE (spec DONE item 2, "All P-item behaviours match 1.5.5";
-    /// drive log P2, commit 470351a480; TODO L-ENG9). 1.5.5's one surface gave every limit reason
-    /// its own status and kind and answered none of them as an internal error (v1.5.5
-    /// `crates/busbar/src/ingress/mod.rs:237-305`). On the served mcp door the reason-to-family
-    /// decision is the kernel's alone: every reason a plane is handed is answered at the status the
-    /// kernel chose from the one classification (`busbar_contract::abi::plane::RefusalCode::class`;
-    /// the door states `0`, the kernel's status stands) and in the one refusal family
-    /// (`CODE_REFUSED`), never as the internal error, whatever its class. The door holds no
-    /// reason-to-class table of its own (the unserved `Plane` impl's `refusal_words` is deleted,
-    /// plane-mcp finding 12).
     #[test]
     fn p_item_refusal_reason_collapse_the_door_answers_every_reason_at_the_kernels_status_never_internal(
     ) {
@@ -952,7 +882,6 @@ mod both_ways {
         assert_eq!(c.outcome, Outcome::Ready, "the door opens");
         let mut rendered = 0;
         for code in RefusalCode::ALL {
-            // Two codes are the kernel's own money verdicts and never reach a plane (`reason_of`).
             if reason_of(code.code()).is_none() {
                 continue;
             }
@@ -965,9 +894,7 @@ mod both_ways {
                 "{code:?} (class {class:?}) is answered at the kernel's status"
             );
             let body = document(&r.reply);
-            // A mounted path's failed authentication and the body limit, refused before any
-            // unit, keep the bytes the kernel's own JSON-RPC rendering answered (`-32600`, the
-            // 1.6.0 baseline; audit K4#2(b)): every other reason is the one refusal family.
+
             let want = if matches!(
                 code,
                 RefusalCode::Unauthenticated | RefusalCode::BodyTooLarge
@@ -990,12 +917,7 @@ mod both_ways {
         assert!(rendered > 0, "the walk rendered at least one reason");
     }
 
-    // ── the relayed call and the entitlement binding ───────────────────────────────────────────────
-
     /// A HOST whose entitlement answer is a fixed table of `"<kind>:<name>"` grants, and which
-    /// serves nothing else: the kernel's entitlement service, as the door asks it. As the kernel's
-    /// (`KernelServices::entitled`), a crossing that serves no unit is entitled to nothing: the
-    /// loader's request lookup must hand the unit the crossing serves.
     struct Grants(&'static [&'static str]);
 
     impl ServicesDouble for Grants {
@@ -1101,7 +1023,6 @@ mod both_ways {
             busbar_plugin_loader::dispatch::Ran::Now(Stored::refused(UNSERVED))
         }
         /// The kernel's Approve as this section's approvals seed it: `read_file` approved at its
-        /// digest, `draft` allowed and pending (ARCHITECT Q3: the door renders the verdict).
         fn trust_serves(
             &self,
             _: &Caller,
@@ -1185,7 +1106,6 @@ mod both_ways {
     }
 
     /// [`Grants`], and a random source that answers (fresh bytes at every call): a host the plane
-    /// can mint a session id on.
     struct Minting(Grants, std::sync::atomic::AtomicU64);
 
     impl ServicesDouble for Minting {
@@ -1291,7 +1211,6 @@ mod both_ways {
             busbar_plugin_loader::dispatch::Ran::Now(Stored::refused(UNSERVED))
         }
         /// The kernel's Approve as this section's approvals seed it: `read_file` approved at its
-        /// digest, `draft` allowed and pending (ARCHITECT Q3: the door renders the verdict).
         fn trust_serves(
             &self,
             _: &Caller,
@@ -1387,7 +1306,6 @@ mod both_ways {
     ];
 
     /// One server with one approved tool (its `path` argument mirrored in `Mcp-Param-Path`), one
-    /// tool awaiting approval, and the `roots` grant with nothing declared to disclose.
     const RELAY_SECTION: &[u8] = door_facts::RELAY_SECTION;
 
     /// A relayed call, its path argument mirrored.
@@ -1422,7 +1340,6 @@ mod both_ways {
     const JSON_HEAD: &[Field] = &[field("content-type", "application/json")];
     const SSE_HEAD: &[Field] = &[field("content-type", "text/event-stream")];
     /// The far end's answers: a result, a JSON-RPC error, a result streamed after a progress
-    /// frame, and an ask for roots busbar holds the grant for and has nothing to disclose.
     const FAR_OK: &[u8] =
         br#"{"jsonrpc":"2.0","id":0,"result":{"content":[{"type":"text","text":"hi"}]}}"#;
     const FAR_ERROR: &[u8] =
@@ -1433,7 +1350,6 @@ mod both_ways {
     const FAR_ASK: &[u8] = br#"{"jsonrpc":"2.0","id":0,"result":{"resultType":"input_required","inputRequests":{"r":{"method":"roots/list"}}}}"#;
 
     /// THE RELAY SCRIPT: the calls a member answers, the ones the plane refuses itself, and the
-    /// listings the kernel's entitlement narrows; each answer read back.
     fn relay_script(p: &Plugin<Plane>) -> Vec<Step> {
         let mut t = Vec::new();
         let mut i: PlaneOpenIn = z();
@@ -1519,8 +1435,6 @@ mod both_ways {
     }
 
     /// `project` of `body` with a request-stage hook's `rewrite`: the view's scalars and strings,
-    /// the projected body (`reply`), the prompt view's turns and the rewritten body (`fields`, as
-    /// `("turn:<role>", text)` and `("rewritten", body)`), read back through the arena.
     fn project_with(
         p: &Plugin<Plane>,
         what: &'static str,
@@ -1548,7 +1462,7 @@ mod both_ways {
         if c.outcome == Outcome::Ready {
             let base = arena.as_ptr() as usize;
             let view = j.out.view;
-            // A string the view leaves unset (NULL) reads as empty, as a span absent from the arena.
+
             let span_of = |a: AbiStr| {
                 if a.is_absent() {
                     return Span { offset: 0, len: 0 };
@@ -1584,9 +1498,6 @@ mod both_ways {
     }
 
     /// `project`: a call is one turn of tool arguments named by the plane, with its
-    /// `{tool, arguments}` body, its view's entry the registered server the tool is served by (the
-    /// entry a gate-first plane's hooks are attached to); a listing carries no invocation and
-    /// projects an empty view.
     #[test]
     fn a_call_projects_its_invocation_for_the_hooks() {
         let t = relay_script(&linked(&served(ALL)));
@@ -1613,7 +1524,6 @@ mod both_ways {
     }
 
     /// `project`'s PROMPT VIEW is the served engine's projection of an invocation: one `user` turn,
-    /// the arguments as JSON text (what a content-granted gate or rewrite hook screens).
     #[test]
     fn a_call_projects_one_user_turn_of_its_arguments() {
         let t = relay_script(&linked(&served(ALL)));
@@ -1624,11 +1534,6 @@ mod both_ways {
         );
     }
 
-    /// A REQUEST-STAGE HOOK'S REWRITE (BUSBAR-1.6.0.md Part 3 section 12, "Hooks"): the plane applies
-    /// it in its own dialect (the arguments replaced, every other member as the caller sent it),
-    /// answers the rewritten request, and projects THAT request; a rewrite with no usable arguments
-    /// object is not applied and the request projects as it came (the served engine's call went out
-    /// untouched).
     #[test]
     fn a_rewrite_replaces_the_arguments_and_the_rewritten_call_is_projected() {
         let t = relay_script(&linked(&served(ALL)));
@@ -1675,9 +1580,6 @@ mod both_ways {
     }
 
     /// The relayed call, as the door states it on the wire: the ATTEMPT is taken, the caller's body
-    /// becomes a request bound for the member at the path of the member's URL, and the far end's
-    /// answer is settled in JSON, metered, logged and audited. (That the request and the settled
-    /// answers are byte for byte what the plane's own builders say is checked in the logic crate.)
     #[test]
     fn a_relayed_call_is_sent_on_settled_metered_logged_and_audited() {
         let t = relay_script(&linked(&served(ALL)));
@@ -1702,10 +1604,7 @@ mod both_ways {
         );
         assert_eq!(ok.fields, vec![json_type(), length_of(&ok.reply)]);
         assert!(ok.detail.contains("done=true far=false"), "{}", ok.detail);
-        // THE METER: a call the server answered is counted, once, as one tool call (tail class 0)
-        // and the bytes of the document it answered with (tail class 1, a Response class: "the
-        // length of the document it just read back"), and the success earns its fee unit (tail
-        // class 2, `per_request`). The plane states its counts; the kernel prices them.
+
         assert_eq!(
             ok.units,
             vec![
@@ -1715,9 +1614,7 @@ mod both_ways {
             ],
             "the one tool call the server answered, its answer's bytes, and its fee unit"
         );
-        // THE CALL LOG (RULE-CHECK 2026-09-30): the answer carries the call's one chained record,
-        // keyed by the caller's chain scope (no caller reference: the ungoverned scope), its suffix
-        // the plane's own fields at the host clock's reading (this HOST's clock reads 0).
+
         assert_eq!(
             ok.records,
             vec![(
@@ -1727,11 +1624,7 @@ mod both_ways {
             )],
             "one call record"
         );
-        // THE AUDIT ROW (SEAM-L(k)): the dispatched call's one `mcp_tool.call` row, applied, on the
-        // published tool; and THE LEDGER LANE (SEAM-L(j)): the call's registered server,
-        // `mcp_server:<server>`, never the published tool (architect ruling 2026-10-23, R-11): the
-        // kernel holds a present `tools.rate_card` to its registrations, so a per-tool key prices
-        // nothing.
+
         assert_eq!(
             ok.audits,
             vec![(
@@ -1755,8 +1648,6 @@ mod both_ways {
         let error = step(&t, "answer error");
         assert_eq!(document(&error.reply)["result"]["isError"], json!(true));
 
-        // A GRANTED ASK IS RELAYED under busbar's sealed state (Law 11); a host that signs nothing
-        // cannot seal it, so the ask is refused, never answered by busbar.
         let ask = step(&t, "answer ask");
         assert_eq!(ask.status, 403);
         assert_eq!(
@@ -1765,18 +1656,6 @@ mod both_ways {
         );
     }
 
-    /// $ A CALL ITS UPSTREAM NEVER ANSWERED BILLS ITS FEE UNIT AND NO CLASS (/status row 123; #62,
-    /// BUSBAR-1.6.0.md l.2252: what is billed is what was delivered; #71: the plane reports counts,
-    /// the kernel writes them). The call went out, and the far end ended with nothing (the kernel's
-    /// `Ok(None)` piece). The caller is answered the upstream-failure result, 200 `isError`, and the
-    /// plane reports exactly the fee unit that success earns (tail class 2, `per_request`): the call
-    /// left, so it keeps its fee (Q35, "a hop that left is billed whatever the backend then
-    /// answered"). It reports no `tool_calls` and no `bytes`, because no server answered a call and
-    /// no document was read back. MCP is new in 1.6.0, so this pins predev's own figures
-    /// (BUSBAR-1.6.0.md l.4684-4685: the baseline for the new planes is current predev behaviour,
-    /// never a 1.5.5 one). It is also the one shape that reads `requests=1`, the flat fee and no
-    /// class counts on the admin usage row: a red `h2-class-price` with that shape is an upstream
-    /// that never answered.
     #[test]
     fn a_call_its_upstream_never_answered_bills_its_fee_unit_and_no_class() {
         let t = relay_script(&linked(&served(ALL)));
@@ -1803,10 +1682,6 @@ mod both_ways {
     }
 
     /// $ AN UPSTREAM THAT ANSWERED HTTP 5xx WITH NO JSON-RPC BODY IS STILL A SERVED CALL
-    /// (ARCHITECT/coordinator ruling 2026-10-14, Q35 in 1.6.0-QUESTIONS.md: "a hop that left is
-    /// billed whatever the backend then answered"). The far end answered, so the plane counts one
-    /// `tool_calls` and the bytes of the body it read back (tail classes 0 and 1), beside the fee
-    /// unit its caller's 200 `isError` answer earns (tail class 2).
     #[test]
     fn an_upstream_5xx_that_is_no_json_rpc_counts_as_a_served_call() {
         let t = relay_script(&linked(&served(ALL)));
@@ -1833,7 +1708,6 @@ mod both_ways {
     }
 
     /// The calls the plane refuses itself, with a member picked: the catalogue's and the mirror's
-    /// refusals, written to the caller as a local answer and never sent on.
     #[test]
     fn a_call_the_plane_refuses_is_answered_and_never_sent() {
         let t = relay_script(&linked(&served(ALL)));
@@ -1879,7 +1753,6 @@ mod both_ways {
     }
 
     /// A caller that prefers an event stream is answered with one: the answer after the plane's
-    /// own log records.
     #[test]
     fn a_caller_preferring_a_stream_is_answered_with_one() {
         let t = relay_script(&linked(&served(ALL)));
@@ -1905,10 +1778,7 @@ mod both_ways {
         assert_eq!(events[0]["method"], json!("notifications/message"));
     }
 
-    // ── the red arm ──────────────────────────────────────────────────────────────────────────────────
-
     /// A call capture for the hand-built table entry below: one slot per thread, as `plugin_door!`
-    /// expands for a plugin's own image.
     struct TestCapture;
     impl CaptureHome for TestCapture {
         fn retention() -> &'static busbar_contract::abi::sdk::capture::CaptureRetention {
@@ -1976,7 +1846,6 @@ mod both_ways {
         assert_ne!(r.reply, h.reply, "the answer is where the two differ");
         assert_ne!(red, honest);
     }
-    // ── the host log ────────────────────────────────────────────────────────────────────────────────
 
     /// The host's envelope sink, keeping the text of every diagnostic and log record a call
     /// carried: what the host writes to the plugin's own log file.
@@ -1994,11 +1863,6 @@ mod both_ways {
         fn dropped(&self, _: busbar_plugin_loader::dispatch::Dropped) {}
     }
 
-    /// THE PLANE'S DIAGNOSTIC REACHES THE HOST'S LOG, DROPPED IN AS LINKED (owner ruling
-    /// 2026-10-27): the first `2024-11-05` event stream an ungoverned caller opens raises the
-    /// plane's declared diagnostic (`BUSBAR-7108`) in the answer's envelope, which reaches the host's
-    /// sink, the one that writes the plugin's own log file, from the dropped-in image as from the
-    /// linked door.
     #[test]
     fn the_ungoverned_stream_diagnostic_reaches_the_host_log_dropped_in_as_linked() {
         let d = Dispatcher::with_services(
@@ -2072,9 +1936,6 @@ mod both_ways {
 
 mod bounds {
     //! WHAT THE DOOR HOLDS AND GATHERS IS BOUNDED. A unit the kernel refuses is over, and the door
-    //! drops it; an upstream's answer is gathered only under the SDK's reply ceiling.
-    //!
-    //! The units are driven through the linked door op by op, as [`super::both_ways`] drives it.
 
     use std::sync::Arc;
 
@@ -2145,7 +2006,6 @@ mod bounds {
     }
 
     /// `body` with `fields` arrives as `unit`, POSTed on the mount: its outcome and the status the
-    /// plane refused it with.
     fn arrive(
         p: &Plugin<Plane>,
         unit: u64,
@@ -2172,7 +2032,6 @@ mod bounds {
     }
 
     /// One `on_piece` of `unit` from `from` carrying `flags`, `stream` and `caller`, through a
-    /// reply buffer of `cap` bytes and buffers that hold the rest.
     fn push(
         p: &Plugin<Plane>,
         (unit, from, flags): (u64, u32, u32),
@@ -2232,7 +2091,6 @@ mod bounds {
     }
 
     /// A unit the kernel refuses after it arrived is over: the plane no longer holds it, so a
-    /// piece naming it is refused rather than answered from the request params it kept.
     #[test]
     fn a_unit_the_kernel_refuses_is_dropped() {
         let d = Dispatcher::new(DispatchConfig::default());
@@ -2260,7 +2118,7 @@ mod bounds {
             Outcome::Ready,
             "arrive"
         );
-        // A far end's piece for a unit that sent nothing on.
+
         assert_eq!(piece(&p, 8, FROM_FAR_END), Outcome::Refused);
         assert_eq!(
             piece(&p, 8, FROM_CALLER),
@@ -2283,7 +2141,6 @@ mod bounds {
     ];
 
     /// A HOST WITH A CLOCK: the shared services double, serving `clock.now` (a subscription is
-    /// timed on it) and nothing else.
     struct Clocked;
 
     impl ServicesDouble for Clocked {
@@ -2301,14 +2158,12 @@ mod bounds {
     }
 
     /// One caller opening its quota's worth of subscriptions, plus one, cuts off no other caller's
-    /// stream: the extra one is refused, in the caller's own answer.
     #[test]
     fn a_caller_at_its_subscription_quota_is_refused_and_evicts_no_other_caller() {
         const QUOTA: u64 = 64;
         let d = clocked();
         let p = started(&d);
-        // Streams are opened through a one-byte reply buffer, so each stays held, its head part
-        // written.
+
         let open = |unit: u64, caller: &'static str, cap: usize| {
             assert_eq!(
                 arrive(&p, unit, LISTEN, LISTEN_FIELDS).0,
@@ -2342,8 +2197,6 @@ mod bounds {
         );
     }
 
-    /// FAIL CLOSED ON THE CLOCK (row 159 finding P-M4): on a host whose clock is unbound, a
-    /// subscription is refused `503` in its caller's own answer, never opened at the epoch.
     #[test]
     fn a_subscription_on_a_host_whose_clock_is_unbound_is_refused() {
         let d = Dispatcher::new(DispatchConfig::default());
@@ -2363,7 +2216,6 @@ mod bounds {
     }
 
     /// A full unit table refuses the next arrival (429) and never evicts: the first unit is still
-    /// held and still answers.
     #[test]
     fn a_full_unit_table_refuses_the_next_arrival_and_evicts_nothing() {
         let d = Dispatcher::new(DispatchConfig::default());

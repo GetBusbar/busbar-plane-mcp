@@ -30,8 +30,6 @@ pub(super) fn hold(plane: &McpDoor, handle: u64, until_ms: u64) {
 }
 
 /// On a terminal failure the host may have restored the work to live. Keep custody and retry on
-/// a fresh, unconsumed completion handle. Pending always polls the exact original full handle.
-/// A confirmed success is never issued again, even while its completion awaits retirement.
 pub(super) fn drive(plane: &McpDoor, ticket: Ticket, driver: &mut Driver) -> bool {
     let Some(services) = plane.services else {
         return !plane.relays.is_empty();
@@ -54,26 +52,31 @@ pub(super) fn drive(plane: &McpDoor, ticket: Ticket, driver: &mut Driver) -> boo
         let mut done = Vec::new();
         let mut due = false;
         for (&handle, work) in works.iter_mut() {
-            // A failed clock never expires an ordinary live ask. An immediate cleanup, or an
-            // already-started operation, needs no further clock reading to finish.
-            if work.until_ms != 0 && work.pending.is_none() && !work.applied
-                && now_ms.is_none_or(|now| now < work.until_ms) {
+            if work.until_ms != 0
+                && work.pending.is_none()
+                && !work.applied
+                && now_ms.is_none_or(|now| now < work.until_ms)
+            {
                 continue;
             }
             due = true;
             if !work.applied {
-                let Some(completion) = driver.host_handle(ticket, &mut work.pending) else { continue };
+                let Some(completion) = driver.host_handle(ticket, &mut work.pending) else {
+                    continue;
+                };
                 match services.work_settle(completion, handle, CHILD_LAPSED) {
                     Poll::Pending => continue,
                     Poll::Ready(Ok(())) => work.applied = true,
-                    Poll::Ready(Err(_)) => { /* An unknown terminal result is not proof of absence. */ }
+                    Poll::Ready(Err(_)) => {}
                 }
             }
             if driver.host_consumed(&mut work.pending) && work.applied {
                 done.push(handle);
             }
         }
-        for handle in done { works.remove(&handle); }
+        for handle in done {
+            works.remove(&handle);
+        }
         due && !works.is_empty()
     })
 }

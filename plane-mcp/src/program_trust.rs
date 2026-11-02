@@ -2,8 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! Host launch receipts on the program need, never metadata supplied by an MCP peer. The public
-//! identity is only the approved command path. Arguments, environment and working directory stay
-//! bound to the host's private admission; this is no executable-byte or payload attestation.
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use std::collections::BTreeMap;
@@ -76,7 +74,7 @@ impl Versions {
                 return Err("the stdio MCP host launch receipt is from a retired program".into());
             }
         }
-        // Legacy non-rooted value-only fixtures may carry no generation. It authenticates nothing.
+
         if observed
             == (Observed {
                 instance: 0,
@@ -147,8 +145,7 @@ pub(crate) fn observe<'a>(
     }
     let generation = number(generation.ok_or_else(|| UNTRUSTED.to_string())?)?;
     let instance = number(instance.ok_or_else(|| UNTRUSTED.to_string())?)?;
-    // Comparing the canonical encoding of the approved UTF-8 bytes also rejects permissive
-    // base64 aliases, invalid UTF-8 and whitespace, without allocating from untrusted input size.
+
     if identity != Some(STANDARD.encode(command.as_bytes()).as_bytes()) {
         return Err(UNTRUSTED.into());
     }

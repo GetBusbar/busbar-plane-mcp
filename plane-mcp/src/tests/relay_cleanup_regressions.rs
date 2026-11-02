@@ -149,7 +149,6 @@ impl SafeSlot for Open {
             ..McpDoor::default()
         };
         if input.open().generation() == 0 {
-            // Exercise the actual post-open clock-refusal path, not a hand-built cleanup entry.
             let child = crate::ask::ChildLeg {
                 launch: None,
                 generation: 1,
@@ -291,7 +290,7 @@ impl<'h> Fixture<'h> {
                 .set(|i| &i.open.head.op, slot::OPEN)
                 .set(|i| &i.open.generation, u64::from(!clock_fails)),
         );
-        // The hosted OPEN retains the externally owned tables until this fixture closes.
+
         let mut opened = reply::call_hosted_in(
             view()
                 .op::<busbar_contract::abi::plane::Ops>(|o| &o.head.open)
@@ -318,7 +317,7 @@ impl<'h> Fixture<'h> {
             .set(|i| &i.drive.head.host.handle, 71)
             .set(|i| &i.drive.driver, DRIVER)
             .blob(|i| &i.drive.head.extensions, &extensions, BLOB_OCTETS);
-        // TestIn borrows the capability bytes for this call; the instance retains its host loan.
+
         let answer = reply::call_in(
             view()
                 .op::<busbar_contract::abi::plane::Ops>(|o| &o.head.drive)
@@ -337,7 +336,7 @@ impl<'h> Fixture<'h> {
             .set(|i| &i.head.op, slot::REFRESH)
             .set(|i| &i.generation, 2)
             .settings(b"{}");
-        // The real plane REFRESH copies its settings while the instance proof stays borrowed.
+
         let refreshed = reply::call_in(
             view()
                 .op::<busbar_contract::abi::plane::Ops>(|o| &o.head.refresh)
@@ -350,7 +349,7 @@ impl<'h> Fixture<'h> {
         let input = TestIn::<GenIn>::new()
             .set(|i| &i.head.op, slot::RETIRE)
             .set(|i| &i.generation, 1);
-        // Old-generation retirement cannot consume or replace the instance proof.
+
         let retired = reply::call_in(
             view()
                 .op::<busbar_contract::abi::plane::Ops>(|o| &o.head.retire)
@@ -372,7 +371,7 @@ impl<'h> Fixture<'h> {
                 },
             )
             .set(|i| &i.unit, 1);
-        // Caller cancellation is on this same live plane; no output buffer is borrowed past return.
+
         let cancelled = reply::call_in(
             view()
                 .op::<busbar_contract::abi::plane::Ops>(|o| &o.head.cancel)
@@ -387,7 +386,7 @@ impl<'h> Fixture<'h> {
 impl Drop for Fixture<'_> {
     fn drop(&mut self) {
         let input = TestIn::<InHead>::new().set(|i| &i.op, slot::CLOSE);
-        // Consume the instance before the external FakeHost goes out of scope.
+
         let closed = reply::close_in(
             view()
                 .op::<busbar_contract::abi::plane::Ops>(|o| &o.head.close)

@@ -9,7 +9,6 @@ pub const CLASS_TOOL_CALLS: MeterClassId = MeterClassId::new("tool_calls");
 pub const CLASS_BYTES: MeterClassId = MeterClassId::new("bytes");
 
 /// This plane's lines in the `Flags:` block of `busbar --help`, byte for byte as the binary has
-/// always printed them (shadow-oracle cells `cli__--help` / `cli__-h`), with no trailing newline.
 pub const HELP_FLAGS: &str =
     "    --mcp-stdio         serve the MCP plane on THIS PROCESS's stdin/stdout (newline-delimited
                         JSON-RPC) instead of binding any listener — for an MCP host that runs

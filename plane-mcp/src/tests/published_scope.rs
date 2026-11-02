@@ -37,8 +37,6 @@ fn unit() -> CallUnit {
 }
 
 /// This exercises the lower member-send fallback with an admission produced from the actual
-/// source catalogue. Ordinary pool routing refuses a missing twin before reaching this boundary;
-/// the fallback must preserve only its canonical default name, never the source alias.
 #[test]
 fn a_member_send_fallback_uses_the_targets_canonical_default_scope() {
     let cfg = statement::read_tools_section(br#"{

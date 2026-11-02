@@ -2,18 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE APPROVAL DIGEST, PINNED: the plane's own [`tool_digest`] (name, description and canonical
-//! input schema, each length-framed) over two fixed inputs, to the constants every other reader of
-//! the digest asserts.
-//!
-//! - The cross-language pin fixture: this repo's `testing/mcp-conformance/mcp-subject/tool-digest.mjs` asserts the same
-//!   constant (`PIN_EXPECTED`). A drift on either side lets an operator approve a digest one side
-//!   computes and the other never matches.
-//! - The `ping` tool this repo's black-box cases approve (`tests/blackbox/*_live_approval_*.json`,
-//!   `an_approved_tool_serves_through_the_real_binary.json`): their `schema_hash` is this value, so
-//!   the cases approve exactly what the plane computes for the tool their upstream serves.
-//!
-//! Moved here from busbar's `crates/busbar/tests/qa_mcp_integrity.rs`, where the same constant was
-//! asserted against a re-implementation of the digest in the test itself; here it is the plane's.
 
 use crate::trust::tool_digest;
 use serde_json::json;

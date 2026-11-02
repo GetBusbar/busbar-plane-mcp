@@ -32,7 +32,7 @@ impl Host {
             ack.capability, self.capability,
             "the host accepts only its exact current token"
         );
-        // Host services and connector operations share the driver's sequence namespace.
+
         self.capability.nonce = self.capability.nonce.checked_add(1).unwrap();
         self.capability.acknowledged = wire::ack_digest(&ack).unwrap();
         ack.handles.into_iter().map(|handle| handle.seq).collect()

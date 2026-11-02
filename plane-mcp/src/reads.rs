@@ -2,16 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE TWO READS ANSWERED FROM THE SECTION: `prompts/get` and `resources/read`. No upstream is
-//! contacted; the content is the operator's own, with the caller's text substituted into it and the
-//! whole passed through the markup strip after substitution, never before.
-//!
-//! Pure: the request's params, the generation's [`Catalogue`] and the caller's `admit` predicate
-//! in; the answer's bytes or its refusal out. A prompt that asks its caller for input first
-//! ([`PromptEntry::ask_caller`]) reaches [`prompts_get`] only once that exchange let it through.
-//!
-//! The answers and the refusals are the served engine's: a missing member is `400` + `-32602`;
-//! resources not found and not granted are one `404` + `-32602`; a uri two reachable approvals answer is
-//! `409` + `-32000` naming them.
 
 use std::collections::BTreeMap;
 
@@ -34,8 +24,6 @@ fn string_param<'a>(params: Option<&'a Value>, key: &str) -> Option<&'a str> {
 }
 
 /// Substitute `{arg}` placeholders from `params.arguments`, in ONE pass over the template: an
-/// argument's value is never read for placeholders, and an unknown placeholder is left as written.
-/// Only string arguments substitute.
 #[must_use]
 pub fn substitute_arguments(template: &str, params: Option<&Value>) -> String {
     let Some(args) = params
@@ -48,7 +36,6 @@ pub fn substitute_arguments(template: &str, params: Option<&Value>) -> String {
 }
 
 /// The `messages` a prompt renders, in whichever form the operator declared: substituted first,
-/// normalised second. Media payloads are opaque and pass untouched.
 fn render_messages(prompt: &PromptEntry, params: Option<&Value>) -> Vec<Value> {
     let render = |s: &str| normalise(&substitute_arguments(s, params));
     if prompt.messages.is_empty() {
@@ -93,11 +80,6 @@ fn render_messages(prompt: &PromptEntry, params: Option<&Value>) -> Vec<Value> {
 }
 
 /// The prompt `params.name` names, under the caller's grants.
-///
-/// # Errors
-///
-/// `400` + `-32602` without a string `params.name`; `404` + `-32000` for a prompt that does not
-/// exist or is not the caller's, in one sentence.
 pub fn prompt_named<'c>(
     catalogue: &'c Catalogue,
     id: &Value,
@@ -149,8 +131,6 @@ fn content(uri: &str, mime_type: Option<&String>, blob: Option<&String>, text: &
 }
 
 /// `template` with each `{name}` that `bindings` holds replaced by its value, in ONE pass over the
-/// template: a bound value is copied as it is, so a value that itself spells `{other}` is never
-/// substituted again. A `{...}` no binding names is kept as written.
 fn substitute(template: &str, bindings: &BTreeMap<String, String>) -> String {
     substitute_with(template, |name| bindings.get(name).map(String::as_str))
 }
@@ -207,12 +187,6 @@ fn ambiguous(id: &Value, uri: &str, candidates: &[String]) -> Refusal {
 }
 
 /// `resources/read`: a concrete approval first, a template second, never a guess between two.
-///
-/// # Errors
-///
-/// `400` + `-32602` without a string `params.uri`; `409` + `-32000` for an ambiguity; `404` +
-/// `-32602` for a uri nothing the caller may see answers. This dispatch serves `2026-07-28`,
-/// which retires `-32002`; legacy session adaptation preserves the standard Invalid params code.
 pub fn resources_read(
     catalogue: &Catalogue,
     id: &Value,

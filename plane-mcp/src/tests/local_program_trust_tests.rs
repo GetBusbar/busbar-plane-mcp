@@ -2,8 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! Local-program roots through the production settings reader. A root names the configured
-//! absolute command path, byte for byte, and requires an explicit absolute working directory.
-//! The host's admission and receipt proofs are exercised by the program-transport suites.
 
 use serde_json::{json, Value};
 
@@ -17,8 +15,6 @@ const PROGRAM: &str = if cfg!(windows) {
 
 const WORKDIR: &str = if cfg!(windows) { r"C:\Windows" } else { "/tmp" };
 
-// An absolute spelling of the same location is still different operator intent: the grammar
-// compares bytes and does not normalise either path before deciding whether they agree.
 const OTHER_SPELLING: &str = if cfg!(windows) {
     r"C:\Windows\System32\.\cmd.exe"
 } else {
@@ -63,7 +59,6 @@ fn refuses(section: &Value) -> String {
 }
 
 /// This is the positive control for every refusal family. Before local_program is implemented,
-/// it fails at the production enum's unsupported-mechanism reading, rather than proving a mirror.
 fn accepts_local_program() -> ToolsCfg {
     read(&local_section()).expect("stdio local_program with matching command/key and absolute cwd")
 }
@@ -145,7 +140,6 @@ fn local_program_refuses_network_transports_and_stdio_network_fields() {
     accepts_local_program();
     for url in ["http://mcp.example/rpc", "https://mcp.example/rpc"] {
         for explicit_transport in [false, true] {
-            // No spawn-only field can mask a missing local_program/transport check here.
             let mut section = json!({
                 "local": { "url": url, "pin": { "mechanism": "local_program", "key": PROGRAM } }
             });
@@ -242,7 +236,6 @@ fn local_program_does_not_change_existing_network_pin_grammar_or_pubkey_refusal(
 
 #[test]
 fn stdio_cannot_claim_a_tls_identity_without_a_tls_connection() {
-    // A protocol-only development registration remains readable, but has no authenticity root.
     let mut dev = local_section();
     dev["local"]["pin"] = json!({ "mechanism": "unpinned" });
     read(&dev).expect("an explicitly unpinned stdio fixture remains registrable");

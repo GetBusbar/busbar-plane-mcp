@@ -318,8 +318,6 @@ fn a_completed_stdio_response_obeys_the_reply_bound_on_its_final_piece() {
         let pieces = body.chunks(16 * 1024);
         let count = pieces.len();
         for (at, bytes) in pieces.enumerate() {
-            // The kernel's program lease reports the same child generation as readiness did.
-            // Omitting it would test a retired launch receipt before reaching the size bound.
             let head = if at == 0 {
                 vec![(busbar_contract::conn::PROGRAM_GENERATION_FIELD, "1")]
             } else {

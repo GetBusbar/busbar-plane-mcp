@@ -2,7 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! A subscription: the acknowledgement first and narrowed, a change only when what THIS caller can
-//! see changed, the permission re-asked on every frame, a keepalive when quiet, and its bound.
 
 use serde_json::json;
 
@@ -146,7 +145,7 @@ fn a_change_the_caller_can_see_notifies_and_one_it_cannot_does_not() {
     let params = json!({ "notifications": { "toolsListChanged": true } });
     let mut l = Listen::open(Some(&params), json!(1), 0, |_| false).expect("opened");
     let _ack = l.step(&catalogue(1, SECTION), &everything, &Standing::Live, &[], 1);
-    // A new generation that adds a tool this caller can see.
+
     let Step::Frames(frames) = l.step(
         &catalogue(2, SECTION_MORE),
         &everything,
@@ -157,7 +156,7 @@ fn a_change_the_caller_can_see_notifies_and_one_it_cannot_does_not() {
         panic!("a visible change notifies");
     };
     assert_eq!(frames[0]["method"], "notifications/tools/list_changed");
-    // A new generation whose change this caller cannot see (it is entitled to nothing new).
+
     let only_read = |kind: &str, name: &str| {
         kind != crate::statement::SCOPE_TOOL || name.ends_with("read_file")
     };
@@ -236,11 +235,6 @@ fn an_upstream_announcement_reaches_only_a_subscriber_entitled_to_the_announcing
 }
 
 /// CHOKE POINT J (OPEN-AND-TRUSTED): a subscription is a long-lived response, and it holds NO
-/// principal it resolved at open. It is opened from the request alone (`Listen::open` takes no
-/// identity), and every frame is judged under the permission the door re-asks that frame (the
-/// kernel's live re-resolution, `ENTITLEMENT_STANDING`): the same open stream that wrote frames
-/// while its principal stood ends on the first frame after it stops standing, with the identity
-/// refusal, and writes nothing after.
 #[test]
 fn the_long_lived_response_holds_no_principal_it_resolved_at_open() {
     let params = json!({ "notifications": { "toolsListChanged": true } });
@@ -289,8 +283,6 @@ fn the_long_lived_response_holds_no_principal_it_resolved_at_open() {
 }
 
 /// A request naming more distinct uris than the ceiling is refused as soon as the distinct count
-/// passes it, never after reading the rest of the array; duplicates are folded without a scan of
-/// what was kept, so many copies of a few uris are accepted.
 #[test]
 fn the_distinct_uris_are_counted_through_a_set_and_the_ceiling_refuses_at_once() {
     let many: Vec<String> = (0..200).map(|n| format!("file:///r{n}")).collect();

@@ -3,7 +3,6 @@ use std::collections::VecDeque;
 use crate::local_renderer::Local;
 
 /// Called only after the existing history quota admits this encoded length. Retained history
-/// keeps compact bytes, so a tiny answer cannot pin large original arguments or a generation.
 pub(super) fn buffered(mut local: Local) -> Result<String, ()> {
     let length = local.len();
     let mut bytes = Vec::new();

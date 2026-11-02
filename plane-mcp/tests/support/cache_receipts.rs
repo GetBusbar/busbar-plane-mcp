@@ -365,7 +365,6 @@ pub(super) extern "C" fn trust_state(
 }
 
 /// Render only approvals and sightings the existing mock book actually holds. Reading this view
-/// never creates an approval; no book means no known items and an unapproved counterparty.
 fn trust_rows() -> (u64, Vec<u8>, Vec<ItemSpan>) {
     let held = book();
     let Some(book) = held.as_ref() else {
@@ -730,8 +729,7 @@ fn two_pending_operator_connects_keep_their_own_negotiation() {
     let held = HoldLists::on();
     assert_eq!(d.serve_once(719, 0, "fs", false).outcome, Outcome::Pending);
     assert_eq!(d.serve_once(720, 0, "fs", false).outcome, Outcome::Pending);
-    // A first Pending may still be progressing through the optimistic request or greeting.
-    // Start the no-restart observation only once both actual session-list wires are held.
+
     let held_lists = || {
         upstreams()
             .as_ref()

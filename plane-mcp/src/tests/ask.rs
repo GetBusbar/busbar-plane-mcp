@@ -336,8 +336,6 @@ fn the_digest_is_the_serialisations() {
 }
 
 /// THE OPERATOR-AUTHORED ASK (choke point H): the `params` a caller is shown are exactly the bytes
-/// the operator wrote, deserialised from configuration and carried verbatim into the
-/// `input_required` result; nothing else can make a [`CallerAsk`].
 #[test]
 fn the_asks_params_are_the_operators_bytes_and_nothing_else() {
     let params = json!({
@@ -374,9 +372,6 @@ fn the_asks_params_are_the_operators_bytes_and_nothing_else() {
 }
 
 /// LAW 11 (U16): AN UPSTREAM'S ASK IS RELAYED under busbar's one sealed state, which pins the member
-/// and nests the upstream's own. Its retry, on a tool with or without rounds of busbar's own, is
-/// the relayed retry, spent once; the state presented by another principal, on another call, or
-/// forged is refused.
 #[test]
 fn a_relayed_asks_retry_is_pinned_spent_once_and_bound_to_its_caller() {
     let mut seal = Plain::default();
@@ -393,7 +388,7 @@ fn a_relayed_asks_retry_is_pinned_spent_once_and_bound_to_its_caller() {
         responses: Some(&answers),
         state: Some(&state),
     };
-    // Busbar's own rounds do not stand in its way: they were answered before the call went out.
+
     for rounds in [Vec::new(), confirm()] {
         let mut fresh = Plain::default();
         assert_eq!(
@@ -401,7 +396,7 @@ fn a_relayed_asks_retry_is_pinned_spent_once_and_bound_to_its_caller() {
             AskDecision::Relayed(leg.clone())
         );
     }
-    // RED: spent once.
+
     assert_eq!(
         decide(&[], 3, &caps(), retry, bind("k"), "d", Some(&mut seal)),
         AskDecision::Relayed(leg.clone())
@@ -410,7 +405,7 @@ fn a_relayed_asks_retry_is_pinned_spent_once_and_bound_to_its_caller() {
         decide(&[], 3, &caps(), retry, bind("k"), "d", Some(&mut seal)),
         AskDecision::Refuse(AskRefusal::StateRejected(Rejected::AlreadySpent))
     );
-    // RED: another principal, another call's arguments.
+
     let mut other = Plain::default();
     assert_eq!(
         decide(&[], 3, &caps(), retry, bind("other"), "d", Some(&mut other)),
@@ -420,7 +415,7 @@ fn a_relayed_asks_retry_is_pinned_spent_once_and_bound_to_its_caller() {
         decide(&[], 3, &caps(), retry, bind("k"), "e", Some(&mut other)),
         AskDecision::Refuse(AskRefusal::StateRejected(Rejected::WrongRequest))
     );
-    // RED: a forged state is never a relayed retry.
+
     let forged = Retry {
         responses: Some(&answers),
         state: Some("forged"),
@@ -472,9 +467,6 @@ fn child_leg() -> UpstreamLeg {
 }
 
 /// LAW 11, A STDIO CHILD'S OWN REQUESTS: busbar writes none of them, so a retry that
-/// leaves one unanswered is refused (`ask_unanswered`) BEFORE its state is spent, and the caller can
-/// still answer it; the complete retry is the relayed retry, carrying the child's leg, spent once.
-/// RED: a forged state, and a spent one, are refused.
 #[test]
 fn a_childs_relayed_ask_is_answered_whole_by_the_caller_and_spent_once() {
     let mut seal = Plain::default();
@@ -495,7 +487,7 @@ fn a_childs_relayed_ask_is_answered_whole_by_the_caller_and_spent_once() {
         refused.to_string().contains('9'),
         "names the unanswered key: {refused}"
     );
-    // Not spent: the caller answers the rest and the retry goes through, once.
+
     let whole = json!({ "srv-1": { "action": "accept" }, "9": { "roots": [] } });
     let retry = Retry {
         responses: Some(&whole),
@@ -524,8 +516,6 @@ fn a_childs_relayed_ask_is_answered_whole_by_the_caller_and_spent_once() {
 }
 
 /// THE TASK PATH'S RETRY: the state `tasks/update` carries back is opened, bound to
-/// its principal and call, and spent once; a forged state, a spent one, another caller's, and a
-/// state of busbar's own ask (no upstream leg) are refused.
 #[test]
 fn a_tasks_relayed_state_opens_once_for_its_caller_and_call() {
     let mut seal = Plain::default();
@@ -537,7 +527,7 @@ fn a_tasks_relayed_state_opens_once_for_its_caller_and_call() {
         answers: None,
     };
     let state = relay_state_for(bind("k"), "d", leg.clone(), 86_400, &mut seal).expect("sealed");
-    // A day later the state still stands: a task waits on a human.
+
     let later = Bind {
         now: 100 + 86_000,
         ..bind("k")
@@ -584,9 +574,6 @@ fn a_tasks_relayed_state_opens_once_for_its_caller_and_call() {
 }
 
 /// THE LAST ROUND'S ANSWER (BUSBAR-1.6.0 spec lines 379-390, the ask's gate; ask.rs's promise that a
-/// caller cannot strip the operator's confirmation gate): the state minted for the final round,
-/// re-sent with no `inputResponses` (or an empty map), is refused as unanswered and does not
-/// proceed; the same state with its answer proceeds once.
 #[test]
 fn the_final_rounds_state_re_sent_without_answers_does_not_proceed() {
     for answers in [None, Some(json!({}))] {
@@ -619,7 +606,7 @@ fn the_final_rounds_state_re_sent_without_answers_does_not_proceed() {
             panic!("the unanswered final round must refuse, got {d:?}");
         };
         assert_eq!(r.audit_reason(), "ask_unanswered");
-        // The refusal spent nothing: the caller can still answer.
+
         let answered = json!({ "ok": true });
         let retry = Retry {
             responses: Some(&answered),

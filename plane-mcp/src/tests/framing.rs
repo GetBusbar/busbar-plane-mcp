@@ -85,7 +85,7 @@ fn the_stream_carries_progress_then_the_records_then_the_answer() {
     let body = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list",
         "params": {"_meta": {META_LOGGING_LEVEL: "debug"}}});
     let framing = Framing::of(Some(EVENT_STREAM), "tools/list", &body).expect("framed");
-    // Members out of order and a number spelt as no printer would: the answer is its own bytes.
+
     let answer = br#"{"result":{"tools":[],"n":1e3,"f":1.0},"jsonrpc":"2.0","id":1}"#.to_vec();
     let progress = [json!({"jsonrpc": "2.0", "method": "notifications/progress"})];
     let (bytes, framed) = framing.frame(200, answer.clone(), &progress);
@@ -107,7 +107,6 @@ fn the_stream_carries_progress_then_the_records_then_the_answer() {
 }
 
 /// An answer spread over lines goes out one `data:` line per line, each line its own bytes, so a
-/// client joining them with `\n` reads the answer's text back.
 #[test]
 fn a_multi_line_answer_is_one_data_line_per_line() {
     let body = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {"_meta": {}}});

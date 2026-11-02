@@ -2,18 +2,7 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! SESSION STATE FOR THE SESSION REVISIONS: plane state, per process, bounded, and bound to its
-//! owner. No statics, no clock (the caller passes `now_ms`), no randomness (the caller passes the
-//! entropy).
-//!
-//! Every dimension has a ceiling in [`Bounds`], and ONE OWNER'S PRESSURE NEVER EVICTS ANOTHER
-//! OWNER'S SESSION OR EVENTS: every eviction and trim lands on the owner whose open or write caused
-//! it. ADMISSION BOUNDS LIVE WORK, NOTHING EVICTS IT: a session holding a live
-//! stream is never given way for another, and a cursor a live stream reads is never dropped; only an
-//! idle session gives way, and an open past a ceiling with none to give is refused. An evicted,
-//! expired or foreign session answers exactly as an unknown one does (404, and the client
-//! re-initialises), so a leaked id is not a probe. An all-zero entropy buffer is refused.
 
-// The crate's only public item is `door`: the accessors and variants below were this module's public API; the tests hold them, the door does not reach them.
 #![cfg_attr(not(test), allow(dead_code))]
 
 use std::collections::{BTreeMap, VecDeque};
@@ -54,7 +43,6 @@ impl Default for Bounds {
 }
 
 /// The fixed cost charged to a session for its own bookkeeping, so a table of empty sessions is
-/// still bounded by `max_total_bytes`.
 const SESSION_OVERHEAD: usize = 256;
 /// The fixed cost charged per buffered event over its data.
 const EVENT_OVERHEAD: usize = 32;
@@ -235,19 +223,12 @@ impl<D: ReplayData> ReplayTable<D> {
     }
 
     /// Whether `id` names a session the table still holds, whoever owns it (state kept beside a
-    /// session is dropped once this is false).
     #[must_use]
     pub fn holds(&self, id: &str) -> bool {
         self.sessions.contains_key(id)
     }
 
     /// Opens a session for `owner`: its id, 32 lowercase hex digits from `entropy` (16 bytes from
-    /// the caller's CSPRNG).
-    ///
-    /// # Errors
-    /// [`OpenRefused::NoEntropy`] for an all-zero buffer, [`OpenRefused::Collision`] when the id is
-    /// already live, [`OpenRefused::Full`] when only another owner's session could make room, and
-    /// [`OpenRefused::OwnerFull`] when the owner is at its count and every session it holds is live.
     pub fn open(
         &mut self,
         entropy: [u8; 16],
@@ -301,7 +282,6 @@ impl<D: ReplayData> ReplayTable<D> {
     }
 
     /// Finds `id` for `owner`, refreshing its idle clock. Unknown, expired and foreign sessions all
-    /// read `None`.
     fn find(&mut self, id: &str, owner: &Owner, now_ms: u64) -> Option<&mut Session<D>> {
         let last_ms = self.sessions.get(id)?.last_ms;
         let expired = now_ms.saturating_sub(last_ms) >= self.bounds.idle_ms;
@@ -332,15 +312,11 @@ impl<D: ReplayData> ReplayTable<D> {
     }
 
     /// Ends `id` whoever holds it: its owner's own end, taken by the plane (a `2024-11-05` session
-    /// ends with its stream).
     pub fn end(&mut self, id: &str) {
         self.remove(id);
     }
 
     /// Opens a resumable stream in `id`. When the session is at `stream_cap`, the oldest cursor no
-    /// live stream reads, and its buffered events, are dropped first. `None` when `owner` does not
-    /// hold `id`, or when every cursor at the cap is read by a live stream (the open is refused;
-    /// no live stream is ended for it).
     pub fn open_stream(&mut self, id: &str, owner: &Owner, now_ms: u64) -> Option<u32> {
         let stream_cap = self.bounds.stream_cap.max(1);
         let s = self.find(id, owner, now_ms)?;
@@ -373,8 +349,6 @@ impl<D: ReplayData> ReplayTable<D> {
     }
 
     /// A live stream reads `stream` of `id` (its GET is held open): until [`Self::release_stream`],
-    /// the cursor is never dropped and the session never evicted. `false` when there is no such
-    /// cursor.
     pub fn hold_stream(&mut self, id: &str, stream: u32) -> bool {
         let Some(st) = self
             .sessions
@@ -399,8 +373,6 @@ impl<D: ReplayData> ReplayTable<D> {
     }
 
     /// Buffers `data` as the next event on `stream` and returns its event id. The buffer is then
-    /// trimmed to the session and table bounds. `None` when `owner` does not hold `id` or the stream
-    /// is not open.
     pub fn push(
         &mut self,
         id: &str,
@@ -424,7 +396,6 @@ impl<D: ReplayData> ReplayTable<D> {
     }
 
     /// Whether an event can survive this table's existing per-session retention quota. This
-    /// chooses its storage representation; oversized events still advance and trim as before.
     pub fn retained_event_fits(&self, encoded_len: usize) -> bool {
         encoded_len
             .checked_add(EVENT_OVERHEAD)
@@ -432,7 +403,6 @@ impl<D: ReplayData> ReplayTable<D> {
     }
 
     /// Prepare retained storage only after the same owner and open-cursor checks as `push`.
-    /// Both checks and preparation remain inside this table's exclusive borrow.
     pub fn push_prepared<E>(
         &mut self,
         id: &str,
@@ -481,8 +451,7 @@ impl<D: ReplayData> ReplayTable<D> {
             }
             freed += f;
         }
-        // Trimming to fit can free more than this event cost (one older large event, or this
-        // event itself past `max_session_bytes`): the owner is then charged less, never negative.
+
         if freed > cost {
             self.release_bytes(owner, freed - cost);
         } else {
@@ -493,8 +462,6 @@ impl<D: ReplayData> ReplayTable<D> {
     }
 
     /// Resumes after `last_event_id`. `None` when `owner` does not hold `id`, or the cursor names a
-    /// stream the session does not hold (a cursor from another stream is never replayed here: the
-    /// spec forbids replaying one stream's messages on another).
     pub fn replay(
         &mut self,
         id: &str,
@@ -547,7 +514,6 @@ impl<D: ReplayData> ReplayTable<D> {
     }
 
     /// Evicts `owner`'s least recently used IDLE session other than `keep`. `false` when there is
-    /// none. Never another owner's, and never one a live stream reads.
     fn evict_lru_of(&mut self, owner: &Owner, keep: Option<&str>) -> bool {
         let victim = self
             .sessions
@@ -565,7 +531,6 @@ impl<D: ReplayData> ReplayTable<D> {
     }
 
     /// Holds `owner` under its byte share and the table under its total, at `owner`'s cost only:
-    /// its other sessions go first, then `keep`'s oldest events. `false` when that was not enough.
     fn enforce(&mut self, owner: &Owner, keep: &str) -> bool {
         loop {
             let over = self.owner_bytes(owner) > self.bounds.max_owner_bytes
@@ -605,17 +570,12 @@ impl Remembered {
 }
 
 /// The key of one remembered upstream conversation: the member AND the caller binding it was
-/// negotiated for (the caller reference the kernel lends; the ungoverned chain's is empty). Two
-/// callers of one member never share a session: a session revision's server
-/// keeps per-session state, binds a session to the identity that opened it, and maps request ids
-/// to answers within it.
 #[must_use]
 pub fn upstream_key(member: &str, binding: &str) -> String {
     format!("{member}\u{1f}{binding}")
 }
 
 /// The first JSON-RPC id a request lowered into a remembered session carries: above every id a
-/// stateless round carries (`dispatch_request_id`, the round) and below `initialize`'s.
 pub const SESSION_FIRST_ID: u64 = 1 << 32;
 
 /// The client's per-upstream memory, bounded in count and bytes with least-recently-used eviction.
@@ -660,8 +620,6 @@ impl UpstreamTable {
     }
 
     /// THE NEXT REQUEST ID for `upstream`'s remembered session, taken from the instance's one
-    /// counter ([`Self::take_id`]): never issued before by this instance, so never repeated in that
-    /// session or any other. `None` when nothing with a session is remembered for it.
     pub fn next_id(&mut self, upstream: &str) -> Option<u64> {
         self.entries
             .get(upstream)
@@ -670,7 +628,6 @@ impl UpstreamTable {
     }
 
     /// AN ID NEVER ISSUED BEFORE by this instance: the counter only goes up, from
-    /// [`SESSION_FIRST_ID`], for the instance's life.
     pub fn take_id(&mut self) -> u64 {
         let taken = self.next;
         self.next = self.next.saturating_add(1);

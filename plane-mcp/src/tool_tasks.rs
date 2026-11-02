@@ -2,22 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! SEP-2663 — THE TASKS EXTENSION on the MCP door, pure: the task's state, its two wire shapes, its
-//! lifecycle transitions, the retention sweep and the durable rows a task is kept in (the served
-//! engine's `tasks.rs`, ported; the door half that runs a task is `door_tasks`).
-//!
-//! A `tools/call` on a tool whose operator declared `task_support`, from a caller that declared the
-//! extension, is answered with a `CreateTaskResult`; the caller polls `tasks/get` until the task is
-//! terminal, the result INLINED. `tasks/update` delivers input; `tasks/cancel` stops it. There is no
-//! `tasks/result` and no `tasks/list` (the v2 wire removed both).
-//!
-//! A tool that RAN and reported a failure is `completed` with `result.isError: true`; `failed` is a
-//! PROTOCOL-level error, inlining `error` and never `result`.
-//!
-//! THE TASK STORE IS HOST RECORDS: the handle is the kernel's; a live task's state and a terminal
-//! task's result are written to the plane's records in chunks, so the verbs answer from any node and
-//! across a restart. Every live task is indexed under its caller with its run's LEASE
-//! ([`TaskLease`]), so the handles a gone process left behind are settled, never exhausting the bound
-//! of live work.
 
 use std::collections::BTreeMap;
 
@@ -27,51 +11,33 @@ use serde_json::{json, Map, Value};
 use crate::ask::CallerAsk;
 
 /// The local terminal cache's age, and the default used by pure task construction. Served task
-/// shapes replace this with the host's observed, creation-relative retention horizon. Dropping
-/// this cache never authorizes deleting durable result chunks.
 pub const TASK_TTL_MS: u64 = 300_000;
 
 /// The poll cadence busbar suggests. Advisory — a client that polls faster is not refused.
 pub const TASK_POLL_INTERVAL_MS: u64 = 250;
 
 /// The ceiling on tasks the instance keeps in hand at once: the work handles' live bound, whose
-/// default is this. The oldest TERMINAL tasks are dropped first, and a working task is never
-/// dropped to make room.
 pub const MAX_RETAINED_TASKS: usize = 4096;
 
 /// The ABANDONMENT ceiling on an ACTIVE task: one whose last update is older than this is treated
-/// as abandoned by its caller and cancelled (a transition, never a drop), after which the ordinary
-/// retention applies. A full day: an `input_required` park waiting on a human legitimately sits
-/// for hours, but not for days. Enforced by the create-time sweep (no timer to schedule or leak).
 pub const ACTIVE_TASK_ABANDON_MS: u64 = 86_400_000;
 
 /// THE CEILING ON DISTINCT ANSWER KEYS one task retains: `tasks/update` delivers `inputResponses`
-/// under keys of the caller's own choosing, so without a ceiling a caller parked in
-/// `input_required` could grow one task's map without bound.
 pub const MAX_TASK_ANSWERS: usize = 256;
 
 /// The JSON-RPC code a `failed` task inlines: `-32603` (internal error), because what is reported
-/// is that busbar could not carry the dispatch to an answer, and the caller has no parameter to
-/// correct.
 pub const TASK_PROTOCOL_ERROR_CODE: i64 = -32603;
 
 /// How long the continuation's one-time run claim stands: past any live task's abandonment and its
-/// retention after, so a task cannot be run twice while its handle can still be found.
 pub const RUN_CLAIM_TTL_MS: u64 = ACTIVE_TASK_ABANDON_MS + TASK_TTL_MS;
 
 /// How long the state a task's relayed ask is answered under stands, in seconds: as long as the task
-/// may stay parked on its caller ([`ACTIVE_TASK_ABANDON_MS`]), a human's answer included.
 pub const TASK_RELAY_TTL_SECS: u64 = ACTIVE_TASK_ABANDON_MS / 1000;
 
 /// The bytes of one result chunk: a plane record holds at most
-/// [`busbar_contract::bounded::MAX_RECORD_BYTES`].
 pub const RESULT_CHUNK_BYTES: usize = 480;
 
 /// The most chunks one task's result (or its live state) is written in: what one answer's record
-/// writes hold (`busbar_contract::abi::plane::check::MAX_RECORDS`, 1024) with the strikes of the
-/// state it replaces beside it. The task store is host records: a
-/// result longer than this settles the task `failed` in words ([`kept_bytes`]), and a live state
-/// longer than this is refused where it would be made; neither is held only in hand.
 pub const MAX_RESULT_CHUNKS: usize = 480;
 
 /// Plane records of the task kind, `(key, value)`, in key order.
@@ -84,12 +50,9 @@ pub const fn kept_bytes() -> usize {
 }
 
 /// THE RUN'S LEASE beyond its server's own `timeout:`: how long a task's run may go unheard from
-/// before another process takes its handle as left behind (the process running it gone) and settles
-/// it `cancelled`. Taken when the continuation is nested and renewed as each call goes out.
 pub const RUN_LEASE_MS: u64 = 300_000;
 
 /// The live-state chunks a settle strikes at the least: what a process that did not write a task's
-/// live state strikes of it.
 pub const LIVE_STRIKES: u32 = 4;
 
 /// A task's lifecycle state, as the wire spells it.
@@ -135,7 +98,6 @@ impl Status {
     }
 
     /// Terminal states are the three a task never leaves. `tasks/cancel` on one of them is an
-    /// idempotent no-op rather than an error.
     #[must_use]
     pub fn is_terminal(self) -> bool {
         matches!(self, Status::Completed | Status::Failed | Status::Cancelled)
@@ -212,7 +174,6 @@ pub struct RelayPark {
 
 impl Task {
     /// A working task `id` for `principal`, on work handle `handle`, running the call `digest`
-    /// names, created at `now_ms`.
     #[must_use]
     pub fn new(id: &str, principal: &str, handle: u64, digest: &str, now_ms: u64) -> Self {
         Task {
@@ -241,7 +202,6 @@ impl Task {
     }
 
     /// A task read back from its durable row (`row`) and, for a terminal one, its result
-    /// (`terminal`: `{"result": …}` or `{"error": …}`).
     #[must_use]
     pub fn from_row(
         id: &str,
@@ -280,8 +240,6 @@ impl Task {
     }
 
     /// THE LIVE STATE its records keep ([`live_parts`]): its status and last update, its
-    /// `inputRequests` in order, the answers it holds, the upstream ask and the round of its own
-    /// asks it is parked on.
     #[must_use]
     pub fn live(&self) -> Value {
         let requests: Vec<Value> = self
@@ -305,7 +263,6 @@ impl Task {
     }
 
     /// The live state its records hold ([`Task::live`]'s document), laid over a task read from its
-    /// row; a document that is not one leaves it as it is.
     pub fn take_live(&mut self, live: &Value) {
         let (Some(status), Some(updated)) = (
             live.get("status")
@@ -358,8 +315,6 @@ impl Task {
     }
 
     /// The host's rows and records replace the held view when they have caught up with local
-    /// progress. A terminal host row stands immediately. Older live records cannot undo an
-    /// acknowledged update, a running continuation, or a local terminal state.
     pub fn hosted(&mut self, host: Task) {
         if !host.status.is_terminal()
             && (self.status.is_terminal()
@@ -389,7 +344,6 @@ impl Task {
     }
 
     /// THE ROUND OF ITS OWN ASKS A `tasks/update` ANSWERED, taken: the round and the call the resume
-    /// it nests runs with. The round is remembered as the one resume this instance will run.
     pub fn answer_round(&mut self) -> Option<(usize, Value)> {
         let answered = self.asked.take();
         if let Some((round, _)) = &answered {
@@ -399,8 +353,6 @@ impl Task {
     }
 
     /// Whether the continuation resuming at `round` for `principal` may run it: the task is that
-    /// caller's and working, and `round` is the one a `tasks/update` answered and nested, taken
-    /// here once.
     pub fn take_resume(&mut self, principal: &str, round: usize) -> bool {
         let runs = self.owned_by(principal)
             && self.status == Status::Working
@@ -424,7 +376,6 @@ impl Task {
     }
 
     /// Set the creation-relative wire TTL from the host's current work observation. A live
-    /// handle has no established expiry; observation plus retention is its earliest horizon.
     pub fn retain_at(
         &mut self,
         observed_ms: u64,
@@ -445,8 +396,6 @@ impl Task {
     }
 
     /// The `DetailedTask` a `tasks/get` answers with, minus the `resultType` the response builder
-    /// stamps. `requestState` is ABSENT and its absence is load-bearing: SEP-2663 removed it from
-    /// the v2 wire.
     #[must_use]
     pub fn detailed(&self) -> Value {
         let mut obj = self.shape();
@@ -464,8 +413,6 @@ impl Task {
     }
 
     /// The `CreateTaskResult` a `tools/call` answers with — a FLAT `Result & Task` intersection,
-    /// carrying none of `result`, `error` or `inputRequests` (those are `tasks/get`'s), and an
-    /// EMPTY `content`: the base revision's `CallToolResult` makes `content` required.
     #[must_use]
     pub fn created(&self) -> Value {
         let mut obj = self.shape();
@@ -489,7 +436,6 @@ impl Task {
     }
 
     /// PARK on a round of asks. Any ask already answered by an earlier `tasks/update` is not
-    /// re-asked; a round with nothing left to ask leaves the status alone.
     pub fn park(&mut self, asks: Vec<CallerAsk>, now_ms: u64) {
         if self.status.is_terminal() {
             return;
@@ -511,8 +457,6 @@ impl Task {
     }
 
     /// Park on the upstream's ask, relayed to the caller: `input_required`, its
-    /// `inputRequests` the upstream's own, verbatim and in its order, under busbar's sealed `state`;
-    /// the retry runs `params`. A terminal task does not park.
     pub fn park_relay(
         &mut self,
         requests: &Map<String, Value>,
@@ -538,7 +482,6 @@ impl Task {
     }
 
     /// THE RELAYED ASK, ANSWERED: taken once every key the upstream asked is answered (the retry
-    /// goes to the member with the caller's answers), `None` before, and `None` to any later caller.
     pub fn take_relay(&mut self) -> Option<RelayPark> {
         let park = self.relay.as_ref()?;
         if park.keys.iter().any(|k| !park.responses.contains_key(k)) {
@@ -548,16 +491,6 @@ impl Task {
     }
 
     /// Deliver `inputResponses`. Keys the task is not waiting on are IGNORED rather than refused:
-    /// only a key the current round asked is kept (an answer may only
-    /// supply what was asked for, as the synchronous call's rule says). On a task parked on its
-    /// upstream's ask the answers are the upstream's: kept for the retry, never merged into the
-    /// tool's arguments.
-    ///
-    /// Returns `false`, applying NOTHING, when this batch would grow the task's answer map past
-    /// [`MAX_TASK_ANSWERS`] DISTINCT keys — refused whole, never truncated. A key already held is a
-    /// REPEAT, not new, so re-answering one never counts against the ceiling.
-    ///
-    /// A TERMINAL task takes no input: the update is acknowledged and changes nothing.
     pub fn deliver(&mut self, responses: &Map<String, Value>, now_ms: u64) -> bool {
         if self.status.is_terminal() {
             return true;
@@ -595,7 +528,6 @@ impl Task {
     }
 
     /// Whether every ask of the current round is answered (or the task left `input_required` some
-    /// other way).
     #[must_use]
     pub fn answered(&self) -> bool {
         self.input_requests.is_empty() || self.status.is_terminal()
@@ -616,7 +548,6 @@ impl Task {
     }
 
     /// The tool RAN. `result` is its own answer, `isError` and all. Whether this call made the
-    /// transition.
     pub fn complete(&mut self, result: Value, now_ms: u64) -> bool {
         let moved = self.end(Status::Completed, now_ms);
         if moved {
@@ -626,7 +557,6 @@ impl Task {
     }
 
     /// A PROTOCOL-level failure: `error` only, never a `result` beside it. Whether this call made
-    /// the transition.
     pub fn fail(&mut self, code: i64, message: String, now_ms: u64) -> bool {
         let moved = self.end(Status::Failed, now_ms);
         if moved {
@@ -637,7 +567,6 @@ impl Task {
     }
 
     /// CANCEL. Idempotent on a terminal task, which is the whole of the `tasks/cancel` contract.
-    /// Whether THIS call performed the terminal transition.
     pub fn cancel(&mut self, now_ms: u64) -> bool {
         self.end(Status::Cancelled, now_ms)
     }
@@ -680,7 +609,6 @@ impl Task {
     }
 
     /// The terminal value its result chunks carry: `{"result": …}` or `{"error": …}`; `None` for a
-    /// task with neither (working, input-required, cancelled).
     #[must_use]
     pub fn terminal(&self) -> Option<Value> {
         match (&self.result, &self.error) {
@@ -707,8 +635,6 @@ pub struct Swept {
 }
 
 /// THE SWEEP, run when a task is created: an ACTIVE task past the abandonment ceiling is first
-/// CANCELLED (a transition, never a drop); expired terminal tasks are dropped; and only if that was
-/// not enough, the oldest terminal tasks. Never a working one.
 pub fn sweep(tasks: &mut BTreeMap<String, Task>, now_ms: u64) -> Swept {
     let mut swept = Swept::default();
     for task in tasks.values_mut() {
@@ -801,8 +727,6 @@ impl WorkRow {
 }
 
 /// THE DIGEST of the call a continuation runs (the published name, the arguments as admitted and the
-/// caller's `_meta`): written in the handle's row by the creating unit, compared by the
-/// continuation against the call its arrival carries, so the run is the call that was admitted.
 #[must_use]
 pub fn run_digest(params: &Value) -> String {
     busbar_contract::redacted::sha256_hex(&serde_json::to_vec(params).unwrap_or_default())
@@ -821,18 +745,11 @@ pub fn chunk_prefix(id: &str) -> Vec<u8> {
 }
 
 /// THE RESULT, IN CHUNKS: the terminal value's bytes cut into plane records of at most
-/// [`RESULT_CHUNK_BYTES`]; `Err` its length in bytes when it would take more than
-/// [`MAX_RESULT_CHUNKS`].
-///
-/// # Errors
-///
-/// The value's length, when the host's records do not keep it.
 pub fn result_chunks(id: &str, terminal: &Value) -> Result<Records, usize> {
     chunked(|n| chunk_key(id, n), terminal)
 }
 
 /// `value`'s bytes cut into plane records of at most [`RESULT_CHUNK_BYTES`], keyed `key(n)`; `Err`
-/// its length in bytes when it would take more than [`MAX_RESULT_CHUNKS`].
 fn chunked(key: impl Fn(u32) -> Vec<u8>, value: &Value) -> Result<Records, usize> {
     let bytes = serde_json::to_vec(value).unwrap_or_default();
     let chunks: Vec<&[u8]> = bytes.chunks(RESULT_CHUNK_BYTES).collect();
@@ -858,16 +775,11 @@ pub fn live_prefix(id: &str) -> Vec<u8> {
 }
 
 /// THE LIVE STATE, IN CHUNKS ([`Task::live`]), as [`result_chunks`] cuts a result.
-///
-/// # Errors
-///
-/// The state's length, when the host's records do not keep it.
 pub fn live_parts(id: &str, live: &Value) -> Result<Records, usize> {
     chunked(|n| live_key(id, n), live)
 }
 
 /// The live state read back from its chunks' bytes, in key order: the first document they hold (an
-/// earlier, longer state's chunks past it are not read); `None` when they hold none.
 #[must_use]
 pub fn read_live(bytes: &[u8]) -> Option<Value> {
     serde_json::Deserializer::from_slice(bytes)
@@ -877,7 +789,6 @@ pub fn read_live(bytes: &[u8]) -> Option<Value> {
 }
 
 /// The prefix `principal`'s index rows are keyed under: a digest of the principal, never the
-/// principal itself.
 #[must_use]
 pub fn index_prefix(principal: &str) -> Vec<u8> {
     let owner = busbar_contract::redacted::sha256_hex(principal.as_bytes());
@@ -923,7 +834,6 @@ impl TaskLease {
     }
 
     /// Whether the task it indexes is LEFT BEHIND at `now_ms`: its run's lease lapsed (the process
-    /// running it is gone), or nothing moved it past [`ACTIVE_TASK_ABANDON_MS`].
     #[must_use]
     pub fn left_behind(&self, now_ms: u64) -> bool {
         (self.until_ms != 0 && now_ms > self.until_ms)
@@ -932,7 +842,6 @@ impl TaskLease {
 }
 
 /// The `N` `|`-separated fields of a row whose version word is `version`; `None` for bytes that are
-/// not one.
 fn fields<'a, const N: usize>(bytes: &'a [u8], version: &str) -> Option<[&'a str; N]> {
     let mut parts = std::str::from_utf8(bytes).ok()?.split('|');
     if parts.next()? != version {
@@ -952,9 +861,6 @@ pub fn read_chunks<'a>(chunks: impl Iterator<Item = &'a [u8]>) -> Option<Value> 
 }
 
 /// The arguments a continuation calls with: the admitted arguments, with the caller's gathered ask
-/// answers merged in under the operator's own keys, and NEVER over an argument the call was
-/// admitted with (the hooks and the argument guard judged the admitted arguments; an answer may
-/// never rewrite one). A clone, never a mutation.
 #[must_use]
 pub fn merge_answers(arguments: &Value, answers: &Map<String, Value>) -> Value {
     if answers.is_empty() {
@@ -970,7 +876,6 @@ pub fn merge_answers(arguments: &Value, answers: &Map<String, Value>) -> Value {
 }
 
 /// The task-scoped ask rounds for a tool, filtered to what this caller declared it can answer. A
-/// round left EMPTY by the filter is dropped rather than parked on.
 #[must_use]
 pub fn task_ask_rounds(
     rounds: &[crate::tools_config::AskRoundCfg],
@@ -984,10 +889,8 @@ pub fn task_ask_rounds(
 }
 
 /// The `CreateTaskResult` envelope: the flat task shape with `resultType: task`, under the caller's
-/// id.
 #[must_use]
 pub fn task_result(id: &Value, mut created: Value) -> Vec<u8> {
-    // SEP-2663's discriminator, returned ONLY on a task busbar itself just created.
     if let Some(obj) = created.as_object_mut() {
         obj.insert("resultType".into(), "task".into());
     }

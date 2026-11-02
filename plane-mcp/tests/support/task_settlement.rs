@@ -152,8 +152,6 @@ fn a_queued_task_rechecks_its_grant_and_trust_when_the_child_becomes_free() {
     }
 }
 
-// A real connector-backed child greeting, with a controlled Pending establish. The fixture speaks
-// the existing generation/initialize/list protocol; task call bytes still use the actual member walk.
 #[derive(Default)]
 struct GreetingChild {
     next: u64,

@@ -1,15 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! AN OPERATOR'S PIN IS ENFORCED, AS THE HOST READS THE PLANE (THE DESIGN: the host owns pins and
-//! the connector enforces them).
-//!
-//! The host seals a registration's pin into its member route only where the plane declares the
-//! pin's mechanism a pin of the FAR END'S KEY (`PinMechanismDecl::peer_key`; busbar's
-//! `registration_anchors` keeps `pin.filter(|p| p.peer_key)`), and presents a client identity only
-//! where the member-target need's `trust_from` names the registration key holding it. These tests
-//! read both facts back the way the loader reads a linked row: the Statement's rendering and the
-//! facts the bound plane is served by.
+//! Checks declared peer-key pins and client-identity trust anchors as the host reads MCP registrations.
 
 use std::sync::Arc;
 
@@ -34,7 +26,7 @@ fn linked(d: &Dispatcher) -> Plugin<Plane> {
             max_inflight_cap: 64,
             sink: Arc::new(NoSink),
             dispatcher: d.adopter(),
-            // Read for its facts only: bound as a probe.
+
             conns: ConnTable::Probe,
         },
     )
@@ -42,9 +34,6 @@ fn linked(d: &Dispatcher) -> Plugin<Plane> {
 }
 
 /// RED on a plane whose far-end pins are not peer-key pins: the host would seal no pin, and an
-/// operator's `cert_spki` or `mtls` key would be parsed and never compared with the far end's.
-/// `pinned_pubkey` authenticates nothing in this build: no manifest signature is verified, so
-/// it is neither an authenticity root nor a far-end key pin (SEC-PIN).
 #[test]
 fn tls_roots_pin_peer_keys_and_local_program_has_its_own_launch_root() {
     let d = Dispatcher::new(DispatchConfig::default());
@@ -90,7 +79,6 @@ fn tls_roots_pin_peer_keys_and_local_program_has_its_own_launch_root() {
 }
 
 /// RED on a plane whose http need names no `trust_from`: an `mtls` registration's client
-/// certificate would never be resolved or presented.
 #[test]
 fn the_http_member_need_names_the_client_identity_and_its_secret_references() {
     let d = Dispatcher::new(DispatchConfig::default());
@@ -115,7 +103,6 @@ fn the_http_member_need_names_the_client_identity_and_its_secret_references() {
         );
     }
 
-    // The Statement's rendering (what a dropped-in plane's signed manifest carries) states the same.
     let row = LinkedRow::of_loaded(loaded_door()).expect("the linked door states its Statement");
     let read = rendering::read(&row.statement).expect("the Statement renders");
     let need = read
@@ -132,7 +119,6 @@ fn the_http_member_need_names_the_client_identity_and_its_secret_references() {
 
 /// This plugin's own door, named for the loader.
 fn loaded_door() -> busbar_plugin_loader::dispatch::LoadedDoor {
-    // This crate's sealed door function (`&'static Door`), taken by the loader's safe conversion.
     let door: busbar_contract::abi::mechanism::door::DoorFn = busbar_plane_mcp::door;
     busbar_plugin_loader::dispatch::LoadedDoor::from(door)
 }

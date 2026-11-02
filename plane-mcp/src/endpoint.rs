@@ -2,9 +2,7 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE `mcp:` ENDPOINT BLOCK: its grammar ([`McpCfg`]), its boot refusals ([`McpCfgError`]) and the
-//! validated resource ([`McpResource`]) the composition root lowers it to at boot.
 
-// The crate's only public item is `door`: the accessors and variants below were this module's public API; the tests hold them, the door does not reach them.
 #![cfg_attr(not(test), allow(dead_code))]
 
 use serde::{Deserialize, Serialize};
@@ -147,20 +145,10 @@ impl std::fmt::Display for McpCfgError {
 }
 
 /// The RFC 9728 section 3.1 well-known prefix. The resource's own path is appended AFTER this, per the
-/// "path insertion" rule the RFC defines for a resource that is not at an origin root.
-///
-/// The join itself is on the CODEC side, so the plane — which declares an OPEN claim on the composed
-/// discovery path and may not name this crate — reads the same composer rather than a second one.
-/// The well-known prefix went with it; there is one place the two are put together now.
-///
-/// `DEFAULT_MOUNT` is THE ONE PATH this endpoint is served at: the compile-time claim, read from the
-/// claim table rather than written a second time here, so the path validation accepts and the path
-/// claimed cannot disagree.
 use crate::{codec::protected_resource_metadata_path, tool_claims::DEFAULT_MOUNT};
 
 impl McpResource {
     /// Validate and derive. Every refusal is fail-closed at BOOT rather than at first request: an
-    /// operator finds out from a process that will not start, not from an agent that cannot connect.
     pub fn from_cfg(cfg: &McpCfg) -> Result<Self, McpCfgError> {
         let uri = cfg.canonical_uri.trim();
         if uri.is_empty() {
@@ -175,9 +163,7 @@ impl McpResource {
         if mount_path.is_empty() {
             return Err(McpCfgError::CanonicalUriHasNoPath(uri.to_string()));
         }
-        // The mount is not operator-configurable: one path is claimed and nothing else, so an
-        // address naming any other path is a boot refusal here rather than a deployment that
-        // advertises a path it does not serve (CG-17).
+
         if mount_path != DEFAULT_MOUNT {
             return Err(McpCfgError::CanonicalUriPathNotClaimed {
                 uri: uri.to_string(),
@@ -226,18 +212,11 @@ impl McpResource {
 }
 
 /// Split an absolute `http(s)` URI into `(origin, path)`, or `None` when it is not one.
-///
-/// Hand-written rather than pulled from a URL crate on purpose: what is needed is a STRICT
-/// recogniser for one shape, and a permissive general-purpose parser is the wrong tool for a value
-/// whose whole job is to be compared for exact equality. A lenient parse that accepts and normalises
-/// `HTTPS://Host:443/mcp` would hand back a string that no longer equals the `aud` the IdP minted.
-/// So: recognise, do not normalise.
 fn split_absolute(uri: &str) -> Option<(&str, &str)> {
     let rest = uri
         .strip_prefix("https://")
         .or_else(|| uri.strip_prefix("http://"))?;
-    // The authority must be non-empty, and ends at the first `/`, `?` or `#` (a query or fragment
-    // straight after the authority is that, never part of the host).
+
     let authority_len = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     if authority_len == 0 {
         return None;
@@ -248,8 +227,6 @@ fn split_absolute(uri: &str) -> Option<(&str, &str)> {
 }
 
 /// `/mcp/` -> `/mcp`, `` -> ``, `/` -> ``. The same normalisation
-/// core's plane dispatch applies to its mount path, so the derived mount and the dispatch mount are
-/// the same string by construction rather than by two functions agreeing.
 fn normalise_path(path: &str) -> String {
     let trimmed = path.trim_matches('/');
     if trimmed.is_empty() {

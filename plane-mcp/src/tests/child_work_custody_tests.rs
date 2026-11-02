@@ -2,9 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! Rooted child-work retries require custody in this live plane, even when durable work and the
-//! child's internal stamp would otherwise agree after a restart. Real safe slots call the
-//! production binder over typed host services; the host deliberately retains the same record.
-//! A raw launch pair records correlation within host custody; it grants no restart authority.
 
 use super::*;
 use busbar_contract::abi::host::service::{
@@ -30,8 +27,6 @@ const TICKET: Ticket = Ticket {
     generation: 3,
 };
 
-// Independently stated durable wire records: sha256("fs") is the final field. The rooted record
-// binds host launch (37, 1), internal stamp 1 and call id 7; a new door can reuse internal stamp 1.
 const ROOTED_RECORD: &[u8] =
     b"a2|37|1|1|7|dce7cce055566bed799f788cd0048e209a27a473c0f48b956fa1f1780e80d2c1";
 const OTHER_LAUNCH_RECORD: &[u8] =
@@ -199,8 +194,6 @@ impl SafeSlot for Open {
             case.require_local,
         );
         if case.resume_pending_once {
-            // The exact unit and plane survive this PENDING result. No successful service is
-            // replayed, and the custody entry remains present while resume awaits completion.
             assert!(bound.is_pending());
             assert!(!unit.child_work.resumed);
             assert!(!unit.child_work.done);
@@ -225,7 +218,7 @@ impl SafeSlot for Open {
                 let calls = calls.borrow();
                 (calls.find, calls.resume, calls.settle)
             });
-            // Only this same unit's completed bind may bypass the now-removed custody entry.
+
             let repeated = bind_child_work(
                 &plane,
                 TICKET,

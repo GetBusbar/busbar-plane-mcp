@@ -2,18 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The session revisions and the legacy event stream, served, in both directions.
-//!
-//! INBOUND: a POST with the stateless marker, or naming neither a session nor `initialize`, is the
-//! stateless path, untouched. `initialize` opens a session (revision by negotiation only) whose
-//! 128-bit id from the host's CSPRNG is bound to its OWNER; any other owner, or an unknown, ended or
-//! expired id, is `404` on every path. A dispatched method is RAISED, sent through the one dispatch
-//! and its answer LOWERED ([`crate::adapt`]). GET opens a session's stream, or with no session and
-//! no `MCP-Protocol-Version` the `2024-11-05` stream; any other sessionless GET or DELETE is `405`.
-//! The ungoverned chain's first `2024-11-05` stream latches [`UNGOVERNED_LEGACY_STREAM`].
-//!
-//! OUTBOUND ([`Negotiating`]): the stateless request first, byte for byte; only on a refusal the
-//! client ladder ([`crate::client::negotiate`]) opens a session, every hop over the door's
-//! connector; its last rung, the `2024-11-05` stream, is [`super::door_legacy`]'s.
 
 use std::collections::VecDeque;
 use std::task::Poll;
@@ -80,11 +68,9 @@ fn history_data(table: &Sessions, data: Data) -> Result<Data, ()> {
 }
 
 /// THE INSTANCE'S DIAGNOSTIC that an ungoverned chain's sessions are unisolated, latched on its
-/// first `2024-11-05` stream (the index of its id in the Statement's diagnostic ids).
 pub(super) const UNGOVERNED_LEGACY_STREAM: u32 = 0;
 
 /// The names of the Statement's diagnostic ids, in index order: each the `BUSBAR-NNNN` banner of
-/// the catalog code it raises (`declares.json`), so the host's log resolves its entry.
 pub(super) const DIAG_NAMES: &[&str] = &["BUSBAR-7108"];
 
 /// The Statement's diagnostic ids, in index order ([`DIAG_NAMES`]).
@@ -98,23 +84,18 @@ const UNGOVERNED_WORDS: &str =
      nothing between callers; govern the deployment to bind each session to its key";
 
 /// The status a session that is not the caller's (unknown, ended, expired, or another owner's) is
-/// answered with, on every path.
 const STATUS_NOT_FOUND: u32 = 404;
 /// The status of a session request whose version header disagrees with its session.
 const STATUS_BAD_REQUEST: u32 = 400;
 /// The status a session that cannot be opened is answered with.
 const STATUS_UNAVAILABLE: u32 = 503;
 /// The status of a message accepted and answered elsewhere (a notification, or a `2024-11-05`
-/// message whose answer goes on its stream).
 const STATUS_ACCEPTED: u32 = 202;
 
 /// The status a held stream past its owner's quota is refused with (as a subscription past its own).
 const STATUS_QUOTA: u32 = 429;
 
 /// The most held session streams (`GET`s, the `2024-11-05` stream's included) one owner holds open
-/// at once: the per-owner quota, the same bound
-/// `subscriptions/listen` holds a caller to. A caller at it is refused its next one; no held stream
-/// is evicted for it.
 const MAX_STREAMS_PER_OWNER: usize = super::door_listen::MAX_LISTENS_PER_OWNER;
 
 /// The most resource subscriptions one owner holds across its sessions.
@@ -122,7 +103,6 @@ const MAX_OWNER_SUBSCRIPTIONS: usize = 256;
 /// The ceiling on one retained subscription uri, in bytes.
 const MAX_RESOURCE_SUB_URI_BYTES: usize = 2048;
 /// The most announced updates a session holds until its stream collects them; past it, the oldest
-/// gives way.
 const MAX_PENDING_UPDATES: usize = 64;
 
 /// How a session message arrived. A session is carried on the event stream exactly when its
@@ -208,13 +188,6 @@ pub(super) enum SessionArrived {
 }
 
 /// THE OWNER a unit's session is bound to: the kernel's caller reference (derived from the
-/// principal's key id), or the ungoverned chain's one constant.
-///
-/// AN EMPTY REFERENCE IS THE UNGOVERNED CHAIN, and nothing else: the kernel lends every principal
-/// it verified on a governed chain a non-empty reference derived from the deployment keyset, and
-/// never an empty one (a busbar test pins that guarantee), so an empty reference reaches the plane
-/// only where no chain governs the deployment. The plane is handed no other governance fact, and
-/// needs none.
 pub(super) fn owner_of(caller: &str) -> Owner {
     let who = super::principal_of(caller);
     Owner {
@@ -381,13 +354,11 @@ fn message(
         SessionMethod::Dispatch => match adapt::raise(&mut value) {
             None => (Kind::Here(value), None, Vec::new()),
             Some(()) => {
-                // The raised body's mirror, less the caller's own `Accept`.
                 let mut mirror: Vec<(String, String)> = crate::codec::mirrored(&value)
                     .into_iter()
                     .filter(|(name, _)| name != "accept")
                     .collect();
-                // A `tools/call` mirrors its annotated arguments, as its caller's revision
-                // cannot.
+
                 if method.as_deref() == Some(crate::codec::METHOD_TOOLS_CALL) {
                     let schema = value
                         .pointer("/params/name")
@@ -411,8 +382,6 @@ fn message(
 }
 
 /// The disposition a session unit answered here is decided under, and counted as: an `initialize`
-/// or a message answered here is a discovery, a stream holds open as a subscription does, and a
-/// DELETE or an accepted message is a notification.
 pub(super) fn disposition(unit: &SessionUnit) -> Disposition {
     let request = |method: &str, id: Value| match crate::tool_ops::method_row_for(method) {
         Some(row) => Disposition::Request { row, id },
@@ -449,7 +418,6 @@ pub(super) fn disposition(unit: &SessionUnit) -> Disposition {
 }
 
 /// A session unit's arrival refused by the one dispatch: answered once the session is the
-/// caller's, never before (a mismatch answers `404` on every path).
 pub(super) fn refused_in_session(unit: &mut SessionUnit, refusal: &Refusal) -> bool {
     match unit {
         SessionUnit::Message { kind, .. } => {
@@ -459,8 +427,6 @@ pub(super) fn refused_in_session(unit: &mut SessionUnit, refusal: &Refusal) -> b
         _ => false,
     }
 }
-
-// ── the host's services, on a unit's ticket ─────────────────────────────────────────────────────
 
 /// Runs `f` on busbar's memory of its upstream conversations.
 fn upstreams(plane: &McpDoor, f: impl FnOnce(&mut UpstreamTable)) {
@@ -566,10 +532,7 @@ fn id_of(kind: &Kind) -> Value {
     }
 }
 
-// ── the answers ─────────────────────────────────────────────────────────────────────────────────
-
 /// ANSWER A SESSION UNIT on its caller's piece, the session first checked against its owner:
-/// `None` for a unit the one dispatch answers (its session checked).
 pub(super) fn answer(
     plane: &McpDoor,
     ticket: Ticket,
@@ -585,7 +548,6 @@ pub(super) fn answer(
         &session_unit,
         SessionUnit::Rejected(_) | SessionUnit::Notification
     ) {
-        // Neither a refusal nor an unanswered notification opens or touches a session.
         0
     } else {
         let Some(now) = wall_ms(plane.services, ticket, &mut unit.issued) else {
@@ -623,7 +585,7 @@ pub(super) fn answer(
             }
             if with_sessions(plane, |t| t.close(&session, &owner, now)) == Some(true) {
                 plane.session_state.remove(&session);
-                // Each of its streams ends at its next collection.
+
                 due(plane, &session);
                 answer_of(200, Vec::new())
             } else {
@@ -702,7 +664,6 @@ fn open_endpoint(
     requested: Option<&str>,
     now: u64,
 ) -> Pending {
-    // The event-stream revision is opened by its GET, never by a POSTed `initialize`.
     let revision = match revision::negotiate(requested) {
         r if r.is_event_stream_revision() => revision::SESSION_REVISIONS[0],
         r => r,
@@ -747,7 +708,7 @@ fn here(
     let uri = value.pointer("/params/uri").and_then(Value::as_str);
     match method {
         adapt::METHOD_PING => ok(json!({})),
-        // The `2024-11-05` session opened with its stream; its `initialize` arrives inside it.
+
         adapt::METHOD_INITIALIZE if revision.is_event_stream_revision() => {
             match discovery(plane, ticket, unit, &id) {
                 Some(d) => ok(adapt::initialize_result(&d, revision)),
@@ -823,8 +784,6 @@ fn here(
     }
 }
 
-// ── what a session holds beside its table row ───────────────────────────────────────────────────
-
 /// A session's own state: its owner, the resources it watches, its log floor, and the updates
 /// announced for it its stream has not collected.
 #[derive(Debug, Clone, Default)]
@@ -868,9 +827,6 @@ fn subscribe(plane: &McpDoor, session: &str, owner: &Owner, uri: &str) -> bool {
 }
 
 /// AN UPSTREAM ANNOUNCED that `uri` of its registration `server` changed: every session watching
-/// that uri holds it until its stream collects it, where the subscriber's entitlement is asked
-/// again (Listen's relay rule: the uri resolves under its live grant to the announcing server's
-/// declared resource).
 pub(super) fn announce(plane: &McpDoor, server: &str, uri: &str) {
     let sessions: Vec<String> = plane.session_state.with_all(|m| {
         let mut hit = Vec::new();
@@ -888,20 +844,14 @@ pub(super) fn announce(plane: &McpDoor, server: &str, uri: &str) {
     for session in sessions {
         due(plane, &session);
     }
-    // The subscriptions held by `subscriptions/listen`, on either carrier, hear it too.
+
     door_listen::announced(plane, server, uri);
 }
 
 /// THE RATE LIMIT on an upstream's list-changed notifications: at most one is accepted per server
-/// in this window (monotonic ms). Its timing is all busbar reads of it, and an accepted one only
-/// makes the next call re-fetch, so the window bounds how often an upstream can make busbar fetch.
 pub const LIST_CHANGED_MIN_INTERVAL_MS: u64 = 30_000;
 
 /// AN UPSTREAM SAID ITS LISTS CHANGED (`notifications/{tools,prompts,resources}/list_changed`):
-/// accepted under [`LIST_CHANGED_MIN_INTERVAL_MS`], it marks `server`'s list stale, so the next
-/// call re-verifies against the authoritative `tools/list`. The body is never read; nothing is
-/// installed, approved or promoted. A clock that cannot be read never suppresses one: stale is the
-/// safe direction.
 pub(super) fn list_changed(plane: &McpDoor, server: &str, now_ms: Option<u64>) {
     let key = server.to_string();
     if let (Some(now), Some(last)) = (now_ms, plane.list_noticed.get(&key)) {
@@ -918,9 +868,6 @@ pub(super) fn list_changed(plane: &McpDoor, server: &str, now_ms: Option<u64>) {
 }
 
 /// WHAT AN UPSTREAM SAID ON ITS EVENT STREAM beside a relayed call's answer: its resource updates
-/// are announced to every watching session, its list-changed notifications mark its list stale
-/// ([`list_changed`], at `mono_ms`), and, for a caller in a session, its log records past the
-/// session's floor are delivered on that session's stream.
 pub(super) fn heard(
     plane: &McpDoor,
     server: &str,
@@ -965,7 +912,7 @@ pub(super) fn heard(
                     Some(floor) => level >= floor,
                     None => true,
                 };
-                // The record goes on as the upstream wrote it.
+
                 if passes {
                     let _delivered = deliver_frame(plane, id, owner, data.trim(), now);
                 }
@@ -987,12 +934,7 @@ pub(super) fn session_of(unit: &Option<SessionUnit>) -> Option<String> {
     }
 }
 
-// ── the answer, lowered ─────────────────────────────────────────────────────────────────────────
-
 /// LOWERS the answer a session unit's dispatch wrote, before its first byte: the session
-/// revision's shape (a result no session revision can carry becomes an error), every JSON-RPC
-/// dispatch answer at `200` (a malformed message keeps its refusal status); on the `2024-11-05` stream, the answer goes on the stream and the POST is
-/// accepted (`202`).
 pub(super) fn lower(plane: &McpDoor, ticket: Ticket, caller: &str, unit: &mut CallUnit) {
     let malformed = matches!(
         &unit.session,
@@ -1027,14 +969,12 @@ pub(super) fn lower(plane: &McpDoor, ticket: Ticket, caller: &str, unit: &mut Ca
     let Some(pending) = unit.pending.as_mut() else {
         return;
     };
-    // A legacy answer goes on its session's stream, which a failed clock read cannot touch: the
-    // POST is answered that it was not delivered.
+
     let Some(now) = now else {
         replace_wire_answer(pending, unavailable(&Value::Null, super::CLOCK_UNREAD));
         return;
     };
-    // Local results already have the revision's schema. A legacy POST buffers compact bytes only
-    // under the existing history quota; an oversized cursor follows the original self-trim path.
+
     if pending.local.is_some() {
         if let Some(session) = legacy {
             let local = pending
@@ -1076,8 +1016,7 @@ pub(super) fn lower(plane: &McpDoor, ticket: Ticket, caller: &str, unit: &mut Ca
         return;
     };
     let rpc = v.get("jsonrpc").is_some() && (v.get("result").is_some() || v.get("error").is_some());
-    // The answer is relayed as its own bytes: handed on unchanged when nothing is lowered,
-    // and otherwise only the stateless-only members' spans are cut out ([`adapt::lower_answer`]).
+
     let bytes = match adapt::lower_answer(&pending.bytes) {
         None => return,
         Some(adapt::Lowered::Unchanged) => std::mem::take(&mut pending.bytes),
@@ -1106,8 +1045,7 @@ pub(super) fn lower(plane: &McpDoor, ticket: Ticket, caller: &str, unit: &mut Ca
                 &String::from_utf8_lossy(&bytes),
                 now,
             );
-            // No stream took the answer (it ended while the message ran): the POST is told the
-            // session is gone, never accepted for an answer nobody will read.
+
             if delivered {
                 pending.bytes.clear();
                 pending.fields.clear();
@@ -1138,13 +1076,11 @@ fn replace_wire_answer(pending: &mut Pending, answer: Pending) {
     pending.fields = answer.fields;
     pending.bytes = answer.bytes;
     pending.local = answer.local;
-    // Delivery failed; completed upstream work still reports its usage, records and audit.
+
     pending
         .units
         .retain(|u| u.class != crate::statement::CLASS_FEE_INDEX);
 }
-
-// ── the streams ─────────────────────────────────────────────────────────────────────────────────
 
 /// One held GET stream, by its unit.
 #[derive(Debug, Clone)]
@@ -1173,7 +1109,6 @@ pub(super) fn holds(plane: &McpDoor, unit: u64) -> bool {
 }
 
 /// `data` buffered on `session`'s stream, and the stream named due: `false` when no live stream
-/// took it.
 fn deliver_frame(plane: &McpDoor, session: &str, owner: &Owner, data: &str, now: u64) -> bool {
     let target = plane
         .streams
@@ -1248,7 +1183,6 @@ pub(super) fn taken(plane: &McpDoor, named: &[u64]) {
 }
 
 /// THE TICK: every held stream owes a collection (its keepalive, or its end once its session is
-/// gone), and the state of every session the table no longer holds is dropped.
 pub(super) fn tick(plane: &McpDoor) {
     let any = plane.streams.with_all(|m| {
         for s in m.values_mut() {
@@ -1287,14 +1221,11 @@ pub(super) fn cancelled(plane: &McpDoor, ticket: Ticket) {
 }
 
 /// ENDS the held stream of unit `key`: it is no longer live work, so its cursor (kept for a
-/// resuming GET) and its session may give way again.
 fn end_stream(plane: &McpDoor, key: u64) -> Option<Stream> {
     let ended = plane.streams.remove(&key)?;
     with_sessions(plane, |t| {
         t.release_stream(&ended.session, ended.stream);
-        // A `2024-11-05` SESSION LIVES AS LONG AS ITS STREAM: its answers have nowhere else to go,
-        // so a message POSTed after the stream ended is told the session is unknown (`404`) before
-        // it runs, never run, charged and its answer dropped.
+
         if ended.legacy {
             t.end(&ended.session);
         }
@@ -1309,7 +1240,6 @@ fn end_stream(plane: &McpDoor, key: u64) -> Option<Stream> {
 const KEEPALIVE: &[u8] = b": keepalive\n\n";
 
 /// ONE PIECE OF A HELD SESSION STREAM: the caller's piece opens it, a collection writes what its
-/// session buffered (or a keepalive, or its end), and the caller's side ending ends it.
 pub(super) fn piece(
     plane: &McpDoor,
     input: Lent<'_, OnPieceIn>,
@@ -1342,9 +1272,7 @@ pub(super) fn piece(
             _ => None,
         }
     });
-    // THE UNGOVERNED CHAIN SAYS SO, once per instance, on its first `2024-11-05` stream: latched
-    // only once the envelope carried it, so a report the envelope had no room for is made again on
-    // the next such stream.
+
     if say_ungoverned {
         plane.said_ungoverned.with_all(|said| {
             if !said.contains_key(&())
@@ -1431,7 +1359,7 @@ fn open_stream(
     if plane.streams.with(&unit.key, |s| s.is_some()) {
         return Some((false, false));
     }
-    // THE QUOTA REFUSES THE NEW STREAM, never evicts a held one.
+
     let held = plane
         .streams
         .with_all(|m| m.values().filter(|s| s.owner == *owner).count());
@@ -1516,8 +1444,7 @@ fn open_stream(
                 None => {
                     let opened =
                         with_sessions(plane, |t| t.open_stream(&session, owner, now)).flatten();
-                    // THE SESSION'S CURSORS ARE ALL READ BY LIVE STREAMS: the new one is refused,
-                    // and no live stream is ended for it.
+
                     let Some(stream) = opened else {
                         let refusal = Refusal {
                             status: STATUS_QUOTA,
@@ -1537,11 +1464,9 @@ fn open_stream(
             }
         }
     };
-    // THE STREAM IS LIVE WORK: its session is never evicted, nor its cursor dropped, while it is
-    // held ([`end_stream`] lets it go).
+
     with_sessions(plane, |t| t.hold_stream(&session, stream));
-    // One stream per live unit, so the unit table's admission bound (it refuses past `MAX_UNITS`,
-    // and evicts nothing) bounds this table too.
+
     plane.streams.insert(
         unit.key,
         Stream {
@@ -1560,11 +1485,9 @@ fn open_stream(
 }
 
 /// ONE COLLECTION of a held stream: the updates announced for its session (each re-judged under
-/// the caller's live grants), then every event buffered after its cursor; a keepalive when quiet;
-/// its end once its session is gone.
 fn step_stream(plane: &McpDoor, ticket: Ticket, unit: &mut CallUnit) -> Option<bool> {
     let held_stream = plane.streams.get(&unit.key)?;
-    // A collection whose clock read failed collects nothing: the next one reads it again.
+
     let Some((now, mono)) = clocks(plane, ticket, unit) else {
         return Some(false);
     };
@@ -1620,7 +1543,6 @@ fn step_stream(plane: &McpDoor, ticket: Ticket, unit: &mut CallUnit) -> Option<b
     })
     .flatten();
     let Some(replay) = replay else {
-        // The session is gone (ended or expired): so is its stream.
         end_stream(plane, unit.key);
         unit.pending = Some(door_listen::frame(Vec::new(), true, true));
         return Some(true);
@@ -1645,13 +1567,10 @@ fn step_stream(plane: &McpDoor, ticket: Ticket, unit: &mut CallUnit) -> Option<b
     Some(true)
 }
 
-// ── busbar as a client: the negotiated upstream conversation ────────────────────────────────────
-
 /// How many connector handles one hop of a negotiation may number.
 pub(super) const HOP_SPAN: u32 = 1 << 9;
 
 /// What busbar remembers about the conversation `key` names ([`crate::tool_sessions::upstream_key`]:
-/// a member and the caller binding it was negotiated for), and the next request id of its session.
 fn remembered(plane: &McpDoor, key: &str) -> (Option<Remembered>, Option<u64>) {
     plane
         .upstreams
@@ -1660,15 +1579,11 @@ fn remembered(plane: &McpDoor, key: &str) -> (Option<Remembered>, Option<u64>) {
 }
 
 /// One hop's answer as the connector read it: its status, its head fields (lower-case names) and
-/// its body.
 type Hop = (u16, Vec<(String, String)>, Vec<u8>);
 
 /// What a negotiation came to.
 pub(super) enum Negotiated {
     /// The answer to hand on: the status, the body as the upstream sent it, and whether it is an
-    /// event stream.
-    /// The last field is the id the request carried in a session when it is not the original's
-    /// (the id the answer is correlated by).
     Answer(u16, Vec<u8>, bool, Option<u64>),
     /// No answer: why, in words, for the caller's upstream-failure answer.
     Failed(String),
@@ -1714,9 +1629,6 @@ pub(super) struct Negotiating {
 
 impl Negotiating {
     /// A conversation carrying `original` (a stateless request) to `member` for the caller bound
-    /// as `binding` (the caller reference the kernel lends; empty for the ungoverned chain), and the
-    /// request its first hop is: `original` itself, or lowered into the session busbar remembers
-    /// for that member AND that caller, under that session's own next id.
     pub(super) fn begin(
         plane: &McpDoor,
         member: &str,
@@ -1725,10 +1637,7 @@ impl Negotiating {
     ) -> Self {
         let key = crate::tool_sessions::upstream_key(member, binding);
         let (remembered, session_id) = remembered(plane, &key);
-        // A request lowered into a remembered session carries a token derived from the id it is
-        // sent under (the negotiator writes both); any other carries one drawn here from the
-        // instance's one counter, so two calls in flight never share a progress token (the round's
-        // id, `0` on every first round, is no such thing).
+
         let original = match session_id {
             Some(_) => original,
             None => with_progress_token(plane, original),
@@ -1739,8 +1648,7 @@ impl Negotiating {
         let legacy_known = remembered
             .as_ref()
             .is_some_and(|r| r.revision.is_event_stream_revision());
-        // The walk's first hop is the stateless request unless busbar holds a session with the
-        // member for this caller; a held `2024-11-05` stream has no session the hop could ride.
+
         let probing = legacy_known
             || !remembered
                 .as_ref()
@@ -1779,7 +1687,6 @@ impl Negotiating {
     }
 
     /// Replies no call waited for on the call's held stream, dropped since its last answer: each
-    /// is audited on this call's answer, rejected.
     pub(super) fn dropped(&self) -> u32 {
         self.dropped
     }
@@ -1815,8 +1722,7 @@ impl Negotiating {
             fields,
             body: json,
         };
-        // A KNOWN LEGACY UPSTREAM: an answer to the stateless request is the answer; a refusal goes
-        // straight to the held event stream, never through `initialize` again.
+
         if probing && self.legacy_known {
             return if (200..300).contains(&status) {
                 Action::Finish(hop)
@@ -1824,8 +1730,7 @@ impl Negotiating {
                 Action::OpenStream
             };
         }
-        // A KNOWN STATELESS UPSTREAM, or a refusal that says nothing about the revision (the
-        // credential, or a rate): its answer is the stateless path's, unrenegotiated.
+
         if probing && (self.stateless_known || matches!(status, 401 | 403 | 407 | 429)) {
             return Action::Finish(hop);
         }
@@ -1836,8 +1741,6 @@ impl Negotiating {
     }
 
     /// DRIVES the conversation over the door's connector, hop by hop, from `base`: PENDING while a
-    /// hop pends (the action kept), READY with what it came to. What busbar learnt is kept for the
-    /// next call to `member`.
     fn drive(
         &mut self,
         instance: &Instance<'_, McpDoor>,
@@ -1903,9 +1806,7 @@ impl Negotiating {
                     self.keep(plane);
                     return Poll::Ready(self.failed(&refusal, member));
                 }
-                // THE LAST RUNG: the `2024-11-05` event stream, held by the connector and read on the
-                // driver ticket, this call's request POSTed to the address it names and its answer
-                // taken by its id ([`super::door_legacy`]).
+
                 Some(Action::OpenStream)
                     if plane.host.as_ref().is_some_and(|h| h.lends_connector()) =>
                 {
@@ -1944,7 +1845,7 @@ impl Negotiating {
                         }
                     }
                 }
-                // No connector to hold a stream over: said, never papered over.
+
                 Some(Action::OpenStream) | None => {
                     self.keep(plane);
                     return Poll::Ready(Negotiated::Failed(self.legacy_only(member)));
@@ -1954,7 +1855,6 @@ impl Negotiating {
     }
 
     /// What busbar learnt, kept (or forgotten) for the next call to the same member by the same
-    /// caller.
     fn keep(&self, plane: &McpDoor) {
         upstreams(plane, |t| match self.negotiator.remembered() {
             Some(r) => t.put(&self.key, r),
@@ -2018,12 +1918,6 @@ pub(super) fn exchange_request(
 }
 
 /// A FETCH OF THE DOOR'S OWN (verify-on-call's `tools/list`), negotiated: every hop over the
-/// connector from `base`, the conversation parked on the unit while one pends.
-///
-/// The conversation is the caller's (`binding`); an answer to a request that
-/// carried its session's own id is handed back under the original's id, which the fetch correlates.
-/// The conversation is kept in `slot` while it pends: a unit's, or an operator `connect`'s (which
-/// has no unit).
 pub(super) fn fetch_in(
     instance: &Instance<'_, McpDoor>,
     plane: &McpDoor,
@@ -2138,7 +2032,6 @@ fn request_id(request: &OutboundRequest) -> Option<Value> {
 }
 
 /// `request` with the progress token it carries (when it asks for progress at all) replaced by one
-/// no other request of this instance carries: `busbar-` and an id from the instance's one counter.
 fn with_progress_token(plane: &McpDoor, mut request: OutboundRequest) -> OutboundRequest {
     let Ok(mut body) = serde_json::from_slice::<Value>(&request.body) else {
         return request;
@@ -2160,8 +2053,6 @@ fn with_progress_token(plane: &McpDoor, mut request: OutboundRequest) -> Outboun
 }
 
 /// `body` (one JSON-RPC answer) with its top-level `id` put back to `id` when it is `sent`, the
-/// id the request carried in its session: the answer as the request that asked it is correlated.
-/// Any other body is handed on as it came.
 fn with_id(body: Vec<u8>, sent: u64, id: serde_json::Value) -> Vec<u8> {
     let Ok(mut doc) = serde_json::from_slice::<serde_json::Value>(&body) else {
         return body;
@@ -2176,8 +2067,6 @@ fn with_id(body: Vec<u8>, sent: u64, id: serde_json::Value) -> Vec<u8> {
 }
 
 /// THE WALK'S ANSWER to a relayed call's first hop (`status`, event stream or not, `far`), and the
-/// conversation from there: READY with what it came to, `None` when the answer is handed on as it
-/// came (the stateless path, or no connector to negotiate over).
 pub(super) fn far_answer(
     instance: &Instance<'_, McpDoor>,
     plane: &McpDoor,
@@ -2196,7 +2085,7 @@ pub(super) fn far_answer(
         }
         let status = u16::try_from(status).unwrap_or(0);
         let next = negotiating.feed(Some((status, fields, far.to_vec())));
-        // The walk's own answer, or a refusal with no connector to negotiate over: handed on.
+
         let lends = plane.host.is_some_and(|h| h.lends_connector());
         match next {
             Action::Finish(_) => {

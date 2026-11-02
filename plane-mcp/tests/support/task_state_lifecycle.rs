@@ -141,7 +141,7 @@ fn an_acknowledged_update_survives_a_poll_before_its_records_land() {
     assert_eq!(d.arrive(3, &update).outcome, Outcome::Ready);
     assert_eq!(d.piece(3, &Given::caller(ALICE, &update)).status, 200);
     let resumed = last_nested();
-    // The update's records ride its returned piece. A poll can reach the host before that ride.
+
     with_book(|b| b.records = before);
     assert_eq!(get(&d, 4, &task).json()["result"]["status"], "working");
     let sent = run(&d, 5, "st", &resumed);

@@ -2,29 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The line carrier's units: the host holds the
-//! process's own stdin/stdout open as ONE carrier session and opens a unit per line; what a line
-//! MEANS is [`crate::line`]'s, and how a unit answers it is here. What the plane writes unsolicited
-//! (busbar's own asks of its caller, a subscription's changes and keepalives) it writes with the
-//! host's `session.emit` on the session every line names
-//! ([`busbar_contract::abi::host::service::CARRIER_SESSION_FIELD`]).
-//!
-//! - A REQUEST goes on through the one dispatch under the fields its body implies; its answer is
-//!   one line.
-//! - An `input_required` answer — busbar's OWN ask, or an UPSTREAM's ask relayed — is
-//!   LIVENED ([`liven`]): its first ask is emitted as busbar's own request (`busbar:<n>`), the unit
-//!   answers nothing, and the caller's answers are lines of their own: each answer but the round's
-//!   last emits the next ask; the last is the RETRY, the request as the caller sent it with the
-//!   answers and the sealed state, dispatched as that unit (its own admission). An answer that is an
-//!   error hands the caller the `input_required` result itself. The exceptions: a line whose carrier
-//!   session negotiated a SESSION revision (`2025-06-18`, `2025-11-25`) has its answer lowered into
-//!   that revision first, which turns an `input_required` result into the revision's error (it has
-//!   no such result), so there is nothing left to liven; a round past the
-//!   round cap, or past [`MAX_LIVE_ASKS_PER_SESSION`] live on its session, is handed on as it is.
-//! - A SUBSCRIPTION (`subscriptions/listen`) is answered with its acknowledgement and kept on the
-//!   session ([`listen`]): the tick ([`tick`]) steps it, emitting what changed, a `ping` when it has
-//!   been quiet and its last frame at its bound.
-//! - The STDIO-ERA VERBS are answered here, and a notification — or a line answering nothing busbar
-//!   asked — is answered with nothing at all.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -56,8 +33,6 @@ pub(super) struct LineUnit {
 }
 
 /// After this long with no unit of its caller re-asking its standing and grants (two pings went
-/// unanswered, or the kernel admitted none of its caller's lines, as it admits none of a revoked
-/// caller's), a line subscription's permission is not re-confirmed and it ends on its frame.
 const UNCONFIRMED_NS: u64 = 3 * KEEPALIVE_NS;
 
 /// One subscription kept on a carrier session.
@@ -85,7 +60,6 @@ pub(super) struct LineListen {
 
 impl LineListen {
     /// Its caller's standing at `now_ns`: the last unit's answer, or lapsed when none re-confirmed
-    /// it for [`UNCONFIRMED_NS`].
     fn standing_at(&self, now_ns: u64) -> Standing {
         if self.standing != Standing::Live {
             return self.standing.clone();
@@ -105,8 +79,6 @@ impl LineListen {
     }
 
     /// ONE STEP at `now_ns` over the live `catalogue`, under the grants and the standing its
-    /// caller's units last re-asked (on either carrier the permission is re-asked, never the one
-    /// captured at open), relaying the upstream announcements held since its last step.
     fn step_at(&mut self, catalogue: &Catalogue, now_ns: u64) -> ListenStep {
         let standing = self.standing_at(now_ns);
         let updates = std::mem::take(&mut self.updates);
@@ -122,8 +94,6 @@ impl LineListen {
     }
 
     /// Whether busbar asks its caller a `ping` at `now_ns` to have its standing re-asked (the
-    /// answer is a line, so a unit, and the unit re-asks): none re-confirmed it, and none was
-    /// asked, for [`KEEPALIVE_NS`]. Asked, it is noted.
     fn wants_ping(&mut self, now_ns: u64) -> bool {
         let due = now_ns.saturating_sub(self.confirmed_ns) >= KEEPALIVE_NS
             && now_ns.saturating_sub(self.pinged_ns) >= KEEPALIVE_NS;
@@ -135,9 +105,6 @@ impl LineListen {
 }
 
 /// THE PERMISSION, RE-ASKED ON A LINE: a unit of the carrier session's caller (any line it sends,
-/// the answer to busbar's `ping` among them) re-asks the kernel its standing and the catalogue's
-/// grants on its own ticket, and every subscription that caller holds on the session takes the
-/// answers. The kernel answers them only for a unit in flight, which a kept subscription is not.
 pub(super) fn reconfirm(plane: &McpDoor, ticket: Ticket, principal: &str, unit: &mut CallUnit) {
     let Some(session) = unit.line.as_ref().map(|l| l.session) else {
         return;
@@ -166,8 +133,6 @@ pub(super) fn reconfirm(plane: &McpDoor, ticket: Ticket, principal: &str, unit: 
     plane.line_listens.with_all(|m| {
         for ((s, _), l) in m.iter_mut() {
             if *s == session && l.owner == principal {
-                // A clock that cannot be read is never a time (P-M4): the re-asked grants and
-                // standing still apply, but the confirmation is not moved to a time never read.
                 l.confirmed_ns = now.unwrap_or(l.confirmed_ns);
                 l.entitled.clone_from(&entitled);
                 l.hidden.clone_from(&hidden);
@@ -178,7 +143,6 @@ pub(super) fn reconfirm(plane: &McpDoor, ticket: Ticket, principal: &str, unit: 
 }
 
 /// AN UPSTREAM ANNOUNCED that `uri` of its registration `server` changed: every subscription kept
-/// on a carrier session holds it for its next step, which relays it to one that asked for the uri.
 pub(super) fn announced(plane: &McpDoor, server: &str, uri: &str) {
     plane.line_listens.with_all(|m| {
         for kept in m.values_mut() {
@@ -190,14 +154,12 @@ pub(super) fn announced(plane: &McpDoor, server: &str, uri: &str) {
 }
 
 /// One line as `arrive` read it: what the unit is to the carrier, and the bytes the one dispatch
-/// decides on (`None` = the unit answers its preset, the dispatch decides nothing).
 pub(super) struct Arrival {
     pub(super) unit: LineUnit,
     pub(super) dispatch: Option<Vec<u8>>,
 }
 
 /// READ ONE LINE of carrier session `session`: an answer to one of busbar's own asks (its round
-/// moved on, or its retry), a cancel, a stdio-era verb, or a request for the one dispatch.
 pub(super) fn arrive(plane: &McpDoor, session: u64, body: &[u8]) -> Arrival {
     let mut unit = LineUnit {
         session,
@@ -208,12 +170,11 @@ pub(super) fn arrive(plane: &McpDoor, session: u64, body: &[u8]) -> Arrival {
 }
 
 /// [`arrive`]'s reading of the line into `unit`: the bytes the one dispatch decides on, `None` when
-/// the unit answers its preset.
 fn read(plane: &McpDoor, session: u64, body: &[u8], unit: &mut LineUnit) -> Option<Vec<u8>> {
     let Ok(value) = serde_json::from_slice::<Value>(body) else {
         return Some(body.to_vec());
     };
-    // Read the envelope before a cancellation, greeting or reply can move carrier state.
+
     if value.get("method").is_some() {
         match crate::tool_arrival::request(&value) {
             Err(refusal) => {
@@ -235,7 +196,7 @@ fn read(plane: &McpDoor, session: u64, body: &[u8], unit: &mut LineUnit) -> Opti
         let n = match &reply {
             Reply::Answered(n, _) | Reply::Failed(n) => *n,
         };
-        // An answer to nothing busbar asked on this session: nothing to say.
+
         unit.preset = Some(Vec::new());
         let mut live = plane.live_asks.remove(&(session, n))?;
         match reply {
@@ -243,8 +204,6 @@ fn read(plane: &McpDoor, session: u64, body: &[u8], unit: &mut LineUnit) -> Opti
             Reply::Answered(_, result) => {
                 live.answered(result);
                 if !live.queued.is_empty() {
-                    // Retire the answered id before the next request is emitted. A duplicate
-                    // reply cannot answer the next key, and its old deadline cannot lapse it.
                     live.deadline_ns = 0;
                     let next = next_ask(plane);
                     plane.live_asks.insert((session, next), live);
@@ -273,8 +232,7 @@ fn read(plane: &McpDoor, session: u64, body: &[u8], unit: &mut LineUnit) -> Opti
     }
     let answer = match line::era(&value) {
         Era::Dispatch => None,
-        // THE CARRIER SESSION NOW SPEAKS `revision` (revision by negotiation).
-        // The table is bounded and evicts nothing: a full one answers the stateless revision.
+
         Era::Opened(revision, answer) => Some(
             if plane.line_revisions.with_all(|m| {
                 let full = m.len() >= super::MAX_UNITS && !m.contains_key(&session);
@@ -294,8 +252,7 @@ fn read(plane: &McpDoor, session: u64, body: &[u8], unit: &mut LineUnit) -> Opti
         unit.preset = Some(serde_json::to_vec(&answer).unwrap_or_default());
         return None;
     }
-    // A LINE OF A SESSION REVISION carries no stateless `_meta`: it is raised into the one
-    // dispatch's shape, and its answer lowered back ([`crate::adapt`]).
+
     let stateless = value
         .pointer("/params/_meta")
         .and_then(|m| m.get(crate::codec::META_PROTOCOL_VERSION))
@@ -314,7 +271,6 @@ fn read(plane: &McpDoor, session: u64, body: &[u8], unit: &mut LineUnit) -> Opti
 }
 
 /// Whether a line that the one dispatch refused is a notification: a notification is never
-/// answered, refused or not.
 pub(super) fn is_notification(v: &Value) -> bool {
     v.get("method").is_some_and(Value::is_string) && v.get("id").is_none()
 }
@@ -339,7 +295,6 @@ fn emit(plane: &McpDoor, ticket: Ticket, seq: u32, session: u64, bytes: &[u8]) -
 }
 
 /// THE PRESET ANSWER of a line unit, or the next ask of its round emitted (the unit then answers
-/// nothing): `None` for a unit the one dispatch answers.
 pub(super) fn preset(plane: &McpDoor, ticket: Ticket, unit: &mut CallUnit) -> Option<Pending> {
     let line_unit = unit.line.as_mut()?;
     let session = line_unit.session;
@@ -348,10 +303,10 @@ pub(super) fn preset(plane: &McpDoor, ticket: Ticket, unit: &mut CallUnit) -> Op
         let line_unit = unit.line.as_mut()?;
         if let Some(mut live) = plane.live_asks.remove(&(session, n)) {
             let fresh = next_ask(plane);
-            // A clock that cannot be read arms no lapse: the caller is handed the result itself.
+
             if let (Some(now), Some(ask)) = (now, live.issue(fresh)) {
                 live.arm(now);
-                // Kept before it is asked: its answer may arrive before the emit returns.
+
                 let fallback = live.fallback.clone();
                 plane.live_asks.insert((session, fresh), live);
                 if !emit(plane, ticket, unit.issued, session, &ask) {
@@ -359,7 +314,6 @@ pub(super) fn preset(plane: &McpDoor, ticket: Ticket, unit: &mut CallUnit) -> Op
                     line_unit.preset = Some(fallback);
                 }
             } else {
-                // The next ask cannot be put to the caller: it is handed the result itself.
                 line_unit.preset = Some(live.fallback);
             }
             unit.issued += 1;
@@ -374,10 +328,7 @@ pub(super) fn preset(plane: &McpDoor, ticket: Ticket, unit: &mut CallUnit) -> Op
 pub(super) const MAX_LIVE_ASKS_PER_SESSION: usize = 64;
 
 /// LIVEN a line unit's answer: an `input_required` result (busbar's own ask, or an upstream's
-/// relayed) is put to the caller as live requests on the session, its first ask emitted now, and
-/// the unit answers nothing. Any other answer, or one that cannot be emitted, is left as it is.
 pub(super) fn liven(plane: &McpDoor, ticket: Ticket, unit: &mut CallUnit) {
-    // Local prompt/resource answers are compact complete results and never ask for input.
     if unit
         .pending
         .as_ref()
@@ -395,12 +346,9 @@ pub(super) fn liven(plane: &McpDoor, ticket: Ticket, unit: &mut CallUnit) {
         .as_mut()
         .filter(|pending| pending.request.is_none())
     {
-        // JSON whitespace has no meaning outside strings. Remove physical line separators
-        // before any early return, preserving every string and number byte of the result.
         compact_line(&mut pending.bytes);
     }
-    // The round cap: past it the `input_required` result is handed to the caller as it is (its
-    // sealed `requestState` makes that a continuation), never put live again.
+
     if round >= line::MAX_LIVE_ASK_ROUNDS {
         return;
     }
@@ -424,9 +372,7 @@ pub(super) fn liven(plane: &McpDoor, ticket: Ticket, unit: &mut CallUnit) {
     {
         return;
     }
-    // THE LIVE ASKS OF ONE CARRIER SESSION ARE BOUNDED: past [`MAX_LIVE_ASKS_PER_SESSION`] the
-    // answer is handed to the caller as it is (its sealed `requestState` makes that a continuation),
-    // as past the round cap.
+
     let held = plane
         .live_asks
         .with_all(|m| m.keys().filter(|(s, _)| *s == session).count());
@@ -436,7 +382,7 @@ pub(super) fn liven(plane: &McpDoor, ticket: Ticket, unit: &mut CallUnit) {
     let Some(mut live) = LiveAsk::of(original, pending.bytes.clone(), result, round) else {
         return;
     };
-    // A clock that cannot be read arms no lapse: the answer is left as it is.
+
     let Some(now) = door_listen::mono_ns(plane.services, ticket, unit) else {
         return;
     };
@@ -447,8 +393,7 @@ pub(super) fn liven(plane: &McpDoor, ticket: Ticket, unit: &mut CallUnit) {
     };
     let seq = unit.issued;
     unit.issued += 1;
-    // KEPT BEFORE IT IS ASKED: the caller's answer is a line of its own, and may arrive before
-    // the emit returns.
+
     plane.live_asks.insert((session, n), live);
     if !emit(plane, ticket, seq, session, &ask) {
         plane.live_asks.remove(&(session, n));
@@ -483,8 +428,6 @@ fn compact_line(bytes: &mut Vec<u8>) {
 }
 
 /// OPEN a subscription on the carrier session: refused in its own words, or answered with its
-/// acknowledgement and kept on the session. `None` for a unit that is not a line's
-/// `subscriptions/listen`.
 pub(super) fn listen(
     plane: &McpDoor,
     ticket: Ticket,
@@ -525,7 +468,7 @@ pub(super) fn listen(
         pinged_ns: now,
         updates: Vec::new(),
     };
-    // THE QUOTA REFUSES THE NEW SUBSCRIPTION, never evicts a held one, as on the HTTP carrier.
+
     let admitted = plane.line_listens.with_all(|m| {
         let full = door_listen::quota_full(m.values().map(|l| &l.owner), principal);
         if !m.contains_key(&key) && full {
@@ -581,8 +524,6 @@ fn lines(frames: &[Value]) -> Vec<u8> {
 }
 
 /// THE LAPSE of live asks: a round whose ask in flight went [`line::ASK_TIMEOUT_NS`] unanswered is
-/// dropped and the caller is handed the `input_required` result itself, emitted on its session (the
-/// unit that put the ask answered nothing, so the fallback is a line of its own).
 fn lapse_asks(plane: &McpDoor, ticket: Ticket, now_ns: u64, seq: &mut u32) {
     let lapsed: Vec<(u64, Vec<u8>)> = plane.live_asks.with_all(|m| {
         let keys: Vec<(u64, u64)> = m
@@ -613,10 +554,6 @@ fn ping(plane: &McpDoor) -> Vec<u8> {
 }
 
 /// THE TICK, for the subscriptions kept on carrier sessions: each stepped over the live catalogue
-/// under the standing and grants its caller's units last re-asked ([`reconfirm`]), what it says
-/// emitted on its session (a `ping` when it has been quiet, or when its standing is due to be
-/// re-asked), and a subscription whose session can take nothing more, or that ended (its
-/// permission lapsed, or not re-confirmed), dropped.
 pub(super) fn tick(plane: &McpDoor, ticket: Ticket, now_ns: u64) {
     let mut seq: u32 = 0;
     lapse_asks(plane, ticket, now_ns, &mut seq);

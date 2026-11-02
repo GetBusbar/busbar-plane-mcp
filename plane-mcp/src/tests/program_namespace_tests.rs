@@ -53,8 +53,7 @@ fn a_slot_zero_operator_and_a_unit_on_the_shared_child_have_distinct_typed_ids()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     reset(1, Vec::new());
-    // The existing numeric wire id for unit 7's first list. This fixture protects that wire
-    // compatibility while the operator with slot 0/generation 7 shares the child with it.
+
     const UNIT_ID: u64 = 1_649_267_442_560;
     let leases = opened();
     let mut unit = Correlator::default();

@@ -2,15 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! A sealed state's window is judged at a time the host's clock gave: a host whose `clock.now`
-//! fails refuses the state (busbar's own and a relayed one) and mints none, and never reads the
-//! failure as the epoch (BUSBAR-1.6.0 spec line 1576: the clock is the kernel's one clock; line
-//! 3295-3370: fail closed).
-//!
-//! The door's ask decision and its relayed state's seal are driven here over the host they seal
-//! against (`plane_door::SealHost`), a plain Rust value: a clock that reads a given second, one whose
-//! read fails and one that is not served (both read as no time, as the door's host services answer
-//! them), a signer whose signature is the data's digest, and a random fill of sevens. The door's own
-//! [`DoorSeal`](crate::plane_door::DoorSeal) is the same seam over the host's services.
 
 use serde_json::json;
 
@@ -21,7 +12,6 @@ use busbar_contract::abi::sdk::publish::Keyed;
 use serde_json::Value;
 
 /// A HOST'S CLOCK, as the seal reads it: the Unix second it answers, or `None` when its read fails
-/// or it serves no clock.
 struct HostClock {
     secs: Option<u64>,
 }
@@ -36,9 +26,6 @@ static UNSERVED: HostClock = HostClock { secs: None };
 static FAILS: HostClock = HostClock { secs: None };
 
 /// THE HOST THE DOOR SEALS AGAINST, as a value: its clock, a signer whose signature is the data's
-/// digest (64 hex bytes, so a state opens only as minted), a random fill of sevens, and the
-/// instance's ledger of spent approvals (no host claim is served, so the local half is the gate,
-/// as the door's own seal answers a host that serves none).
 struct HostDouble<'a> {
     clock: &'static HostClock,
     spent: &'a Keyed<String, u64>,
@@ -140,7 +127,7 @@ fn busbars_own_state_is_refused_when_the_clock_fails() {
     let mut retry = caps();
     retry["requestState"] = json!(request_state);
     retry["inputResponses"] = json!({ "ok": true });
-    // A clock that reads past the window refuses the state as expired: the harness's control.
+
     assert!(
         matches!(
             decide_on(&LAPSED, &spent, &rounds, &retry),
@@ -148,14 +135,14 @@ fn busbars_own_state_is_refused_when_the_clock_fails() {
         ),
         "a lapsed state is expired"
     );
-    // A clock that fails (whether served and failing, or not served) judges nothing: refused.
+
     for table in [&FAILS, &UNSERVED] {
         let d = decide_on(table, &spent, &rounds, &retry);
         assert!(
             matches!(d, AskDecision::Refuse(AskRefusal::ClockUnavailable { .. })),
             "refused for the clock, got {d:?}"
         );
-        // And no state is minted at the epoch.
+
         let d = decide_on(table, &spent, &rounds, &caps());
         assert!(
             matches!(d, AskDecision::Refuse(AskRefusal::ClockUnavailable { .. })),
@@ -236,7 +223,6 @@ fn relayed_under_failed_clock(ttl_secs: u64) -> crate::call::AskRefusal {
 }
 
 /// A relayed ask (the request's window) whose host clock fails is refused as `ask_unavailable`, in
-/// words naming the clock.
 #[test]
 fn a_relayed_ask_under_a_failed_clock_is_refused_naming_the_clock() {
     let refusal = relayed_under_failed_clock(ask::DEFAULT_TTL_SECS);

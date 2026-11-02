@@ -2,28 +2,24 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE MCP PLANE DOOR'S ROOT CELLS, as the composition root's door-cells row reads them: this file
-//! is the one this crate states under its `links` name (`build.rs`, `cargo::metadata=cells=`),
-//! compiled as a child of the composition root's serve module in its test builds (`super::` is
-//! `root::serve`), the same for this pinned dependency as for a path one. The kernel and the loader
-//! are the root's to link, never a plane's, so this directory has no `main.rs`,
-//! and `cargo test -p busbar-plane-mcp` does not build it.
-//!
-//! What it states is the plane's answer to busbar's capability-equality ledger: its two columns,
-//! and the root-leg cells the ledger marks not applicable on them, reason for reason, which the
-//! composition root holds equal to the ledger's (`root/tests/door_cells.rs`). The leg's proven
-//! cells are where the ledger's `root_legs` row `root-mcp` names them (busbar's
-//! `crates/busbar/src/root/tests/serve_tests.rs`, its `tools_door` module); the door's
-//! secret-source driver is the composition root's own (`root/tests/secret_source.rs`, the tool
-//! door's).
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 /// THIS PLANE'S CAPABILITY-EQUALITY COLUMNS (`qa/capability-equality.json`): the cells its root leg
-/// answers for.
 pub(crate) const COLUMNS: &[&str] = &["mcp-client", "mcp-server"];
 
 /// `(capability, column, reason)`: the root-leg cells this plane is NOT owed, each the ledger's own
-/// not-applicable cell with its reason, word for word. The composition root holds the two equal: a
-/// plane opts out of nothing the ledger says it has, and the ledger excuses nothing the plane does
-/// not state.
 pub(crate) const NOT_APPLICABLE: &[(&str, &str, &str)] = &[
     (
         "breaker-trip",
@@ -58,9 +54,6 @@ pub(crate) const NOT_APPLICABLE: &[(&str, &str, &str)] = &[
 ];
 
 /// THE SECRET-SOURCE SCAN'S DRIVEN DOOR (the composition root's `secret_source.rs`, which holds
-/// every linked door plane to a driver): the Statement names the cells in this file drive. None:
-/// this door's driver is the composition root's own (see the module docs), so this file adds no
-/// name to the scan.
 pub(crate) fn secret_source_driven() -> Vec<String> {
     Vec::new()
 }

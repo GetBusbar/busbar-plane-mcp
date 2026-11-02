@@ -2,12 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE ANSWERS THE PLANE GIVES FROM WHAT IT HOLDS: every request whose answer is the generation's
-//! catalogue or the section's own content, and that reaches no far end. Pure: the arrival's
-//! [`Disposition`], the generation's [`Catalogue`] and the caller's `admit` predicate in; the status
-//! and the answer's bytes out, or [`Answer::Far`] for a request that is not answered here.
-//!
-//! The answers are the served engine's, byte for byte, including its refusals: a local answer that
-//! refuses answers its own refusal body with its own status.
 
 use serde_json::{json, Value};
 
@@ -112,7 +106,6 @@ fn discover_visible(
 }
 
 /// ANSWER ONE ARRIVAL from what the plane holds. `params` is the request body's `params`;
-/// `hidden` is the kernel's trust verdict for a listed tool: `true` hides it.
 pub fn answer(
     disposition: &Disposition,
     params: Option<&Value>,
@@ -142,8 +135,6 @@ pub fn answer(
                     Err(refusal) => Answer::refused(&refusal),
                 }
             } else if op == OP_PROMPT_GET {
-                // A prompt that asks its caller first, or a retry presenting answers or state,
-                // takes busbar's ask decision before it renders: not answered here.
                 let retried = params.is_some_and(|p| {
                     p.get("inputResponses").is_some() || p.get("requestState").is_some()
                 });
@@ -155,7 +146,6 @@ pub fn answer(
             } else if op == OP_TASK_GET || op == OP_TASK_UPDATE || op == OP_TASK_CANCEL {
                 Answer::refused(&crate::call::task_verb(id, params))
             } else if op == OP_COMPLETION {
-                // Always the empty completion, never validated against the catalogue.
                 let empty = json!({ "completion": { "values": [], "hasMore": false, "total": 0 } });
                 Answer::ok(complete(id, empty))
             } else if op == OP_DISCOVER {

@@ -2,24 +2,10 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE ANSWER'S FRAMING: one JSON-RPC answer re-framed as an event stream, with the log records
-//! busbar writes about its own handling of the request riding ahead of it. Pure: the caller's
-//! `Accept` value, its `_meta` and the finished answer in; the event-stream bytes out.
-//!
-//! A caller that did not ask for a stream is answered in JSON, unchanged: [`prefers_event_stream`]
-//! is false for every `Accept` that puts `application/json` first, which is every MCP client that
-//! has not deliberately asked otherwise. A caller that supplied a `progressToken` has asked for
-//! progress, and a stream is the only shape progress can arrive in, so the token is itself a request
-//! for one. Only a `200` whose body is one JSON document is re-framed; every other answer goes out as
-//! it was written.
-//!
-//! The log records describe BUSBAR, never an upstream: an upstream's own records would arrive at
-//! busbar's caller under busbar's name. Their `logger` is prefixed `busbar.` so that stays visible.
 
 use serde_json::{json, Value};
 
 /// The `_meta` key a caller names the least severe log level it wants with. An extension key under
-/// busbar's own prefix: this revision has no `logging/setLevel` (no session to remember it in), so
-/// the level rides the request it applies to.
 pub const META_LOGGING_LEVEL: &str = "io.busbar/loggingLevel";
 
 /// The level a caller that names none is given.
@@ -61,8 +47,6 @@ pub(crate) fn severity_of(name: &str) -> Option<usize> {
 }
 
 /// The least severe level the caller asked for in `_meta`, or [`DEFAULT_LEVEL`]. A level the
-/// protocol does not name is the default, never a refusal: the caller asked for a stream, and an
-/// unknown filter is not a reason to deny it one.
 #[must_use]
 pub fn requested_level(meta: Option<&Value>) -> &'static str {
     let named = meta
@@ -75,7 +59,6 @@ pub fn requested_level(meta: Option<&Value>) -> &'static str {
 }
 
 /// Whether a record at `level` passes a caller that asked for `requested`. An unknown name on
-/// either side passes: the filter only ever removes what it can place.
 #[must_use]
 pub fn level_allows(requested: &str, level: &str) -> bool {
     match (severity_of(requested), severity_of(level)) {
@@ -85,7 +68,6 @@ pub fn level_allows(requested: &str, level: &str) -> bool {
 }
 
 /// Whether the caller's `Accept` value prefers an event stream to JSON: by quality, then by
-/// position, and never when the stream is listed at `q=0` or not at all.
 #[must_use]
 pub fn prefers_event_stream(accept: Option<&str>) -> bool {
     let Some(accept) = accept else {
@@ -148,11 +130,6 @@ fn push_raw_event(out: &mut String, data: &str) {
 }
 
 /// One answer as an event stream: each of `frames`, then the answer, one `message` event each.
-/// `None` when `body` is not one JSON document (it goes out as it was).
-///
-/// The answer is its own bytes: never parsed and printed again, which would re-order its
-/// members and re-spell its numbers. Each of its lines is one `data:` line, and a client joins them
-/// back with `\n`: a JSON document carries a line break only between its tokens.
 #[must_use]
 pub fn event_stream(body: &[u8], frames: &[Value]) -> Option<Vec<u8>> {
     let text = std::str::from_utf8(body).ok()?;
@@ -216,13 +193,6 @@ impl Framing {
     }
 
     /// The answer `(status, body)` framed: a `200` with a JSON body as an event stream, and
-    /// `true`; anything else as it was, and `false`. The stream is each progress frame, then the
-    /// two `notifications/message` records busbar writes about its own handling (what was
-    /// dispatched, `debug`, and how it ended, `info`) at the caller's level, then the answer.
-    ///
-    /// The answer is its own bytes: never parsed and printed again, which would re-order
-    /// its members and re-spell its numbers. Each of its lines is one `data:` line, and a client
-    /// joins them back with `\n`: a JSON document carries a line break only between its tokens.
     #[must_use]
     pub fn frame(&self, status: u32, body: Vec<u8>, progress: &[Value]) -> (Vec<u8>, bool) {
         if status != 200 {

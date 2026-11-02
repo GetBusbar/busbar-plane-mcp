@@ -2,7 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The relayed call, pure: admission in the engine's order and words, the request the client
-//! dialect builds, and the far end's answer settled.
 
 use serde_json::{json, Value};
 
@@ -54,7 +53,6 @@ fn judge_continuation(
 }
 
 /// One server: an approved tool whose `path` argument is mirrored in `Mcp-Param-Path`, a tool
-/// awaiting approval, a tool that must be answered as a task, and a tool that asks its caller.
 const SECTION: &str = r#"{"fs": {"url": "https://mcp.example/fs", "pin": {"mechanism": "unpinned"},
   "grants": {"roots": true},
   "tools_allow": {
@@ -132,9 +130,6 @@ fn a_call_with_no_name_is_malformed_and_logged_with_no_tool() {
 }
 
 /// RED W11 (website `mcp.md:161,432`: the audit records every check, refusals included): a name
-/// past the ceiling is refused, AND the refusal is logged and audited (rejected), under a BOUNDED
-/// rendering of the name (a prefix and its byte length, which no real tool name can spell), never
-/// the name verbatim.
 #[test]
 fn an_oversized_name_refusal_is_audited_under_a_bounded_name() {
     let long = "x".repeat(MAX_TOOL_NAME_BYTES + 1);
@@ -195,11 +190,6 @@ fn an_unknown_and_an_ungranted_tool_read_the_same_and_log_apart() {
     assert_eq!(line.expect("logged").reason, "not_granted");
 }
 
-/// THE KERNEL'S VERDICT, RENDERED (ARCHITECT Q3): the door judges no trust; it renders what the
-/// kernel's Approve (`trust.serves`) answered for the called tool. An item never sighted is not
-/// found, as an unknown name is; a known one the operator has not approved is refused; every other
-/// distrust is refused under its own reason; a server the re-fetch could not reach fails the call
-/// as an upstream failure (a tool error), never sent.
 #[test]
 fn the_kernels_trust_verdict_is_rendered_and_never_judged_here() {
     use busbar_contract::abi::host::service as svc;
@@ -277,7 +267,6 @@ fn the_kernels_trust_verdict_is_rendered_and_never_judged_here() {
 }
 
 /// The verdict is asked only of a tool the caller is granted: an ungranted call is not found before
-/// the kernel is asked anything.
 #[test]
 fn the_verdict_is_asked_only_after_the_grants() {
     let (r, _) = refused(admit_trusted(
@@ -427,10 +416,6 @@ fn judged(arguments: Value, judge: &mut dyn FnMut(&ToolEntry, &str) -> Option<u6
     judge_arguments(admission, judge)
 }
 
-/// THE ARGUMENT GUARD ASKS THE HOST (BUSBAR-1.6.0.md Appendix C B.3 item 11, `dest.judge`): every
-/// host the arguments name is put to the judge for the called tool, an IPv6 literal bracketed as
-/// `dest.judge` reads it, and the host's verdict alone decides. A host the plane holds no rule
-/// about is refused when the judge refuses it, in the guard's bytes; one the judge admits is sent.
 #[test]
 fn the_hosts_verdict_decides_an_argument_url() {
     let arguments = json!({ "path": "/a", "fetch": "http://public.example/x", "peer": "https://[2001:db8::1]:8443/" });
@@ -475,7 +460,6 @@ fn the_hosts_verdict_decides_an_argument_url() {
 }
 
 /// A host that gives no verdict (it serves no `dest.judge`, or the judgement failed) refuses the
-/// value rather than admitting it unjudged; arguments naming no host never ask it.
 #[test]
 fn a_host_that_gives_no_verdict_refuses_the_argument() {
     let (r, _) = refused(judged(
@@ -514,8 +498,7 @@ fn the_request_is_the_dialect_builders_at_the_members_path() {
         "the upstream's own name"
     );
     assert_eq!(body["id"], json!(0));
-    // A RELAYED ASK NEEDS A CALLER WHO CAN ANSWER IT (Law 11): the roots grant alone advertises
-    // nothing to a caller that declared no roots; with the caller's roots declared it is.
+
     assert_eq!(
         body["params"]["_meta"][crate::codec::META_CLIENT_CAPABILITIES],
         json!({}),
@@ -576,7 +559,6 @@ fn settle_far(far: &str) -> Settled {
 }
 
 /// A result with no `resultType` gets the dialect's `complete` ahead of the upstream's own members,
-/// which follow as they came; an empty result is the stamp alone.
 #[test]
 fn a_result_is_stamped_and_dispatched() {
     let settled = settle_far(
@@ -604,11 +586,6 @@ fn far_result(result: &str) -> String {
     format!(r#"{{"jsonrpc":"2.0","id":0,"result":{result}}}"#)
 }
 
-/// LAW 11 (THE DESIGN 2126, 2131-2132; product hard rule 3369-3373): a tool's result is the
-/// upstream's data and reaches the caller as the upstream sent it. `Vec<String>` and `<b>x</b>` in
-/// the content text, in `structuredContent` and in `_meta` are the tool's answer, not markup busbar
-/// may strip, and the result's bytes are the upstream's own, member order included.
-/// RED arm: a built-in strip served `Vec` for `Vec<String>` and `x` for `<b>x</b>`.
 #[test]
 fn a_result_reaches_its_caller_as_the_upstream_sent_it() {
     let sent = r#"{"resultType":"complete","structuredContent":{"t":"Vec<String>","n":1,"h":"<b>x</b>"},"content":[{"type":"text","text":"fn f() -> Vec<String> { <b>x</b> }"}],"_meta":{"m":"<i>y</i>"}}"#;
@@ -632,11 +609,6 @@ fn a_result_reaches_its_caller_as_the_upstream_sent_it() {
     assert_eq!((line.outcome, line.reason.as_str()), ("dispatched", ""));
 }
 
-/// LAW 11 (THE DESIGN 2131-2132): a `structuredContent` that does not match the tool's published
-/// `outputSchema` is still the upstream's answer. It is relayed unchanged; busbar never answers in
-/// the upstream's place.
-/// RED arm: busbar replaced it with its own `isError` result, "The structured result was NOT
-/// served".
 #[test]
 fn structured_output_breaking_the_published_schema_is_relayed_unchanged() {
     let sent = r#"{"resultType":"complete","content":[],"structuredContent":{}}"#;
@@ -673,10 +645,6 @@ fn an_upstream_error_is_a_tool_failure_naming_the_server() {
     );
 }
 
-/// LAW 11 (THE DESIGN 2126, 2131-2132; product hard rule 3369-3373): the upstream's JSON-RPC
-/// error message is the upstream's data and reaches the caller unchanged inside busbar's failure
-/// words; `Vec<String>` and `<b>x</b>` are not markup busbar may strip.
-/// RED arm: the failure text ran through the markup strip, serving `Vec` and `x`.
 #[test]
 fn an_upstream_error_message_reaches_its_caller_unchanged() {
     let (_, body, _) = answer_of(settle_far(
@@ -689,18 +657,6 @@ fn an_upstream_error_message_reaches_its_caller_unchanged() {
     );
 }
 
-/// P-ITEM: EMPTY REPLY / UNARY-EMPTY TERMINALITY (spec DONE item 2, "All P-item behaviours match
-/// 1.5.5"; the drive log's P4, commit 470351a480, which the money briefs name "mcp bills empty
-/// answer as complete"). An envelope with a real result is the upstream's complete answer; one
-/// with neither `result` nor `error` is never settled as one.
-///
-/// This is a money boundary. A JSON-RPC answer carries exactly one of `result` or `error`; a
-/// document with NEITHER used to fall through to a complete answer and charge the caller for a
-/// result that never came. On the served door it is the upstream's failure: an `isError` result
-/// naming the server, logged `upstream_failed` and audited rejected, never the `dispatched` line
-/// of a delivered result. The 1.5.5 behaviour this plane matches is its one surface's (the llm
-/// surface; owner correction 2026-09-28): a response the caller cannot use is not billed as a
-/// delivered one (v1.5.5 `crates/busbar/src/proxy/response_body.rs:415-440`).
 #[test]
 fn p_item_empty_reply_only_a_real_result_settles_complete() {
     let (status, body, line) = answer_of(settle_far(r#"{"jsonrpc":"2.0","id":0,"result":{}}"#));
@@ -746,8 +702,6 @@ fn an_ungranted_ask_is_refused_and_never_forwarded() {
 }
 
 /// LAW 11 (U16): a granted roots ask is RELAYED to the caller, its result as it came; busbar
-/// answers none of it. RED arm: a satisfier answering from the operator's roots would settle a
-/// next round (an answer busbar wrote) instead of handing the upstream's result back.
 #[test]
 fn a_granted_roots_ask_is_relayed_to_the_caller_as_it_came() {
     let far = r#"{"jsonrpc":"2.0","id":0,"result":{"resultType":"input_required","inputRequests":{"r":{"method":"roots/list"}},"requestState":"s"}}"#;
@@ -773,8 +727,6 @@ fn a_granted_roots_ask_is_relayed_to_the_caller_as_it_came() {
 }
 
 /// LAW 11 (BUSBAR-1.6.0 lines 2127-2132, the relay-only ruling at 418-422): a granted SAMPLING ask
-/// is relayed to the caller exactly as the upstream sent it. busbar runs no completion for it on any
-/// plane; the caller answers it. A pin: predev already relays on this path, and this holds it there.
 #[test]
 fn a_granted_sampling_ask_is_relayed_to_the_caller_unchanged() {
     let section = section();
@@ -800,8 +752,6 @@ fn a_granted_sampling_ask_is_relayed_to_the_caller_unchanged() {
 }
 
 /// LAW 11 (finding 20): what the caller reads about an upstream's ask says what the code does — the
-/// ask is RELAYED to the caller, or not relayed under the operator's policy. It never says busbar
-/// satisfies an ask, or that an ask terminates at busbar.
 #[test]
 fn an_ask_refusal_tells_the_caller_the_ask_is_relayed_never_satisfied() {
     let ungranted = settle_far(
@@ -827,7 +777,6 @@ fn an_ask_refusal_tells_the_caller_the_ask_is_relayed_never_satisfied() {
 }
 
 /// An ask mixing a granted kind with an ungranted one is refused naming the ungranted one: the
-/// most privileged kind alone does not decide a map whose lesser entries are ungranted.
 #[test]
 fn an_ask_mixing_an_ungranted_kind_is_refused() {
     let (status, body, _) = answer_of(settle_far(
@@ -890,8 +839,6 @@ fn a_tasks_verb_is_gated_then_names_no_task_of_this_callers() {
 }
 
 /// THE INVOKE REWRITE CONTRACT, as the served engine applied a `prompt: rw` hook's reply to a
-/// call's arguments: an object `content`, a JSON-string `content` that parses to an object, or a
-/// role-less entry itself; the last usable entry wins; nothing usable is not applied.
 #[test]
 fn a_rewrite_replaces_the_arguments_by_the_invoke_contract() {
     let body = br#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"fs_read","arguments":{"path":"/secret"},"_meta":{"k":"v"}}}"#;
@@ -927,7 +874,7 @@ fn a_rewrite_replaces_the_arguments_by_the_invoke_contract() {
         ] })),
         Some(object)
     );
-    // Nothing usable: a role with no content, plain text, a scalar, no messages at all.
+
     assert_eq!(
         args(serde_json::json!({ "messages": [{ "role": "user" }] })),
         None
@@ -940,7 +887,7 @@ fn a_rewrite_replaces_the_arguments_by_the_invoke_contract() {
     let mut untouched = request();
     assert_eq!(rewritten(&mut untouched, b"not json"), None);
     assert_eq!(untouched, request());
-    // A request that is not a call is never rewritten.
+
     let mut list = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}});
     assert_eq!(
         rewritten(
@@ -953,7 +900,6 @@ fn a_rewrite_replaces_the_arguments_by_the_invoke_contract() {
 }
 
 /// THE AUDIT ROW OF BUSBAR'S OWN ASK (SEAM-L(k)): an ask of the caller is `mcp.caller_ask` applied on
-/// the tool; a task created is the call applied; a task that could not start is rejected.
 #[test]
 fn an_ask_of_the_caller_and_a_task_are_audited_in_the_engines_words() {
     let mut ask = |_: &ToolEntry, _: &Value| crate::ask::AskDecision::Ask {
@@ -989,13 +935,6 @@ fn an_ask_of_the_caller_and_a_task_are_audited_in_the_engines_words() {
         Some(AuditRow::tool("fs_batch", false))
     );
 }
-
-// ---------------------------------------------------------------------------------------------
-// THE INPUT-SIDE SAMPLING BOUNDS (owner ruling Q22c, BUSBAR-1.6.0 l.3951): a granted
-// `sampling/createMessage` ask is relayed only while it is within `tools.<server>.sampling_bounds`.
-// Each bound: one over the cap is refused naming the exact key (RED before this change: it relayed),
-// exactly at the cap still relays, and the default applies when the key is omitted.
-// ---------------------------------------------------------------------------------------------
 
 /// The `fs` definition with the sampling grant held and `bounds` applied.
 fn sampling_def(
@@ -1076,7 +1015,7 @@ fn sampling_max_messages_over_the_cap_is_refused_at_the_cap_relays() {
 #[test]
 fn sampling_max_prompt_bytes_counts_the_system_prompt_and_every_message() {
     let def = sampling_def(|b| b.max_prompt_bytes = 10);
-    // 4 (system) + 3 + 3 = 10: at the cap.
+
     let at = json!({ "systemPrompt": "abcd", "messages": text_messages(2, "xyz") });
     assert_relayed(sampling_settle(&def, at));
     let over = json!({ "systemPrompt": "abcde", "messages": text_messages(2, "xyz") });
@@ -1131,12 +1070,11 @@ fn sampling_temperature_outside_the_range_is_refused_at_the_edges_relays() {
     );
     assert_relayed(sampling_settle(&def, json!({ "temperature": 0.2 })));
     assert_relayed(sampling_settle(&def, json!({ "temperature": 1.5 })));
-    // Absent temperature is never a violation.
+
     assert_relayed(sampling_settle(&def, json!({})));
 }
 
 /// The defaults apply when `sampling_bounds` is not written at all: 64 messages, 65536 prompt bytes,
-/// 8 stop sequences of 64 bytes, temperature 0.0..=2.0.
 #[test]
 fn sampling_bounds_default_when_the_keys_are_omitted() {
     let def = sampling_def(|_| {});
@@ -1189,17 +1127,12 @@ fn sampling_bounds_default_when_the_keys_are_omitted() {
 }
 
 /// The bound is read where there is no definition too (the defaults), and a roots ask is never
-/// measured.
 #[test]
 fn sampling_bounds_measure_only_sampling_asks() {
     let roots = r#"{"jsonrpc":"2.0","id":0,"result":{"resultType":"input_required","inputRequests":{"r":{"method":"roots/list","params":{"messages":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65]}}}}}"#;
     assert_relayed(settle_far(roots));
 }
 
-/// THE CALLER'S REPLY IS BOUNDED TOO (ARCHITECT 2026-10-14): the continuation sent upstream
-/// (`inputResponses` with the `requestState` it carries) is measured as serialised; one byte over
-/// `max_input_response_bytes` is refused by name (`sampling_bound_exceeded`, 403) and not forwarded,
-/// exactly at the cap it is forwarded.
 #[test]
 fn input_responses_over_the_cap_are_refused_and_not_forwarded_at_the_cap_forwarded() {
     let continuation = json!({
@@ -1241,12 +1174,6 @@ fn input_responses_default_cap_is_one_mebibyte() {
     let small = json!({ "inputResponses": { "s": "y" }, "requestState": "z" });
     judge_continuation("fs", &def.sampling_bounds, &small).expect("under");
 }
-
-// ---------------------------------------------------------------------------------------------
-// BUSBAR'S OWN ANSWERS ACROSS ROUNDS AND ACROSS A RELAYED ASK (row 159 mcp findings C-M5, C-M6):
-// what went out on the first call is what goes out on every retry of the same exchange, plus the
-// answers of the round the retry closes.
-// ---------------------------------------------------------------------------------------------
 
 /// A tool whose operator asks its caller in TWO rounds before it runs.
 const TWO_ROUNDS: &str = r#"{"fs": {"url": "https://mcp.example/fs", "pin": {"mechanism": "unpinned"},
@@ -1298,8 +1225,6 @@ fn asked_state(a: Admission) -> String {
 }
 
 /// C-M6: an exchange of two rounds goes out with BOTH rounds' answers. The caller's retry answers
-/// the round it was asked (MRTR: `inputResponses` answers the `inputRequests` of the result it
-/// retries), so the earlier round's answers ride in the sealed state, not in the caller's memory.
 #[test]
 fn a_two_round_exchange_goes_out_with_every_rounds_answers() {
     let section = crate::statement::read_tools_section(TWO_ROUNDS.as_bytes()).expect("reads");
@@ -1327,8 +1252,6 @@ fn a_two_round_exchange_goes_out_with_every_rounds_answers() {
 }
 
 /// C-M5: the retry of an upstream's ask relayed to the caller goes out as the first call did (the
-/// caller's arguments with busbar's own answers merged), plus the upstream's answers in the
-/// continuation. The relayed state carries busbar's own answers sealed (`a`).
 #[test]
 fn a_relayed_asks_retry_goes_out_with_busbars_own_answers_merged_again() {
     let leg: crate::ask::UpstreamLeg = serde_json::from_value(json!({
@@ -1359,9 +1282,6 @@ fn a_relayed_asks_retry_goes_out_with_busbars_own_answers_merged_again() {
     );
 }
 
-/// C-M7 (owner ruling Q22c): `max_prompt_bytes` measures every content part an ask carries, not
-/// only its text: an image, an audio clip or an embedded resource is prompt the caller's model is
-/// handed, and an upstream picks its size.
 #[test]
 fn sampling_max_prompt_bytes_counts_every_content_part() {
     let def = sampling_def(|b| b.max_prompt_bytes = 64);
@@ -1381,7 +1301,7 @@ fn sampling_max_prompt_bytes_counts_every_content_part() {
         );
         assert_bound_refused(settled, "max_prompt_bytes", "64");
     }
-    // In an array of parts too.
+
     let mixed = json!({ "messages": [{ "role": "user", "content": [
         { "type": "text", "text": "hi" },
         { "type": "image", "data": "x".repeat(100), "mimeType": "image/png" }
@@ -1391,14 +1311,13 @@ fn sampling_max_prompt_bytes_counts_every_content_part() {
         matches!(settled, Settled::Answer { .. }),
         "an image beside a text part must be measured, got {settled:?}"
     );
-    // The control: a small image is within the bound.
+
     let small = json!({ "messages": [{ "role": "user", "content":
         { "type": "image", "data": "xx", "mimeType": "image/png" } }] });
     assert_relayed(sampling_settle(&def, small));
 }
 
 /// C-M5, the sealing half: the relayed state's leg carries busbar's own answers the call went out
-/// with ([`own_answers`]), and its retry goes out with the first call's arguments exactly.
 #[test]
 fn the_relayed_leg_seals_the_answers_the_first_call_went_out_with() {
     let cat = catalogue();
@@ -1435,7 +1354,7 @@ fn the_relayed_leg_seals_the_answers_the_first_call_went_out_with() {
     ));
     assert_eq!(again.arguments, sent.arguments);
     assert_eq!(again.sent_digest, sent.sent_digest);
-    // A call that went out with none seals none.
+
     let plain = go(admit_call(
         &cat,
         &json!(1),
@@ -1448,10 +1367,6 @@ fn the_relayed_leg_seals_the_answers_the_first_call_went_out_with() {
 }
 
 /// RED W10 (website `mcp.md:141-144`: an unknown and an ungranted tool give "the same words"): the
-/// two answers are BYTE-IDENTICAL on the wire, status, message and `data` alike, whether the plane
-/// refuses the ungranted call itself or renders the kernel's grant denial ([`not_granted`]): a
-/// caller probing names learns only that there is nothing there for it. The per-call log keeps
-/// the two apart (`unknown_tool`, `not_granted`), where the operator reads them.
 #[test]
 fn an_unknown_and_an_ungranted_tool_are_byte_identical_on_the_wire() {
     let id = json!(7);
@@ -1488,8 +1403,6 @@ fn an_unknown_and_an_ungranted_tool_are_byte_identical_on_the_wire() {
 }
 
 /// RED W7 (security.md: a redirect is a failure, never followed): a relayed call's far end that
-/// answers `302` is an upstream failure, whatever well-formed result rides it: the result is never
-/// served to the caller.
 #[test]
 fn a_302_from_the_upstream_is_a_failure_not_a_result() {
     let section = section();
@@ -1527,8 +1440,6 @@ fn entry_with_schema(schema: &Value) -> ToolEntry {
 }
 
 /// M1-7: an `x-mcp-header` may annotate an integer or a boolean. The body's value is rendered as
-/// the header carries it (a decimal integer, `true`/`false`), so a header that mirrors it agrees,
-/// one that does not disagrees, and a body that sets it with no header is refused.
 #[test]
 fn an_integer_or_boolean_annotated_argument_is_compared_as_the_header_renders_it() {
     let entry = entry_with_schema(&json!({"type": "object", "properties": {
@@ -1561,7 +1472,6 @@ fn an_integer_or_boolean_annotated_argument_is_compared_as_the_header_renders_it
 }
 
 /// M1-8: an annotation on a nested property, reached through a chain of `properties`, is validated
-/// against the argument at that path.
 #[test]
 fn a_nested_annotated_argument_is_compared_with_its_header() {
     let entry = entry_with_schema(&json!({"type": "object", "properties": {
@@ -1580,7 +1490,6 @@ fn a_nested_annotated_argument_is_compared_with_its_header() {
 }
 
 /// M1-9: the relayed request mirrors every annotated argument into its `Mcp-Param-*` header, as a
-/// conforming client must, or a server that checks the mirror refuses it.
 #[test]
 fn the_relayed_request_mirrors_its_annotated_arguments() {
     let section = section();
@@ -1595,7 +1504,6 @@ fn the_relayed_request_mirrors_its_annotated_arguments() {
 }
 
 /// M1-11: THE EVENT-STREAM LINE RULE, as `client::compat::EventReader` reads it (B5): CRLF, a lone
-/// LF and a lone CR each end a line, so a body framed with bare CRs reads as the same events.
 #[test]
 fn an_answer_framed_with_bare_crs_reads_as_its_events() {
     let raw = b"event: message\rdata: {\"a\":1}\r\rdata: {\"b\":\rdata: 2}\r\r";
@@ -1608,7 +1516,6 @@ fn an_answer_framed_with_bare_crs_reads_as_its_events() {
 }
 
 /// M1-13: a progress notification whose JSON is split over several `data:` lines is one event,
-/// read as `last_sse_data` reads one.
 #[test]
 fn a_progress_frame_split_over_data_lines_is_one_frame() {
     let raw = b"data: {\"jsonrpc\":\"2.0\",\ndata: \"method\":\"notifications/progress\",\ndata: \"params\":{\"progressToken\":\"busbar-0\",\"progress\":1}}\n\n";
@@ -1616,8 +1523,6 @@ fn a_progress_frame_split_over_data_lines_is_one_frame() {
 }
 
 /// M1-14: an ask the bounds cannot read is not relayed past them. An `inputRequests` that is not
-/// an object of requests, and a request whose method is none of the asks this plane knows, are
-/// refused rather than relayed whole under the sampling grant.
 #[test]
 fn an_ask_the_sampling_bounds_cannot_read_is_refused_not_relayed() {
     let def = sampling_def(|_| {});
@@ -1649,7 +1554,6 @@ fn an_ask_the_sampling_bounds_cannot_read_is_refused_not_relayed() {
 }
 
 /// M1-16: a temperature that is not a number is refused for that, never by naming a bound the
-/// operator would then adjust in vain.
 #[test]
 fn a_temperature_that_is_not_a_number_is_refused_naming_that() {
     let def = sampling_def(|_| {});

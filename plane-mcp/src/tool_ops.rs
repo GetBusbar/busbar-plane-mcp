@@ -1,25 +1,5 @@
 //! The operation vocabulary: which method name is which priced operation.
-//!
-//! This protocol names its operation in the BODY rather than in the path, so the table below is the
-//! whole of how a request becomes a unit. One row per method, one class per row, and the class is
-//! what the draft declares and what the unit is priced at.
-//!
-//! ## Why the table is written here rather than read from the codec
-//!
-//! The sibling `codec` module carries the accepted wire methods; this table additionally assigns
-//! their operation classes and sender roles. Tests compare those wire names and the battery's
-//! methods with this table so the two responsibilities cannot silently drift.
-//!
-//! ## Three kinds of row
-//!
-//! A CLIENT method is one a caller sends and this node answers. A PROVIDER method is one an upstream
-//! sends BACK during a call — asking for a completion, for a list of roots, or for something from
-//! the caller — which is relayed to that call's caller inside the call's own unit (it opens no unit
-//! of its own; the caller's answer goes back to the upstream on the same unit). A
-//! NOTIFICATION is neither: it carries no identifier, obliges no answer, and the specification
-//! forbids replying to one.
 
-// The crate's only public item is `door`: the accessors and variants below were this module's public API; the tests hold them, the door does not reach them.
 #![cfg_attr(not(test), allow(dead_code))]
 
 use busbar_contract::ids::OpClassId;
@@ -64,9 +44,6 @@ pub const OP_TASK_CANCEL: OpClassId = OpClassId::new("task_cancel");
 pub const OP_SUBSCRIPTIONS_LISTEN: OpClassId = OpClassId::new("subscriptions_listen");
 
 /// An upstream asking the caller for a completion, mid-call.
-///
-/// This is provider-initiated: the upstream sends it and busbar relays it to the caller, who answers
-/// it or not. busbar runs no completion for it and opens no unit of another plane.
 pub const OP_SAMPLING: OpClassId = OpClassId::new("sampling");
 
 /// An upstream asking which roots it may work under, mid-call.
@@ -120,9 +97,6 @@ pub struct RpcMethodRow {
 }
 
 /// Every method name this plane reads.
-///
-/// A name absent from here is a method this plane does not carry, and the decode step says so rather
-/// than guessing.
 pub const METHODS: &[RpcMethodRow] = &[
     RpcMethodRow {
         method: "server/discover",
@@ -189,7 +163,6 @@ pub const METHODS: &[RpcMethodRow] = &[
         op: OP_SUBSCRIPTIONS_LISTEN,
         sender: Sender::Client,
     },
-    // The three an upstream sends BACK, mid-call.
     RpcMethodRow {
         method: "sampling/createMessage",
         op: OP_SAMPLING,

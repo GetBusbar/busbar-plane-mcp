@@ -2,8 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! Receipt checks at the actual ProgramExchange caller: no child write precedes a checked first
-//! host head, and a later head cannot replace it. The strict peer delegates receipt parsing and
-//! launch-version stamping to production code; the connector supplies only scripted wire pieces.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;

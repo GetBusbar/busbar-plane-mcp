@@ -2,7 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! Existing door API regressions for local repeated-placeholder answers. The allocation witness
-//! observes only each ABI crossing, never the test's setup or its expected-output iterator.
 
 use super::*;
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -162,7 +161,7 @@ fn begin(d: &Door, unit: u64, method: &str, body: &[u8], accept: &str) {
 fn repeated_prompt_and_resource_answers_stream_past_an_upstream_reply_limit_without_expanded_allocations(
 ) {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
-    // This product exceeds the upstream exchange's 16 MiB limit. Local answers have no such limit.
+
     let argument = "x".repeat(65536);
     let copies = 257;
     let expanded = argument.len() * copies;

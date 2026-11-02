@@ -1,18 +1,7 @@
 //! What reading a stdio child's message is allowed to allocate. Moved in from `tests/` when the
-//! crate's only public item became `door`. It counts through busbar-test-kit's `alloc_counter`
-//! (a dev-dependency; busbar #1830 moved it out of busbar-contract), this crate's
-//! test build's one `#[global_allocator]` (`src/tests/mod.rs`), so the crate holds no `unsafe`.
-//!
-//! An allocation COUNT is the same number on every machine, so work that grows with the input
-//! where it should not is seen here where a stopwatch on a shared runner would miss it.
 
 use busbar_test_kit::alloc_counter::allocations_of;
 
-/// RED (finding 14, the design's no-blocking rule: bounded work): a stdio child's message arriving
-/// in many small pieces is read ONCE. Re-parsing everything held on every piece builds and drops
-/// the message's completed part once per piece: quadratic in its size (a multi-megabyte tool result
-/// costs seconds of worker CPU per lease). Scanning only the new bytes and parsing only a whole
-/// message keeps the count linear: one parse's worth of allocations and the buffer's growth.
 #[test]
 fn a_childs_message_read_in_small_pieces_is_parsed_once() {
     use crate::tool_program::{Frames, Message};

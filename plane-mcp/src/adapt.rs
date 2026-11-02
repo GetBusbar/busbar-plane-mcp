@@ -2,23 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE SESSION REVISIONS, READ INTO AND WRITTEN OUT OF THE ONE DISPATCH.
-//!
-//! The plane has one method dispatch, written against the stateless `2026-07-28` shape: every
-//! request carries its revision and the client's capabilities in `params._meta`, and mirrors its
-//! method (and target name) into request headers. A session revision states those facts once, in
-//! `initialize`, and then relies on the session. So a session request is RAISED into the stateless
-//! shape before dispatch ([`raise`]), and the answer is LOWERED back into the session revision after
-//! it ([`lower_result`]). There is no second dispatch table.
-//!
-//! What a session client is allowed to reach is decided here too ([`session_method`]): the methods
-//! the session revisions define. The stateless revision's own methods (`server/discover`,
-//! `subscriptions/listen`, the tasks extension) are never offered to a session client, whether it
-//! asks for them by name or reads the capabilities `initialize` answered with. The session's own
-//! verbs (`resources/subscribe`, `resources/unsubscribe`, `logging/setLevel`) stay for the old
-//! revisions and are answered from the session's state.
-//!
-//! The `2024-11-05` event-stream framing lives here as values ([`frame`], [`endpoint_event`]);
-//! writing them to a connection is the caller's.
 
 use busbar_contract::spans::members;
 use serde_json::{Map, Value};
@@ -53,8 +36,6 @@ pub enum PostKind {
 }
 
 /// Classifies a POST. The stateless revision is recognised by its own marker (`_meta` carrying the
-/// protocol version) and wins over everything else, and a request with neither a session nor an
-/// `initialize` keeps the stateless reading too, so the stateless path's answers are unchanged.
 #[must_use]
 pub fn classify_post(
     body: &Value,
@@ -140,11 +121,6 @@ pub fn session_method(method: Option<&str>, has_id: bool) -> SessionMethod {
 }
 
 /// RAISES a session request into the stateless shape: `params._meta` gains the stateless revision
-/// and an EMPTY client-capability declaration (a session client's own capabilities would read as
-/// consent to an input-required answer it cannot receive). Its header mirror is then what
-/// [`crate::codec::mirrored`] reads off it.
-///
-/// `None` when the message has no method or its `params` is present and not an object.
 #[must_use]
 pub fn raise(message: &mut Value) -> Option<()> {
     message.get("method")?.as_str()?;
@@ -163,12 +139,9 @@ pub fn raise(message: &mut Value) -> Option<()> {
 }
 
 /// How deep a chain of `properties` the annotation walk follows. A pinned schema is the operator's,
-/// so this bounds stack use, not an attack.
 const MAX_PARAM_DEPTH: usize = 16;
 
 /// THE `x-mcp-header` ANNOTATIONS of a tool's `inputSchema`: each annotated property's path (its
-/// chain of `properties` keys, outermost first) and its header suffix. The walk follows `properties`
-/// only (never `items`, a combinator or a `$ref`), as the custom-header rule reaches a parameter.
 #[must_use]
 pub fn annotated_params(input_schema: Option<&Value>) -> Vec<(Vec<String>, String)> {
     let mut found = Vec::new();
@@ -210,7 +183,6 @@ pub fn argument_at<'a>(arguments: &'a Value, path: &[String]) -> Option<&'a Valu
 }
 
 /// THE TEXT AN `Mcp-Param-*` HEADER CARRIES for one argument value: a string as it is, an integer
-/// in decimal, a boolean as `true` or `false`; `None` for any other value (no header mirrors it).
 #[must_use]
 pub fn param_text(value: &Value) -> Option<String> {
     match value {
@@ -222,9 +194,6 @@ pub fn param_text(value: &Value) -> Option<String> {
 }
 
 /// THE CUSTOM PARAMETER MIRROR a raised or relayed `tools/call` must carry (a session client's
-/// revision has none): for every `x-mcp-header` annotation ([`annotated_params`]) whose argument is
-/// a string, an integer or a boolean ([`param_text`]), (`mcp-param-<suffix>`, the value in the
-/// name sentinel where it needs one).
 #[must_use]
 pub fn param_mirror(
     input_schema: Option<&Value>,
@@ -252,7 +221,6 @@ pub fn param_mirror(
 const STATELESS_ONLY_MEMBERS: &[&str] = &["resultType", "cacheScope", "ttlMs"];
 
 /// LOWERS a stateless result into a session revision's shape: `false` when it is not a complete
-/// one (an input-required or task answer), which no session revision can express.
 pub fn lower_result(result: &mut Value) -> bool {
     let Some(obj) = result.as_object_mut() else {
         return true;
@@ -279,10 +247,6 @@ pub enum Lowered {
 }
 
 /// LOWERS one JSON-RPC answer as BYTES, never parsed and printed again (Law 11, as
-/// `framing::event_stream` relays the stateless answer): an answer [`lower_result`] would change
-/// nothing in is [`Lowered::Unchanged`], and otherwise only the removed members' spans are cut out
-/// of the answer's own text, so every other member keeps its order, its spacing and its numbers'
-/// spelling. `None` for a body that is not one JSON document.
 #[must_use]
 pub fn lower_answer(answer: &[u8]) -> Option<Lowered> {
     let text = std::str::from_utf8(answer).ok()?;
@@ -297,15 +261,13 @@ pub fn lower_answer(answer: &[u8]) -> Option<Lowered> {
     if result.as_object().map(Map::len) == before {
         return Some(Lowered::Unchanged);
     }
-    // A document serde_json read is one this reader walks; were it not, the lowered value is
-    // still the right answer, printed.
+
     let spliced =
         splice_result(text).unwrap_or_else(|| serde_json::to_vec(&value).unwrap_or_default());
     Some(Lowered::Spliced(spliced))
 }
 
 /// `text` (one JSON-RPC answer) with every stateless-only member of its `result` cut out, with the
-/// one comma that joined it: `None` when `text` is not one object with an object `result`.
 fn splice_result(text: &str) -> Option<Vec<u8>> {
     let top = members(text.as_bytes(), 0)?;
     if !text
@@ -315,7 +277,7 @@ fn splice_result(text: &str) -> Option<Vec<u8>> {
     {
         return None;
     }
-    // serde_json reads the last of two same-named members: so does the splice.
+
     let inner = members(text.as_bytes(), top.last("result")?.value_start)?.members;
     let removed: Vec<bool> = inner
         .iter()
@@ -325,11 +287,10 @@ fn splice_result(text: &str) -> Option<Vec<u8>> {
     let mut cuts: Vec<(usize, usize)> = Vec::new();
     for (i, m) in inner.iter().enumerate().filter(|(i, _)| removed[*i]) {
         cuts.push(match last_kept {
-            // A member before the last kept one goes with the comma after it.
             Some(k) if i < k => (m.key_start, inner[i + 1].key_start),
-            // A member after it goes with the comma before it.
+
             Some(k) => (inner[k].value_end, m.value_end),
-            // Every member goes.
+
             None => (inner[0].key_start, m.value_end),
         });
     }
@@ -347,9 +308,6 @@ fn splice_result(text: &str) -> Option<Vec<u8>> {
 }
 
 /// Builds the `initialize` result from the stateless discovery document, for `revision`: only the
-/// capability groups the session revisions define and discovery declared (`tools`, `prompts`,
-/// `resources` with `subscribe`, `logging`, and from `2025-06-18` `completions`); no list-changed
-/// notifications are offered.
 #[must_use]
 pub fn initialize_result(discovery: &Value, revision: Revision) -> Value {
     let declared = discovery.get("capabilities");
@@ -381,7 +339,6 @@ pub fn initialize_result(discovery: &Value, revision: Revision) -> Value {
 }
 
 /// One event-stream event. `data` is written one `data:` line per line it holds, so a multi-line
-/// payload survives framing.
 #[must_use]
 pub fn frame(id: Option<&str>, event: Option<&str>, data: &str) -> String {
     let mut out = String::with_capacity(data.len() + 48);
@@ -414,7 +371,6 @@ pub fn frame(id: Option<&str>, event: Option<&str>, data: &str) -> String {
 }
 
 /// The `2024-11-05` stream's first event: the address, relative to the endpoint's own origin, that
-/// messages for this session are POSTed to.
 #[must_use]
 pub fn endpoint_event(mount_path: &str, session: &str) -> String {
     frame(

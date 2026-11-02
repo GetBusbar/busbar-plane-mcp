@@ -6,7 +6,6 @@
 use super::*;
 
 /// Every field LengthPrefixed (`len:u64-be ⧺ bytes`, a number its eight big-endian bytes), in the
-/// digest's order: ts, server, tool, outcome, reason, tool_digest, pin_generation.
 #[test]
 fn the_call_suffix_is_length_prefixed_in_digest_order() {
     fn lp(out: &mut Vec<u8>, b: &[u8]) {

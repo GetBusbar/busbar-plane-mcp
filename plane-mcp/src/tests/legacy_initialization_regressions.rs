@@ -33,7 +33,7 @@ const INITIALIZE_STREAM: u64 = 1;
 const NOTIFICATION_STREAM: u64 = 2;
 const CALL_ID: u64 = 1;
 const TIMEOUT_MS: u64 = 1000;
-// RFC 9110: the POST is accepted while its RPC answer arrives over SSE.
+
 const HTTP_ACCEPTED: u32 = 202;
 const HTTP_UNAUTHORIZED: u32 = 401;
 
@@ -328,7 +328,7 @@ impl<'h> Fixture<'h> {
         });
         CALLS.with(|calls| calls.borrow_mut().clear());
         let input = host.lend_in(TestIn::<OpenIn>::new().set(|i| &i.head.op, slot::OPEN));
-        // The instance proof retains this external host borrow through CLOSE.
+
         let mut opened = reply::call_hosted_in(
             view()
                 .op::<busbar_contract::abi::export::Ops>(|o| &o.head.open)
@@ -351,7 +351,7 @@ impl<'h> Fixture<'h> {
             .set(|i| &i.head.op, slot::DRIVE)
             .set(|i| &i.head.ticket, ticket)
             .set(|i| &i.head.flags, if resuming { FLAG_RESUME } else { 0 });
-        // A pointer-free input and this door's retained instance proof cover the call.
+
         reply::call_in(
             view()
                 .op::<busbar_contract::abi::export::Ops>(|o| &o.head.drive)
@@ -366,7 +366,7 @@ impl<'h> Fixture<'h> {
         let input = TestIn::<GenIn>::new()
             .set(|i| &i.head.op, slot::RETIRE)
             .set(|i| &i.generation, action as u64);
-        // This exact RETIRE frame carries only the action scalar; the instance stays borrowed.
+
         assert_eq!(
             reply::call_in(
                 view()
@@ -384,7 +384,7 @@ impl<'h> Fixture<'h> {
         let input = TestIn::<CancelIn>::new()
             .set(|i| &i.head.op, slot::CANCEL)
             .set(|i| &i.ticket, OWNER);
-        // Cancellation targets the owner ticket on this fixture's still-live instance.
+
         assert_eq!(
             reply::call_in(
                 view()
@@ -402,7 +402,7 @@ impl<'h> Fixture<'h> {
 impl Drop for Fixture<'_> {
     fn drop(&mut self) {
         let input = TestIn::<InHead>::new().set(|i| &i.op, slot::CLOSE);
-        // CLOSE consumes the proof while its external host and parked Exchange remain live.
+
         let closed = reply::close_in(
             view()
                 .op::<busbar_contract::abi::export::Ops>(|o| &o.head.close)

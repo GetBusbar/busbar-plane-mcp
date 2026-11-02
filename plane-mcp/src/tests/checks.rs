@@ -2,7 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The stateless revision's envelope checks answer as the served engine does: the same order, the
-//! same codes and the same sentences.
 
 use serde_json::{json, Value};
 

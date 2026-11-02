@@ -46,7 +46,7 @@ fn a_held_stdio_place_wakes_queued_work_at_its_existing_ask_deadline() {
         }
         let ask=serde_json::to_vec(&json!({"jsonrpc":"2.0","id":900,"method":"elicitation/create","params":{"message":"sure?"}})).unwrap();
         let mut far = Given::far(ALICE, 200, &ask);
-        // An ask keeps the stdio lease live; LAST would truthfully mean the child closed stdout.
+
         far.flags &= !PIECE_LAST;
         far.head.push(("generation", "1"));
         let asked = d.piece(2, &far);
@@ -72,7 +72,7 @@ fn a_held_stdio_place_wakes_queued_work_at_its_existing_ask_deadline() {
             run(&d, 4, "io", &second)
         };
         assert!(!queued.far);
-        // The existing ask hold is300s; this does not shorten the caller's600s request deadline.
+
         assert_eq!(
             queued.wake_at_ns,
             start + 300_000_000_000,

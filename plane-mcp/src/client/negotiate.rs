@@ -2,12 +2,7 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! ONE UPSTREAM CALL, NEGOTIATED: the client ladder as a sans-I/O state machine. [`Negotiator`]
-//! carries one stateless request and says, one [`Action`] at a time, what to put on the wire: the
-//! request itself; on a refusal `initialize`, `notifications/initialized` and the request lowered
-//! into the revision the upstream chose; on a refusal of `initialize`, [`Action::OpenStream`] (the
-//! driver carries the call over the `2024-11-05` event stream, `door_legacy`).
 
-// The crate's only public item is `door`: the accessors and variants below were this module's public API; the tests hold them, the door does not reach them.
 #![cfg_attr(not(test), allow(dead_code))]
 
 use serde_json::Value;
@@ -104,7 +99,6 @@ pub struct Negotiator {
 
 impl Negotiator {
     /// Carries `original` (a stateless request) to its upstream, starting from what busbar
-    /// `remembered` about that upstream. `client_version` names busbar in `initialize`.
     #[must_use]
     pub fn new(
         original: OutboundRequest,
@@ -128,7 +122,6 @@ impl Negotiator {
     }
 
     /// The id a request lowered into the remembered session carries: that session's next id
-    /// (`UpstreamTable::next_id`), never the stateless round's. `None`: the original's id.
     #[must_use]
     pub fn with_session_id(mut self, id: Option<u64>) -> Self {
         self.session_id = id;
@@ -142,14 +135,12 @@ impl Negotiator {
     }
 
     /// The id the request this negotiation sent in a session carried, when it is not the
-    /// original's: the id its answer is correlated by.
     #[must_use]
     pub fn sent_id(&self) -> Option<u64> {
         self.sent_id
     }
 
     /// What to keep for the next call to this upstream: the negotiated revision and, on a
-    /// session revision, its session. `None` means forget (nothing was learnt, or it was lost).
     #[must_use]
     pub fn remembered(&self) -> Option<Remembered> {
         self.remembered.clone()
@@ -170,8 +161,6 @@ impl Negotiator {
     }
 
     fn in_session(&mut self, revision: Revision, session: Option<String>) -> Action {
-        // A REQUEST IN A SESSION CARRIES THAT SESSION'S OWN NEXT ID, never the stateless round's
-        // that every concurrent call carries.
         let id = self.session_id.filter(|_| self.original_id.is_some());
         let (original, url) = (&self.original, &self.original.url);
         let request = lower_request(original, url, revision, session.as_deref(), id);
@@ -220,7 +209,6 @@ impl Negotiator {
                 }
                 StepOutcome::Unreachable => self.fail(Refusal::Unreachable(Some(answer))),
                 StepOutcome::Refused4xx => {
-                    // A remembered stateless upstream that now refuses is renegotiated once.
                     self.remembered = None;
                     self.initialize()
                 }
@@ -262,8 +250,6 @@ impl Negotiator {
             }
             Phase::InSession { session, .. } => {
                 if answer.status == 404 && session.is_some() && !self.reinitialized {
-                    // The upstream's session is gone (ended, expired, or another replica): the
-                    // spec's recovery is a fresh `initialize`, once.
                     self.reinitialized = true;
                     self.remembered = None;
                     return self.initialize();

@@ -77,7 +77,6 @@ pub enum Disposition {
 }
 
 /// The shared MCP request envelope, including the shape of present parameters. Session and
-/// line housekeeping use this before changing state, just as the stateless dispatch does.
 pub fn request(value: &Value) -> Result<busbar_contract::jsonrpc::Envelope, Refusal> {
     use busbar_contract::jsonrpc::Envelope;
     let envelope = busbar_contract::jsonrpc::read(value).map_err(|invalid| Refusal {
@@ -130,7 +129,6 @@ pub fn request(value: &Value) -> Result<busbar_contract::jsonrpc::Envelope, Refu
 }
 
 /// DECIDE ONE ARRIVAL. `value` is the body as JSON (`None` = not JSON); `field` reads a request head
-/// field by its lower-case name.
 pub fn decide<'a>(value: Option<&Value>, field: impl Fn(&str) -> Option<&'a str>) -> Disposition {
     let Some(value) = value else {
         return Disposition::Refused(Refusal {

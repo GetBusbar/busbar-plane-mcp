@@ -2,7 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The line carrier's meanings: the fields a body implies, the stdio-era verbs, busbar's own asks
-//! issued in order and their retry, and what a line that answers busbar is.
 
 use serde_json::json;
 
@@ -36,7 +35,7 @@ fn the_stdio_era_verbs_are_answered_here_and_others_go_to_the_dispatch() {
     }
     let list = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {} });
     assert_eq!(era(&list), Era::Dispatch);
-    // A notification is not a stdio-era request.
+
     let note = json!({ "jsonrpc": "2.0", "method": "ping" });
     assert_eq!(era(&note), Era::Dispatch);
 }
@@ -103,7 +102,7 @@ fn a_live_round_issues_its_asks_in_order_and_its_retry_carries_the_answers_and_t
     assert_eq!(retry["params"]["requestState"], "sealed");
     assert_eq!(retry["params"]["inputResponses"]["a"]["action"], "accept");
     assert_eq!(retry["params"]["inputResponses"]["b"]["roots"], json!([]));
-    // A result naming no asks, or no state, is no round: it is handed to the caller as it is.
+
     let no_state =
         json!({ "resultType": "input_required", "inputRequests": { "a": { "method": "m" } } });
     assert!(LiveAsk::of(json!({}), Vec::new(), &no_state, 0).is_none());
@@ -132,9 +131,6 @@ fn a_live_ask_lapses_at_its_timeout_and_a_request_is_livened_a_bounded_number_of
     assert!(ask.lapsed(1_000 + ASK_TIMEOUT_NS));
 }
 
-/// `initialize` naming a session revision this plane carries is answered in it (THE DESIGN section 2,
-/// the mcp bullet: revision by negotiation), and the carrier still declares neither `subscribe` nor
-/// `logging` in it; naming none, or the stateless one, keeps the stateless answer.
 #[test]
 fn initialize_negotiates_a_session_revision() {
     let init = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-06-18" } });

@@ -1,30 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE PUBLISHED CONFORMANCE SUITE, run over this plane (TODO ABI-b4; OWNER 2026-10-03: plugins
-//! test themselves against busbar's published suite). The linked door (`busbar_plane_mcp::door`) and
-//! this crate's dropped-in image (the `busbar-plane-mcp-plugin` cdylib, which `cargo test` builds
-//! beside the test), each through the one loader, driven by busbar-plugin-loader's plane script
-//! over `conformance.json`, every step at its pinned crossing count, the two folds equal: one
-//! relayed `tools/call` per unit (each unit arrives first and its caller's body follows its
-//! ATTEMPT, as the plane holds a call from its arrival), answered whole, through a narrow buffer,
-//! and after a short one. `plugin-ci.yml` runs it under `--release`.
-//!
-//! THE HOST IS BUSBAR'S OWN CONNECTOR (`host:`): every need the plane declares binds over it as a
-//! running busbar binds it, its TLS trusting the suite's test anchors (`tls:`). So the plane's
-//! verify-on-call fetch of the registered server's tool list is a real HTTPS exchange with the
-//! suite's far end ([`server`], at `conformance_host::FAR_END`, which the settings' `fs` url
-//! names), not a probe.
+//! Runs linked and dropped-in MCP doors over the same published conformance script and host connector.
 
-// The suite's host connector, as the fleet heal renders it (`busbar_test_kit::conformance_host!`):
-// its far end, its anchors, the network transport doors (`tcp`, `http`) and the host's own proof.
 #[path = "support/conformance_host.rs"]
 mod conformance_host;
 
 /// The doors the host serves: the rendered network ones, and the PROCESS carrier for the stdio
-/// need (`busbar-transport-stdio`, at the rev busbar's dist links at the pin), which the heal
-/// leaves out because the far end dials no process; without it the host refuses to bind a plane
-/// that declares a stdio need (`UnservedScheme`).
 const DOORS: busbar_test_kit::conformance_host::Doors = &[
     conformance_host::DOORS[0],
     conformance_host::DOORS[1],
@@ -32,7 +14,6 @@ const DOORS: busbar_test_kit::conformance_host::Doors = &[
 ];
 
 /// THE REGISTERED SERVER `fs`, at the suite's far end: each HTTP request is answered, under the
-/// JSON-RPC request's own id, with its one tool, `read_file` (the plane's `tools/list` fetch).
 fn server(seen: &[u8]) -> Option<Vec<u8>> {
     let end = seen.windows(4).position(|w| w == b"\r\n\r\n")? + 4;
     let head = String::from_utf8_lossy(&seen[..end]).to_ascii_lowercase();
@@ -65,7 +46,6 @@ fn server(seen: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// THE SUITE'S HOST (`conformance::Host`): the far end started, then busbar's connector over
-/// [`DOORS`]. One per leg.
 fn host(
     wake: busbar_test_kit::conformance_host::ConnWake,
     anchors: Option<&str>,
@@ -75,7 +55,6 @@ fn host(
 }
 
 /// Bind both initial and refreshed settings to the exact leaf the suite's far end serves.
-/// The CA and leaf belong to the test kit; a syntactically valid invented digest is no pin.
 fn inputs() -> &'static str {
     static INPUTS: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     INPUTS.get_or_init(|| {

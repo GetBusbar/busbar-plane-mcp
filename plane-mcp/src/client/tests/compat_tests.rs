@@ -76,9 +76,6 @@ fn a_refusal_moves_the_ladder_and_an_outage_does_not() {
 }
 
 /// RED: ANY `4xx` to the stateless request refuses its revision, whatever JSON-RPC error rides it.
-/// The MCP specification has a server answer an unsupported `MCP-Protocol-Version` with `400 Bad
-/// Request` and fixes no code or wording, so a `400` carrying an error that names neither the
-/// session nor `-32022` is still the revision refused, never the call's answer.
 #[test]
 fn red_any_4xx_to_the_stateless_request_refuses_its_revision() {
     for status in [400u16, 401, 404, 405, 409, 422] {
@@ -93,7 +90,7 @@ fn red_any_4xx_to_the_stateless_request_refuses_its_revision() {
         assert_eq!(stateless_outcome(status, b""), StepOutcome::Refused4xx);
     }
     assert_eq!(stateless_outcome(503, b""), StepOutcome::Unreachable);
-    // A success status: the stateless path's own answer, an upstream's own error included.
+
     let own =
         json!({"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"bad args"}}).to_string();
     assert_eq!(
@@ -199,7 +196,6 @@ fn only_a_revision_this_plane_carries_is_accepted_from_initialize() {
 }
 
 /// RED: the message address a `2024-11-05` stream names can never move busbar's POSTs (and the
-/// credential on them) to another origin.
 #[test]
 fn red_a_message_address_on_another_origin_is_refused() {
     let base = "https://up.example:8443/events";
@@ -249,8 +245,6 @@ fn the_event_reader_joins_split_chunks_and_is_bounded() {
 }
 
 /// B5: THE EVENT-STREAM LINE RULE. CRLF, a lone LF and a lone CR each end a line, so a stream
-/// framed with bare CRs reads as the same events as one framed with LFs: a CR is never dropped
-/// into the line beside it. A CR that ends a chunk waits for the next (it may be half a CRLF).
 #[test]
 fn the_event_reader_ends_a_line_on_a_lone_cr() {
     let mut r = EventReader::new(1024);
@@ -280,7 +274,6 @@ fn the_event_reader_ends_a_line_on_a_lone_cr() {
 }
 
 /// B5: THE BOUND COUNTS THE BYTES HELD, carriage returns included: a peer that sends nothing but
-/// CRs, never ending an event, still meets the bound.
 #[test]
 fn the_event_reader_bound_counts_every_byte_held() {
     let mut r = EventReader::new(64);

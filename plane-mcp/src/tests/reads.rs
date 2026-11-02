@@ -205,7 +205,6 @@ fn a_template_binds_one_segment_and_never_a_subtree() {
 }
 
 /// RED: A TEMPLATE IS SUBSTITUTED IN ONE PASS. A bound value that itself spells another
-/// placeholder is copied as it is, never substituted again; a placeholder no binding names stays.
 #[test]
 fn a_bound_value_spelling_a_placeholder_is_not_substituted_again() {
     let bindings: std::collections::BTreeMap<String, String> = [
@@ -240,8 +239,7 @@ fn absent_and_ungranted_resources_use_current_invalid_params_and_echo_only_reque
             .expect_err("not exposed");
         assert_eq!((refused.status, refused.code), (404, -32602));
         assert_eq!(refused.data, Some(json!({"uri": uri})));
-        // Legacy session adaptation preserves this standard JSON-RPC error. It must not
-        // reintroduce the retired resource-specific code into the modern dispatch.
+
         assert_eq!(
             crate::adapt::lower_answer(&refused.body()),
             Some(crate::adapt::Lowered::Unchanged),

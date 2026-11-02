@@ -2,8 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! $ THE DOOR'S MONEY ANSWERS: what a unit reports beside the answer its caller is written. The
-//! plane reports its units and whether a fee unit was incurred; the kernel writes them (the design's
-//! money section, "The plane reports; the kernel writes").
 
 use serde_json::{json, Value};
 
@@ -41,7 +39,6 @@ fn admitted() -> AdmittedCall {
 }
 
 /// `fs_read_file`, whose server the door's live tool-list check could not reach: its answer and its
-/// call-log line.
 fn unreached() -> (Vec<u8>, crate::call::CallLine) {
     match admission(crate::call::Trust::Unreached("down".to_string())) {
         Admission::Unreached(body, line) => (body, line),
@@ -55,7 +52,6 @@ fn units(answer: &Pending) -> Vec<(u32, u64)> {
 }
 
 /// The call log's one line for `fs_read_file`, as the door writes it under scope `k`, generation 1,
-/// at 7.
 fn logged(outcome: &str, reason: &str) -> Vec<(u32, Vec<u8>, Vec<u8>)> {
     vec![(
         statement::RECORD_CALL,
@@ -73,11 +69,6 @@ fn tool_error(answer: &Pending) {
 }
 
 /// $ A CALL THAT NEVER LEFT ITS QUEUE EARNS NO FEE UNIT AND IS NOT LOGGED DISPATCHED
-/// A call queued behind another call on its stdio member's child,
-/// whose deadline passed before its turn came, was never sent. Its caller is still answered the
-/// upstream-failure tool error, 200 `isError`, but the plane reports NO fee unit, so the kernel gives
-/// back the fee its admission counted. The call log names it `refused` / `queue_deadline`, audited
-/// rejected, never `dispatched`, because that word means the call went out.
 #[test]
 fn a_call_that_never_left_its_queue_earns_no_fee_unit_and_is_not_logged_dispatched() {
     let crate::call::Settled::Answer { status, body, line } =
@@ -108,7 +99,6 @@ fn a_call_that_never_left_its_queue_earns_no_fee_unit_and_is_not_logged_dispatch
 }
 
 /// The twin of the queued call: a call that WAS sent and whose upstream then failed keeps its fee
-/// unit and its `dispatched` line. The fee follows what went out, not how the far end answered.
 #[test]
 fn a_call_that_went_out_and_failed_keeps_its_fee_unit_and_its_dispatched_line() {
     let crate::call::Settled::Answer { status, body, line } =
@@ -134,9 +124,6 @@ fn a_call_that_went_out_and_failed_keeps_its_fee_unit_and_its_dispatched_line() 
 }
 
 /// $ A CALL WHOSE SERVER THE TOOL-LIST CHECK COULD NOT REACH EARNS NO FEE UNIT. The
-/// door's live re-fetch of the server's tool list failed, so the call never left.
-/// Its caller is answered the upstream-failure tool error, 200 `isError`, and the plane reports NO
-/// fee unit, so the kernel gives back the fee its admission counted.
 #[test]
 fn a_call_whose_server_the_tool_list_check_could_not_reach_earns_no_fee_unit() {
     let (body, line) = unreached();
@@ -150,7 +137,6 @@ fn a_call_whose_server_the_tool_list_check_could_not_reach_earns_no_fee_unit() {
 }
 
 /// The twin of the unreached call: its call-log line stays what it was, `refused` under its fixed
-/// reason `upstream_failed`, audited rejected. The call did not go out, so it is never `dispatched`.
 #[test]
 fn a_call_whose_server_the_tool_list_check_could_not_reach_stays_logged_refused() {
     let (body, line) = unreached();

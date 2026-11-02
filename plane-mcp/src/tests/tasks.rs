@@ -2,8 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! SEP-2663 task substrate — the properties the wire depends on, tested where they are decided. The
-//! served engine's `tasks_tests.rs`, ported onto the door's task (`Task` held by the instance, its
-//! handle the kernel's work handle), with the cases the durable rows add.
 
 use std::collections::BTreeMap;
 
@@ -19,7 +17,6 @@ fn task(principal: &str) -> Task {
 }
 
 /// Two callers, two tasks, and neither can address the other's. The refusal is INDISTINGUISHABLE
-/// from an unknown id on purpose (the verbs answer `-32602 unknown taskId` for both).
 #[test]
 fn a_task_is_addressable_only_by_the_principal_it_was_created_for() {
     let mine = task("key-a");
@@ -86,7 +83,6 @@ fn elicitation(key: &str) -> CallerAsk {
 }
 
 /// PARTIAL FULFILMENT: answering one key of a two-key round removes that key and leaves the task
-/// parked on the other.
 #[test]
 fn answering_one_of_two_asks_leaves_the_task_parked_on_the_other() {
     let mut t = task("key-partial");
@@ -118,7 +114,7 @@ fn answering_one_of_two_asks_leaves_the_task_parked_on_the_other() {
         "working",
         "with every ask answered the task leaves `input_required` and resumes"
     );
-    // A round re-parked after its keys were answered asks nothing again.
+
     t.park(vec![elicitation("first")], T0);
     assert!(t.answered());
     assert_eq!(t.detailed()["status"], "working");
@@ -155,7 +151,7 @@ fn the_creation_result_is_flat_and_carries_no_detailed_task_members() {
     for legacy in ["ttl", "pollInterval"] {
         assert!(!obj.contains_key(legacy), "the v1 `{legacy}` key is gone");
     }
-    // The envelope stamps the discriminator on the flat shape.
+
     let envelope: Value = serde_json::from_slice(&task_result(&json!(4), created)).expect("JSON");
     assert_eq!(envelope["id"], 4);
     assert_eq!(envelope["result"]["resultType"], "task");
@@ -216,7 +212,6 @@ fn timestamps_render_as_iso_8601_utc() {
 }
 
 /// `cancel` reports whether THIS call made the transition — the guard a single cancel record rests
-/// on when a caller's cancel and the kernel's race.
 #[test]
 fn cancel_reports_the_transition_it_made_and_only_that_one() {
     let mut t = task("key-cancel-cas");
@@ -236,9 +231,6 @@ fn cancel_reports_the_transition_it_made_and_only_that_one() {
 }
 
 /// THE ABANDONMENT CEILING: an active task whose last update is older than
-/// `ACTIVE_TASK_ABANDON_MS` is CANCELLED by the create-time sweep — a transition, never a drop, its
-/// continuation woken to see it and its handle listed to settle — and then rides the ordinary
-/// retention out; a younger active task is untouched.
 #[test]
 fn an_abandoned_active_task_is_cancelled_by_the_sweep_and_then_ages_out() {
     let mut tasks: BTreeMap<String, Task> = BTreeMap::new();
@@ -249,8 +241,7 @@ fn an_abandoned_active_task_is_cancelled_by_the_sweep_and_then_ages_out() {
     let mut old = Task::new("old", "key-abandon", 1, "d", T0);
     old.runner = Some((9, ticket));
     tasks.insert("old".into(), old);
-    // Exactly AT the ceiling is not abandoned (the bound is strict, matching `is_expired`): the
-    // young task's age at the sweep is the ceiling itself, the old one's a millisecond past it.
+
     tasks.insert(
         "young".into(),
         Task::new("young", "key-abandon", 2, "d", T0 + 1),
@@ -275,16 +266,16 @@ fn an_abandoned_active_task_is_cancelled_by_the_sweep_and_then_ages_out() {
     assert_eq!(swept.settle.len(), 1, "its handle is settled with it");
     assert_eq!(swept.settle[0].0, 1);
     assert_eq!(tasks["young"].status(), Status::Working);
-    // A second sweep does not list the settle again.
+
     assert!(sweep(&mut tasks, sweep_now).settle.is_empty());
-    // The cancel stamped `updated_ms = sweep_now`, so the ordinary retention now applies.
+
     let swept = sweep(&mut tasks, sweep_now + TASK_TTL_MS + 1);
     assert!(
         !tasks.contains_key("old"),
         "after the retention the cancelled task is dropped like any other terminal task"
     );
     assert!(swept.strike.is_empty(), "it wrote no result to strike");
-    // By then the young task too is past the ceiling: cancelled by that sweep, never dropped.
+
     assert_eq!(
         tasks.get("young").map(Task::status),
         Some(Status::Cancelled),
@@ -293,7 +284,6 @@ fn an_abandoned_active_task_is_cancelled_by_the_sweep_and_then_ages_out() {
 }
 
 /// THE CAP drops the oldest TERMINAL tasks first, never a working one, and lists every dropped
-/// task's result chunks to strike.
 #[test]
 fn the_cap_drops_the_oldest_terminal_tasks_and_never_a_working_one() {
     let mut tasks: BTreeMap<String, Task> = BTreeMap::new();
@@ -312,7 +302,6 @@ fn the_cap_drops_the_oldest_terminal_tasks_and_never_a_working_one() {
 }
 
 /// THE 257th distinct key is refused; 256 are accepted; a REPEAT of a key already answered (no
-/// longer asked) changes nothing.
 #[test]
 fn a_tasks_answer_map_is_capped_at_max_task_answers_distinct_keys() {
     let mut t = task("key-answers-cap");
@@ -390,7 +379,6 @@ fn the_durable_row_round_trips_and_fits_the_work_record() {
 }
 
 /// THE RESULT IN CHUNKS: each a plane record, read back in key order whole; a result too long to
-/// write is not written.
 #[test]
 fn a_result_is_written_in_ordered_chunks_and_read_back_whole() {
     let text = "x".repeat(RESULT_CHUNK_BYTES * 3);
@@ -414,7 +402,6 @@ fn a_result_is_written_in_ordered_chunks_and_read_back_whole() {
 }
 
 /// The answers become arguments under the operator's keys, a clone; and the task's own rounds are
-/// filtered to what the caller declared, an emptied round dropped.
 #[test]
 fn answers_merge_into_the_arguments_and_rounds_filter_by_the_callers_declaration() {
     let mut answers = Map::new();
@@ -454,9 +441,6 @@ fn the_run_digest_names_the_call() {
     );
 }
 
-/// LAW 11 ON THE TASK PATH (ARCHITECT Q6): a task parked on its upstream's ask is `input_required`
-/// with the upstream's `inputRequests` verbatim; the caller's answers are kept for the retry and
-/// never merged into the tool's arguments; the park is taken once, when every key is answered.
 #[test]
 fn a_task_parked_on_its_upstreams_ask_hands_the_answers_back_once() {
     let mut t = task("k");
@@ -493,7 +477,7 @@ fn a_task_parked_on_its_upstreams_ask_hands_the_answers_back_once() {
     assert_eq!(park.responses["draft"], json!({"x": 1}));
     assert_eq!(park.responses["ok"], json!({"action": "accept"}));
     assert_eq!(t.take_relay(), None, "taken once");
-    // A cancelled task parks nothing.
+
     let mut gone = task("k");
     assert!(gone.cancel(8));
     gone.park_relay(&requests, "sealed".into(), json!({}), 9);
@@ -501,10 +485,6 @@ fn a_task_parked_on_its_upstreams_ask_hands_the_answers_back_once() {
     assert_eq!(gone.take_relay(), None);
 }
 
-/// THE TASK STORE IS HOST RECORDS (BUSBAR-1.6.0.md, the mcp bullet): a live task's state — its
-/// status, its `inputRequests` in order, its answers, the round of its own asks and the upstream
-/// ask it is parked on — reads back from its records into the task its row makes, and answers the
-/// same `tasks/get`.
 #[test]
 fn a_live_tasks_state_reads_back_from_its_records() {
     let row = WorkRow {
@@ -521,8 +501,7 @@ fn a_live_tasks_state_reads_back_from_its_records() {
     let requests: Map<String, Value> =
         serde_json::from_value(json!({"r": {"method": "roots/list"}})).unwrap();
     relayed.park_relay(&requests, "sealed".into(), json!({"name": "fs_x"}), T0 + 3);
-    // The relayed task is parked on an ask its caller has not answered, so `take_relay` is `None`
-    // on both sides below; the park itself is what must read back.
+
     assert!(relayed.relay.is_some(), "the relayed task is parked");
     for held in [own, relayed] {
         let parts = live_parts(&held.id, &held.live()).expect("a state the records keep");
@@ -545,7 +524,6 @@ fn a_live_tasks_state_reads_back_from_its_records() {
 }
 
 /// A SHORTER STATE WRITTEN OVER A LONGER ONE reads back as itself: the longer one's chunks past it
-/// are not read.
 #[test]
 fn a_live_state_reads_back_whole_over_an_earlier_longer_one() {
     let short = json!({"status": "working", "updated": 1});
@@ -558,8 +536,6 @@ fn a_live_state_reads_back_whole_over_an_earlier_longer_one() {
 }
 
 /// THE INDEX ROW of a live task: a run's lease that lapsed, or nothing moving it past the
-/// abandonment ceiling, leaves it behind; a task parked on its caller is not left behind by time
-/// short of that ceiling.
 #[test]
 fn a_task_is_left_behind_once_its_runs_lease_lapses_or_it_is_abandoned() {
     let run = TaskLease {
@@ -581,7 +557,6 @@ fn a_task_is_left_behind_once_its_runs_lease_lapses_or_it_is_abandoned() {
 }
 
 /// Finding 24 [LOW]: `tasks/update` on a terminal task changes nothing — no answer is kept and its
-/// last update stands.
 #[test]
 fn an_update_to_a_terminal_task_changes_nothing() {
     let mut t = task("k");
@@ -592,9 +567,6 @@ fn an_update_to_a_terminal_task_changes_nothing() {
 }
 
 /// A RESUME RUNS ONLY THE ROUND AN UPDATE ANSWERED, AND ONLY ONCE. The task-run claim is a credentialed
-/// route, so a `resume: <round>` body can arrive that no `tasks/update` nested: it must not skip the
-/// operator's `task_ask_caller` rounds (a round past the answered one) nor run the call again (a
-/// second resume of the same round).
 #[test]
 fn a_resume_runs_only_the_round_an_update_answered_and_only_once() {
     let mut t = task("k");

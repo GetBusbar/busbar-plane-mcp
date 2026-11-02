@@ -2,7 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! Local results over pinned original inputs: nonrecursive substitution, whole-string markup
-//! normalisation and resumable compact JSON without materialising the amplified text/result.
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -322,7 +321,6 @@ fn head_demand(bytes: &[u8]) -> Option<DemandKind> {
 }
 
 /// The suffix is a word of bare `<` and closing `</` openers; every other byte makes the
-/// preceding prefix permanently inert. A slash can extend only a bare opener.
 fn opener_suffix(bytes: &[u8]) -> usize {
     let mut start = 0;
     let mut bare = false;
@@ -630,7 +628,6 @@ fn source_summary<'a>(
 }
 
 /// Select a virtual range without copying its bytes. Boundary fragments are bounded by the
-/// physical template's substitution sites, even when an argument's value is repeated.
 fn range_rope(parts: &[Span], from: usize, to: usize) -> Result<Rope, LengthOverflow> {
     let mut at = 0usize;
     let mut result = Rope::default();
@@ -667,8 +664,7 @@ fn boundary_segment<'a>(
     let mut at = 0usize;
     let mut suffix_start = 0usize;
     let mut bare = false;
-    // Candidate opener and the suffix state just BEFORE it. An inner '<' supersedes an
-    // ineligible outer candidate, exactly as the existing lexical starts_tag test does.
+
     let mut candidate: Option<(usize, usize, bool)> = None;
     let mut tag = None;
     'parts: for part in parts {
@@ -713,8 +709,6 @@ fn boundary_segment<'a>(
     }
     if let Some((tag_start, stable_end)) = tag {
         if stable_end == 1 && first[0] == b'/' && stack.pop(DemandKind::Bare, source) {
-            // The slash extends an incoming bare opener. Reuse an ASCII '<' from the deleted
-            // raw tag plus this slash: both bytes are constants, with original-source custody.
             let closing = Rope::concat(
                 range_rope(parts, tag_start, tag_start + 1)?,
                 range_rope(parts, 0, 1)?,
@@ -738,8 +732,6 @@ fn boundary_segment<'a>(
 }
 
 /// Normalise the virtual concatenation, sharing each original source's interior summary across
-/// repeated argument occurrences. The only non-source-sized state is one shared-rope frame per
-/// physical substitution site; no expanded opener stack or expanded output string is allocated.
 fn normalise_spans<'a>(
     pieces: &[Span],
     reusable: &[bool],
@@ -786,8 +778,7 @@ fn normalise_spans<'a>(
         }
     }
     stack.flush(&mut output)?;
-    // With no remaining '>' every would-be tag is unterminated, including one completed across
-    // a substitution seam. The baseline keeps this entire tail byte-for-byte.
+
     for piece in boundary {
         output.push(Rope::span(piece));
     }
@@ -831,8 +822,7 @@ struct Input {
     held: Arc<crate::plane_door::Held>,
     selection: Selection,
     id: Value,
-    // String argument/URI allocations are moved out of this Value, never cloned. The original
-    // allocations live in arguments/uri for exactly as long as this shared request source lives.
+
     params: Option<Value>,
     arguments: Vec<String>,
     bindings: Vec<String>,
@@ -1091,8 +1081,7 @@ impl Builder {
     }
     fn finish(mut self) -> Result<Local, crate::tool_arrival::Refusal> {
         self.raw(b"}");
-        // Every string the plan can read already lives in the indexed original allocations.
-        // The remaining request DOM (including unused non-string arguments) has no delivery use.
+
         self.input.params = None;
         let input = Arc::new(self.input);
         let mut length = Some(0usize);
@@ -1434,7 +1423,7 @@ impl RopeString {
                     ]);
                 }
             }
-            // Loading a different leaf must not reuse an absolute offset from this one.
+
             if self.source.current.is_some_and(|span| span.len() == 0) {
                 self.plain_end = 0;
             }
