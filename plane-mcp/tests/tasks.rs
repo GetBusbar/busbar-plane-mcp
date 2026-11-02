@@ -1785,6 +1785,38 @@ fn confirm_section() -> Value {
     }})
 }
 
+#[test]
+fn a_task_answer_cannot_dispatch_through_an_uninspected_schema_branch() {
+    let _serial = fresh();
+    let mut section = confirm_section();
+    let entry = &mut section["st"]["tools_allow"]["read_file"];
+    let ask = entry["task_ask_caller"][0]["confirm"].take();
+    entry["task_ask_caller"] = json!([{"target":ask}]);
+    let mut hostname = json!({"format":"hostname"});
+    for _ in 0..8 {
+        hostname = json!({"allOf":[hostname]});
+    }
+    entry["input_schema"] = json!({"type":"object","properties":{"target":hostname}});
+    let door = open(&section);
+    // The initial arguments have no target, so creation is allowed before the task asks for it.
+    let task = create(&door, 30_510, "st", "st_read_file");
+    let parked = run(&door, 30_511, "st", &last_nested());
+    assert!(!parked.far);
+    let update = verb(
+        "tasks/update",
+        &task,
+        &json!({"inputResponses":{"target":{"action":"accept","content":{"host":"169.254.169.254"}}}}),
+    );
+    assert_eq!(door.arrive(30_512, &update).outcome, Outcome::Ready);
+    assert_eq!(
+        door.piece(30_512, &Given::caller(ALICE, &update)).status,
+        200
+    );
+    let resumed = run(&door, 30_513, "st", &last_nested());
+    assert!(!resumed.far, "{}", resumed.text());
+    assert_failed(&get(&door, 30_514, &task), "inspected partially");
+}
+
 /// THE SEAL AND THE ROUND: the resume a `tasks/update` nests runs the task's call;
 /// the same resume under a forged seal, for the very round that update answered, is served as a
 /// task that does not exist with no call sent (the seal check alone refuses it: the round would

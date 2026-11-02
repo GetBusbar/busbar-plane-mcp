@@ -69,6 +69,8 @@ pub(super) struct LineListen {
     acknowledged: bool,
     /// The entitlement answers the last unit of its caller re-asked (at open, the opener's).
     entitled: BTreeMap<String, bool>,
+    /// The tool-list trust filter re-confirmed with the caller's standing and grants.
+    hidden: std::collections::BTreeSet<String>,
     /// The caller that opened it: the principal whose units re-ask it, and the quota counts under.
     owner: String,
     /// Its caller's standing, as the last unit of its caller re-asked it.
@@ -109,8 +111,14 @@ impl LineListen {
         let standing = self.standing_at(now_ns);
         let updates = std::mem::take(&mut self.updates);
         let admit = super::admit(&self.entitled);
-        self.listen
-            .step(catalogue, &admit, &standing, &updates, now_ns)
+        self.listen.step_visible(
+            catalogue,
+            &admit,
+            &|entry| self.hidden.contains(&entry.namespaced),
+            &standing,
+            &updates,
+            now_ns,
+        )
     }
 
     /// Whether busbar asks its caller a `ping` at `now_ns` to have its standing re-asked (the
@@ -148,6 +156,13 @@ pub(super) fn reconfirm(plane: &McpDoor, ticket: Ticket, principal: &str, unit: 
     let standing = door_listen::standing(plane, ticket, principal, unit);
     let now = door_listen::mono_ns(plane.services, ticket, unit);
     let entitled = unit.entitled.clone();
+    let hidden = super::hidden_tools(
+        plane,
+        ticket,
+        &mut unit.issued,
+        &held,
+        &super::admit(&entitled),
+    );
     plane.line_listens.with_all(|m| {
         for ((s, _), l) in m.iter_mut() {
             if *s == session && l.owner == principal {
@@ -155,6 +170,7 @@ pub(super) fn reconfirm(plane: &McpDoor, ticket: Ticket, principal: &str, unit: 
                 // standing still apply, but the confirmation is not moved to a time never read.
                 l.confirmed_ns = now.unwrap_or(l.confirmed_ns);
                 l.entitled.clone_from(&entitled);
+                l.hidden.clone_from(&hidden);
                 l.standing = standing.clone();
             }
         }
@@ -483,7 +499,15 @@ pub(super) fn listen(
         Err(refused) => return Some(*refused),
     };
     let admit = super::admit(&unit.entitled);
-    let frames = match listen.step(&held.catalogue, &admit, &Standing::Live, &[], now) {
+    let hidden = super::hidden_tools(plane, ticket, &mut unit.issued, &held, &admit);
+    let frames = match listen.step_visible(
+        &held.catalogue,
+        &admit,
+        &|entry| hidden.contains(&entry.namespaced),
+        &Standing::Live,
+        &[],
+        now,
+    ) {
         ListenStep::Frames(frames) | ListenStep::End(frames) => frames,
         _ => Vec::new(),
     };
@@ -494,6 +518,7 @@ pub(super) fn listen(
         opening_ticket: ticket,
         acknowledged: false,
         entitled: unit.entitled.clone(),
+        hidden,
         owner: principal.to_string(),
         standing: Standing::Live,
         confirmed_ns: now,

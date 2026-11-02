@@ -38,6 +38,74 @@ fn everything(_: &str, _: &str) -> bool {
 }
 
 #[test]
+fn content_only_changes_use_full_visible_lists_and_ignore_unlisted_content() {
+    let first = json!({"fs":{"url":"https://mcp.example/fs","pin":{"mechanism":"unpinned"},
+        "tools_allow":{"t":{"description":"old","input_schema":{"type":"object"}}},
+        "prompts_allow":{"p":{"description":"old","template":"body"}},
+        "resources_allow":{"file:///r":{"name":"r","description":"old","text":"body"}},
+        "resource_templates_allow":{"file:///{name}":{"description":"old","text":"body {name}"}}
+    }});
+    let build =
+        |generation, value: &Value| catalogue(generation, &serde_json::to_vec(value).unwrap());
+    for (kind, field) in [
+        (0, "tools_allow"),
+        (1, "prompts_allow"),
+        (2, "resources_allow"),
+        (2, "resource_templates_allow"),
+    ] {
+        let mut changed = first.clone();
+        let entry = changed["fs"][field]
+            .as_object_mut()
+            .unwrap()
+            .values_mut()
+            .next()
+            .unwrap();
+        entry["description"] = json!("new");
+        let params = json!({"notifications":{"toolsListChanged":true,"promptsListChanged":true,"resourcesListChanged":true}});
+        let mut listen = Listen::open(Some(&params), json!(1), 0, |_| false).unwrap();
+        listen.step(&build(1, &first), &everything, &Standing::Live, &[], 1);
+        let Step::Frames(frames) =
+            listen.step(&build(2, &changed), &everything, &Standing::Live, &[], 2)
+        else {
+            panic!("visible description change must notify")
+        };
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0]["method"], KINDS[kind].1);
+    }
+    let mut body_only = first.clone();
+    body_only["fs"]["resources_allow"]["file:///r"]["text"] = json!("new body");
+    assert_eq!(
+        change_keys(&build(1, &first), &everything),
+        change_keys(&build(2, &body_only), &everything)
+    );
+}
+
+#[test]
+fn a_hidden_tools_content_does_not_notify_but_visibility_changes_do() {
+    let cat = catalogue(1, SECTION);
+    let params = json!({"notifications":{"toolsListChanged":true}});
+    let mut listen = Listen::open(Some(&params), json!(1), 0, |_| false).unwrap();
+    listen.step_visible(&cat, &everything, &|_| true, &Standing::Live, &[], 1);
+    assert_eq!(
+        listen.step_visible(
+            &catalogue(2, SECTION_MORE),
+            &everything,
+            &|_| true,
+            &Standing::Live,
+            &[],
+            2
+        ),
+        Step::Quiet
+    );
+    let Step::Frames(frames) =
+        listen.step_visible(&cat, &everything, &|_| false, &Standing::Live, &[], 3)
+    else {
+        panic!("revealing a tool changes the visible list")
+    };
+    assert_eq!(frames[0]["method"], "notifications/tools/list_changed");
+}
+
+#[test]
 fn the_acknowledgement_is_first_and_carries_the_accepted_subset() {
     let params = json!({ "notifications": {
         "toolsListChanged": true,

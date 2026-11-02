@@ -298,13 +298,19 @@ fn step(plane: &McpDoor, ticket: Ticket, principal: &str, unit: &mut CallUnit) -
     };
     let standing = standing(plane, ticket, principal, unit);
     let admit = admit(&unit.entitled);
+    let hidden = super::hidden_tools(plane, ticket, &mut unit.issued, &held, &admit);
     let (stepped, headed) = plane.listens.with(&unit.key, |l| {
         let l = l?;
         l.due = false;
         let updates = std::mem::take(&mut l.updates);
-        let stepped = l
-            .listen
-            .step(&held.catalogue, &admit, &standing, &updates, now);
+        let stepped = l.listen.step_visible(
+            &held.catalogue,
+            &admit,
+            &|entry| hidden.contains(&entry.namespaced),
+            &standing,
+            &updates,
+            now,
+        );
         // The head goes with the stream's first frame (its acknowledgement, or the last frame of a
         // stream whose permission lapsed before it).
         let headed = l.headed;

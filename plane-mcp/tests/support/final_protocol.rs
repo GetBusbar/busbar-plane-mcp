@@ -7,6 +7,131 @@ use super::*;
 
 const STATELESS: &str = "https://audit.example/stateless";
 const SESSION: &str = "https://audit.example/session";
+
+#[test]
+fn an_uninspected_combinator_schema_never_reaches_the_normal_member_send() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let mut hostname = json!({"format":"hostname"});
+    for _ in 0..8 {
+        hostname = json!({"allOf":[hostname]});
+    }
+    let section = json!({"audit":{"url":STATELESS,"pin":{"mechanism":"unpinned"},"tools_allow":{"read_file":{"input_schema":{"type":"object","properties":{"target":hostname}}}}}}).to_string();
+    let door = open_with(&section);
+    let body = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"audit_read_file","arguments":{"target":"169.254.169.254"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}).to_string();
+    let fields = [
+        ("mcp-protocol-version", "2026-07-28"),
+        ("mcp-method", "tools/call"),
+        ("mcp-name", "audit_read_file"),
+    ];
+    assert_eq!(
+        door.arrive(30_500, "POST", "/mcp", body.as_bytes(), &fields)
+            .outcome,
+        Outcome::Ready
+    );
+    door.piece(30_500, &Given::attempt(ALICE, "audit"));
+    let answer = door.pump(30_500, &Given::caller(ALICE, body.as_bytes()));
+    assert!(!answer.far, "{}", answer.text());
+    assert!(
+        answer.text().contains("inspected partially"),
+        "{}",
+        answer.text()
+    );
+    assert!(seen()
+        .iter()
+        .all(|request| request.body["method"] != "tools/call"));
+}
+
+fn reload(door: &Door, generation: u64, section: &str) {
+    use busbar_contract::abi::mechanism::lifecycle::RefreshIn;
+    use busbar_contract::abi::plane::PlaneRefreshOut;
+    let input = RefreshIn {
+        head: head::<RefreshIn>(life::REFRESH, Ticket::NONE),
+        generation,
+        settings: octets(section.as_bytes()),
+        secrets: std::ptr::null(),
+        secrets_len: 0,
+    };
+    let mut output: PlaneRefreshOut = z();
+    output.head = out_head::<PlaneRefreshOut>();
+    // SAFETY: The fixture owns this live door instance; the exact input/output frames and every borrowed buffer remain live throughout the synchronous call.
+    let result = unsafe {
+        lifecycle().refresh.unwrap()(
+            door.instance,
+            std::ptr::from_ref(&input).cast(),
+            std::ptr::from_mut(&mut output).cast(),
+        )
+    };
+    assert_eq!(result.outcome(), Outcome::Ready);
+}
+
+#[test]
+fn description_only_reload_notifies_the_visible_lists_on_http_and_line() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    let original = json!({"audit":{"url":STATELESS,"pin":{"mechanism":"unpinned"},
+        "tools_allow":{"read_file":{"description":"old"}},
+        "prompts_allow":{"p":{"description":"old","template":"prompt"}},
+        "resources_allow":{"file:///r":{"description":"old","text":"resource"}}
+    }});
+    let listen = json!({"jsonrpc":"2.0","id":1,"method":"subscriptions/listen","params":{
+        "notifications":{"toolsListChanged":true,"promptsListChanged":true,"resourcesListChanged":true},
+        "_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}
+    }}).to_string();
+    for line in [false, true] {
+        *upstreams() = Some(Upstreams::default());
+        EMITTED
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+        let door = open_with(&original.to_string());
+        let acknowledged = if line {
+            assert_eq!(
+                door.line(30_520, 988, listen.as_bytes()).outcome,
+                Outcome::Ready
+            );
+            door.piece(30_520, &Given::caller(ALICE, listen.as_bytes()))
+        } else {
+            let fields = [
+                ("mcp-protocol-version", "2026-07-28"),
+                ("mcp-method", "subscriptions/listen"),
+            ];
+            assert_eq!(
+                door.arrive(30_520, "POST", "/mcp", listen.as_bytes(), &fields)
+                    .outcome,
+                Outcome::Ready
+            );
+            door.piece(30_520, &Given::stream_open(ALICE, 988))
+        };
+        assert!(
+            acknowledged.text().contains("acknowledged"),
+            "{}",
+            acknowledged.text()
+        );
+        let mut changed = original.clone();
+        changed["audit"]["tools_allow"]["read_file"]["description"] = json!("new");
+        changed["audit"]["prompts_allow"]["p"]["description"] = json!("new");
+        changed["audit"]["resources_allow"]["file:///r"]["description"] = json!("new");
+        reload(&door, 2, &changed.to_string());
+        let frames = if line {
+            door.turn();
+            EMITTED
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .iter()
+                .filter(|(session, _)| *session == 988)
+                .map(|(_, bytes)| String::from_utf8_lossy(bytes).into_owned())
+                .collect::<String>()
+        } else {
+            door.piece(30_520, &Given::collect(ALICE, 988)).text()
+        };
+        for category in ["tools", "prompts", "resources"] {
+            assert!(
+                frames.contains(&format!("notifications/{category}/list_changed")),
+                "{line}: {frames}"
+            );
+        }
+    }
+}
 static WRONG_INITIALIZE_ID: AtomicBool = AtomicBool::new(false);
 static LEGACY_CHANGED: AtomicBool = AtomicBool::new(false);
 

@@ -37,11 +37,14 @@ fn origin_arrival(d: &Door, unit: u64, origins: &[&[u8]]) -> Arrived {
     input.units_cap = units.len();
     let mut output: ArriveOut = z();
     output.head = out_head::<ArriveOut>();
-    let result = ops().arrive.unwrap()(
-        d.instance,
-        std::ptr::from_ref(&input).cast(),
-        std::ptr::from_mut(&mut output).cast(),
-    );
+    // SAFETY: The fixture owns this live door instance; the exact input/output frames and every borrowed buffer remain live throughout the synchronous call.
+    let result = unsafe {
+        ops().arrive.unwrap()(
+            d.instance,
+            std::ptr::from_ref(&input).cast(),
+            std::ptr::from_mut(&mut output).cast(),
+        )
+    };
     Arrived {
         outcome: result.outcome(),
         refusal_status: output.refusal_status,

@@ -117,10 +117,13 @@ pub fn release(
         lease: head.lease,
     };
     // SAFETY: the test's live door and the lifecycle's exact RELEASE input/output types.
-    let ret = ops.release.unwrap()(
-        instance,
-        std::ptr::from_ref(&input).cast(),
-        std::ptr::from_mut(&mut out).cast(),
-    );
+    // SAFETY: The caller proves the live instance and outstanding lease; these RELEASE frames have the exact declared layouts and remain live.
+    let ret = unsafe {
+        ops.release.unwrap()(
+            instance,
+            std::ptr::from_ref(&input).cast(),
+            std::ptr::from_mut(&mut out).cast(),
+        )
+    };
     assert_eq!(ret.outcome(), Outcome::Ready);
 }

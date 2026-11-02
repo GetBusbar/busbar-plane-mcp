@@ -35,8 +35,9 @@ Off by default: a document that writes neither section below never uses the plan
   - `<id>.verify_ttl`, `timeout`, `aud`, `grants`, `allow_private`, `token_exchange`,
     `max_input_required_rounds`, `max_caller_ask_rounds`, `sampling_bounds`,
     `upstream_credentials`, `hooks`: the per-server rules.
-  - `tools.hooks`: hooks attached to every server; `tools.upstream_credentials`: the default
-    credential mode (`own` or `passthrough`).
+  - `tools.hooks`: hooks attached to every server; `tools.upstream_credentials: own`: the default
+    credential mode. `passthrough` is refused both here and per server: upstream access must use
+    the server's own credential or its configured token exchange.
 - `mcp:` (owned beside it, and it selects the plane on its own): the endpoint block.
   - `canonical_uri`: the endpoint's RFC 8707 resource URI (its path is `/mcp`).
   - `authorization_servers`: the issuers that may mint tokens for it (at least one).

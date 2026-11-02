@@ -23,11 +23,14 @@ fn project(
     input.signals_cap = signals.len();
     let mut output = z::<ProjectOut>();
     output.head = out_head::<ProjectOut>();
-    let answer = ops().project.unwrap()(
-        d.instance,
-        std::ptr::from_ref(&input).cast(),
-        std::ptr::from_mut(&mut output).cast(),
-    );
+    // SAFETY: The fixture owns this live door instance; the exact input/output frames and every borrowed buffer remain live throughout the synchronous call.
+    let answer = unsafe {
+        ops().project.unwrap()(
+            d.instance,
+            std::ptr::from_ref(&input).cast(),
+            std::ptr::from_mut(&mut output).cast(),
+        )
+    };
     (answer.outcome(), output, arena)
 }
 

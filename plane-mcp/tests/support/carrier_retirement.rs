@@ -103,11 +103,14 @@ fn start(door: &Door, epoch: Option<u64>) -> Crossing {
     let mut o: TickOut = z();
     o.head = out_head::<TickOut>();
     // SAFETY: lifecycle TICK with its declared types and the test's live instance.
-    let ret = lifecycle().tick.unwrap()(
-        door.instance,
-        std::ptr::from_ref(&i).cast(),
-        std::ptr::from_mut(&mut o).cast(),
-    );
+    // SAFETY: The fixture owns this live door instance; the exact input/output frames and every borrowed buffer remain live throughout the synchronous call.
+    let ret = unsafe {
+        lifecycle().tick.unwrap()(
+            door.instance,
+            std::ptr::from_ref(&i).cast(),
+            std::ptr::from_mut(&mut o).cast(),
+        )
+    };
     crossed(door, ret, &o.head, 0)
 }
 
@@ -126,11 +129,14 @@ fn resume(door: &Door, epoch: u64, receipt: Option<&[u8]>, cap: usize) -> Crossi
     let mut o: PlaneDriveOut = z();
     o.head = out_head::<PlaneDriveOut>();
     // SAFETY: lifecycle DRIVE with its declared buffers/types and the test's live instance.
-    let ret = lifecycle().drive.unwrap()(
-        door.instance,
-        std::ptr::from_ref(&i).cast(),
-        std::ptr::from_mut(&mut o).cast(),
-    );
+    // SAFETY: The fixture owns this live door instance; the exact input/output frames and every borrowed buffer remain live throughout the synchronous call.
+    let ret = unsafe {
+        lifecycle().drive.unwrap()(
+            door.instance,
+            std::ptr::from_ref(&i).cast(),
+            std::ptr::from_mut(&mut o).cast(),
+        )
+    };
     crossed(door, ret, &o.head, o.sessions_needed)
 }
 
@@ -176,11 +182,14 @@ fn line(door: &Door, unit: u64, session: u64, caller: &str, body: &Value) -> Ans
     let mut o: ArriveOut = z();
     o.head = out_head::<ArriveOut>();
     // SAFETY: ARRIVE with the exact live input/output buffers above.
-    let ret = ops().arrive.unwrap()(
-        door.instance,
-        std::ptr::from_ref(&i).cast(),
-        std::ptr::from_mut(&mut o).cast(),
-    );
+    // SAFETY: The fixture owns this live door instance; the exact input/output frames and every borrowed buffer remain live throughout the synchronous call.
+    let ret = unsafe {
+        ops().arrive.unwrap()(
+            door.instance,
+            std::ptr::from_ref(&i).cast(),
+            std::ptr::from_mut(&mut o).cast(),
+        )
+    };
     assert_eq!(ret.outcome(), Outcome::Ready);
     door.piece(unit, &Given::caller(caller, &body))
 }

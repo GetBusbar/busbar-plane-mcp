@@ -28,7 +28,7 @@ use busbar_contract::abi::host::conn::connector::{
     ReplyPiece, RequestPiece, REPLY_ACK, REPLY_BODY, REPLY_END, REPLY_HEAD, REQUEST_BODY,
     REQUEST_END, REQUEST_HEAD,
 };
-use busbar_contract::abi::mechanism::ticket::{HostCtx, Ticket};
+use busbar_contract::abi::mechanism::ticket::{CompletionHandle, HostCtx, Ticket};
 use busbar_contract::abi::plane::PlaneDriveOut;
 use busbar_contract::abi::sdk::completion_retirement::{Domain, Error, Handle, Retirement};
 use busbar_contract::abi::sdk::conn::{Connector, Host};
@@ -91,6 +91,59 @@ pub(super) struct Driver {
 }
 
 impl Driver {
+    fn reserve(&mut self) -> Option<u32> {
+        if self.failure.is_some() || !self.retirement.can_consume(0) {
+            return None;
+        }
+        self.reusable.pop().or_else(|| {
+            if self.issued >= CYCLE_SPAN {
+                return None;
+            }
+            let seq = LINK_SEQ + self.issued;
+            self.issued += 1;
+            Some(seq)
+        })
+    }
+
+    /// Host and connector operations share the driver's confirmed-retirement namespace.
+    pub(super) fn host_handle(
+        &mut self,
+        ticket: Ticket,
+        pending: &mut Option<CompletionHandle>,
+    ) -> Option<CompletionHandle> {
+        if self.failure.is_some() {
+            return None;
+        }
+        if let Some(handle) = *pending {
+            if handle.ticket != ticket {
+                self.failure = Some(Error::Invalid);
+                return None;
+            }
+            return self.retirement.can_consume(0).then_some(handle);
+        }
+        let handle = super::handle_at(ticket, self.reserve()?);
+        *pending = Some(handle);
+        Some(handle)
+    }
+
+    /// Retire a terminal host result only after its caller copied and consumed it.
+    pub(super) fn host_consumed(&mut self, pending: &mut Option<CompletionHandle>) -> bool {
+        let Some(handle) = *pending else { return true };
+        match self.retirement.consumed(Handle {
+            domain: Domain::Host,
+            seq: handle.seq,
+        }) {
+            Ok(()) => {
+                *pending = None;
+                true
+            }
+            Err(error) => {
+                self.failure = Some(error);
+                false
+            }
+        }
+    }
+
     fn begin(&mut self, owner: HostCtx, ticket: Ticket, extensions: &[u8]) -> Result<(), Error> {
         let reusable = self.retirement.begin(owner, ticket, extensions)?;
         self.reusable
@@ -528,18 +581,11 @@ impl Link {
         }
         let seq = match *pending {
             Some(seq) => seq,
-            None if !issued.reusable.is_empty() => {
-                let seq = issued.reusable.pop().expect("a confirmed retired handle");
+            None => {
+                let seq = issued.reserve()?;
                 *pending = Some(seq);
                 seq
             }
-            None if issued.issued < CYCLE_SPAN => {
-                let seq = LINK_SEQ + issued.issued;
-                issued.issued += 1;
-                *pending = Some(seq);
-                seq
-            }
-            None => return None,
         };
         Some(host.connector_from(driver, seq))
     }
@@ -930,9 +976,10 @@ fn spanned(buf: &[u8], span: FrameSpan) -> &[u8] {
     buf.get(at..at.saturating_add(len)).unwrap_or(&[])
 }
 
-/// Whether the instance holds any stream (the tick wakes the driver for them).
+/// Whether streams or child-work cleanup need maintenance on the instance's driver.
 pub(super) fn any(plane: &McpDoor) -> bool {
     !plane.legacy.is_empty()
+        || !plane.relays.is_empty()
         || plane.legacy_seq.with_all(|state| {
             state
                 .get(&())
@@ -941,7 +988,7 @@ pub(super) fn any(plane: &McpDoor) -> bool {
 }
 
 /// THE DRIVER'S PART, on the instance's driver ticket (`drive`): every held stream read as far as
-/// it goes, and every call an answer (or the stream's end) reached woken. A dead stream no call
+/// it goes, child work whose state lapsed settled, and every waiting call reached woken. A dead stream no call
 /// waits on any more is let go. Pending operations retain their handles. A terminal handle is
 /// acknowledged through the SDK and reused only after the host confirms its result was retired.
 pub(super) fn drive(
@@ -985,10 +1032,11 @@ pub(super) fn drive(
                 l.dead.is_none() || l.retiring() || !l.waiters.is_empty() || !l.answers.is_empty()
             });
         });
+        let cleanup_pending = super::door_relay_cleanup::drive(plane, driver, state);
         if let Some(error) = state.failure {
             return Err(error);
         }
-        Ok(pending(plane) || state.retirement.queued())
+        Ok(pending(plane) || cleanup_pending || state.retirement.queued())
     });
     for announcement in announced {
         match announcement {
@@ -1462,3 +1510,7 @@ fn post(
 #[cfg(test)]
 #[path = "tests/legacy_link_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/relay_cleanup_regressions.rs"]
+mod relay_cleanup_tests;

@@ -81,11 +81,14 @@ fn cancelling_a_task_inspection_preserves_cleanup_and_rejects_the_late_cycle() {
     let mut o: OnPieceOut = z();
     o.head = out_head::<OnPieceOut>();
     // SAFETY: the old cancelled unit is deliberately called with a valid empty piece and receipt.
-    let late = ops().on_piece.unwrap()(
-        d.instance,
-        std::ptr::from_ref(&i).cast(),
-        std::ptr::from_mut(&mut o).cast(),
-    );
+    // SAFETY: The fixture owns this live door instance; the exact input/output frames and every borrowed buffer remain live throughout the synchronous call.
+    let late = unsafe {
+        ops().on_piece.unwrap()(
+            d.instance,
+            std::ptr::from_ref(&i).cast(),
+            std::ptr::from_mut(&mut o).cast(),
+        )
+    };
     assert_eq!(late.outcome(), Outcome::Refused);
     assert!(inspection_wire::request(&o.head).is_none());
     HOLD.store(false, Ordering::SeqCst);

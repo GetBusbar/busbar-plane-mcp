@@ -35,11 +35,14 @@ fn a_task_budget_refusal_keeps_the_kernels_status_and_budget_reason() {
     input.records_cap = records.len();
     let mut output: RefusalOut = z();
     output.head = out_head::<RefusalOut>();
-    let result = ops().refusal.unwrap()(
-        d.instance,
-        std::ptr::from_ref(&input).cast(),
-        std::ptr::from_mut(&mut output).cast(),
-    );
+    // SAFETY: The fixture owns this live door instance; the exact input/output frames and every borrowed buffer remain live throughout the synchronous call.
+    let result = unsafe {
+        ops().refusal.unwrap()(
+            d.instance,
+            std::ptr::from_ref(&input).cast(),
+            std::ptr::from_mut(&mut output).cast(),
+        )
+    };
     assert_eq!(result.outcome(), Outcome::Ready);
     assert_eq!(output.status, 429);
     let body: Value = serde_json::from_slice(&reply[..output.reply_written as usize]).unwrap();
@@ -139,11 +142,14 @@ fn raw_refusal_writes(d: &Door, unit: u64, text: &str, reply_cap: usize) -> (Out
     input.records_cap = records.len();
     let mut output: RefusalOut = z();
     output.head = out_head::<RefusalOut>();
-    let result = ops().refusal.unwrap()(
-        d.instance,
-        std::ptr::from_ref(&input).cast(),
-        std::ptr::from_mut(&mut output).cast(),
-    );
+    // SAFETY: The fixture owns this live door instance; the exact input/output frames and every borrowed buffer remain live throughout the synchronous call.
+    let result = unsafe {
+        ops().refusal.unwrap()(
+            d.instance,
+            std::ptr::from_ref(&input).cast(),
+            std::ptr::from_mut(&mut output).cast(),
+        )
+    };
     (result.outcome(), output.records_written)
 }
 

@@ -271,6 +271,19 @@ impl Listen {
         updates: &[(String, String)],
         now_ns: u64,
     ) -> Step {
+        self.step_visible(catalogue, admit, &|_| false, standing, updates, now_ns)
+    }
+
+    /// The next step with the same trust filter used by this caller's `tools/list`.
+    pub fn step_visible(
+        &mut self,
+        catalogue: &Catalogue,
+        admit: &impl Fn(&str, &str) -> bool,
+        hidden: &impl Fn(&crate::catalogue::ToolEntry) -> bool,
+        standing: &Standing,
+        updates: &[(String, String)],
+        now_ns: u64,
+    ) -> Step {
         if self.phase == Phase::Ended {
             return Step::Closed;
         }
@@ -301,7 +314,7 @@ impl Listen {
         let generation = catalogue.generation();
         match &mut self.phase {
             Phase::Acknowledge => {
-                let seen = change_keys(catalogue, admit);
+                let seen = change_keys_visible(catalogue, admit, hidden);
                 self.phase = Phase::Watch { generation, seen };
                 self.last_write_ns = now_ns;
                 let ack = self.notification(
@@ -316,7 +329,7 @@ impl Listen {
             } => {
                 let mut changed = Vec::new();
                 let fresh = if self.accepted.lists.iter().any(|on| *on) {
-                    change_keys(catalogue, admit)
+                    change_keys_visible(catalogue, admit, hidden)
                 } else {
                     *seen
                 };
@@ -370,48 +383,38 @@ impl Listen {
 
 /// A change key over one grant-scoped catalogue slice: FNV-1a, trusted for nothing (a collision
 /// costs one missed re-read of a list the caller can re-read at any time).
-fn change_key(mut parts: Vec<(&str, &str)>) -> u64 {
-    parts.sort_unstable();
+fn change_key(parts: &[Vec<u8>]) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for pair in parts {
-        for part in [pair.0, pair.1] {
-            for byte in part.as_bytes().iter().chain(std::iter::once(&0u8)) {
-                hash ^= u64::from(*byte);
-                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-            }
+    for part in parts {
+        for byte in (part.len() as u64).to_le_bytes().iter().chain(part.iter()) {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
         }
     }
     hash
 }
 
-/// The three change keys of what ONE CALLER can see. The tool key carries each tool's schema hash:
-/// a tool whose arguments changed shape under an unchanged name is one a client must re-read for.
+/// The three keys of the complete rendered lists one caller can see.
 #[must_use]
 pub fn change_keys(catalogue: &Catalogue, admit: &impl Fn(&str, &str) -> bool) -> [u64; 3] {
-    let tools = catalogue.tools_for(admit);
-    let mut tool_parts: Vec<(&str, &str)> = Vec::with_capacity(tools.len());
-    for tool in &tools {
-        tool_parts.push((
-            tool.namespaced.as_str(),
-            tool.schema_hash.as_deref().unwrap_or(""),
-        ));
-    }
+    change_keys_visible(catalogue, admit, &|_| false)
+}
+
+fn change_keys_visible(
+    catalogue: &Catalogue,
+    admit: &impl Fn(&str, &str) -> bool,
+    hidden: &impl Fn(&crate::catalogue::ToolEntry) -> bool,
+) -> [u64; 3] {
+    // Use the wire renderers: descriptions, schemas, media types, aliases and templates all
+    // matter when they change a visible listing. Bodies/text omitted from lists do not.
+    let id = Value::Null;
     [
-        change_key(tool_parts),
-        change_key(
-            catalogue
-                .prompts_for(admit)
-                .iter()
-                .map(|p| (p.namespaced.as_str(), ""))
-                .collect(),
-        ),
-        change_key(
-            catalogue
-                .resources_for(admit)
-                .iter()
-                .map(|r| (r.namespaced.as_str(), ""))
-                .collect(),
-        ),
+        change_key(&[catalogue.tools_list(&id, admit, hidden)]),
+        change_key(&[catalogue.prompts_list(&id, admit)]),
+        change_key(&[
+            catalogue.resources_list(&id, admit),
+            catalogue.resource_templates_list(&id, admit),
+        ]),
     ]
 }
 

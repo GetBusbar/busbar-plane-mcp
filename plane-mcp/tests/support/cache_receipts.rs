@@ -253,11 +253,14 @@ fn refresh(d: &Door, generation: u64, section: &str) {
     };
     let mut o: PlaneRefreshOut = z();
     o.head = out_head::<PlaneRefreshOut>();
-    let ret = lifecycle().refresh.expect("refresh")(
-        d.instance,
-        std::ptr::from_ref(&i).cast(),
-        std::ptr::from_mut(&mut o).cast(),
-    );
+    // SAFETY: The fixture owns this live door instance; the exact input/output frames and every borrowed buffer remain live throughout the synchronous call.
+    let ret = unsafe {
+        lifecycle().refresh.expect("refresh")(
+            d.instance,
+            std::ptr::from_ref(&i).cast(),
+            std::ptr::from_mut(&mut o).cast(),
+        )
+    };
     assert_eq!(ret.outcome(), Outcome::Ready);
 }
 
@@ -332,11 +335,14 @@ fn a_breaker_refusal_resolves_the_server_from_the_routed_generation() {
     (i.records_buf, i.records_cap) = (records.as_mut_ptr(), records.len());
     let mut o: RefusalOut = z();
     o.head = out_head::<RefusalOut>();
-    let ret = ops().refusal.expect("refusal")(
-        d.instance,
-        std::ptr::from_ref(&i).cast(),
-        std::ptr::from_mut(&mut o).cast(),
-    );
+    // SAFETY: The fixture owns this live door instance; the exact input/output frames and every borrowed buffer remain live throughout the synchronous call.
+    let ret = unsafe {
+        ops().refusal.expect("refusal")(
+            d.instance,
+            std::ptr::from_ref(&i).cast(),
+            std::ptr::from_mut(&mut o).cast(),
+        )
+    };
     assert_eq!(ret.outcome(), Outcome::Ready);
     assert_eq!(o.status, 503);
     let body: Value = serde_json::from_slice(&reply[..o.reply_written as usize]).unwrap();

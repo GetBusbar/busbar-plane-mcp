@@ -232,10 +232,8 @@ pub struct McpDoor {
     line_listens: Keyed<(u64, String), door_line::LineListen>,
     /// The last number busbar spelled one of its own requests on a carrier session in.
     ask_seq: Keyed<(), u64>,
-    /// THE WORK HANDLES stdio children's relayed asks are correlated under, by handle: when each
-    /// lapses (Unix ms). One the caller never came back for is settled by the next relay's sweep,
-    /// so an abandoned ask does not hold a live handle forever.
-    relays: Keyed<u64, u64>,
+    /// Child work owned independently of request units until durable cleanup is confirmed.
+    relays: Keyed<u64, door_relay_cleanup::Work>,
     /// THE SESSIONS of the session revisions and the `2024-11-05` stream: this process's, bounded
     /// per owner in count and bytes ([`crate::tool_sessions::SessionTable`], [`door_sessions`]).
     sessions: Keyed<(), door_sessions::Sessions>,
@@ -250,7 +248,7 @@ pub struct McpDoor {
     /// THE HELD `2024-11-05` EVENT STREAMS busbar reaches legacy-only servers over, by member and
     /// caller binding ([`door_legacy`]).
     legacy: Keyed<String, door_legacy::Link>,
-    /// Pending legacy handles and the SDK's confirmed completion-retirement state.
+    /// Maintenance host/connector handles and their confirmed completion-retirement state.
     legacy_seq: Keyed<(), door_legacy::Driver>,
     /// Whether this instance said its ungoverned chain's sessions are unisolated (once).
     said_ungoverned: Keyed<(), ()>,
@@ -2118,6 +2116,35 @@ fn trust_of(
     }
 }
 
+/// One whole published-list snapshot per server and the same hiding rule as `tools/list`.
+fn hidden_tools(
+    plane: &McpDoor,
+    ticket: Ticket,
+    issued: &mut u32,
+    held: &Held,
+    admit: &impl Fn(&str, &str) -> bool,
+) -> std::collections::BTreeSet<String> {
+    use busbar_contract::abi::host::service::{DISTRUST_CHANGED, DISTRUST_QUARANTINED};
+    let mut lists = BTreeMap::new();
+    let mut hidden = std::collections::BTreeSet::new();
+    for entry in held.catalogue.tools_for(admit) {
+        let list = lists
+            .entry(entry.server.clone())
+            .or_insert_with(|| published_in(plane, held, &entry.server));
+        let hides = match trust_of(plane, ticket, issued, entry, list) {
+            crate::call::Trust::Verdict(DISTRUST_QUARANTINED) => true,
+            crate::call::Trust::Verdict(DISTRUST_CHANGED) => {
+                matches!(list.sighting, crate::trust::Sighting::Seen(_))
+            }
+            _ => false,
+        };
+        if hides {
+            hidden.insert(entry.namespaced.clone());
+        }
+    }
+    hidden
+}
+
 /// Recheck a task's selected entry at its actual send boundary, including after a pending greeting
 /// or a wait in its child's line. These two grants are fresh; other cached unit grants are retained.
 fn admit_task_send(
@@ -2393,34 +2420,19 @@ fn answer_body(
             trust_of(plane, ticket, &mut unit.issued, entry, &list),
         )
     });
-    use busbar_contract::abi::host::service::{DISTRUST_CHANGED, DISTRUST_QUARANTINED};
     let listing = matches!(&disposition, Disposition::Request { row, .. }
         if row.op == crate::tool_ops::OP_TOOLS_LIST || row.op == crate::tool_ops::OP_DISCOVER);
-    let mut hidden = std::collections::BTreeSet::new();
-    if listing {
-        let listed: Vec<crate::catalogue::ToolEntry> = held
-            .catalogue
-            .tools_for(&admit(&unit.entitled))
-            .into_iter()
-            .cloned()
-            .collect();
-        for entry in &listed {
-            // A verdict hides a tool whose server is quarantined, or one offered at another digest
-            // than the one approved (the rug-pull) — judged changed only against a sighting: one its
-            // server was never seen to offer is listed. A tool waiting on the operator stays listed,
-            // so the caller can see what exists (a call is refused on its own verdict).
-            let list = list_of(&entry.server);
-            let sighted = matches!(list.sighting, crate::trust::Sighting::Seen(_));
-            let hides = match trust_of(plane, ticket, &mut unit.issued, entry, &list) {
-                crate::call::Trust::Verdict(DISTRUST_QUARANTINED) => true,
-                crate::call::Trust::Verdict(DISTRUST_CHANGED) => sighted,
-                _ => false,
-            };
-            if hides {
-                hidden.insert(entry.namespaced.clone());
-            }
-        }
-    }
+    let hidden = if listing {
+        hidden_tools(
+            plane,
+            ticket,
+            &mut unit.issued,
+            &held,
+            &admit(&unit.entitled),
+        )
+    } else {
+        std::collections::BTreeSet::new()
+    };
     let mut seal = services
         .map(|s| door_tasks::door_seal(plane, s, ticket, (&mut unit.issued, &mut unit.claim)));
     let admit = |kind: &str, name: &str| admit(&unit.entitled)(kind, name);
@@ -2914,7 +2926,7 @@ enum ChildOpened {
 /// A STDIO CHILD'S RELAYED ASK GIVEN ITS WORK HANDLE (`work.open`): across separate arrivals the
 /// caller's answer is correlated with `work.*`, the synchronous call's and a task's alike. The ask
 /// (`result`, `round`, the child's leg `c`) is held in `asked` while the open pends, the open
-/// re-issued under `work_slot`; an opened handle is swept with the relays once its state lapses.
+/// re-issued under `work_slot`; an opened handle remains owned by the maintenance driver until settled.
 fn open_child_work(
     plane: &McpDoor,
     (services, ticket, issued): (StaticServices, Ticket, &mut u32),
@@ -2926,12 +2938,9 @@ fn open_child_work(
     (result, round, mut c): (&Value, u32, crate::ask::ChildLeg),
 ) -> ChildOpened {
     *asked = Some((result.clone(), round, c.clone()));
-    // Free lapsed custody before asking a full host for another handle. Keep a pending open's
-    // original handle untouched; the sweep uses the unit's separately numbered services.
+    // Cleanup is maintained independently of this request and its pending open.
     if work_slot.is_none() {
-        if let Some(now_ms) = wall_ms(Some(services), ticket, issued) {
-            sweep_relays(plane, services, ticket, issued, now_ms);
-        }
+        door_listen::wake_driver(plane);
     }
     let h = door_tasks::handle(ticket, issued, work_slot);
     let record = child_record(member, &c);
@@ -2947,11 +2956,10 @@ fn open_child_work(
         std::task::Poll::Ready(Ok(opened)) => {
             c.work = Some(opened.reference.to_string());
             let now_ms = wall_ms(Some(services), ticket, issued);
-            // A failed clock read gives the handle no lapse (never one at the epoch): it is
-            // settled at once and the ask refused.
+            // A failed clock read gives the handle no lapse (never one at the epoch): cleanup
+            // becomes immediately due on the driver and the ask is refused.
             let Some(now_ms) = now_ms else {
-                let h = door_tasks::handle(ticket, issued, &mut None);
-                let _unheard = services.work_settle(h, opened.handle, CHILD_LAPSED);
+                door_relay_cleanup::hold(plane, opened.handle, 0);
                 *asked = None;
                 return ChildOpened::Refused(
                     c,
@@ -2961,7 +2969,8 @@ fn open_child_work(
                     },
                 );
             };
-            plane.relays.insert(
+            door_relay_cleanup::hold(
+                plane,
                 opened.handle,
                 now_ms.saturating_add(crate::ask::DEFAULT_TTL_SECS.saturating_mul(1000)),
             );
@@ -3012,33 +3021,6 @@ pub fn seal_relayed<'b, S: SealHost>(
             reason: CLOCK_UNAVAILABLE.to_string(),
         })?;
     crate::ask::relay_state_for(bind(now), digest, leg, ttl_secs, seal).ok_or_else(no_sealer)
-}
-
-/// THE SWEEP of relayed asks' work handles, run as another is opened: each one whose state lapsed
-/// with nobody come back for it is settled (its answer is not waited on), so the live bound holds
-/// only asks a caller can still answer.
-fn sweep_relays(
-    plane: &McpDoor,
-    services: StaticServices,
-    ticket: Ticket,
-    issued: &mut u32,
-    now: u64,
-) {
-    let lapsed: Vec<u64> = plane.relays.with_all(|m| {
-        let gone: Vec<u64> = m
-            .iter()
-            .filter(|(_, at)| **at <= now)
-            .map(|(h, _)| *h)
-            .collect();
-        for h in &gone {
-            m.remove(h);
-        }
-        gone
-    });
-    for work in lapsed {
-        let h = door_tasks::handle(ticket, issued, &mut None);
-        let _unheard = services.work_settle(h, work, CHILD_LAPSED);
-    }
 }
 
 /// A STDIO CHILD'S ASKS (their `ids`) REFUSED on its input in `refusal`'s words (the operator's
@@ -4639,6 +4621,9 @@ mod door_listen;
 
 #[path = "door_legacy.rs"]
 mod door_legacy;
+
+#[path = "door_relay_cleanup.rs"]
+mod door_relay_cleanup;
 
 #[path = "door_inspection.rs"]
 mod door_inspection;

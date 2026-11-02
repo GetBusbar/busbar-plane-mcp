@@ -1,7 +1,7 @@
 use busbar_contract::abi::mechanism::call::{Blob, InHead, OutHead, Outcome};
 use busbar_contract::abi::mechanism::lifecycle::{slot, OpsHead, ReleaseIn};
 use busbar_contract::abi::mechanism::ticket::{HostCtx, Ticket};
-use busbar_contract::abi::sdk::completion_retirement::{self as wire, Capability, Domain};
+use busbar_contract::abi::sdk::completion_retirement::{self as wire, Capability};
 
 pub struct Host {
     capability: Capability,
@@ -32,10 +32,7 @@ impl Host {
             ack.capability, self.capability,
             "the host accepts only its exact current token"
         );
-        assert!(ack
-            .handles
-            .iter()
-            .all(|handle| handle.domain == Domain::Connector));
+        // Host services and connector operations share the driver's sequence namespace.
         self.capability.nonce = self.capability.nonce.checked_add(1).unwrap();
         self.capability.acknowledged = wire::ack_digest(&ack).unwrap();
         ack.handles.into_iter().map(|handle| handle.seq).collect()
@@ -63,10 +60,13 @@ pub fn release(instance: *mut std::ffi::c_void, head: &OutHead, ops: &OpsHead) {
     };
     input.lease = head.lease;
     output.size = std::mem::size_of::<OutHead>() as u32;
-    let answer = ops.release.unwrap()(
-        instance,
-        std::ptr::from_ref(&input).cast(),
-        std::ptr::from_mut(&mut output).cast(),
-    );
+    // SAFETY: The caller proves the live instance and outstanding lease; these RELEASE frames have the exact declared layouts and remain live.
+    let answer = unsafe {
+        ops.release.unwrap()(
+            instance,
+            std::ptr::from_ref(&input).cast(),
+            std::ptr::from_mut(&mut output).cast(),
+        )
+    };
     assert_eq!(answer.outcome(), Outcome::Ready);
 }

@@ -18,11 +18,14 @@ fn cancel_driver(door: &Door) {
     let mut o: PlaneCancelOut = z();
     o.cancel.head = out_head::<PlaneCancelOut>();
     // SAFETY: CANCEL with its exact declared types and the test's live instance.
-    let ret = lifecycle().cancel.unwrap()(
-        door.instance,
-        std::ptr::from_ref(&i).cast(),
-        std::ptr::from_mut(&mut o).cast(),
-    );
+    // SAFETY: The fixture owns this live door instance; the exact input/output frames and every borrowed buffer remain live throughout the synchronous call.
+    let ret = unsafe {
+        lifecycle().cancel.unwrap()(
+            door.instance,
+            std::ptr::from_ref(&i).cast(),
+            std::ptr::from_mut(&mut o).cast(),
+        )
+    };
     assert_eq!(ret.outcome(), Outcome::Ready);
 }
 

@@ -19,6 +19,54 @@ use busbar_contract::net::{
 };
 use serde_json::{json, Value};
 
+#[test]
+fn schema_combinator_exhaustion_refuses_instead_of_dropping_host_declarations() {
+    for keyword in ["allOf", "anyOf", "oneOf"] {
+        let mut declaration = json!({"format":"hostname"});
+        for depth in 0..=super::MAX_COMBINATOR_DEPTH {
+            let schema = json!({"type":"object","properties":{"target":declaration}});
+            let mut judged = Vec::new();
+            let result = guard(&schema, &json!({"target":"169.254.169.254"}), |host| {
+                judged.push(host.to_string());
+                Some(DEST_METADATA)
+            });
+            if depth < super::MAX_COMBINATOR_DEPTH {
+                assert_eq!(judged, ["169.254.169.254"]);
+                assert!(matches!(result.unwrap_err().why, ArgWhy::CloudMetadata(_)));
+            } else {
+                assert!(judged.is_empty());
+                let refusal = result.unwrap_err();
+                assert_eq!(refusal.pointer, "/target");
+                assert_eq!(refusal.why, ArgWhy::SchemaDepth);
+            }
+            declaration = json!({keyword:[schema["properties"]["target"].clone()]});
+        }
+    }
+}
+
+#[test]
+fn schema_exhaustion_also_refuses_empty_values_and_a_shallow_public_host_is_judged() {
+    let mut schema = json!({"format":"hostname"});
+    for _ in 0..super::MAX_COMBINATOR_DEPTH {
+        schema = json!({"allOf":[schema]});
+    }
+    for argument in [json!({}), json!([]), json!(4), json!("example.org")] {
+        assert_eq!(
+            guard(&schema, &argument, |_| Some(DEST_ALLOWED))
+                .unwrap_err()
+                .why,
+            ArgWhy::SchemaDepth
+        );
+    }
+    let accepted = guard(
+        &json!({"allOf":[{"format":"hostname"}]}),
+        &json!("example.org"),
+        |_| Some(DEST_ALLOWED),
+    )
+    .unwrap();
+    assert_eq!(accepted.declared_judged, 1);
+}
+
 /// A STAND-IN HOST'S `dest.judge`, over the contract's address predicates: what the walk is judged
 /// by in these tests. `refuse_private` is `DEST_REFUSE_PRIVATE` (a registration with no private
 /// reach). The deployment's real judge answering a served call is proven in the root crate

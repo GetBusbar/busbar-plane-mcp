@@ -33,6 +33,7 @@ fn retiring_one_host_closed_carrier_removes_all_of_its_line_state() {
                 opening_ticket: Ticket::NONE,
                 acknowledged: true,
                 entitled: BTreeMap::new(),
+                hidden: Default::default(),
                 owner: format!("owner-{session}"),
                 standing: Standing::Live,
                 confirmed_ns: 1,

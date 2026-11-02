@@ -35,6 +35,7 @@ fn opened(owner: &str, now_ns: u64) -> LineListen {
         opening_ticket: Ticket::NONE,
         acknowledged: true,
         entitled: BTreeMap::new(),
+        hidden: Default::default(),
         owner: owner.to_string(),
         standing: Standing::Live,
         confirmed_ns: now_ns,

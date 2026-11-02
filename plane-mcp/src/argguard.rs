@@ -67,6 +67,8 @@ pub enum ArgWhy {
     DepthExceeded,
     /// A schema property pattern could not be compiled or reliably evaluated.
     SchemaPattern,
+    /// A schema combinator nested beyond the inspection budget.
+    SchemaDepth,
 }
 
 impl std::fmt::Display for ArgWhy {
@@ -113,6 +115,10 @@ impl std::fmt::Display for ArgWhy {
                 f,
                 "a schema `patternProperties` expression could not be checked, so the argument is refused"
             ),
+            ArgWhy::SchemaDepth => write!(
+                f,
+                "the input schema nests combinators beyond {MAX_COMBINATOR_DEPTH} levels, so the argument is refused rather than inspected partially"
+            ),
         }
     }
 }
@@ -144,7 +150,7 @@ impl std::fmt::Display for ArgRefusal {
                 "tool argument {at} (schema format `{fmt}`) was refused: {}",
                 self.why
             ),
-            None if self.why == ArgWhy::SchemaPattern => {
+            None if matches!(self.why, ArgWhy::SchemaPattern | ArgWhy::SchemaDepth) => {
                 write!(f, "tool argument {at} was refused: {}", self.why)
             }
             None => write!(
@@ -218,6 +224,12 @@ fn walk(
             why: ArgWhy::DepthExceeded,
         });
     }
+    // Even an empty container or non-string leaf must not turn an unread schema into success.
+    expanded(schemas).map_err(|why| ArgRefusal {
+        pointer: pointer.clone(),
+        declared_format: None,
+        why,
+    })?;
     match value {
         Value::Object(map) => {
             for (k, v) in map {
@@ -240,7 +252,11 @@ fn walk(
                 pointer.push('/');
                 pointer.push_str(&i.to_string());
                 walk(
-                    &child_for_index(schemas, i),
+                    &child_for_index(schemas, i).map_err(|why| ArgRefusal {
+                        pointer: pointer.clone(),
+                        declared_format: None,
+                        why,
+                    })?,
                     v,
                     pointer,
                     depth + 1,
@@ -274,7 +290,7 @@ fn judge_string(
             why,
         }
     };
-    let declared = urlish_formats(schemas);
+    let declared = urlish_formats(schemas).map_err(refused(None))?;
     if !declared.is_empty() {
         scan.declared_judged += 1;
         for (format, kind) in declared {
@@ -625,9 +641,9 @@ fn escape_token(key: &str) -> String {
 
 /// Every URL-ish `format` declared for this position, in declaration order. Overlapping property
 /// patterns apply together, so a relative-reference declaration cannot mask a hostname declaration.
-fn urlish_formats(schemas: &[&Value]) -> Vec<(String, Urlish)> {
+fn urlish_formats(schemas: &[&Value]) -> Result<Vec<(String, Urlish)>, ArgWhy> {
     let mut out = Vec::new();
-    for node in expanded(schemas) {
+    for node in expanded(schemas)? {
         let Some(format) = node.get("format").and_then(Value::as_str) else {
             continue;
         };
@@ -640,20 +656,28 @@ fn urlish_formats(schemas: &[&Value]) -> Vec<(String, Urlish)> {
         };
         out.push((format.to_string(), kind));
     }
-    out
+    Ok(out)
 }
 
 /// A schema node plus every `allOf`/`anyOf`/`oneOf` branch reachable from it, so a URL-ish format
 /// hidden inside a combinator is still found.
-fn expanded<'a>(schemas: &[&'a Value]) -> Vec<&'a Value> {
+fn expanded<'a>(schemas: &[&'a Value]) -> Result<Vec<&'a Value>, ArgWhy> {
     let mut out = Vec::new();
-    expand_into(schemas, &mut out, MAX_COMBINATOR_DEPTH);
-    out
+    expand_into(schemas, &mut out, MAX_COMBINATOR_DEPTH)?;
+    Ok(out)
 }
 
-fn expand_into<'a>(schemas: &[&'a Value], out: &mut Vec<&'a Value>, budget: usize) {
+fn expand_into<'a>(
+    schemas: &[&'a Value],
+    out: &mut Vec<&'a Value>,
+    budget: usize,
+) -> Result<(), ArgWhy> {
     if budget == 0 {
-        return;
+        return if schemas.is_empty() {
+            Ok(())
+        } else {
+            Err(ArgWhy::SchemaDepth)
+        };
     }
     for node in schemas {
         if !node.is_object() {
@@ -663,10 +687,11 @@ fn expand_into<'a>(schemas: &[&'a Value], out: &mut Vec<&'a Value>, budget: usiz
         for key in ["allOf", "anyOf", "oneOf"] {
             if let Some(branches) = node.get(key).and_then(Value::as_array) {
                 let refs: Vec<&Value> = branches.iter().collect();
-                expand_into(&refs, out, budget - 1);
+                expand_into(&refs, out, budget - 1)?;
             }
         }
     }
+    Ok(())
 }
 
 /// Named properties and every matching property pattern apply together. `additionalProperties`
@@ -677,7 +702,7 @@ fn child_for_key<'a>(
     patterns: &mut BTreeMap<String, jsonschema::Validator>,
 ) -> Result<Vec<&'a Value>, ArgWhy> {
     let mut out = Vec::new();
-    for node in expanded(schemas) {
+    for node in expanded(schemas)? {
         let mut covered = false;
         if let Some(named) = node
             .get("properties")
@@ -740,9 +765,9 @@ fn pattern_matches(
 
 /// The schema(s) governing array element `index`: the tuple position where the schema gives one
 /// (`prefixItems`, or the legacy array form of `items`), otherwise the single `items` schema.
-fn child_for_index<'a>(schemas: &[&'a Value], index: usize) -> Vec<&'a Value> {
+fn child_for_index<'a>(schemas: &[&'a Value], index: usize) -> Result<Vec<&'a Value>, ArgWhy> {
     let mut out = Vec::new();
-    for node in expanded(schemas) {
+    for node in expanded(schemas)? {
         if let Some(tuple) = node.get("prefixItems").and_then(Value::as_array) {
             if let Some(at) = tuple.get(index) {
                 out.push(at);
@@ -764,7 +789,7 @@ fn child_for_index<'a>(schemas: &[&'a Value], index: usize) -> Vec<&'a Value> {
             _ => {}
         }
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
