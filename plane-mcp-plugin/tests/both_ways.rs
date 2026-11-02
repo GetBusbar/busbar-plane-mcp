@@ -77,6 +77,7 @@ mod both_ways {
         in_head, load_dropped, load_linked, out_head, Bind, DispatchConfig, Dispatcher, Frame,
         LinkedRow, LoadedDoor, NoSink, Plugin,
     };
+    use busbar_test_kit::services_double::{Double, ServicesDouble};
     use serde_json::{json, Value};
 
     // The door: this plugin's one public item.
@@ -997,7 +998,7 @@ mod both_ways {
     /// loader's request lookup must hand the unit the crossing serves.
     struct Grants(&'static [&'static str]);
 
-    impl busbar_plugin_loader::dispatch::HostServices for Grants {
+    impl ServicesDouble for Grants {
         fn now(&self) -> busbar_plugin_loader::dispatch::Reading {
             busbar_plugin_loader::dispatch::Reading {
                 wall_ns: 0,
@@ -1187,7 +1188,7 @@ mod both_ways {
     /// can mint a session id on.
     struct Minting(Grants, std::sync::atomic::AtomicU64);
 
-    impl busbar_plugin_loader::dispatch::HostServices for Minting {
+    impl ServicesDouble for Minting {
         fn now(&self) -> busbar_plugin_loader::dispatch::Reading {
             busbar_plugin_loader::dispatch::Reading {
                 wall_ns: 0,
@@ -1657,7 +1658,7 @@ mod both_ways {
     }
 
     fn served(grants: &'static [&'static str]) -> Dispatcher {
-        Dispatcher::with_services(DispatchConfig::default(), Arc::new(Grants(grants)))
+        Dispatcher::with_services(DispatchConfig::default(), Arc::new(Double(Grants(grants))))
     }
 
     #[test]
@@ -2003,7 +2004,10 @@ mod both_ways {
     fn the_ungoverned_stream_diagnostic_reaches_the_host_log_dropped_in_as_linked() {
         let d = Dispatcher::with_services(
             DispatchConfig::default(),
-            Arc::new(Minting(Grants(&[]), std::sync::atomic::AtomicU64::new(1))),
+            Arc::new(Double(Minting(
+                Grants(&[]),
+                std::sync::atomic::AtomicU64::new(1),
+            ))),
         );
         const ACCEPT: &[Field] = &[field("accept", "text/event-stream")];
         for dropped_in in [false, true] {
@@ -2283,7 +2287,7 @@ mod bounds {
     /// timed on it) and nothing else.
     struct Clocked;
 
-    impl busbar_contract::services::double::ServicesDouble for Clocked {
+    impl ServicesDouble for Clocked {
         fn now(&self) -> busbar_contract::services::Reading {
             busbar_contract::services::Reading {
                 wall_ns: 1_800_000_000_000_000_000,
@@ -2294,7 +2298,7 @@ mod bounds {
 
     /// A dispatcher whose host serves a clock.
     fn clocked() -> Dispatcher {
-        Dispatcher::with_services(DispatchConfig::default(), Arc::new(Clocked))
+        Dispatcher::with_services(DispatchConfig::default(), Arc::new(Double(Clocked)))
     }
 
     /// One caller opening its quota's worth of subscriptions, plus one, cuts off no other caller's

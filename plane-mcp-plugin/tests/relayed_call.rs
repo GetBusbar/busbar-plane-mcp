@@ -33,6 +33,7 @@ use busbar_plugin_loader::dispatch::{
     Plugin,
 };
 use busbar_test_kit::conformance::{input, output};
+use busbar_test_kit::services_double::{Double, ServicesDouble};
 use serde_json::{json, Value};
 
 use door_facts::{
@@ -331,7 +332,7 @@ fn length_of(reply: &[u8]) -> (String, String) {
 /// loader's request lookup must hand the unit the crossing serves.
 struct Grants(&'static [&'static str]);
 
-impl busbar_plugin_loader::dispatch::HostServices for Grants {
+impl ServicesDouble for Grants {
     fn now(&self) -> busbar_plugin_loader::dispatch::Reading {
         busbar_plugin_loader::dispatch::Reading {
             wall_ns: 0,
@@ -539,7 +540,7 @@ const JSON_HEAD: &[Field] = &[field("content-type", "application/json")];
 const SSE_HEAD: &[Field] = &[field("content-type", "text/event-stream")];
 
 fn served(grants: &'static [&'static str]) -> Dispatcher {
-    Dispatcher::with_services(DispatchConfig::default(), Arc::new(Grants(grants)))
+    Dispatcher::with_services(DispatchConfig::default(), Arc::new(Double(Grants(grants))))
 }
 
 /// THE RELAY SCRIPT'S CALLS: each far answer a member gives one relayed call, read back.
