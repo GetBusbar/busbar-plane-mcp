@@ -3011,8 +3011,27 @@ pub(crate) fn closing_the_actual_plane_retires_its_pending_initialize_without_se
         assert!(
             ups.seen
                 .iter()
-                .all(|seen| seen.body["method"] != "initialize"),
-            "no initialize POST body was sent"
+                .any(|seen| seen.url == LEGACY_URL && seen.body["method"] == "initialize"),
+            "actual legacy fallback must first exercise a refused base-URL initialize probe"
+        );
+        // Negotiation probes POST initialize to the base URL and receive 405 in
+        // legacy_request. The held legacy initialization instead targets the session
+        // message address, whose ESTABLISH has not produced a stream to write.
+        for seen in ups
+            .seen
+            .iter()
+            .filter(|seen| seen.body["method"] == "initialize")
+        {
+            assert_eq!(
+                seen.url, LEGACY_URL,
+                "only refused base-URL negotiation probes may have sent initialize"
+            );
+        }
+        assert!(
+            ups.seen
+                .iter()
+                .all(|seen| !seen.url.contains(LEGACY_MESSAGES)),
+            "no legacy session POST body was sent before its dial completed"
         );
     }
     assert!(resuming, "the actual adapter pended its initialization");
@@ -3058,10 +3077,12 @@ pub(crate) fn closing_the_actual_plane_retires_its_pending_initialize_without_se
         before,
         "closing the parked exchange sends no new body"
     );
-    assert!(ups
-        .seen
-        .iter()
-        .all(|seen| seen.body["method"] != "initialize"));
+    assert!(
+        ups.seen
+            .iter()
+            .all(|seen| !seen.url.contains(LEGACY_MESSAGES)),
+        "CLOSE never writes the held legacy initialization POST"
+    );
     assert!(
         ups.unexpected_closes.is_empty(),
         "a pending dial produced no stream to close"

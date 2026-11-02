@@ -322,7 +322,8 @@
       "Actual CLOSE sends no initialization POST/new body and no CLOSE for a nonexistent stream.",
       "Actual completed flow on its real instance/ticket95 observes literal SDK parked_count0."
     ],
-    "qualification": "Source authored and formatting checked only; both private/public paths require native execution. No generic SDK-only source equivalence waiver is claimed."
+    "qualification": "Source authored and formatting checked only; both private/public paths require native execution. No generic SDK-only source equivalence waiver is claimed.",
+    "fixture_correction": "Native d9 showed broad method-only assertion incorrectly counted required base-URL initialize negotiation probes, answered405 by legacy_request. OPEN itself performs no connector I/O. Descendant asserts every observed initialize targets exact base LEGACY_URL, zero session-message POST transcript before/after CLOSE, and unchanged full transcript length across CLOSE; pending session ESTABLISH still same exact handle/count, literal SDK parking oracle unchanged. Explicit positive assertion requires an actual base-URL initialize probe, preventing the target-specific check from passing vacuously."
   },
   "removed_edges": [
     "workspace/member busbar-test-kit dev dependencies",
