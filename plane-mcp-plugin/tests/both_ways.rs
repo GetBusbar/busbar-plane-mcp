@@ -2077,7 +2077,6 @@ mod bounds {
     //!
     //! The units are driven through the linked door op by op, as [`super::both_ways`] drives it.
 
-    use std::path::Path;
     use std::sync::Arc;
 
     use super::{octets, text, z};
@@ -2096,6 +2095,7 @@ mod bounds {
         in_head, load_linked, out_head, Bind, DispatchConfig, Dispatcher, Frame, LinkedRow, NoSink,
         Plugin,
     };
+    use busbar_test_kit::services_double::{Double, ServicesDouble};
 
     const SECTION: &[u8] =
         br#"{"fs": {"url": "https://mcp.example/fs", "pin": {"mechanism": "unpinned"}}}"#;
