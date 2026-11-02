@@ -40,6 +40,13 @@ mod local_output;
 mod local_renderer;
 #[allow(dead_code)]
 mod plane_door {
+    #[allow(dead_code, unused_imports)]
+    mod actual_legacy_driver {
+        include!("../../plane-mcp/src/legacy_wire.rs");
+        mod tests {
+            include!("support/private_driver.rs");
+        }
+    }
     include!("../../plane-mcp/src/plane_door_impl.rs");
     mod door_legacy {
         include!("../../plane-mcp/src/door_legacy_impl.rs");
@@ -162,14 +169,6 @@ const PLANE_KEY: &str = "mcp";
 #[cfg(test)]
 #[path = "../../plane-mcp/src/tests/mod.rs"]
 mod tests;
-
-#[allow(dead_code, unused_imports)]
-mod actual_legacy_driver {
-    include!("../../plane-mcp/src/legacy_wire.rs");
-    mod tests {
-        include!("support/private_driver.rs");
-    }
-}
 
 // Same ordinary actual-product ABI scenarios, now invoking this integration binary's actual
 // production door so its passive private Instance observations can also be asserted.

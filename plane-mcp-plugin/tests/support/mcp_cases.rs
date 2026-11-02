@@ -1691,7 +1691,7 @@ fn actual_mcp_cases(dropped: bool) -> BTreeMap<String, String> {
         r.insert(label, value)
     };
 
-    let refresh = |what: &[u8]| {
+    let refresh_call = |what: &[u8]| {
         let mut f: Frame<RefreshIn, PlaneRefreshOut> = Frame::new(input(), output());
         (f.input.generation, f.input.settings) = (2, json(what));
         let (c, snap) = p.refresh(&mut f);
@@ -1700,7 +1700,7 @@ fn actual_mcp_cases(dropped: bool) -> BTreeMap<String, String> {
     {
         let label = ("refresh").to_string();
         let before = count();
-        let value = { refresh(&handed(&p.served(), &refresh)) };
+        let value = { refresh_call(&handed(&p.served(), &refresh)) };
         assert_eq!(count() - before, 1, "{label}: exact first crossings");
         r.insert(label, value)
     };

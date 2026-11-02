@@ -382,5 +382,9 @@
     "old": "a354 both_ways resumed(fold, networked=true, dialing_steps=[]) requires >0 actual RESUME on each leg",
     "new": "actual_mcp_cases captures held.resumes before product operations and asserts final > before independently for linked and dropped legs",
     "scope": "Actual per-instance SDK resume counters; preserves blocking/no-Pending regression oracle in addition to exact first-crossing assertions. Native descendant execution pending."
+  },
+  "native_compile_followups": {
+    "driver_module": "Private driver test module now nested under actual plane_door parent, matching production legacy_wire super::handle_at and super::door_sessions references; unchanged actual implementation included, no algorithm copy.",
+    "refresh": "Renamed refresh closure to refresh_call, retaining refresh settings bytes passed to handed and actual REFRESH."
   }
 }
