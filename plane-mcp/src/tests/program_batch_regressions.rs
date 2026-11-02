@@ -1,6 +1,39 @@
 use super::*;
 
 #[test]
+fn whole_and_fragmented_messages_enforce_the_bound_including_the_closing_byte() {
+    let prefix = br#"{"jsonrpc":"2.0","id":7,"result":{"text":""#;
+    let suffix = br#""}}"#;
+    for size in [MESSAGE_MAX, MESSAGE_MAX + 1] {
+        let mut body = prefix.to_vec();
+        body.resize(size - suffix.len(), b'x');
+        body.extend_from_slice(suffix);
+        for chunk_size in [body.len(), 16 * 1024] {
+            let mut corr = Correlator::default();
+            let mut peer = Door::default();
+            let mut completed = Ok(None);
+            for chunk in body.chunks(chunk_size) {
+                completed = corr.take(chunk, 7, "srv", 1, &mut peer);
+                if completed.is_err() {
+                    break;
+                }
+            }
+            if size > MESSAGE_MAX {
+                assert!(
+                    completed.is_err(),
+                    "a complete final piece exceeded the message bound"
+                );
+            } else {
+                assert!(
+                    matches!(completed, Ok(Some(_))),
+                    "an exact-bound message is accepted"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn a_privileged_ask_cannot_be_hidden_before_or_between_cheaper_asks() {
     use crate::client::jsonrpc::{parse_response, RpcOutcome, ServerAsk};
     for requests in [

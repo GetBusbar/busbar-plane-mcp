@@ -276,6 +276,59 @@ fn program_door() -> Door {
     assert_eq!(result.outcome(), Outcome::Ready);
     Door {
         instance: output.open.instance,
+        retirement: std::cell::RefCell::new(completion_retirement_host::Host::new(
+            HostCtx { handle: 71 },
+            DRIVER,
+        )),
+    }
+}
+
+#[test]
+fn a_completed_stdio_response_obeys_the_reply_bound_on_its_final_piece() {
+    use busbar_contract::abi::sdk::exchange::REPLY_MAX;
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    MODE.store(0, Ordering::SeqCst);
+    *PROGRAM.lock().unwrap_or_else(PoisonError::into_inner) = Some(ProgramState::default());
+    *book() = None;
+    let door = program_door();
+    let call = br#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"pg_first","arguments":{},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#;
+    let fields = [
+        ("mcp-protocol-version", "2026-07-28"),
+        ("mcp-method", "tools/call"),
+        ("mcp-name", "pg_first"),
+    ];
+    for (unit, size) in [(30_401, REPLY_MAX + 1)] {
+        assert_eq!(
+            door.arrive(unit, "POST", "/mcp", call, &fields).outcome,
+            Outcome::Ready
+        );
+        door.piece(unit, &Given::attempt(ALICE, "pg"));
+        let sent = door.pump(unit, &Given::caller(ALICE, call));
+        assert!(sent.far, "{}", sent.text());
+        let prefix = format!(
+            r#"{{"jsonrpc":"2.0","id":{},"result":{{"content":[{{"type":"text","text":""#,
+            sent.json()["id"]
+        );
+        let suffix = br#""}]}}"#;
+        let mut body = prefix.into_bytes();
+        body.resize(size - suffix.len(), b'x');
+        body.extend_from_slice(suffix);
+        assert_eq!(body.len(), size);
+        let mut final_answer = Answered::default();
+        let pieces = body.chunks(16 * 1024);
+        let count = pieces.len();
+        for (at, bytes) in pieces.enumerate() {
+            let mut given = Given::far(ALICE, 200, Vec::new(), bytes);
+            if at + 1 != count {
+                given.flags &= !PIECE_LAST;
+            }
+            if at != 0 {
+                given.flags &= !PIECE_HAS_STATUS;
+            }
+            final_answer = door.piece(unit, &given);
+        }
+        assert_eq!(final_answer.json()["result"]["isError"], true);
+        assert!(final_answer.text().contains(&REPLY_MAX.to_string()));
     }
 }
 

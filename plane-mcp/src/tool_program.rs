@@ -133,11 +133,15 @@ pub struct Frames {
     depth: usize,
     in_string: bool,
     escaped: bool,
+    overgrown: bool,
 }
 
 impl Frames {
     /// Take `bytes`; every message they complete.
     pub fn push(&mut self, bytes: &[u8]) -> Vec<Message> {
+        if self.overgrown {
+            return Vec::new();
+        }
         self.buf.extend_from_slice(bytes);
         let mut out = Vec::new();
         let mut used = 0;
@@ -155,6 +159,11 @@ impl Frames {
                         // Not a message: what is held cannot be resynchronised, so it is handed on
                         // whole.
                         let rest = self.buf.split_off(at);
+                        if rest.len() > MESSAGE_MAX {
+                            self.overgrown = true;
+                            self.buf.clear();
+                            return Vec::new();
+                        }
                         *self = Frames::default();
                         out.push(Message::NotJson(rest));
                         return out;
@@ -162,6 +171,13 @@ impl Frames {
                 }
                 continue;
             };
+            // The bound is on a message, including the byte that completes it. Check before
+            // parsing or draining: a complete final piece must not erase evidence of overflow.
+            if self.seen - start > MESSAGE_MAX {
+                self.overgrown = true;
+                self.buf.clear();
+                return Vec::new();
+            }
             if self.in_string {
                 match b {
                     _ if self.escaped => self.escaped = false,
@@ -195,10 +211,10 @@ impl Frames {
         out
     }
 
-    /// Whether a message is part way through, past [`MESSAGE_MAX`].
+    /// Whether a message exceeded [`MESSAGE_MAX`], including its completing piece.
     #[must_use]
     pub fn overgrown(&self) -> bool {
-        self.buf.len() > MESSAGE_MAX
+        self.overgrown || self.buf.len() > MESSAGE_MAX
     }
 }
 
@@ -422,9 +438,9 @@ impl Correlator {
                 self.take_value(value, &wait, member, generation, peer, &mut answer)?;
             }
         }
-        if answer.is_none() && self.frames.overgrown() {
+        if self.frames.overgrown() {
             return Err(format!(
-                "stdio MCP child wrote more than {MESSAGE_MAX} bytes without ending its message; \
+                "stdio MCP child wrote a message of more than {MESSAGE_MAX} bytes; \
                  the read is abandoned rather than grown to whatever the child chooses"
             ));
         }
