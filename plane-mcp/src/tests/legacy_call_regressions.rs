@@ -1,22 +1,8 @@
 use super::*;
 use busbar_contract::abi::mechanism::call::{InHead, OutHead, Outcome};
 use busbar_contract::abi::mechanism::lifecycle::{slot, OpenIn, OpenOut};
-use busbar_contract::abi::sdk::capture::{CaptureHome, CaptureSlot};
-use busbar_contract::abi::sdk::{Instance, Lent, Out, Safe, SafeSlot};
-
-struct Capture;
-impl CaptureHome for Capture {
-    fn retention() -> &'static busbar_contract::abi::sdk::capture::CaptureRetention {
-        static RETENTION: std::sync::OnceLock<
-            busbar_contract::abi::sdk::capture::CaptureRetention,
-        > = std::sync::OnceLock::new();
-        RETENTION.get_or_init(Default::default)
-    }
-    fn with<R>(f: impl FnOnce(&mut CaptureSlot) -> R) -> R {
-        thread_local! {static SLOT:std::cell::RefCell<CaptureSlot>=std::cell::RefCell::new(CaptureSlot::default());}
-        SLOT.with(|slot| f(&mut slot.borrow_mut()))
-    }
-}
+use busbar_contract::abi::sdk::{Instance, Lent, Out, SafeSlot};
+use busbar_test_kit::test_support::DoorView;
 
 struct Probe;
 impl SafeSlot for Probe {
@@ -161,29 +147,61 @@ impl SafeSlot for Close {
     }
 }
 
+mod fixture_door {
+    busbar_contract::plugin_door! {
+        ops: busbar_contract::abi::export::Ops,
+        statement: busbar_contract::abi::sdk::door::statement("mcp-fixture", "1.6.0", 4),
+        lifecycle: {
+            validate: busbar_contract::abi::sdk::Safe<crate::tests::fixture::Idle<busbar_contract::abi::mechanism::lifecycle::ValidateIn, busbar_contract::abi::mechanism::call::OutHead>>,
+            open: busbar_contract::abi::sdk::Safe<super::Probe>,
+            refresh: busbar_contract::abi::sdk::Safe<crate::tests::fixture::Idle<busbar_contract::abi::mechanism::lifecycle::RefreshIn, busbar_contract::abi::mechanism::call::OutHead>>,
+            retire: busbar_contract::abi::sdk::Safe<crate::tests::fixture::Idle<busbar_contract::abi::mechanism::lifecycle::GenIn, busbar_contract::abi::mechanism::call::OutHead>>,
+            tick: busbar_contract::abi::sdk::Safe<crate::tests::fixture::Idle<busbar_contract::abi::mechanism::lifecycle::TickIn, busbar_contract::abi::mechanism::lifecycle::TickOut>>,
+            drive: busbar_contract::abi::sdk::Safe<crate::tests::fixture::Idle<busbar_contract::abi::mechanism::lifecycle::DriveIn, busbar_contract::abi::mechanism::call::OutHead>>,
+            cancel: busbar_contract::abi::sdk::Safe<crate::tests::fixture::Idle<busbar_contract::abi::mechanism::lifecycle::CancelIn, busbar_contract::abi::mechanism::lifecycle::CancelOut>>,
+            release: busbar_contract::abi::sdk::Safe<crate::tests::fixture::Idle<busbar_contract::abi::mechanism::lifecycle::ReleaseIn, busbar_contract::abi::mechanism::call::OutHead>>,
+            close: busbar_contract::abi::sdk::Safe<super::Close>,
+        },
+    }
+}
+
+fn view() -> DoorView {
+    DoorView::of(fixture_door::MACRO_DOOR)
+}
+
 fn run(generation: u64) {
-    use busbar_contract::abi::sdk::door::{blank_in, blank_out, kind_op, Lifecycle};
-    let open = kind_op::<Lifecycle, Safe<Probe>, Capture, { slot::OPEN }>().unwrap();
-    let mut input = blank_in::<OpenIn>();
-    input.head.op = slot::OPEN;
-    input.head.ticket = Ticket {
-        slot: 9,
-        generation: 1,
-    };
-    input.generation = generation;
-    let result = busbar_test_kit::test_support::reply::call(
-        open,
-        std::ptr::null_mut(),
+    use busbar_contract::abi::sdk::door::blank_out;
+    use busbar_test_kit::test_support::{reply, test_in::TestIn};
+    let input = TestIn::<OpenIn>::new()
+        .set(|i| &i.head.op, slot::OPEN)
+        .set(
+            |i| &i.head.ticket,
+            Ticket {
+                slot: 9,
+                generation: 1,
+            },
+        )
+        .set(|i| &i.generation, generation);
+    // The descriptor proves the slot types; TestIn owns every input loan.
+    let mut result = reply::call_in(
+        view()
+            .op::<busbar_contract::abi::export::Ops>(|o| &o.head.open)
+            .unwrap(),
+        None,
         &input,
         blank_out::<OpenOut>(),
     );
     assert_eq!(result.outcome, Outcome::Ready, "{result:?}");
-    let close = kind_op::<Lifecycle, Safe<Close>, Capture, { slot::CLOSE }>().unwrap();
-    let mut input = blank_in::<InHead>();
-    input.op = slot::CLOSE;
-    let closed = busbar_test_kit::test_support::reply::call(
-        close,
-        result.out.instance,
+    let instance = result
+        .take_instance()
+        .expect("the safe open owns an instance");
+    let input = TestIn::<InHead>::new().set(|i| &i.op, slot::CLOSE);
+    // Consume the one instance proof only after all calls and input loans ended.
+    let closed = reply::close_in(
+        view()
+            .op::<busbar_contract::abi::export::Ops>(|o| &o.head.close)
+            .unwrap(),
+        instance,
         &input,
         blank_out::<OutHead>(),
     );

@@ -7,22 +7,23 @@ use super::*;
 use busbar_contract::abi::host::service::{
     ClockNowIn, ClockReading, ItemSpan, WorkOpenIn, WorkSettleIn,
 };
-use busbar_contract::abi::mechanism::call::{Blob, InHead, OutHead, Outcome, Span};
-use busbar_contract::abi::mechanism::lifecycle::{
-    slot, DriveIn, GenIn, OpenIn, OpenOut, RefreshIn,
+use busbar_contract::abi::mechanism::call::{InHead, OutHead, Outcome, Span, BLOB_OCTETS};
+use busbar_contract::abi::mechanism::lifecycle::{slot, GenIn, RefreshIn};
+use busbar_contract::abi::plane::{
+    PlaneCancelIn, PlaneCancelOut, PlaneDriveIn, PlaneDriveOut, PlaneOpenIn, PlaneOpenOut,
+    PlaneRefreshOut,
 };
-use busbar_contract::abi::plane::{PlaneCancelIn, PlaneCancelOut, PlaneLifecycle, PlaneRefreshOut};
-use busbar_contract::abi::sdk::capture::{CaptureHome, CaptureRetention, CaptureSlot};
 use busbar_contract::abi::sdk::completion_retirement::{self as wire, Capability};
-use busbar_contract::abi::sdk::door::{blank_in, blank_out, kind_op, Lifecycle};
+use busbar_contract::abi::sdk::door::blank_out;
 use busbar_contract::abi::sdk::plane_life::{PlaneLife, Refresh, Retire};
-use busbar_contract::abi::sdk::{Instance, Lent, Out, Safe, SafeSlot, Services};
+use busbar_contract::abi::sdk::{Instance, Lent, Out, SafeSlot, Services};
 use busbar_test_kit::test_support::{
     fake::{self, FakeHost, FakeService, ServiceCall},
     reply,
+    test_in::TestIn,
+    DoorView,
 };
 use std::cell::RefCell;
-use std::ffi::c_void;
 
 const DRIVER: Ticket = Ticket {
     slot: 87,
@@ -100,7 +101,7 @@ impl FakeService for OpenWork {
             &[ItemSpan {
                 key: Span {
                     offset: 0,
-                    len: reference.len() as u64
+                    len: reference.len() as u32
                 },
                 value: Span {
                     offset: busbar_contract::abi::plane::SPAN_ABSENT,
@@ -131,35 +132,23 @@ impl FakeService for Settle {
     }
 }
 
-struct Capture;
-impl CaptureHome for Capture {
-    fn retention() -> &'static CaptureRetention {
-        static RETENTION: std::sync::OnceLock<CaptureRetention> = std::sync::OnceLock::new();
-        RETENTION.get_or_init(Default::default)
-    }
-    fn with<R>(f: impl FnOnce(&mut CaptureSlot) -> R) -> R {
-        thread_local! { static SLOT: RefCell<CaptureSlot> = RefCell::new(CaptureSlot::default()); }
-        SLOT.with(|slot| f(&mut slot.borrow_mut()))
-    }
-}
-
 struct Open;
 impl SafeSlot for Open {
     type State = McpDoor;
-    type In = OpenIn;
-    type Out = OpenOut;
+    type In = PlaneOpenIn;
+    type Out = PlaneOpenOut;
     fn call(
         instance: Instance<'_, McpDoor>,
-        input: Lent<'_, OpenIn>,
-        _: Out<'_, OpenOut>,
+        input: Lent<'_, PlaneOpenIn>,
+        _: Out<'_, PlaneOpenOut>,
     ) -> Outcome {
-        let host = input.host().unwrap();
+        let host = input.open().host().unwrap();
         let plane = McpDoor {
             services: Services::of(host),
             host: Some(Host::of(host)),
             ..McpDoor::default()
         };
-        if input.generation() == 0 {
+        if input.open().generation() == 0 {
             // Exercise the actual post-open clock-refusal path, not a hand-built cleanup entry.
             let child = crate::ask::ChildLeg {
                 generation: 1,
@@ -193,19 +182,19 @@ impl SafeSlot for Open {
 struct PollDriver;
 impl SafeSlot for PollDriver {
     type State = McpDoor;
-    type In = DriveIn;
-    type Out = OutHead;
+    type In = PlaneDriveIn;
+    type Out = PlaneDriveOut;
     fn call(
         instance: Instance<'_, McpDoor>,
-        input: Lent<'_, DriveIn>,
-        _: Out<'_, OutHead>,
+        input: Lent<'_, PlaneDriveIn>,
+        _: Out<'_, PlaneDriveOut>,
     ) -> Outcome {
         let plane = instance.get().unwrap();
         let pending = super::drive(
             &instance,
             plane,
-            input.head().host(),
-            input.head().extensions().bytes(),
+            input.drive().head().host(),
+            input.drive().head().extensions().bytes(),
         )
         .unwrap();
         let ack = plane.legacy_seq.with_all(|states| {
@@ -256,56 +245,86 @@ impl SafeSlot for Cancel {
     }
 }
 
-struct Fixture {
-    instance: *mut c_void,
-    _host: FakeHost,
+mod fixture_door {
+    busbar_contract::plugin_door! {
+        ops: busbar_contract::abi::plane::Ops,
+        statement: busbar_contract::abi::sdk::door::statement("mcp-fixture", "1.6.0", 4),
+        lifecycle: {
+            validate: busbar_contract::abi::sdk::Safe<crate::tests::fixture::Idle<busbar_contract::abi::mechanism::lifecycle::ValidateIn, busbar_contract::abi::mechanism::call::OutHead>>,
+            open: busbar_contract::abi::sdk::Safe<super::Open>,
+            refresh: busbar_contract::abi::sdk::Safe<super::Refresh<super::McpDoor>>,
+            retire: busbar_contract::abi::sdk::Safe<super::Retire<super::McpDoor>>,
+            tick: busbar_contract::abi::sdk::Safe<crate::tests::fixture::Idle<busbar_contract::abi::mechanism::lifecycle::TickIn, busbar_contract::abi::mechanism::lifecycle::TickOut>>,
+            drive: busbar_contract::abi::sdk::Safe<super::PollDriver>,
+            cancel: busbar_contract::abi::sdk::Safe<super::Cancel>,
+            release: busbar_contract::abi::sdk::Safe<crate::tests::fixture::Idle<busbar_contract::abi::mechanism::lifecycle::ReleaseIn, busbar_contract::abi::mechanism::call::OutHead>>,
+            close: busbar_contract::abi::sdk::Safe<super::Close>,
+        },
+    }
 }
-impl Fixture {
-    fn new(clock_fails: bool) -> Self {
+
+fn view() -> DoorView {
+    DoorView::of(fixture_door::MACRO_DOOR)
+}
+
+fn fixture_host() -> FakeHost {
+    FakeHost::new()
+        .ctx(HostCtx { handle: 71 })
+        .serve(fake::host::CLOCK_NOW, Clock)
+        .serve(fake::host::WORK_OPEN, OpenWork)
+        .serve(fake::host::WORK_SETTLE, Settle)
+}
+struct Fixture<'h> {
+    instance: Option<reply::Instance<'h>>,
+}
+impl<'h> Fixture<'h> {
+    fn new(host: &'h FakeHost, clock_fails: bool) -> Self {
         STATE.with(|state| {
             *state.borrow_mut() = State {
                 clock_fails,
                 ..State::default()
             }
         });
-        let host = FakeHost::new()
-            .ctx(HostCtx { handle: 71 })
-            .serve(fake::host::CLOCK_NOW, Clock)
-            .serve(fake::host::WORK_OPEN, OpenWork)
-            .serve(fake::host::WORK_SETTLE, Settle);
-        let mut input = blank_in::<OpenIn>();
-        input.head.op = slot::OPEN;
-        input.generation = u64::from(!clock_fails);
-        let opened = reply::call_hosted(
-            kind_op::<Lifecycle, Safe<Open>, Capture, { slot::OPEN }>().unwrap(),
-            std::ptr::null_mut(),
-            &host.lend_to(input),
-            blank_out::<OpenOut>(),
+        let input = host.lend_in(
+            TestIn::<PlaneOpenIn>::new()
+                .set(|i| &i.open.head.op, slot::OPEN)
+                .set(|i| &i.open.generation, u64::from(!clock_fails)),
+        );
+        // The hosted OPEN retains the externally owned tables until this fixture closes.
+        let mut opened = reply::call_hosted_in(
+            view()
+                .op::<busbar_contract::abi::plane::Ops>(|o| &o.head.open)
+                .unwrap(),
+            None,
+            &input,
+            blank_out::<PlaneOpenOut>(),
         );
         assert_eq!(opened.outcome, Outcome::Ready, "{opened:?}");
         Self {
-            instance: opened.out.instance,
-            _host: host,
+            instance: Some(
+                opened
+                    .take_instance()
+                    .expect("the hosted open owns an instance"),
+            ),
         }
     }
     fn drive(&self) {
         let extensions =
             STATE.with(|state| wire::append_capability(&[], state.borrow().cap).unwrap());
-        let mut input = blank_in::<DriveIn>();
-        input.head.op = slot::DRIVE;
-        input.head.ticket = DRIVER;
-        input.head.host = HostCtx { handle: 71 };
-        input.driver = DRIVER;
-        input.head.extensions = busbar_contract::abi::mechanism::call::Blob {
-            ptr: extensions.as_ptr(),
-            len: extensions.len(),
-            ..busbar_contract::abi::mechanism::call::Blob::ZERO
-        };
-        let answer = reply::call(
-            kind_op::<Lifecycle, Safe<PollDriver>, Capture, { slot::DRIVE }>().unwrap(),
-            self.instance,
+        let input = TestIn::<PlaneDriveIn>::new()
+            .set(|i| &i.drive.head.op, slot::DRIVE)
+            .set(|i| &i.drive.head.ticket, DRIVER)
+            .set(|i| &i.drive.head.host.handle, 71)
+            .set(|i| &i.drive.driver, DRIVER)
+            .blob(|i| &i.drive.head.extensions, &extensions, BLOB_OCTETS);
+        // TestIn borrows the capability bytes for this call; the instance retains its host loan.
+        let answer = reply::call_in(
+            view()
+                .op::<busbar_contract::abi::plane::Ops>(|o| &o.head.drive)
+                .unwrap(),
+            self.instance.as_ref(),
             &input,
-            blank_out::<OutHead>(),
+            blank_out::<PlaneDriveOut>(),
         );
         assert!(
             matches!(answer.outcome, Outcome::Ready | Outcome::Pending),
@@ -313,58 +332,66 @@ impl Fixture {
         );
     }
     fn reload_and_retire(&self) {
-        let settings = b"{}";
-        let mut input = blank_in::<RefreshIn>();
-        input.head.op = slot::REFRESH;
-        input.generation = 2;
-        input.settings = Blob {
-            ptr: settings.as_ptr(),
-            len: settings.len(),
-            ..Blob::ZERO
-        };
-        let refreshed = reply::call(
-            kind_op::<PlaneLifecycle, Safe<Refresh<McpDoor>>, Capture, { slot::REFRESH }>()
+        let input = TestIn::<RefreshIn>::new()
+            .set(|i| &i.head.op, slot::REFRESH)
+            .set(|i| &i.generation, 2)
+            .settings(b"{}");
+        // The real plane REFRESH copies its settings while the instance proof stays borrowed.
+        let refreshed = reply::call_in(
+            view()
+                .op::<busbar_contract::abi::plane::Ops>(|o| &o.head.refresh)
                 .unwrap(),
-            self.instance,
+            self.instance.as_ref(),
             &input,
             blank_out::<PlaneRefreshOut>(),
         );
         assert_eq!(refreshed.outcome, Outcome::Ready, "{refreshed:?}");
-        let mut input = blank_in::<GenIn>();
-        input.head.op = slot::RETIRE;
-        input.generation = 1;
-        let retired = reply::call(
-            kind_op::<Lifecycle, Safe<Retire<McpDoor>>, Capture, { slot::RETIRE }>().unwrap(),
-            self.instance,
+        let input = TestIn::<GenIn>::new()
+            .set(|i| &i.head.op, slot::RETIRE)
+            .set(|i| &i.generation, 1);
+        // Old-generation retirement cannot consume or replace the instance proof.
+        let retired = reply::call_in(
+            view()
+                .op::<busbar_contract::abi::plane::Ops>(|o| &o.head.retire)
+                .unwrap(),
+            self.instance.as_ref(),
             &input,
             blank_out::<OutHead>(),
         );
         assert_eq!(retired.outcome, Outcome::Ready, "{retired:?}");
     }
     fn cancel_caller(&self) {
-        let mut input = blank_in::<PlaneCancelIn>();
-        input.cancel.head.op = slot::CANCEL;
-        input.cancel.ticket = Ticket {
-            slot: 1,
-            generation: 1,
-        };
-        input.unit = 1;
-        let cancelled = reply::call(
-            kind_op::<PlaneLifecycle, Safe<Cancel>, Capture, { slot::CANCEL }>().unwrap(),
-            self.instance,
+        let input = TestIn::<PlaneCancelIn>::new()
+            .set(|i| &i.cancel.head.op, slot::CANCEL)
+            .set(
+                |i| &i.cancel.ticket,
+                Ticket {
+                    slot: 1,
+                    generation: 1,
+                },
+            )
+            .set(|i| &i.unit, 1);
+        // Caller cancellation is on this same live plane; no output buffer is borrowed past return.
+        let cancelled = reply::call_in(
+            view()
+                .op::<busbar_contract::abi::plane::Ops>(|o| &o.head.cancel)
+                .unwrap(),
+            self.instance.as_ref(),
             &input,
             blank_out::<PlaneCancelOut>(),
         );
         assert_eq!(cancelled.outcome, Outcome::Ready);
     }
 }
-impl Drop for Fixture {
+impl Drop for Fixture<'_> {
     fn drop(&mut self) {
-        let mut input = blank_in::<InHead>();
-        input.op = slot::CLOSE;
-        let closed = reply::call(
-            kind_op::<Lifecycle, Safe<Close>, Capture, { slot::CLOSE }>().unwrap(),
-            self.instance,
+        let input = TestIn::<InHead>::new().set(|i| &i.op, slot::CLOSE);
+        // Consume the instance before the external FakeHost goes out of scope.
+        let closed = reply::close_in(
+            view()
+                .op::<busbar_contract::abi::plane::Ops>(|o| &o.head.close)
+                .unwrap(),
+            self.instance.take().unwrap(),
             &input,
             blank_out::<OutHead>(),
         );
@@ -374,7 +401,8 @@ impl Drop for Fixture {
 
 #[test]
 fn expiry_is_maintained_without_another_ask_and_pending_keeps_the_full_handle() {
-    let fixture = Fixture::new(false);
+    let host = fixture_host();
+    let fixture = Fixture::new(&host, false);
     fixture.drive();
     STATE.with(|state| assert!(state.borrow().calls.is_empty()));
     STATE.with(|state| {
@@ -425,7 +453,8 @@ fn expiry_is_maintained_without_another_ask_and_pending_keeps_the_full_handle() 
 
 #[test]
 fn clock_refusal_after_open_keeps_immediate_cleanup_even_while_clock_stays_unavailable() {
-    let fixture = Fixture::new(true);
+    let host = fixture_host();
+    let fixture = Fixture::new(&host, true);
     fixture.drive();
     fixture.drive();
     STATE.with(|state| {
@@ -445,7 +474,8 @@ fn clock_refusal_after_open_keeps_immediate_cleanup_even_while_clock_stays_unava
 
 #[test]
 fn pending_cleanup_survives_config_reload_and_old_generation_retirement() {
-    let fixture = Fixture::new(false);
+    let host = fixture_host();
+    let fixture = Fixture::new(&host, false);
     STATE.with(|state| state.borrow_mut().now_ms = 1500);
     fixture.drive();
     fixture.reload_and_retire();
