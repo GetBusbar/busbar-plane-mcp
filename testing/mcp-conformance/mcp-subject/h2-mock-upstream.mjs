@@ -20,7 +20,7 @@
 // directory's file count before/after a call to prove egress did or did not happen.
 //
 // Usage: node h2-mock-upstream.mjs <port>
-import { createServer } from 'node:http';
+import { createServer } from './fixture-server.mjs';
 import { mkdirSync, writeFileSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 

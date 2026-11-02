@@ -34,7 +34,10 @@ test('each half-answer gets a live child, and a later honest peer still answers'
   await once(reserve, 'listening');
   const port = reserve.address().port;
   await new Promise((resolve) => reserve.close(resolve));
-  const child = spawn(process.execPath, [mirror, String(port), control], { stdio: ['ignore', 'ignore', 'pipe'] });
+  const env = { ...process.env };
+  delete env.MCP_FIXTURE_TLS_CERT;
+  delete env.MCP_FIXTURE_TLS_KEY;
+  const child = spawn(process.execPath, [mirror, String(port), control], { stdio: ['ignore', 'ignore', 'pipe'], env });
   let log = '';
   try {
     await new Promise((resolve, reject) => {

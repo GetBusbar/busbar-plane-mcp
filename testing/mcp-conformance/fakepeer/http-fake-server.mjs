@@ -47,7 +47,7 @@
 //
 // Usage:  node http-fake-server.mjs <port> <control-file>
 
-import { createServer } from 'node:http';
+import { createServer } from '../mcp-subject/fixture-server.mjs';
 import { spawn } from 'node:child_process';
 import { readFileSync, appendFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';

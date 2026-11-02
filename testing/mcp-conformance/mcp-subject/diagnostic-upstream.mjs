@@ -30,7 +30,7 @@
 // here mean "the fixture guessed wrong", which is the class of unreadable verdict the whole
 // conformance harness is arranged to avoid.
 
-import { createServer } from "node:http";
+import { createServer } from "./fixture-server.mjs";
 
 const PORT = Number(process.argv[2]);
 if (!PORT) {

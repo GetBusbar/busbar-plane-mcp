@@ -1388,7 +1388,7 @@ mod both_ways {
 
     /// One server with one approved tool (its `path` argument mirrored in `Mcp-Param-Path`), one
     /// tool awaiting approval, and the `roots` grant with nothing declared to disclose.
-    const RELAY_SECTION: &[u8] = br#"{"fs": {"url": "https://mcp.example/fs/rpc?v=1", "pin": {"mechanism": "pinned_pubkey", "key": "sha256/K="}, "grants": {"roots": true}, "tools_allow": {"read_file": {"schema_hash": "sha256:aa", "input_schema": {"type": "object", "properties": {"path": {"type": "string", "x-mcp-header": "Path"}}}}, "draft": {}}}}"#;
+    const RELAY_SECTION: &[u8] = door_facts::RELAY_SECTION;
 
     /// A relayed call, its path argument mirrored.
     const RELAY_CALL: &[u8] = door_facts::RELAY_CALL;
