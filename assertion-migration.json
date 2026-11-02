@@ -209,7 +209,8 @@
       "rev": "22fd86564897d7e9f1d4404dbb8013b89fd1fa89"
     },
     "path": "Actual memory door -> load_linked<Store> -> LoadedStore -> typed StoreCalls record_get/record_put/record_scan",
-    "qualification": "Actual product stores emitted MCP records. No fake BTreeMap store. Typed chains retain contract chain key mapping. Final graph/lock and SDK3 resolution are metadata-owner work."
+    "qualification": "Actual product stores emitted MCP records. No fake BTreeMap store. Typed chains retain contract chain key mapping. Final graph/lock and SDK3 resolution are metadata-owner work.",
+    "canonical_name_verification": "Accepted22fd86564897d7e9f1d4404dbb8013b89fd1fa89 store-memory/src/lib.rs886 MacroDoor tuple declares public name 'memory'; exact plugin.name assertion corrected from Cargo package name, remains mandatory. Immutable53 native RED preserved."
   },
   "private_source_moves": [
     {

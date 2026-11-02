@@ -183,7 +183,7 @@ impl McpServices {
         .expect("actual MemoryStore loads");
         assert_eq!(
             plugin.name(),
-            "busbar-store-memory",
+            "memory",
             "the test requires the actual memory product"
         );
         let store =
