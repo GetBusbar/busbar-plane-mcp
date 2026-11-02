@@ -171,7 +171,7 @@ extern "C" fn entitled(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -
     if NARROW.load(Ordering::SeqCst) && NOT_GRANTED.contains(&target.as_str()) {
         return ready(out, NOT_ENTITLED, 0, 0);
     }
-    if revoked().iter().any(|t| *t == target) {
+    if revoked().contains(&target) {
         return ready(out, NOT_ENTITLED, 0, 0);
     }
     ready(out, ENTITLED, 0, 0)
@@ -873,6 +873,25 @@ fn lifecycle() -> &'static OpsHead {
 /// One opened instance of the door.
 struct Door {
     instance: *mut c_void,
+}
+
+impl Drop for Door {
+    fn drop(&mut self) {
+        let instance = std::mem::replace(&mut self.instance, std::ptr::null_mut());
+        let input = head::<InHead>(life::CLOSE, Ticket::NONE);
+        let mut output = out_head::<OutHead>();
+        // SAFETY: this Door exclusively owns the instance returned by its successful OPEN.
+        // CLOSE consumes it once; its declared InHead/OutHead frames and the fixture's static
+        // host tables stay live for this synchronous call, with no instance access afterward.
+        let closed = unsafe {
+            lifecycle().close.expect("the door closes")(
+                instance,
+                std::ptr::from_ref(&input).cast(),
+                std::ptr::from_mut(&mut output).cast(),
+            )
+        };
+        assert_eq!(closed.outcome(), Outcome::Ready, "the owned door closes");
+    }
 }
 
 fn open_on(tables: &'static Tables, section: &Value) -> Door {

@@ -1323,10 +1323,9 @@ mod both_ways {
         }
         fn random_fill(&self, len: u64) -> Stored {
             let n = self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Stored {
-                bytes: (0..len).map(|i| (n as u8).wrapping_add(i as u8)).collect(),
-                ..Stored::ready(0)
-            }
+            let mut stored = Stored::ready(0);
+            stored.bytes = (0..len).map(|i| (n as u8).wrapping_add(i as u8)).collect();
+            stored
         }
         fn records_secret(
             &self,

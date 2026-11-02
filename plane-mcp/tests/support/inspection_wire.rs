@@ -49,8 +49,10 @@ pub fn sessions(request: &[u8]) -> Option<Vec<u64>> {
     }
     Some(
         request[30..]
-            .chunks_exact(8)
-            .map(|b| u64::from_le_bytes(b.try_into().unwrap()))
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|b| u64::from_le_bytes(*b))
             .collect(),
     )
 }

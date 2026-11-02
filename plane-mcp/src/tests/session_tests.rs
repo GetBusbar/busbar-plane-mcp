@@ -13,7 +13,7 @@ impl From<String> for Deferred {
 }
 
 impl ReplayData for Deferred {
-    fn len(&self) -> usize {
+    fn encoded_len(&self) -> usize {
         self.0
     }
 }
@@ -39,8 +39,8 @@ fn deferred_events_have_the_same_replay_and_eviction_charge_as_their_encoded_byt
     assert_eq!(lazy.open_stream(&id, &who, 0), Some(stream));
     let cursor = format!("{stream}-0");
     for (caller, stream) in [(owner("mallory"), stream), (who.clone(), stream + 1)] {
-        assert!(lazy
-            .push_prepared(
+        assert!(
+            lazy.push_prepared(
                 &id,
                 &caller,
                 stream,
@@ -51,7 +51,8 @@ fn deferred_events_have_the_same_replay_and_eviction_charge_as_their_encoded_byt
                 1
             )
             .unwrap()
-            .is_none());
+            .is_none()
+        );
     }
     for length in [80, 120, 20, 400, 15] {
         assert_eq!(
@@ -71,7 +72,7 @@ fn deferred_events_have_the_same_replay_and_eviction_charge_as_their_encoded_byt
                 .collect::<Vec<_>>(),
             lazy.events
                 .iter()
-                .map(|(id, text)| (id, text.len()))
+                .map(|(id, text)| (id, text.encoded_len()))
                 .collect::<Vec<_>>()
         );
     }
@@ -113,9 +114,10 @@ fn an_id_is_128_bits_of_the_callers_entropy_in_hex() {
     let mut t = SessionTable::new(Bounds::default());
     let id = open(&mut t, 7, "alice", 0);
     assert_eq!(id.len(), 32);
-    assert!(id
-        .bytes()
-        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
+    assert!(
+        id.bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    );
     assert_eq!(&id[..16], "0000000000000007");
 }
 
@@ -271,9 +273,10 @@ fn the_stream_count_is_bounded_and_a_cursor_never_crosses_to_another_stream() {
     t.open_stream(&id, &owner("p"), 0).unwrap();
     assert!(t.replay(&id, &owner("p"), &e0, 0).is_none());
     assert!(t.replay(&id, &owner("p"), "garbage", 0).is_none());
-    assert!(t
-        .replay(&id, &owner("mallory"), &format!("{s1}-0"), 0)
-        .is_none());
+    assert!(
+        t.replay(&id, &owner("mallory"), &format!("{s1}-0"), 0)
+            .is_none()
+    );
 }
 
 #[test]
@@ -567,7 +570,8 @@ fn red_a_session_or_cursor_a_live_stream_reads_is_never_evicted() {
     // The first stream ends: its cursor gives way to the next.
     t.release_stream(&s, cursors[0]);
     assert!(t.open_stream(&s, &owner("bob"), 13).is_some());
-    assert!(t
-        .replay(&s, &owner("bob"), &format!("{}-0", cursors[0]), 14)
-        .is_none());
+    assert!(
+        t.replay(&s, &owner("bob"), &format!("{}-0", cursors[0]), 14)
+            .is_none()
+    );
 }

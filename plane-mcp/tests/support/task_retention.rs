@@ -114,7 +114,7 @@ fn task_ttl_tracks_host_settlement_and_current_retention_rebinding() {
     assert!(
         live["result"]["ttlMs"]
             .as_u64()
-            .is_some_and(|ttl| ttl >= 60_000 && ttl < 300_000),
+            .is_some_and(|ttl| (60_000..300_000).contains(&ttl)),
         "{live}"
     );
     let sent = run(&d, 3, "st", &last_nested());

@@ -142,9 +142,11 @@ impl SafeSlot for Open {
         _: Out<'_, OpenOut>,
     ) -> Outcome {
         let host = input.host().unwrap();
-        let mut plane = McpDoor::default();
-        plane.host = Some(Host::of(host));
-        plane.wake = busbar_contract::abi::sdk::services::Wake::of(host);
+        let plane = McpDoor {
+            host: Some(Host::of(host)),
+            wake: busbar_contract::abi::sdk::services::Wake::of(host),
+            ..McpDoor::default()
+        };
         let mut link = link();
         if !STATE.with(|state| state.borrow().address_missing) {
             link.address = Some(ENDPOINT.into());
