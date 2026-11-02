@@ -457,7 +457,8 @@ impl PlaneLife for McpDoor {
     ) -> Outcome {
         match instance.get() {
             Some(plane) => {
-                let existing = door_inspection::retained_bytes(input.head().extensions().bytes());
+                let existing =
+                    door_inspection::retained_bytes(input.drive().head().extensions().bytes());
                 match door_inspection::maintain(&instance, plane, input, &mut out, existing) {
                     std::task::Poll::Pending => return Outcome::Pending,
                     std::task::Poll::Ready(Err(error)) => {
@@ -466,8 +467,8 @@ impl PlaneLife for McpDoor {
                         )))
                     }
                     std::task::Poll::Ready(Ok(Some(now_ns))) => {
-                        door_line::tick(plane, input.head().ticket(), now_ns);
-                        door_listen::tick(plane, input.head().ticket(), now_ns);
+                        door_line::tick(plane, input.drive().head().ticket(), now_ns);
+                        door_listen::tick(plane, input.drive().head().ticket(), now_ns);
                         door_sessions::tick(plane);
                     }
                     std::task::Poll::Ready(Ok(None)) => {}
@@ -477,8 +478,8 @@ impl PlaneLife for McpDoor {
                 let pending = door_legacy::drive(
                     &instance,
                     plane,
-                    input.head().host(),
-                    input.head().extensions().bytes(),
+                    input.drive().head().host(),
+                    input.drive().head().extensions().bytes(),
                 );
                 let pending = match pending {
                     Ok(pending) => pending,

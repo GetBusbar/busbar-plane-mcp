@@ -267,6 +267,12 @@ impl Task {
         self.principal == principal
     }
 
+    /// The digest of the continuation call recorded when this task was created.
+    #[must_use]
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+
     /// The key of its index row ([`TaskLease`]) in the plane's records.
     #[must_use]
     pub fn index_key(&self) -> Vec<u8> {

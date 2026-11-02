@@ -2426,7 +2426,7 @@ pub(super) fn continuation_refused(
     let now = clock_now(plane);
     let owed = plane.tasks.with(&reference.to_string(), |t| {
         let t = t?;
-        if t.handle != handle || t.row().digest != digest {
+        if t.handle != handle || t.digest() != digest.as_str() {
             return None;
         }
         let ran_here = t.runner == Some((unit, ticket));
