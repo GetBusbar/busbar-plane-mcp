@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 use super::*;
+use busbar_contract::abi::host::conn::connector::service as conn_service;
 use busbar_contract::abi::host::service::{
     ItemSpan, TrustSightIn, TrustStateIn, KEY_APPROVED, KEY_DRIFTED, KEY_NEW, KEY_SAME,
 };
@@ -13,6 +14,296 @@ pub(super) static ITEM_FAILS: AtomicBool = AtomicBool::new(false);
 static STATE_FAILS: AtomicBool = AtomicBool::new(false);
 static SIGHTS: Mutex<Vec<(CompletionHandle, String)>> = Mutex::new(Vec::new());
 static WAKES: Mutex<Vec<Ticket>> = Mutex::new(Vec::new());
+
+/// A connector completion's semantic input, excluding only borrowed output-buffer locations and
+/// capacity. A handle replay may not change the operation or the request it completed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ConnRequest {
+    Establish {
+        need: u32,
+        timeout_ms: u32,
+        target: Option<String>,
+        within: Option<String>,
+        member: Option<String>,
+    },
+    Write {
+        stream: u64,
+        piece: RequestPiece,
+        bytes: Vec<u8>,
+    },
+    Read {
+        stream: u64,
+    },
+    Close {
+        stream: u64,
+    },
+}
+
+/// Owned terminal receipt. The service ABI makes error strings process-lived; no borrowed
+/// request/output pointers are retained. Upstreams owns and resets this with its wire state.
+#[derive(Clone)]
+pub(super) struct ConnReceipt {
+    request: ConnRequest,
+    outcome: RawOutcome,
+    exited: u8,
+    reserved: [u8; 2],
+    value: u64,
+    len: u64,
+    items: u64,
+    needed_bytes: u64,
+    needed_items: u64,
+    error: Option<&'static str>,
+    read: Option<(ReplyPiece, Vec<u8>)>,
+}
+
+impl ConnReceipt {
+    fn output(&self) -> ServiceOut {
+        ServiceOut {
+            size: std::mem::size_of::<ServiceOut>() as u32,
+            outcome: self.outcome,
+            exited: self.exited,
+            _reserved: self.reserved,
+            value: self.value,
+            len: self.len,
+            items: self.items,
+            needed_bytes: self.needed_bytes,
+            needed_items: self.needed_items,
+            error: self.error.map(str_of).unwrap_or(AbiStr::ABSENT),
+        }
+    }
+}
+
+fn conn_text(text: AbiStr) -> Option<String> {
+    if text.is_absent() {
+        None
+    } else {
+        // SAFETY: the SDK lends this semantic string for the connector callback's duration.
+        Some(
+            unsafe { text.as_str() }
+                .expect("a connector string is UTF-8")
+                .to_owned(),
+        )
+    }
+}
+
+fn completed(ctx: HostCtx, handle: CompletionHandle, request: &ConnRequest) -> Option<ConnReceipt> {
+    if handle.ticket.is_none() {
+        return None;
+    }
+    let receipt = upstreams()
+        .as_ref()?
+        .completed
+        .get(&(ctx.handle, handle))
+        .cloned()?;
+    assert_eq!(
+        &receipt.request, request,
+        "one completed handle cannot change its operation or semantic input"
+    );
+    Some(receipt)
+}
+
+/// Snapshot a completed fixture callback while its exact output frame and read buffers are live.
+fn remember(
+    ctx: HostCtx,
+    handle: CompletionHandle,
+    request: ConnRequest,
+    outcome: RawOutcome,
+    output: ServiceOut,
+    read: Option<(ReplyPiece, Vec<u8>)>,
+) {
+    if handle.ticket.is_none() || outcome.outcome() == Outcome::Pending {
+        return;
+    }
+    assert_eq!(output.outcome, outcome);
+    // SAFETY: ServiceOut::error is absent or process-lived UTF-8 by the host service ABI. These
+    // fixture callbacks obey that contract and own any error they return independently of input.
+    let error: Option<&'static str> = if output.error.is_absent() {
+        None
+    } else {
+        Some(unsafe { output.error.as_str() }.expect("a service error is UTF-8"))
+    };
+    let receipt = ConnReceipt {
+        request,
+        outcome,
+        exited: output.exited,
+        reserved: output._reserved,
+        value: output.value,
+        len: output.len,
+        items: output.items,
+        needed_bytes: output.needed_bytes,
+        needed_items: output.needed_items,
+        error,
+        read,
+    };
+    assert!(upstreams()
+        .as_mut()
+        .expect("a callback initialized the upstream fixture")
+        .completed
+        .insert((ctx.handle, handle), receipt)
+        .is_none());
+}
+
+/// Only the completion-retirement protocol's acknowledged driver results may be forgotten.
+pub(super) fn retire(ctx: HostCtx, ticket: Ticket, acknowledged: &[u32]) {
+    if let Some(ups) = upstreams().as_mut() {
+        ups.completed.retain(|(owner, handle), _| {
+            *owner != ctx.handle || handle.ticket != ticket || !acknowledged.contains(&handle.seq)
+        });
+    }
+}
+
+pub(super) extern "C" fn establish_once(
+    ctx: HostCtx,
+    input: *const c_void,
+    out: *mut ServiceOut,
+) -> RawOutcome {
+    // SAFETY: this slot receives the SDK's exact EstablishIn, lent for this synchronous call.
+    let i = unsafe { input.cast::<EstablishIn>().read() };
+    assert_eq!(i.head.op, conn_service::ESTABLISH);
+    let request = ConnRequest::Establish {
+        need: i.need,
+        timeout_ms: i.timeout_ms,
+        target: conn_text(i.target),
+        within: conn_text(i.within),
+        member: conn_text(i.member),
+    };
+    if let Some(receipt) = completed(ctx, i.head.handle, &request) {
+        // SAFETY: the SDK lends the exact writable ServiceOut for this call.
+        unsafe { out.write(receipt.output()) };
+        return receipt.outcome;
+    }
+    let outcome = super::establish(ctx, input, out);
+    // SAFETY: the fixture callback initialized the exact output frame still lent here.
+    remember(
+        ctx,
+        i.head.handle,
+        request,
+        outcome,
+        unsafe { out.read() },
+        None,
+    );
+    outcome
+}
+
+pub(super) extern "C" fn write_request_once(
+    ctx: HostCtx,
+    input: *const c_void,
+    out: *mut ServiceOut,
+) -> RawOutcome {
+    // SAFETY: RequestIn and its descriptor/initialized bytes are lent throughout this callback.
+    let i = unsafe { input.cast::<RequestIn>().read() };
+    assert_eq!(i.head.op, conn_service::WRITE_REQUEST);
+    // SAFETY: the descriptor and exactly len initialized bytes are this call's request inputs.
+    let (piece, bytes) = unsafe {
+        (
+            i.piece.read(),
+            if i.len == 0 {
+                Vec::new()
+            } else {
+                std::slice::from_raw_parts(i.buf, i.len).to_vec()
+            },
+        )
+    };
+    let request = ConnRequest::Write {
+        stream: i.stream,
+        piece,
+        bytes,
+    };
+    if let Some(receipt) = completed(ctx, i.head.handle, &request) {
+        // SAFETY: the SDK lends the exact writable ServiceOut for this call.
+        unsafe { out.write(receipt.output()) };
+        return receipt.outcome;
+    }
+    let outcome = super::write_request(ctx, input, out);
+    // SAFETY: the fixture initialized this still-live output frame.
+    remember(
+        ctx,
+        i.head.handle,
+        request,
+        outcome,
+        unsafe { out.read() },
+        None,
+    );
+    outcome
+}
+
+pub(super) extern "C" fn read_reply_once(
+    ctx: HostCtx,
+    input: *const c_void,
+    out: *mut ServiceOut,
+) -> RawOutcome {
+    // SAFETY: the SDK lends ReplyIn, its writable buffer and descriptor for this callback.
+    let i = unsafe { input.cast::<ReplyIn>().read() };
+    assert_eq!(i.head.op, conn_service::READ_REPLY);
+    let request = ConnRequest::Read { stream: i.stream };
+    if let Some(receipt) = completed(ctx, i.head.handle, &request) {
+        if let Some((piece, bytes)) = receipt.read.as_ref() {
+            assert!(
+                bytes.len() <= i.len,
+                "a replay must lend capacity for its completed bytes"
+            );
+            // SAFETY: capacity was checked; the SDK lends this buffer and the exact descriptor.
+            unsafe {
+                if !bytes.is_empty() {
+                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), i.buf, bytes.len());
+                }
+                i.piece.write(*piece);
+            }
+        }
+        // SAFETY: the SDK lends the exact writable ServiceOut for this call.
+        unsafe { out.write(receipt.output()) };
+        return receipt.outcome;
+    }
+    let outcome = super::read_reply(ctx, input, out);
+    // SAFETY: the fixture initialized this still-live output frame.
+    let output = unsafe { out.read() };
+    let read = if outcome.outcome() == Outcome::Ready {
+        let len = usize::try_from(output.len).expect("a bounded read length");
+        assert!(len <= i.len);
+        // SAFETY: the Ready callback initialized its descriptor and exactly len buffer bytes.
+        Some(unsafe {
+            (
+                i.piece.read(),
+                if len == 0 {
+                    Vec::new()
+                } else {
+                    std::slice::from_raw_parts(i.buf, len).to_vec()
+                },
+            )
+        })
+    } else {
+        None
+    };
+    remember(ctx, i.head.handle, request, outcome, output, read);
+    outcome
+}
+
+pub(super) extern "C" fn close_once(
+    ctx: HostCtx,
+    input: *const c_void,
+    out: *mut ServiceOut,
+) -> RawOutcome {
+    // SAFETY: the SDK lends the exact StreamIn for this callback.
+    let i = unsafe { input.cast::<StreamIn>().read() };
+    assert_eq!(i.head.op, conn_service::CLOSE);
+    let request = ConnRequest::Close { stream: i.stream };
+    if let Some(receipt) = completed(ctx, i.head.handle, &request) {
+        // SAFETY: the SDK lends the exact writable ServiceOut for this call.
+        unsafe { out.write(receipt.output()) };
+        return receipt.outcome;
+    }
+    let outcome = super::close(ctx, input, out);
+    // SAFETY: the fixture initialized this still-live output frame.
+    remember(
+        ctx,
+        i.head.handle,
+        request,
+        outcome,
+        unsafe { out.read() },
+        None,
+    );
+    outcome
+}
 
 pub(super) fn sighted(i: TrustSightIn, out: *mut ServiceOut) -> RawOutcome {
     SIGHTS

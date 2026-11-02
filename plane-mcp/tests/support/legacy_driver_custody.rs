@@ -94,10 +94,12 @@ fn a_short_session_buffer_retains_completed_legacy_results_until_a_successful_re
     };
     assert_eq!(answer.outcome(), Outcome::Pending);
     assert!(sessions[..full.sessions_written as usize].contains(&905));
+    let acknowledged = d.retirement.borrow_mut().acknowledge(&full.head);
     assert!(
-        !d.retirement.borrow_mut().acknowledge(&full.head).is_empty(),
+        !acknowledged.is_empty(),
         "the successful retry acknowledges the retained completed results"
     );
+    cache_receipts::retire(TABLES.0.ctx, DRIVER, &acknowledged);
     completion_retirement_host::release(d.instance, &full.head, lifecycle());
     d.drive();
     assert_eq!(seen().iter().filter(|request| request.body["id"] == json!(907) && request.body["result"].is_object()).count(), 1,
@@ -146,7 +148,8 @@ fn a_legacy_pending_read_keeps_the_driver_pending_across_later_ticks() {
             sessions.len() as u64,
         )
         .unwrap();
-        d.retirement.borrow_mut().acknowledge(&output.head);
+        let acknowledged = d.retirement.borrow_mut().acknowledge(&output.head);
+        cache_receipts::retire(TABLES.0.ctx, DRIVER, &acknowledged);
         completion_retirement_host::release(d.instance, &output.head, lifecycle());
     }
 }

@@ -385,6 +385,13 @@ struct Sse {
 struct Upstreams {
     next: u64,
     open: HashMap<u64, Wire>,
+    completed: HashMap<
+        (
+            u64,
+            busbar_contract::abi::mechanism::ticket::CompletionHandle,
+        ),
+        cache_receipts::ConnReceipt,
+    >,
     seen: Vec<Seen>,
     /// The legacy upstream holds its `tools/call` answers until the test releases them.
     hold_calls: bool,
@@ -825,7 +832,7 @@ extern "C" fn close(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> R
 static CONN_SLOTS: ConnectorSlots = ConnectorSlots {
     size: std::mem::size_of::<ConnectorSlots>() as u32,
     slots: CONN_SERVICES,
-    establish: Some(establish),
+    establish: Some(cache_receipts::establish_once),
     reject_endpoint: None,
     side_stream: None,
     read: None,
@@ -834,11 +841,11 @@ static CONN_SLOTS: ConnectorSlots = ConnectorSlots {
     facts: None,
     checkout: None,
     checkin: None,
-    close: Some(close),
+    close: Some(cache_receipts::close_once),
     random: None,
     identity: None,
-    read_reply: Some(read_reply),
-    write_request: Some(write_request),
+    read_reply: Some(cache_receipts::read_reply_once),
+    write_request: Some(cache_receipts::write_request_once),
 };
 
 struct Tables(HostTables);
@@ -1063,7 +1070,8 @@ impl Door {
         assert!(matches!(ret.outcome(), Outcome::Ready | Outcome::Pending));
         busbar_contract::abi::plane::check::check_drive(ret.outcome(), &o, sessions.len() as u64)
             .unwrap();
-        self.retirement.borrow_mut().acknowledge(&o.head);
+        let acknowledged = self.retirement.borrow_mut().acknowledge(&o.head);
+        cache_receipts::retire(TABLES.0.ctx, DRIVER, &acknowledged);
         completion_retirement_host::release(self.instance, &o.head, lifecycle());
     }
 
