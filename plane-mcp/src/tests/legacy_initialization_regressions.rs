@@ -133,6 +133,12 @@ impl FakeService for CloseStream {
 
 struct Capture;
 impl CaptureHome for Capture {
+    fn retention() -> &'static busbar_contract::abi::sdk::capture::CaptureRetention {
+        static RETENTION: std::sync::OnceLock<
+            busbar_contract::abi::sdk::capture::CaptureRetention,
+        > = std::sync::OnceLock::new();
+        RETENTION.get_or_init(Default::default)
+    }
     fn with<R>(f: impl FnOnce(&mut CaptureSlot) -> R) -> R {
         thread_local! {static SLOT: RefCell<CaptureSlot> = RefCell::new(CaptureSlot::default());}
         SLOT.with(|slot| f(&mut slot.borrow_mut()))
