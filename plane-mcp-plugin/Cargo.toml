@@ -48,3 +48,6 @@ busbar-core-connector = { workspace = true }
 tokio = { workspace = true, features = ["rt", "net", "time"] }
 rcgen = { workspace = true }
 rustls = { workspace = true }
+
+busbar-store-memory = { workspace = true }
+base64 = { workspace = true }
