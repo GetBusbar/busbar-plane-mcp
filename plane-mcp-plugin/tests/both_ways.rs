@@ -559,7 +559,7 @@ mod both_ways {
 
     /// This crate's dropped-in image, the cdylib `cargo test` builds beside the test
     fn dropped(d: &Dispatcher) -> Plugin<Plane> {
-        let path = busbar_test_kit::conformance::cdylib_of("busbar_plane_mcp_plugin");
+        let path = crate::plugin_cdylib();
         let stated = LinkedRow::of_loaded(crate::loaded_door())
             .expect("the door renders its Statement")
             .statement;
@@ -1880,7 +1880,7 @@ mod both_ways {
                 ..bind(&d)
             };
             let p: Plugin<Plane> = if dropped_in {
-                let path = busbar_test_kit::conformance::cdylib_of("busbar_plane_mcp_plugin");
+                let path = crate::plugin_cdylib();
                 let stated = LinkedRow::of_loaded(crate::loaded_door())
                     .expect("the door renders its Statement")
                     .statement;
@@ -2239,4 +2239,22 @@ mod bounds {
             "the first unit was evicted to make room"
         );
     }
+}
+
+fn plugin_cdylib() -> std::path::PathBuf {
+    let path = std::path::PathBuf::from(
+        std::env::var_os("BUSBAR_PLUGIN_CDYLIB")
+            .expect("build this plugin and set BUSBAR_PLUGIN_CDYLIB to its fresh cdylib"),
+    );
+    assert!(
+        path.is_absolute(),
+        "BUSBAR_PLUGIN_CDYLIB must be absolute: {}",
+        path.display()
+    );
+    assert!(
+        path.is_file(),
+        "the built plugin cdylib is missing: {}",
+        path.display()
+    );
+    path
 }
