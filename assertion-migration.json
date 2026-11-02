@@ -8,7 +8,7 @@
     },
     {
       "old": "plane-mcp-plugin/tests/relayed_call.rs:Grants ServicesDouble + conformance input/output helpers",
-      "new": "direct HostServices plus ordinary Default ABI frames with explicit in/out heads",
+      "new": "direct HostServices plus ordinary SDK blank_in/blank_out frames with explicit in/out heads (no contract test-support feature)",
       "assertions": "Every original relayed-call test unchanged; input/output headers initialized explicitly."
     },
     {
@@ -34,31 +34,20 @@
     "exact_body_equality_without_boundary_whitespace": true,
     "reason": "Measure actual private parser source without weakening logic crate forbid(unsafe_code) or publishing test API."
   },
-  "remaining": [
-    {
-      "consumer": "plane-mcp-plugin/tests/conformance.rs + support/conformance_host.rs",
-      "status": "complete source migration: no conformance_suite/conformance_host consumption remains; native qualification pending"
-    },
-    {
-      "consumer": "plane-mcp/src/tests/{child_work_custody_tests,relay_cleanup_regressions,legacy_initialization_regressions,legacy_call_regressions,legacy_driver_regressions}.rs",
-      "status": "11 meaningful tests remain: legacy initialization8 and legacy call3. Driver6, childwork5 and maintenance3 are ordinary actual-private-source assertions."
-    },
-    {
-      "consumer": "Cargo.toml + plane-mcp/Cargo.toml + plane-mcp-plugin/Cargo.toml",
-      "status": "Kit dev edges retained for remaining11 tests; no SDK/peer/publicpin/lock retarget."
-    }
-  ],
+  "remaining": [],
   "validation": {
     "format": "rustfmt source parse/check and git diff --check",
-    "runtime": "No MCP build or test run under resource restriction; source parse/format/diff checks only; actual MemoryStore dev graph/lock pending metadata owner.",
+    "runtime": "No MCP build or test has been run by this source worker: no resource lane approval. Required native scopes: actual --lib build; conformance; private_cases; ordinary public sessions/whole workspace. Final SDK/dependency graph/lock owner must resolve new accepted memory dev edge before locked execution.",
     "locks_and_public_pins": "unchanged",
     "retired_assertions": [],
     "host_qualification": "Direct host composition source-reviewed only; no build, live TLS, process or MCP runtime pass claimed. TCP uses public linked::door; HTTP/stdio original public door functions.",
     "private_source_qualification": "Actual implementation source included by path in private_cases integration binary; production forbid(unsafe_code) unchanged. Exact production core and plane body moved to include files. New raw callbacks exist only in ordinary integration tests. No build/runtime claim.",
     "private_source_current_sha256": {
-      "plane-mcp/src/plane_door_impl.rs": "1e65b9a3de751677f40f81ca4f4d5d5a9c78ce5d344f22ae760f296dc099e974",
-      "plane-mcp/src/legacy_wire.rs": "db7cc06c0f91034111ae2d6be23bea13575e3b87016abe8fa1e159aa92746501"
-    }
+      "plane-mcp/src/plane_door_impl.rs": "cc698bc4fb99d7d61c73a4c4ac53654de1a7f16260cf9319250b4906b2c71ff1",
+      "plane-mcp/src/legacy_wire.rs": "db7cc06c0f91034111ae2d6be23bea13575e3b87016abe8fa1e159aa92746501",
+      "plane-mcp/src/door_legacy_impl.rs": "bdaa1ddf37a522f6492c24461172c943e8dd614ba34c40dfb167dd7993c66f1e"
+    },
+    "source_consumption_gate": "No kit/devkit imports, shared conformance macro consumption, generic FakeHost, test-support feature or fake Probe product remains in authored manifests/source. Historical ledger and untouched lock retain old names as evidence."
   },
   "macro_assertions": {
     "no_configured_credential_crosses_back": {
@@ -271,6 +260,33 @@
         "pending_cleanup_survives_config_reload_and_old_generation_retirement"
       ],
       "assertions": "Exact expiry, full completion handle replay/freshness after terminal refusal/failure, unavailable clock immediate cleanup, single successful application, and cleanup across actual refresh/publication/retirement preserved on actual private state. Fixed raw clock/work callbacks replace generic FakeHost. Fake Probe OPEN/DRIVE/CLOSE framing selfchecks retired; no product callback replaced."
+    },
+    {
+      "old": "plane-mcp/src/tests/legacy_initialization_regressions.rs",
+      "new": "plane-mcp-plugin/tests/support/private_initialization.rs",
+      "tests": [
+        "an_initialization_post_resumes_its_first_pending_host_operation_and_wakes_followers",
+        "an_initialized_notification_resumes_without_reposting_initialize",
+        "cancelling_a_pending_initialization_drops_its_exchange_and_wakes_a_successor",
+        "cancelling_a_pending_initialized_notification_releases_the_same_owner",
+        "an_initialize_post_refusal_finishes_the_owner_and_wakes_followers",
+        "an_initialized_notification_refusal_finishes_the_owner_and_wakes_followers",
+        "repeated_polls_park_once_until_the_endpoint_event_arrives",
+        "closing_an_instance_destroys_a_pending_initialize_without_sending_it"
+      ],
+      "assertions": "All original case assertions retained on actual private Link/Calling orchestration and actual SDK Exchange state with fixed typed raw connector callbacks. No Probe/Idle/SafeSlot product or generic fake host. Actual call wrapper still invokes original Instance-bound post adapter.",
+      "parking_boundary": "Explicit pending Exchange value count is the unit orchestration oracle, not claimed alone as SDK parked_count. The ordinary actual-product sessions close/completion path is also compiled against actual production source and passively reads actual Instance::parked_count scoped to exact state address and ticket730/95, asserting1 before CLOSE and0 after completion. Full pending service handle, no POST/new body and no close of nonexistent stream predicates retained."
+    },
+    {
+      "old": "plane-mcp/src/tests/legacy_call_regressions.rs",
+      "new": "plane-mcp-plugin/tests/support/private_legacy_calls.rs",
+      "tests": [
+        "a_reply_post_refreshes_credential_fields_from_the_current_call",
+        "a_refused_initialize_preserves_the_remote_rpc_error",
+        "an_endpoint_reload_retires_a_live_legacy_link_without_losing_read_answers"
+      ],
+      "assertions": "All original case assertions retained on actual private Link/Calling orchestration and actual SDK Exchange state with fixed typed raw connector callbacks. No Probe/Idle/SafeSlot product or generic fake host. Actual call wrapper still invokes original Instance-bound post adapter.",
+      "parking_boundary": "This actual unarmed-host/error/state unit case never parks an SDK Exchange; all original credential refresh, exact remote RPC error and endpoint retirement/buffered answer predicates retained."
     }
   ],
   "private_source_refactors": [
@@ -281,6 +297,46 @@
     {
       "source": "plane-mcp/src/legacy_wire.rs Driver",
       "reason": "Only internal visibility extended to parent plane module for begin/retirement/failure; no public crate API, algorithm, SDK or wire change."
+    },
+    {
+      "source": "plane-mcp/src/door_legacy_impl.rs call/call_using/post_result",
+      "reason": "Private dependency seam: unchanged actual orchestration body receives ticket and concrete POST closure. Real call always passes actual Instance and unchanged post adapter. HTTP result mapping shared verbatim."
+    },
+    {
+      "source": "plane-mcp/src/plane_door_impl.rs exchange_at/exchange_with_state",
+      "reason": "Same actual SDK Exchange algorithm with owned state explicit. Real adapter still resumes/parks on its actual Instance and preserves absent-host early refusal."
+    },
+    {
+      "source": "plane-mcp/src/plane_door_impl.rs LEGACY_EXCHANGE_COUNTS",
+      "reason": "cfg(test)-only passive TLS observations of actual private state address, ticket and literal Instance::parked_count; no callback/state replacement and no public API. Normal shipped product excludes observation."
     }
-  ]
+  ],
+  "actual_sdk_boundary": {
+    "public_case": "plane-mcp/tests/sessions.rs::closing_the_actual_plane_retires_its_pending_initialize_without_sending_a_post",
+    "integration_case": "plane-mcp-plugin/tests/private_cases.rs::plane_door::actual_sdk_parked_counts_and_instance_close_follow_the_real_mcp_path",
+    "completion_case": "plane-mcp/tests/sessions.rs::a_cancelled_legacy_initialize_never_wedges_the_stream",
+    "predicates": [
+      "Actual full production door OPEN/ON_PIECE flow suspends message-address ESTABLISH before a stream is produced.",
+      "Second actual SDK RESUME uses identical full host completion handle.",
+      "Actual SDK Instance parked_count is exactly1 for this real instance/ticket730 before CLOSE.",
+      "Actual CLOSE sends no initialization POST/new body and no CLOSE for a nonexistent stream.",
+      "Actual completed flow on its real instance/ticket95 observes literal SDK parked_count0."
+    ],
+    "qualification": "Source authored and formatting checked only; both private/public paths require native execution. No generic SDK-only source equivalence waiver is claimed."
+  },
+  "removed_edges": [
+    "workspace/member busbar-test-kit dev dependencies",
+    "unused contract test-seal/test-support dev features",
+    "unused connector test-support feature; direct rcgen pem enabled for actual TLS certificate instead"
+  ],
+  "removed_fake_products": [
+    "old tests/fixture.rs Idle",
+    "old child/cleanup/legacy-init/legacy-call Probe OPEN/CLOSE wrappers and plugin_door tables"
+  ],
+  "retired_framework_selfchecks": [
+    "Mutated shared crossing-count comparator",
+    "Mutated synthetic unreported-class comparator",
+    "Fake Probe helper OPEN/CLOSE/Outcome wrapper selfchecks that always answered hard-coded Ready/Pending; meaningful state/custody assertions transferred to actual private source and actual-door boundary tests."
+  ],
+  "source_status": "COMPLETE_SOURCE_MIGRATION_NATIVE_AND_FINAL_GRAPH_QUALIFICATION_PENDING"
 }

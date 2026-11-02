@@ -130,7 +130,10 @@ fn arrive(
     body: &'static [u8],
     fields: &'static [Field],
 ) -> (Step, Option<Vec<u8>>) {
-    let mut a: Frame<ArriveIn, ArriveOut> = Frame::new(Default::default(), Default::default());
+    let mut a: Frame<ArriveIn, ArriveOut> = Frame::new(
+        busbar_contract::abi::sdk::door::blank_in(),
+        busbar_contract::abi::sdk::door::blank_out(),
+    );
     (a.input.head, a.out.head) = (in_head(), out_head());
     a.input.unit = unit;
     a.input.claim = route_of(verb, target);
@@ -216,7 +219,7 @@ fn push(p: &Plugin<Plane>, what: &'static str, unit: u64, given: Push, cap: usiz
     let mut line = String::new();
     let mut first = true;
     loop {
-        let mut i: OnPieceIn = Default::default();
+        let mut i: OnPieceIn = busbar_contract::abi::sdk::door::blank_in();
         i.head = in_head();
         (i.unit, i.from) = (unit, given.from);
         if first {
@@ -232,7 +235,7 @@ fn push(p: &Plugin<Plane>, what: &'static str, unit: u64, given: Push, cap: usiz
         (i.arena_buf, i.arena_cap) = (arena.as_mut_ptr(), arena.len());
         (i.records_buf, i.records_cap) = (records.as_mut_ptr(), records.len());
         (i.units_buf, i.units_cap) = (units.as_mut_ptr(), units.len());
-        let mut o: OnPieceOut = Default::default();
+        let mut o: OnPieceOut = busbar_contract::abi::sdk::door::blank_out();
         o.head = out_head();
         let mut f = Frame::new(i, o);
         let c = p.call(slot::ON_PIECE, &mut f);
@@ -585,11 +588,11 @@ fn served(grants: &'static [&'static str]) -> Dispatcher {
 /// THE RELAY SCRIPT'S CALLS: each far answer a member gives one relayed call, read back.
 fn relay_script(p: &Plugin<Plane>) -> Vec<Step> {
     let mut t = Vec::new();
-    let mut i: PlaneOpenIn = Default::default();
+    let mut i: PlaneOpenIn = busbar_contract::abi::sdk::door::blank_in();
     i.open.head = in_head();
     (i.open.generation, i.open.settings) = (1, octets(RELAY_SECTION));
     i.public_url = text(PUBLIC_URL.as_bytes());
-    let mut o: PlaneOpenOut = Default::default();
+    let mut o: PlaneOpenOut = busbar_contract::abi::sdk::door::blank_out();
     o.open.head = out_head();
     t.push(Step::new("open", p.open(&mut Frame::new(i, o)).0.outcome));
     let post = ("POST", "/mcp");

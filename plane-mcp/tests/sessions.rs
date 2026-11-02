@@ -47,7 +47,7 @@ use busbar_contract::abi::plane::{
     PIECE_LAST, RECORD_AUDIT, RECORD_PUT,
 };
 use busbar_contract::abi::transport::FrameSpan;
-use busbar_plane_mcp::door;
+pub use busbar_plane_mcp::door;
 use serde_json::{json, Value};
 
 fn answer(out: *mut ServiceOut, outcome: Outcome, value: u64, len: u64) -> RawOutcome {
@@ -204,6 +204,10 @@ struct Upstreams {
     hold_calls: bool,
     /// The legacy upstream holds its `initialize` answers until the test releases them.
     hold_init: bool,
+    /// This actual-door lifetime case holds the message-address ESTABLISH before a stream exists.
+    pause_message_dial: bool,
+    pending_message_dials: Vec<CompletionHandle>,
+    unexpected_closes: Vec<u64>,
 }
 
 static UPSTREAMS: Mutex<Option<Upstreams>> = Mutex::new(None);
@@ -497,6 +501,10 @@ fn establish_now(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawO
     let url = String::from_utf8_lossy(url).into_owned();
     let mut ups = upstreams();
     let ups = ups.get_or_insert_with(Upstreams::default);
+    if ups.pause_message_dial && url.starts_with(&format!("https://up.example{LEGACY_MESSAGES}")) {
+        ups.pending_message_dials.push(i.head.handle);
+        return answer(out, Outcome::Pending, 0, 0);
+    }
     ups.next += 1;
     let id = ups.next;
     ups.open.insert(
@@ -663,7 +671,10 @@ fn close_now(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutco
     // SAFETY: the SDK hands a `StreamIn`.
     let i = unsafe { input.cast::<StreamIn>().read() };
     if let Some(ups) = upstreams().as_mut() {
-        ups.open.remove(&i.stream);
+        let existed = ups.open.remove(&i.stream).is_some();
+        if ups.pause_message_dial && !existed {
+            ups.unexpected_closes.push(i.stream);
+        }
     }
     answer(out, Outcome::Ready, 0, 0)
 }
@@ -738,7 +749,7 @@ fn out_head<T>() -> OutHead {
 
 fn ops() -> &'static Ops {
     // SAFETY: the door is a `'static` table whose ops are the plane kind's.
-    unsafe { &*door().ops().cast::<Ops>() }
+    unsafe { &*crate::door().ops().cast::<Ops>() }
 }
 
 fn lifecycle() -> &'static OpsHead {
@@ -1020,6 +1031,9 @@ impl Door {
 
     /// One piece of `unit`, re-called while the door says `more`: the outcome, the status, the
     fn piece(&self, unit: u64, given: &Given<'_>) -> Answered {
+        self.piece_with_resume(unit, given, false)
+    }
+    fn piece_with_resume(&self, unit: u64, given: &Given<'_>, resuming: bool) -> Answered {
         let ticket = Ticket {
             slot: u32::try_from(unit).unwrap(),
             generation: 1,
@@ -1042,6 +1056,9 @@ impl Door {
         for _ in 0..64 {
             let mut i: OnPieceIn = z();
             i.head = head::<OnPieceIn>(slot::ON_PIECE, ticket);
+            if first && resuming {
+                i.head.flags |= busbar_contract::abi::mechanism::call::FLAG_RESUME;
+            }
             i.unit = unit;
             i.from = given.from;
             i.stream = given.stream;
@@ -2054,7 +2071,7 @@ fn busbars_own_initialize_id_round_trips_a_javascript_server() {
 
 /// RED B-H3: A CANCELLED INITIALIZING CALL NEVER WEDGES THE STREAM: the call running the stream's
 #[test]
-fn a_cancelled_legacy_initialize_never_wedges_the_stream() {
+pub(crate) fn a_cancelled_legacy_initialize_never_wedges_the_stream() {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
     *upstreams() = Some(Upstreams::default());
     let d = open_with(LEGACY_SECTION);
@@ -2934,3 +2951,119 @@ fn a_members_update_reaches_a_listen_subscriber_exactly_once() {
 
 #[path = "support/reported_stream_standing.rs"]
 mod reported_stream_standing;
+
+/// Companion to the private orchestration oracle: the actual product's real SDK Instance owns
+/// the pending exchange here, and its actual CLOSE must destroy it before any POST is sent.
+#[test]
+pub(crate) fn closing_the_actual_plane_retires_its_pending_initialize_without_sending_a_post() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    *upstreams() = Some(Upstreams::default());
+    let d = open_with(LEGACY_SECTION);
+    upstreams().as_mut().unwrap().pause_message_dial = true;
+    let (body, fields) = legacy_call(730, "never-sent.txt");
+    assert_eq!(
+        d.arrive(730, "POST", "/mcp", &body, &fields).outcome,
+        Outcome::Ready
+    );
+    let attempt = Given::attempt(ALICE, "lg");
+    let caller = Given::caller(ALICE, &body);
+    let refused = walk_refused(ALICE);
+    let mut phase = 0;
+    let mut resuming = false;
+    for _ in 0..64 {
+        let given = match phase {
+            0 => &attempt,
+            1 => &caller,
+            _ => &refused,
+        };
+        let got = d.piece_with_resume(730, given, resuming);
+        resuming = got.outcome == Some(Outcome::Pending);
+        if !upstreams()
+            .as_ref()
+            .unwrap()
+            .pending_message_dials
+            .is_empty()
+        {
+            break;
+        }
+        assert!(
+            matches!(got.outcome, Some(Outcome::Ready | Outcome::Pending)),
+            "{}",
+            got.text()
+        );
+        if !resuming {
+            if phase == 0 {
+                phase = 1;
+            } else if got.far {
+                phase = 2;
+            }
+        }
+        d.turn();
+    }
+    {
+        let ups = upstreams();
+        let ups = ups.as_ref().unwrap();
+        assert_eq!(
+            ups.pending_message_dials.len(),
+            1,
+            "actual initialization is held before producing a stream"
+        );
+        assert!(
+            ups.seen
+                .iter()
+                .all(|seen| seen.body["method"] != "initialize"),
+            "no initialize POST body was sent"
+        );
+    }
+    assert!(resuming, "the actual adapter pended its initialization");
+    let given = match phase {
+        0 => &attempt,
+        1 => &caller,
+        _ => &refused,
+    };
+    let pending = d.piece_with_resume(730, given, true);
+    assert_eq!(pending.outcome, Some(Outcome::Pending));
+    let before = {
+        let ups = upstreams();
+        let ups = ups.as_ref().unwrap();
+        assert_eq!(ups.pending_message_dials.len(), 2);
+        assert_eq!(
+            ups.pending_message_dials[0], ups.pending_message_dials[1],
+            "the actual SDK resumes its exact original host operation"
+        );
+        ups.seen.len()
+    };
+    let input = head::<InHead>(life::CLOSE, Ticket::NONE);
+    let mut output = out_head::<OutHead>();
+    let close = lifecycle().close.expect("actual product CLOSE");
+    // SAFETY: this is the actual opened product instance and the exact complete CLOSE frames;
+    // it is never entered again after this terminal close.
+    let outcome = unsafe {
+        close(
+            d.instance,
+            std::ptr::from_ref(&input).cast(),
+            std::ptr::from_mut(&mut output).cast(),
+        )
+    };
+    assert_eq!(outcome.outcome(), Outcome::Ready);
+    let ups = upstreams();
+    let ups = ups.as_ref().unwrap();
+    assert_eq!(
+        ups.pending_message_dials.len(),
+        2,
+        "close did not resume the unsent initialization"
+    );
+    assert_eq!(
+        ups.seen.len(),
+        before,
+        "closing the parked exchange sends no new body"
+    );
+    assert!(ups
+        .seen
+        .iter()
+        .all(|seen| seen.body["method"] != "initialize"));
+    assert!(
+        ups.unexpected_closes.is_empty(),
+        "a pending dial produced no stream to close"
+    );
+}

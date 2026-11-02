@@ -3,8 +3,6 @@
 
 //! The crate-level test modules: the suites that moved in from `tests/` when this crate's only
 
-pub(crate) mod fixture;
-
 /// A grant check that admits every grant: the unit suites' stand-in for a caller entitled to all.
 pub(crate) fn everyone(_: &str, _: &str) -> bool {
     true

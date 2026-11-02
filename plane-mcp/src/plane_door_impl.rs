@@ -4040,7 +4040,12 @@ const ROUND_SEQ_SPAN: u32 = 1 << 12;
 /// The first handle seq a relayed call's negotiation (its hops after the walk's) numbers its
 const NEGOTIATE_SEQ: u32 = 1 << 28;
 
-/// ONE EXCHANGE ON A UNIT'S TICKET, its connector services numbered from `base` (a unit's ticket
+#[cfg(test)]
+thread_local! {
+    // Passive, per-thread observations of the actual Instance; no state or callbacks are replaced.
+    static LEGACY_EXCHANGE_COUNTS: std::cell::RefCell<Vec<(usize, Ticket, usize)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+/// ONE EXCHANGE ON A UNIT'S TICKET, its connector services numbered from `base`.
 fn exchange_at(
     instance: &Instance<'_, McpDoor>,
     host: Option<&busbar_contract::abi::sdk::conn::Host>,
@@ -4054,26 +4059,71 @@ fn exchange_at(
         busbar_contract::abi::sdk::conn::ConnFailure,
     >,
 > {
+    use busbar_contract::abi::sdk::exchange::Exchange;
+    let Some(host) = host else {
+        return std::task::Poll::Ready(Err(busbar_contract::abi::sdk::conn::ConnFailure::Unarmed));
+    };
+    let mut state = instance.resume::<Exchange>().map(|parked| *parked);
+    let answer = exchange_with_state(
+        Some(host),
+        instance.ticket(),
+        base,
+        url,
+        member,
+        &mut state,
+        request,
+    );
+    if let Some(state) = state {
+        instance.park(state);
+    }
+    #[cfg(test)]
+    if let Some(plane) = instance.get() {
+        LEGACY_EXCHANGE_COUNTS.with(|counts| {
+            counts.borrow_mut().push((
+                std::ptr::from_ref(plane) as usize,
+                instance.ticket(),
+                instance.parked_count(),
+            ))
+        });
+    }
+    answer
+}
+
+/// The actual framed exchange with its owned state supplied explicitly; the real ABI adapter
+/// above resumes and parks this state on its actual SDK Instance.
+fn exchange_with_state(
+    host: Option<&busbar_contract::abi::sdk::conn::Host>,
+    ticket: Ticket,
+    base: u32,
+    url: &str,
+    member: &str,
+    state: &mut Option<busbar_contract::abi::sdk::exchange::Exchange>,
+    request: impl FnOnce() -> busbar_contract::abi::sdk::exchange::Request,
+) -> std::task::Poll<
+    Result<
+        busbar_contract::abi::sdk::exchange::ExchangeResponse,
+        busbar_contract::abi::sdk::conn::ConnFailure,
+    >,
+> {
     use busbar_contract::abi::sdk::exchange::{exchange, Exchange};
     let Some(host) = host else {
         return std::task::Poll::Ready(Err(busbar_contract::abi::sdk::conn::ConnFailure::Unarmed));
     };
-    let mut state = match instance.resume::<Exchange>() {
-        Some(parked) => *parked,
-
+    let mut exchange_state = match state.take() {
+        Some(parked) => parked,
         None => match Exchange::request(request()) {
-            Ok(s) => s.as_member(member),
-            Err(e) => return std::task::Poll::Ready(Err(e)),
+            Ok(state) => state.as_member(member),
+            Err(error) => return std::task::Poll::Ready(Err(error)),
         },
     };
     let answer = exchange(
-        &mut host.connector_from(instance.ticket(), base),
-        &mut state,
+        &mut host.connector_from(ticket, base),
+        &mut exchange_state,
         0,
         Some(url),
     );
     if answer.is_pending() {
-        instance.park(state);
+        *state = Some(exchange_state);
     }
     answer
 }
@@ -4430,9 +4480,6 @@ busbar_contract::plugin_door! {
 /// THE SUBSCRIPTIONS HELD AS SESSIONS ON THE HTTP CARRIER (Q-L3B-K6-HTTP (a)): a child of the door,
 #[path = "door_listen.rs"]
 mod door_listen;
-
-#[path = "door_legacy.rs"]
-mod door_legacy;
 
 #[path = "door_relay_cleanup.rs"]
 mod door_relay_cleanup;

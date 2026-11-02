@@ -41,6 +41,61 @@ mod local_renderer;
 #[allow(dead_code)]
 mod plane_door {
     include!("../../plane-mcp/src/plane_door_impl.rs");
+    mod door_legacy {
+        include!("../../plane-mcp/src/door_legacy_impl.rs");
+        mod initialization {
+            include!("support/private_initialization.rs");
+        }
+        mod legacy_calls {
+            include!("support/private_legacy_calls.rs");
+        }
+    }
+    #[test]
+    fn actual_sdk_parked_counts_and_instance_close_follow_the_real_mcp_path() {
+        LEGACY_EXCHANGE_COUNTS.with(|counts| counts.borrow_mut().clear());
+        crate::actual_sessions::closing_the_actual_plane_retires_its_pending_initialize_without_sending_a_post();
+        LEGACY_EXCHANGE_COUNTS.with(|counts| {
+            let counts = counts.borrow();
+            let target = Ticket {
+                slot: 730,
+                generation: 1,
+            };
+            let scoped: Vec<_> = counts
+                .iter()
+                .filter(|(_, ticket, _)| *ticket == target)
+                .collect();
+            let instance = scoped.first().expect("actual pending adapter entered").0;
+            assert!(
+                scoped.iter().all(|(owner, _, _)| *owner == instance),
+                "observations name only this real instance"
+            );
+            assert_eq!(
+                scoped.last().unwrap().2,
+                1,
+                "the actual SDK Instance parks exactly one Exchange before CLOSE"
+            );
+        });
+        LEGACY_EXCHANGE_COUNTS.with(|counts| counts.borrow_mut().clear());
+        crate::actual_sessions::a_cancelled_legacy_initialize_never_wedges_the_stream();
+        LEGACY_EXCHANGE_COUNTS.with(|counts| {
+            let counts = counts.borrow();
+            let target = Ticket {
+                slot: 95,
+                generation: 1,
+            };
+            let scoped: Vec<_> = counts
+                .iter()
+                .filter(|(_, ticket, _)| *ticket == target)
+                .collect();
+            let instance = scoped.first().expect("actual completed adapter entered").0;
+            assert!(scoped.iter().all(|(owner, _, _)| *owner == instance));
+            assert_eq!(
+                scoped.last().unwrap().2,
+                0,
+                "the actual SDK Instance retains no Exchange after completion"
+            );
+        });
+    }
     mod cleanup_tests {
         include!("support/private_cleanup.rs");
     }
@@ -75,7 +130,7 @@ mod tools_config;
 pub use plane_door::door;
 
 /// The plane's declared metadata (`declares.json`), linked by the distribution and signed into a
-pub const DECLARES: &str = include_str!("../declares.json");
+pub const DECLARES: &str = include_str!("../../plane-mcp/declares.json");
 
 #[path = "../../plane-mcp/src/reads.rs"]
 mod reads;
@@ -115,3 +170,9 @@ mod actual_legacy_driver {
         include!("support/private_driver.rs");
     }
 }
+
+// Same ordinary actual-product ABI scenarios, now invoking this integration binary's actual
+// production door so its passive private Instance observations can also be asserted.
+#[allow(unused_imports)]
+#[path = "../../plane-mcp/tests/sessions.rs"]
+mod actual_sessions;

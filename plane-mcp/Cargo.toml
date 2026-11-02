@@ -43,11 +43,3 @@ tracing = { workspace = true }
 # UTS #46 mapping (`ｌｏｃａｌｈｏｓｔ` is `localhost`) and the IPv4 number reading (`0x` is `0.0.0.0`),
 # the reading a fetching upstream dials. Pure parsing; busbar's own row, already in its lock.
 url = { workspace = true }
-
-[dev-dependencies]
-# The TEST-ONLY seal (#65). `busbar_contract::plugin::TestKernelSeal` is the one blessed
-# fixture implementor of the SEALED `KernelSeal` trait; this crate's test harnesses used to
-# forge their own. Dev-only and feature-gated, so it is absent from every release build.
-busbar-contract = { workspace = true, features = ["test-seal"] }
-# The test kit, test-only: the counting allocator the allocation gates read (`src/tests/mod.rs`).
-busbar-test-kit = { workspace = true }
