@@ -41,3 +41,6 @@ mod method_inventory_tests;
 mod program_tests;
 /// The sanitiser's complexity guards (`tests/sanitize_complexity.rs`).
 mod sanitize_complexity_tests;
+
+/// Configured host-launch authentication for stdio registrations.
+mod local_program_trust_tests;
