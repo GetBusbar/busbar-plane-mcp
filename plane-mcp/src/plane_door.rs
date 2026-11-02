@@ -720,6 +720,8 @@ struct CallUnit {
     program_list: Option<door_program::ProgramList>,
     /// The attempt whose stdio member the door greeted ([`door_program::ready`]).
     readied: Option<u32>,
+    /// The exact checked launch stamp greeted for this attempt, required on rooted eager bodies.
+    program_ready: Option<(u32, u64)>,
     /// What the unit is to the tasks extension ([`door_tasks`]).
     task: Option<door_tasks::TaskUnit>,
     /// What the unit is to the line carrier: its session and what its line was ([`door_line`]).
@@ -1413,6 +1415,7 @@ slot!(
             program: None,
             program_list: None,
             readied: None,
+            program_ready: None,
             task: task_run.map(|(reference, params, _, retry)| {
                 door_tasks::TaskUnit::run(reference, params, retry)
             }),
@@ -3193,6 +3196,11 @@ fn send_to_member(
     if let Err(refusal) = judged {
         return Some(MemberSend::Judged(Box::new(relay.admitted), refusal));
     }
+    let checked_program = child.as_ref().map(|child| child.generation).or_else(|| {
+        unit.program_ready
+            .filter(|(attempt, _)| *attempt == unit.attempt)
+            .map(|(_, stamp)| stamp)
+    });
     let mut outbound = if let Some(child) = child {
         // A STDIO CHILD'S RELAYED ASK, ANSWERED: its work handle bound, the caller's
         // answers written to the child under its own ids, and the call it still owes
@@ -3241,6 +3249,20 @@ fn send_to_member(
     } else {
         crate::call::outbound(&relay.admitted, member, def, round, continuation.as_ref())?
     };
+    if def.pin.mechanism == crate::tools_config::McpPinMechanism::LocalProgram {
+        let expected = checked_program.and_then(|stamp| {
+            plane.program_versions.with_all(|all| {
+                all.get(&())
+                    .and_then(|versions| versions.expected_fields(member, stamp))
+            })
+        });
+        let Some(expected) = expected else {
+            // No rooted call or owed child reply may open eagerly without its checked current pair.
+            return Some(MemberSend::Decline);
+        };
+        // Consumed by the host before the kernel-owned lease flushes its body.
+        outbound.fields.extend(expected);
+    }
     // A member's token_exchange down-scope / passthrough lend rides its outbound
     // (Q-L3B-DOOR-EXCHANGE); a stdio child carries none.
     if relay.program.is_none() {

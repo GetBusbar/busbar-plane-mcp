@@ -617,13 +617,17 @@ pub(super) fn ready(
             Looked::Pending
         }
         std::task::Poll::Ready(result) => {
-            if let Err(reason) = result {
-                if def.pin.mechanism == crate::tools_config::McpPinMechanism::LocalProgram {
-                    publish(
-                        plane,
-                        &list_key(held, member),
-                        crate::trust::Sighting::Failed(reason),
-                    );
+            match result {
+                Ok(exchanged) => unit.program_ready = Some((unit.attempt, exchanged.generation)),
+                Err(reason) => {
+                    unit.program_ready = None;
+                    if def.pin.mechanism == crate::tools_config::McpPinMechanism::LocalProgram {
+                        publish(
+                            plane,
+                            &list_key(held, member),
+                            crate::trust::Sighting::Failed(reason),
+                        );
+                    }
                 }
             }
             unit.readied = Some(unit.attempt);

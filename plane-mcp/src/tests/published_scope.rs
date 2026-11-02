@@ -27,6 +27,7 @@ fn unit() -> CallUnit {
         program: None,
         program_list: None,
         readied: None,
+        program_ready: None,
         task: None,
         line: None,
         child_work: ChildWork::default(),

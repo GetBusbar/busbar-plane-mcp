@@ -61,7 +61,11 @@ resolves only its admitted environment references, and applies the admitted work
 The host supplies the first successful lease head only after it has observed a live program
 handle from a successful spawn under that same ticket and checked supplier grant. The plane
 requires one canonical `generation`, `program-instance`, and base64 `program-identity` field
-from that head before sending a greeting, observing tools, or forwarding a call. The identity
+from that head before sending a greeting or observing tools. A governed call or child reply
+opens with the expected checked incarnation and generation; the host compares them against the
+current live program before flushing any request body. A replacement or respawn refuses that
+open instead of receiving bytes owed to the earlier child. The plane also validates the actual
+call lease head before accepting its response. The identity
 contains only the configured command path. The private grant binds arguments, environment,
 and working directory; no public recipe hash or secret fingerprint is emitted. Missing,
 duplicate, unsuccessful, noncanonical, mismatched, repeated, or retired receipts refuse the

@@ -27,6 +27,33 @@ pub(crate) struct Versions {
 }
 
 impl Versions {
+    /// Resolve only the current exact checked stamp. Superseded replies cannot select a newer child.
+    pub(crate) fn observed(&self, member: &str, stamp: u64) -> Option<Observed> {
+        self.latest.get(member).and_then(|(observed, current)| {
+            (*current == stamp && observed.instance != 0 && observed.generation != 0)
+                .then_some(*observed)
+        })
+    }
+
+    /// Only host narrowing fields, never forwarded as child JSON or treated as authentication.
+    pub(crate) fn expected_fields(
+        &self,
+        member: &str,
+        stamp: u64,
+    ) -> Option<[(String, String); 2]> {
+        let observed = self.observed(member, stamp)?;
+        Some([
+            (
+                busbar_contract::conn::PROGRAM_EXPECT_INSTANCE_FIELD.to_string(),
+                observed.instance.to_string(),
+            ),
+            (
+                busbar_contract::conn::PROGRAM_EXPECT_GENERATION_FIELD.to_string(),
+                observed.generation.to_string(),
+            ),
+        ])
+    }
+
     pub(crate) fn stamp(&mut self, member: &str, observed: Observed) -> Result<u64, String> {
         if let Some((before, stamp)) = self.latest.get(member) {
             if observed == *before {
@@ -266,6 +293,15 @@ mod tests {
             .unwrap();
         assert_ne!(replacement, respawn);
         assert_ne!(replacement, original);
+        assert_eq!(
+            versions.observed("server", replacement),
+            Some(Observed {
+                instance: 38,
+                generation: 1
+            })
+        );
+        assert_eq!(versions.observed("server", original), None);
+        assert_eq!(versions.observed("other", replacement), None);
         assert!(versions.stamp("server", first).is_err());
         assert!(versions
             .stamp(
@@ -313,5 +349,40 @@ mod tests {
         assert!(!versions.latest.contains_key("other"));
         assert!(versions.stamp("other", first).is_err());
         assert!(!versions.latest.contains_key("other"));
+    }
+    #[test]
+    fn eager_body_guard_uses_only_the_current_checked_host_pair() {
+        let observed = block(200, &fields("37", "2", COMMAND), COMMAND, true).unwrap();
+        let mut versions = Versions::default();
+        let checked = versions.stamp("server", observed).unwrap();
+        assert_eq!(
+            versions.expected_fields("server", checked).unwrap(),
+            [
+                ("program-expect-instance".to_string(), "37".to_string()),
+                ("program-expect-generation".to_string(), "2".to_string()),
+            ]
+        );
+        assert!(versions.expected_fields("other", checked).is_none());
+        let new = versions
+            .stamp(
+                "server",
+                Observed {
+                    instance: 38,
+                    generation: 1,
+                },
+            )
+            .unwrap();
+        assert!(versions.expected_fields("server", checked).is_none());
+        assert_eq!(versions.expected_fields("server", new).unwrap()[0].1, "38");
+        let legacy = versions
+            .stamp(
+                "legacy",
+                Observed {
+                    instance: 0,
+                    generation: 7,
+                },
+            )
+            .unwrap();
+        assert!(versions.expected_fields("legacy", legacy).is_none());
     }
 }
