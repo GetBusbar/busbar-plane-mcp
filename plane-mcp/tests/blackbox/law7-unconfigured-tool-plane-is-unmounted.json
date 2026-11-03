@@ -138,6 +138,42 @@
         "port": "data",
         "method": "POST",
         "path": "/mcp",
+        "response_headers_absent": [
+          "www-authenticate"
+        ],
+        "status": 401,
+        "json_eq": {
+          "": {
+            "error": {
+              "code": "invalid_api_key",
+              "message": "Incorrect API key provided.",
+              "param": null,
+              "type": "authentication_error"
+            }
+          }
+        },
+        "body_lacks": [
+          "error_description"
+        ]
+      }
+    },
+    {
+      "mint": {
+        "path": "/api/v1/admin/keys",
+        "body": {
+          "name": "law7-unconfigured"
+        }
+      }
+    },
+    {
+      "call": {
+        "port": "data",
+        "method": "POST",
+        "path": "/mcp",
+        "response_headers_absent": [
+          "www-authenticate"
+        ],
+        "bearer": "{minted}",
         "status": 404,
         "body_lacks": [
           "error_description"
