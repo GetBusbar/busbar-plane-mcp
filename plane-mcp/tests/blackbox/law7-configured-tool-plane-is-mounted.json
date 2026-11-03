@@ -57,9 +57,13 @@
         "method": "POST",
         "path": "/mcp",
         "status": 401,
-        "body_contains": [
-          "error_description"
-        ]
+        "response_headers_eq": {
+          "www-authenticate": "Bearer resource_metadata=\"http://127.0.0.1:{data_port}/.well-known/oauth-protected-resource/mcp\""
+        },
+        "json_eq": {
+          "": { "error": "unauthorized" }
+        },
+        "body_eq": "{\"error\":\"unauthorized\"}"
       }
     }
   ]
