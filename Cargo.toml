@@ -118,7 +118,7 @@ url = "2"
 webpki = { package = "rustls-webpki", version = "0.103", default-features = false, features = ["std", "ring"] }
 webpki-roots = "1"
 zeroize = "1"
-"busbar-store-memory" = { "git" = "https://github.com/GetBusbar/busbar-store-memory", "rev" = "afa6267d0e34a1cb328e286d3d1ec6f95a83808f" }
+"busbar-store-memory" = { "git" = "https://github.com/GetBusbar/busbar-store-memory", "rev" = "6736c6a664ad66bee8c98edaf3794af676deeb07" }
 # busbar .github/fleet/deps.toml [plugin-deps], at 892773b8ed5d0cc78694bbcf5a10d89346ad61e6
 fallible-iterator = "0.2"
 httparse = { version = "1", default-features = false }
