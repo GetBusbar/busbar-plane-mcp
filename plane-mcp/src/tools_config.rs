@@ -96,7 +96,8 @@ pub struct ServerPinCfg {
 ///
 /// A SIBLING of `pin:`, not a field inside it: `pin:` says how busbar knows the server is the one
 /// the operator meant, this says how the server knows the connection is busbar's. The host reads
-/// it at the http need's `trust_from` path ([`crate::statement::CLIENT_IDENTITY_FROM`]), resolves both
+/// it as the unchanged sibling of the http need's structured TLS selector
+/// ([`crate::statement::TLS_FROM`]), resolves both
 /// references once, and the connector presents the certificate on every connection to the server.
 ///
 /// Both fields are SECRET REFERENCES (`{env: ..}`, `{file: ..}` or a `kind: secret` module), the
@@ -113,6 +114,18 @@ pub struct ClientIdentityCfg {
 
 /// `Eq` is asserted rather than derived because [`busbar_contract::secret_ref::SecretRef`] derives
 impl Eq for ClientIdentityCfg {}
+
+/// `tools.<server>.tls` — extra public trust material for this HTTPS member only.
+///
+/// The host validates the PEM bundle before publication and adds its certificate anchors to the
+/// existing roots. It still verifies the server's chain, name, validity and configured pin.
+/// Client authentication stays at the sibling `client_identity:` field.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpTlsCfg {
+    /// A nonempty PEM certificate bundle. Public certificates, never a private key or secret ref.
+    pub ca_cert_pem: String,
+}
 
 /// `tools.<server>.tools_allow.<tool>` — one approved tool, and the slot its approved schema hash
 /// lives in.
@@ -455,6 +468,11 @@ pub struct McpServerDefCfg {
     /// on `transport: stdio` (neither has a TLS handshake to present it in).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_identity: Option<ClientIdentityCfg>,
+    /// Additional public CA certificates for this HTTPS member. The host validates the PEM before
+    /// publication, adds its anchors to the existing roots, and keeps name, validity, pin and mTLS
+    /// verification. Refused for plaintext HTTP and stdio.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<McpTlsCfg>,
     /// `<n><s|m|h|d>`: the longest an observation is reused before verify-on-call re-fetches. Absent =
     /// [`DEFAULT_MCP_VERIFY_TTL`]; `0` = every call. Judged by the kernel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -827,6 +845,31 @@ fn validate_endpoint(at: &str, def: &McpServerDefCfg) -> Result<(), String> {
     Ok(())
 }
 
+/// Public CA configuration must have a secured network handshake to affect.
+fn validate_tls(at: &str, def: &McpServerDefCfg) -> Result<(), String> {
+    let Some(tls) = &def.tls else {
+        return Ok(());
+    };
+    if def.transport.is_some_and(ServerTransport::spawns_child) {
+        return Err(format!(
+            "{at}: `tls:` cannot be used on `transport: stdio`, which has no TLS handshake"
+        ));
+    }
+    if !def.url.starts_with("https://") {
+        return Err(format!(
+            "{at}: `tls:` requires an `https://` endpoint; a plaintext connection cannot use CA certificates"
+        ));
+    }
+    if tls.ca_cert_pem.trim().is_empty() {
+        return Err(format!(
+            "{at}: `tls.ca_cert_pem:` must be a nonempty PEM certificate bundle"
+        ));
+    }
+    // The host's existing operator-CA parser validates certificate PEM/DER and seals only public
+    // DER anchors before boot or apply publishes this member. The plane does not duplicate PKI.
+    Ok(())
+}
+
 /// THE CLIENT IDENTITY, matched against the pin's mechanism and the url's scheme.
 fn validate_client_identity(at: &str, def: &McpServerDefCfg) -> Result<(), String> {
     if def.pin.mechanism == McpPinMechanism::ClientCertBinding && def.client_identity.is_none() {
@@ -939,6 +982,7 @@ pub fn validate_server(name: &str, def: &McpServerDefCfg) -> Result<(), String> 
     validate_endpoint(&at, def)?;
     def.sampling_bounds.validate(&at)?;
     validate_client_identity(&at, def)?;
+    validate_tls(&at, def)?;
 
     if def.upstream_credentials == Some(UpstreamCreds::Passthrough) {
         return Err(refuse_passthrough(&at, def.token_exchange.is_some()));

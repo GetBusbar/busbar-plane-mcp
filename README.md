@@ -31,6 +31,14 @@ Off by default: a document that writes neither section below never uses the plan
     declares no authenticity root and cannot approve tools. `pinned_pubkey` is refused because
     this build verifies no MCP manifest signature.
   - `<id>.client_identity`: busbar's client certificate and key for that server (secret references).
+  - `<id>.tls.ca_cert_pem`: an optional public PEM certificate bundle added to the trust roots for
+    this HTTPS server only. The host validates it before boot or reload publishes the registration.
+    It does not replace public roots, certificate-chain/name/validity checks, `pin`, or mTLS.
+    Plaintext HTTP and stdio reject `tls:` rather than silently ignoring it. An absent `tls:` keeps
+    existing trust unchanged. `client_identity` stays at its existing sibling location; there is no
+    nested `tls.client_identity` spelling.
+    The bundle does not widen `allow_private` or another server's trust. Changing it on reload
+    changes new connections; retained work keeps its previous generation's scoped trust until it ends.
   - `<id>.tools_allow`, `prompts_allow`, `resources_allow`, `resource_templates_allow`: what it may
     publish.
   - `<id>.verify_ttl`, `timeout`, `aud`, `grants`, `allow_private`, `token_exchange`,

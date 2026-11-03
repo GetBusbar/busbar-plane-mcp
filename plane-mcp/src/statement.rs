@@ -50,8 +50,9 @@ pub const SECTIONS: &[Section] = &[
     },
 ];
 
-/// WHERE EACH REGISTERED SERVER'S CLIENT IDENTITY IS WRITTEN, as a member path (`settings.*.<key>`,
-pub const CLIENT_IDENTITY_FROM: &str = "settings.*.client_identity";
+/// The structured host TLS selector: optional `tls.ca_cert_pem` plus the unchanged sibling
+/// `client_identity`. This is not a PEM string and is resolved separately for each member.
+pub const TLS_FROM: &str = "settings.*.tls";
 
 /// THE SECRET REFERENCES ITS SECTION HOLDS, by settings path (`*` = every registration, every
 pub const SECRET_REFS: &[AbiStr] = &[
@@ -90,7 +91,7 @@ pub const NEEDS: &[Need] = &[
 
         n.target_from = abi_str("settings.*.url");
 
-        n.trust_from = abi_str(CLIENT_IDENTITY_FROM);
+        n.trust_from = abi_str(TLS_FROM);
         n.keep_mode = KEEP_NAMED;
         n
     },

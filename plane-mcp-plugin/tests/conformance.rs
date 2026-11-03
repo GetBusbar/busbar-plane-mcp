@@ -8,9 +8,15 @@ fn inputs() -> &'static str {
         let template = include_str!("conformance.json");
         let marker = "__MCP_CONFORMANCE_PEER_KEY_PIN__";
         assert_eq!(template.matches(marker).count(), 2);
+        assert_eq!(template.matches("__MCP_CONFORMANCE_CA_PEM__").count(), 2);
         template
             .replace(marker, &mcp_network::peer_key_pin())
             .replace("localhost:56712", mcp_network::authority())
+            .replace(
+                "\"__MCP_CONFORMANCE_CA_PEM__\"",
+                &serde_json::to_string(mcp_network::anchors())
+                    .expect("the actual public TLS root serialises"),
+            )
     })
 }
 

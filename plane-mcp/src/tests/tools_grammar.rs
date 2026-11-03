@@ -761,6 +761,74 @@ fn a_client_identity_with_no_handshake_to_present_it_in_is_refused() {
     );
 }
 
+/// The typed grammar preserves public CA material; the host's operator-CA parser owns PEM/DER
+/// validation before publication. Client identity remains the existing sibling object.
+#[test]
+fn a_member_tls_bundle_keeps_public_material_and_legacy_client_identity_separate() {
+    let public_material =
+        "-----BEGIN CERTIFICATE-----\nopaque to the typed grammar\n-----END CERTIFICATE-----";
+    let identity = json!({"cert": {"env": "C"}, "key": {"env": "K"}});
+    for (mechanism, with_identity) in [("cert_spki", false), ("mtls", true)] {
+        let mut server = json!({
+            "url": "https://fs.internal/",
+            "pin": {"mechanism": mechanism, "key": "AAAA"},
+            "tls": {"ca_cert_pem": public_material}
+        });
+        if with_identity {
+            server["client_identity"] = identity.clone();
+        }
+        let cfg = grammar(json!({"fs": server})).expect("the TLS config shape reads");
+        let def = &cfg.servers["fs"];
+        assert_eq!(def.tls.as_ref().unwrap().ca_cert_pem, public_material);
+        assert_eq!(def.client_identity.is_some(), with_identity);
+        let encoded = serde_json::to_value(def).unwrap();
+        assert_eq!(encoded["tls"]["ca_cert_pem"], public_material);
+        assert!(encoded["tls"].get("client_identity").is_none());
+    }
+    let old = grammar(json!({"fs": {
+        "url": "https://fs.internal/",
+        "pin": {"mechanism": "mtls", "key": "AAAA"},
+        "client_identity": identity
+    }}))
+    .expect("existing identity-only config stays valid");
+    assert!(old.servers["fs"].tls.is_none());
+    assert!(old.servers["fs"].client_identity.is_some());
+}
+
+#[test]
+fn member_tls_refuses_empty_wrong_shape_and_nested_identity_spellings() {
+    for tls in [
+        json!({}),
+        json!({"ca_cert_pem": ""}),
+        json!({"ca_cert_pem": " \n\t"}),
+        json!({"ca_cert_pem": {"file": "/run/ca.pem"}}),
+        json!({"ca_cert_pem": 42}),
+        json!({"ca_cert_pem": "public CA", "client_identity": {"cert": {"env": "C"}, "key": {"env": "K"}}}),
+        json!({"ca_cert_pem": "public CA", "unknown": true}),
+    ] {
+        assert!(
+            grammar(json!({"fs": {
+                "url": "https://fs.internal/",
+                "pin": {"mechanism": "cert_spki", "key": "AAAA"},
+                "tls": tls
+            }}))
+            .is_err(),
+            "invalid TLS shape was accepted"
+        );
+    }
+}
+
+#[test]
+fn member_tls_is_refused_without_a_secured_network_handshake() {
+    for server in [
+        json!({"url": "http://fs.internal/", "pin": {"mechanism": "unpinned"}, "tls": {"ca_cert_pem": "public CA"}}),
+        json!({"transport": "stdio", "command": ABS_PROGRAM, "pin": {"mechanism": "unpinned"}, "tls": {"ca_cert_pem": "public CA"}}),
+    ] {
+        let err = grammar(json!({"fs": server})).expect_err("TLS cannot be silently ignored");
+        assert!(err.contains("`tls:`"), "{err}");
+    }
+}
+
 /// THE CANARY a credential-echo test plants: bytes that may appear in a config and must appear in
 const CANARY: &str = "CANARY-plane-mcp-echo-7f3a91";
 

@@ -16,6 +16,8 @@ use busbar_plugin_loader::dispatch::{
 const MEMBER_TARGET: &str = "settings.*.url";
 /// The registration key the http need names busbar's client identity at.
 const CLIENT_IDENTITY_FROM: &str = "settings.*.client_identity";
+/// The explicit structured TLS selector; the legacy identity remains its sibling.
+const TLS_FROM: &str = "settings.*.tls";
 
 fn linked(d: &Dispatcher) -> Plugin<Plane> {
     let row = LinkedRow::of_loaded(loaded_door()).expect("the linked door states its Statement");
@@ -80,7 +82,7 @@ fn tls_roots_pin_peer_keys_and_local_program_has_its_own_launch_root() {
 
 /// RED on a plane whose http need names no `trust_from`: an `mtls` registration's client
 #[test]
-fn the_http_member_need_names_the_client_identity_and_its_secret_references() {
+fn the_http_member_need_names_structured_tls_and_legacy_identity_secret_references() {
     let d = Dispatcher::new(DispatchConfig::default());
     let served = linked(&d).served();
     let at = served
@@ -88,11 +90,11 @@ fn the_http_member_need_names_the_client_identity_and_its_secret_references() {
         .iter()
         .position(|t| *t == MEMBER_TARGET)
         .expect("a need reaches each registered server at its url");
-    assert_eq!(served.need_trust[at], CLIENT_IDENTITY_FROM);
+    assert_eq!(served.need_trust[at], TLS_FROM);
     assert_eq!(
         busbar_contract::section::member_target(served.need_trust[at]),
-        Some("client_identity"),
-        "the host reads the identity at the registration's own key"
+        Some("tls"),
+        "the host reads each member's TLS bundle and unchanged sibling identity"
     );
     for half in ["cert", "key"] {
         let path = format!("{CLIENT_IDENTITY_FROM}.{half}");
@@ -103,6 +105,14 @@ fn the_http_member_need_names_the_client_identity_and_its_secret_references() {
         );
     }
 
+    assert!(
+        served
+            .secret_refs
+            .iter()
+            .all(|path| !path.starts_with(TLS_FROM)),
+        "public CA certificates are not secret references"
+    );
+
     let row = LinkedRow::of_loaded(loaded_door()).expect("the linked door states its Statement");
     let read = rendering::read(&row.statement).expect("the Statement renders");
     let need = read
@@ -110,7 +120,7 @@ fn the_http_member_need_names_the_client_identity_and_its_secret_references() {
         .iter()
         .find(|n| n.target_from == MEMBER_TARGET)
         .expect("the rendering states the member need");
-    assert_eq!(need.trust_from, CLIENT_IDENTITY_FROM);
+    assert_eq!(need.trust_from, TLS_FROM);
     for half in ["cert", "key"] {
         let path = format!("{CLIENT_IDENTITY_FROM}.{half}");
         assert!(read.secret_refs.contains(&path), "{:?}", read.secret_refs);

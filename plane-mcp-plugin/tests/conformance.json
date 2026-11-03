@@ -5,6 +5,9 @@
   "settings": {
     "fs": {
       "url": "https://localhost:56712/fs/rpc?v=1",
+      "tls": {
+        "ca_cert_pem": "__MCP_CONFORMANCE_CA_PEM__"
+      },
       "pin": {
         "mechanism": "cert_spki",
         "key": "__MCP_CONFORMANCE_PEER_KEY_PIN__"
@@ -48,11 +51,37 @@
             "mechanism": "unpinned"
           }
         }
+      },
+      {
+        "plaintext": {
+          "url": "http://localhost:56712/rpc",
+          "pin": {
+            "mechanism": "unpinned"
+          },
+          "tls": {
+            "ca_cert_pem": "no plaintext TLS handshake"
+          }
+        }
+      },
+      {
+        "child": {
+          "transport": "stdio",
+          "command": "/bin/cat",
+          "pin": {
+            "mechanism": "unpinned"
+          },
+          "tls": {
+            "ca_cert_pem": "no stdio TLS handshake"
+          }
+        }
       }
     ],
     "refresh_settings": {
       "fs": {
         "url": "https://localhost:56712/fs/rpc?v=1",
+        "tls": {
+          "ca_cert_pem": "__MCP_CONFORMANCE_CA_PEM__"
+        },
         "pin": {
           "mechanism": "cert_spki",
           "key": "__MCP_CONFORMANCE_PEER_KEY_PIN__"
