@@ -1033,7 +1033,7 @@ mod both_ways {
                 DISTRUST_NONE, DISTRUST_NOT_APPROVED, DISTRUST_UNKNOWN_ITEM,
             };
             Stored::ready(match (counterparty, item) {
-                ("fs", Some("read_file")) => DISTRUST_NONE,
+                ("fs" | "fs2", Some("read_file")) => DISTRUST_NONE,
                 ("fs", Some("draft")) => DISTRUST_NOT_APPROVED,
                 _ => DISTRUST_UNKNOWN_ITEM,
             })
@@ -1690,6 +1690,81 @@ mod both_ways {
             want,
             "the dropped-in door, entitled to nothing"
         );
+    }
+
+    #[test]
+    fn the_selected_member_controls_the_actual_outbound_path_in_both_doors() {
+        let mut settings = document(RELAY_SECTION);
+        settings["fs2"] = settings["fs"].clone();
+        settings["fs2"]["url"] = json!("https://second.example/second/rpc?only=2");
+        let settings = Box::leak(serde_json::to_vec(&settings).unwrap().into_boxed_slice());
+        const GRANTS: &[&str] = &[
+            "mcp_server:fs",
+            "mcp_tool:fs_read_file",
+            "mcp_server:fs2",
+            "mcp_tool:fs2_read_file",
+        ];
+        for dropped_in in [false, true] {
+            let d = served(GRANTS);
+            let p = if dropped_in { dropped(&d) } else { linked(&d) };
+            let mut i: PlaneOpenIn = z();
+            i.open.head = in_head();
+            (i.open.generation, i.open.settings) = (1, octets(settings));
+            i.public_url = text(PUBLIC_URL.as_bytes());
+            let mut o: PlaneOpenOut = z();
+            o.open.head = out_head();
+            assert_eq!(p.open(&mut Frame::new(i, o)).0.outcome, Outcome::Ready);
+            for (unit, member, name, path, other) in [
+                (
+                    80,
+                    "fs",
+                    "fs_read_file",
+                    "/fs/rpc?v=1",
+                    "/second/rpc?only=2",
+                ),
+                (
+                    81,
+                    "fs2",
+                    "fs2_read_file",
+                    "/second/rpc?only=2",
+                    "/fs/rpc?v=1",
+                ),
+            ] {
+                let mut call = document(RELAY_CALL);
+                call["params"]["name"] = json!(name);
+                let body = Box::leak(serde_json::to_vec(&call).unwrap().into_boxed_slice());
+                let fields = Box::leak(Box::new([
+                    field(H_PROTOCOL_VERSION, PROTOCOL_VERSION),
+                    field(H_MCP_METHOD, "tools/call"),
+                    field(H_MCP_NAME, name),
+                    field("mcp-param-path", "/a"),
+                ]));
+                assert_eq!(
+                    arrive(&p, "arrive selected", unit, ("POST", "/mcp"), body, fields)
+                        .0
+                        .outcome,
+                    Outcome::Ready
+                );
+                assert_eq!(
+                    push(&p, "attempt selected", unit, Push::attempt(member), 64).outcome,
+                    Outcome::Ready
+                );
+                let sent = push(&p, "send selected", unit, Push::caller(body), 64);
+                assert_eq!(sent.outcome, Outcome::Ready);
+                assert!(
+                    sent.detail.ends_with(&format!("request=POST {path}")),
+                    "{}",
+                    sent.detail
+                );
+                assert!(
+                    !sent.detail.ends_with(&format!("request=POST {other}")),
+                    "{}",
+                    sent.detail
+                );
+                assert_eq!(document(&sent.reply)["params"]["name"], json!("read_file"));
+                assert_eq!(sent.lane, Some(format!("mcp_server:{member}")));
+            }
+        }
     }
 
     /// The relayed call, as the door states it on the wire: the ATTEMPT is taken, the caller's body
