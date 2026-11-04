@@ -10,6 +10,7 @@
 # (template/modernci/conformance.yaml):
 #
 #     bash testing/conformance/run.sh            # every suite in testing/conformance/suites.tsv
+#     bash testing/conformance/run.sh --selftest # the verdict judge bites on planted verdicts
 #
 # THE SUITE LIST is this repo's own `testing/conformance/suites.tsv` (not templated): one suite per
 # line, `<suite-id><TAB><command>`; `#` starts a comment. The id is busbar's registry id
@@ -47,6 +48,7 @@ judge() {
   python3 -I - "$@" <<'PY'
 import json, sys, os, datetime, urllib.parse
 raw, suite, rc, out = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
+SCHEMA = "busbar.conformance.verdict/1"
 KEYS = {"schema", "suite", "standard", "plan", "spec_version", "status", "armed", "commit",
         "run_id", "evidence", "generated_at", "reason", "repo", "core_pin"}
 def refuse(why):
@@ -60,6 +62,8 @@ def check(v):
     extra = set(v) - KEYS
     if extra:
         return f"verdict carries unknown fields {sorted(extra)}"
+    if v.get("schema", SCHEMA) != SCHEMA:
+        return f"verdict states schema {v.get('schema')!r}, not {SCHEMA!r}"
     if v.get("status") not in ("pass", "fail", "not-run"):
         return f"status {v.get('status')!r} is not pass|fail|not-run"
     if not isinstance(v.get("armed"), bool):
@@ -82,7 +86,12 @@ env = os.environ
 repo = env.get("MODERNCI_REPO") or env["CONF_REPO"]
 head = env["CONF_HEAD"]
 frm = env.get("MODERNCI_FROM") or env.get("CONF_BRANCH") or "dev"
-v["schema"] = "busbar.conformance.verdict/1"
+expected = {"repo": repo, "commit": head, "core_pin": env["BUSBAR_PIN"]}
+for field, value in expected.items():
+    if field in v and v[field] != value:
+        v = refuse(f"the suite's subject {field} is {v[field]!r}, expected {value!r}")
+        break
+v["schema"] = SCHEMA
 v["repo"] = repo
 v["commit"] = head
 v["core_pin"] = env["BUSBAR_PIN"]
@@ -98,12 +107,46 @@ sys.exit(0 if v["status"] == "pass" else 1)
 PY
 }
 
+selftest() {
+  local t; t="$(mktemp -d)"; trap 'rm -rf "$t"' RETURN
+  export BUSBAR_PIN=0000000000000000000000000000000000000000 CONF_REPO=selftest/repo CONF_HEAD=1111111111111111111111111111111111111111 CONF_MCI_URL="$MCI_URL"
+  local ok=0
+  expect() { # expect <want rc> <name> <verdict text or -> <rc>
+    local want="$1" name="$2" text="$3" rc="$4" got=0
+    rm -f "$t/v.json"; [ "$text" = - ] || printf '%s' "$text" > "$t/v.json"
+    judge "$t/v.json" s1 "$rc" "$t/out.json" >/dev/null || got=1
+    if [ "$got" != "$want" ]; then echo "selftest FAILED: $name (exit $got, wanted $want)"; ok=1; else echo "  ok: $name"; fi
+  }
+  expect 0 "an armed pass is published" '{"suite":"s1","status":"pass","armed":true}' 0
+  expect 1 "no verdict file is red" - 0
+  expect 1 "a verdict that is not JSON is red" 'nope' 0
+  expect 1 "a verdict filed under another suite is red" '{"suite":"s2","status":"pass","armed":true}' 0
+  expect 1 "an unarmed pass is red" '{"suite":"s1","status":"pass","armed":false}' 0
+  expect 1 "a pass whose command failed is red" '{"suite":"s1","status":"pass","armed":true}' 1
+  expect 1 "an unknown field is red" '{"suite":"s1","status":"pass","armed":true,"x":1}' 0
+  expect 1 "another schema is red" '{"schema":"busbar.conformance.verdict/2","suite":"s1","status":"pass","armed":true}' 0
+  expect 1 "a fail is red" '{"suite":"s1","status":"fail","armed":true}' 1
+  expect 1 "not-run is red" '{"suite":"s1","status":"not-run","armed":false}' 3
+  expect 1 "an older subject cannot be stamped current" '{"suite":"s1","status":"pass","armed":true,"commit":"2222222222222222222222222222222222222222"}' 0
+  expect 1 "another core cannot be stamped current" '{"suite":"s1","status":"pass","armed":true,"core_pin":"2222222222222222222222222222222222222222"}' 0
+  expect 1 "another repo cannot be stamped current" '{"suite":"s1","status":"pass","armed":true,"repo":"other/repo"}' 0
+  judge <(printf '%s' '{"suite":"s1","status":"pass","armed":true}') s1 0 "$t/out.json" >/dev/null
+  python3 -I -c 'import json,sys; v=json.load(open(sys.argv[1])); assert v["repo"]=="selftest/repo" and v["core_pin"].startswith("0000") and v["evidence"].endswith("&head=1111111111111111111111111111111111111111"), v' "$t/out.json" \
+    && echo "  ok: the stamp names the repo, the commit, the core pin and the move" || { echo "selftest FAILED: the stamp"; ok=1; }
+  return "$ok"
+}
+
+[ "${1:-}" = --selftest ] && { selftest; exit $?; }
+
 if [ ! -s "$LIST" ] || ! grep -qvE '^[[:space:]]*(#|$)' "$LIST"; then
   say "this repo lists no suites ($LIST); nothing to judge"
   exit 0
 fi
 
-export CONF_HEAD="${MODERNCI_COMMIT:-$(git rev-parse HEAD)}"
+unset GIT_INDEX_FILE GIT_DIR GIT_WORK_TREE
+actual_head="$(git -C "$here" rev-parse HEAD)" || { say "the checkout has no source commit"; exit 2; }
+export CONF_HEAD="${MODERNCI_COMMIT:-$actual_head}"
+[ "$CONF_HEAD" = "$actual_head" ] || { say "the checkout is $actual_head, expected $CONF_HEAD"; exit 2; }
 # busbar itself carries no .busbar-ref: its core suites judge this checkout, so the pin is HEAD.
 if [ -f .busbar-ref ]; then
   pin="$(awk '{print $1; exit}' .busbar-ref)"
@@ -126,7 +169,10 @@ else:
 repo = repo.strip("/")
 print(repo[:-4] if repo.endswith(".git") else repo)
 ')"
-export CONF_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null)"
+CONF_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null)"
+# A detached checkout names no branch (git prints `HEAD`): the judge then falls back to dev.
+[ "$CONF_BRANCH" != HEAD ] || CONF_BRANCH=""
+export CONF_BRANCH
 export CONF_MCI_URL="$MCI_URL"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$here/target}"
 
@@ -137,7 +183,8 @@ if [ "$pin" = "$CONF_HEAD" ] && [ ! -f .busbar-ref ]; then
   export BUSBAR_CHECKOUT="$here"
 else
 export BUSBAR_CHECKOUT="$W/busbar"
-git init -q "$BUSBAR_CHECKOUT" && git -C "$BUSBAR_CHECKOUT" remote add origin https://github.com/GetBusbar/busbar.git \
+mkdir -p "$BUSBAR_CHECKOUT" && git -C "$BUSBAR_CHECKOUT" init -q \
+  && git -C "$BUSBAR_CHECKOUT" remote add origin https://github.com/GetBusbar/busbar.git \
   && git -C "$BUSBAR_CHECKOUT" fetch -q --depth 1 --no-tags origin "$pin" \
   && git -C "$BUSBAR_CHECKOUT" -c advice.detachedHead=false checkout -q FETCH_HEAD \
   || { say "busbar $pin could not be fetched"; exit 2; }
@@ -146,10 +193,14 @@ fi
 # shellcheck source=testing/conformance/tools.sh
 . testing/conformance/tools.sh rust node || { say "the pinned tools could not be provisioned"; exit 2; }
 
+# Refuse duplicate ids before they can share a work directory and overwrite a verdict.
+awk -F '\t' '!/^[[:space:]]*(#|$)/ { if (seen[$1]++) { print "duplicate suite id: " $1 > "/dev/stderr"; bad=1 } } END { exit bad }' "$LIST" \
+  || { say "$LIST repeats a suite id"; exit 2; }
 rm -rf "$OUT"; mkdir -p "$OUT/verdicts"
 fail=0; n=0
-while IFS=$'\t' read -r id cmd; do
-  case "$id" in ''|\#*) continue ;; esac
+while IFS=$'\t' read -r id cmd || [ -n "$id" ]; do
+  # Blank and comment lines, leading whitespace included, as the emptiness and duplicate checks skip them.
+  case "${id#"${id%%[![:space:]]*}"}" in ''|\#*) continue ;; esac
   [ -n "${cmd:-}" ] || { say "$LIST: suite $id names no command"; fail=1; continue; }
   n=$((n + 1))
   dir="$OUT/$id"; mkdir -p "$dir"
