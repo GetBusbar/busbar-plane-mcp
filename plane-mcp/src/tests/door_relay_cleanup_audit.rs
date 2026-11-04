@@ -2,13 +2,14 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 use super::*;
+use busbar_contract::abi::mechanism::call::Outcome;
 
 #[test]
-fn a_settle_refused_as_already_settled_releases_custody() {
+fn only_a_successful_settlement_releases_custody() {
     assert!(confirmed(Ok(())));
     assert!(
-        confirmed(Err(ServiceError::Declined(Outcome::Refused))),
-        "a handle settled first elsewhere can never be settled again: keeping it retries forever"
+        !confirmed(Err(ServiceError::Declined(Outcome::Refused))),
+        "refusal can describe live work or a settlement that may still roll back"
     );
 }
 

@@ -1671,9 +1671,14 @@ fn unknown_tool_uses_invalid_params_without_disclosing_existence() {
 #[test]
 fn completed_result_with_an_ask_keeps_the_executed_audit_outcome() {
     let value = json!({"resultType":"complete", "inputRequests":{}});
-    let (_, _, line) = answer_of(completed(&admitted(), &value, b"{}"));
+    let (status, body, line) = answer_of(completed(&admitted(), &value, b"{}"));
+    assert_eq!(status, STATUS_FORBIDDEN);
+    assert_eq!(body["error"]["data"]["reason"], "ask_not_proxied");
+    assert_eq!(line.reason, "ask_not_proxied");
     assert_eq!(line.outcome, vocab::OUTCOME_DISPATCHED);
-    assert!(line.audit.unwrap().applied);
+    let audit = line.audit.unwrap();
+    assert_eq!(audit.action, "mcp_tool.call");
+    assert!(audit.applied);
 }
 
 #[test]

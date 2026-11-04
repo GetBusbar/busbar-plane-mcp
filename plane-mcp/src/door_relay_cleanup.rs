@@ -5,7 +5,6 @@
 
 use std::task::Poll;
 
-use busbar_contract::abi::mechanism::call::Outcome;
 use busbar_contract::abi::mechanism::ticket::{CompletionHandle, Ticket};
 use busbar_contract::abi::sdk::services::ServiceError;
 
@@ -83,14 +82,11 @@ pub(super) fn drive(plane: &McpDoor, ticket: Ticket, driver: &mut Driver) -> boo
     })
 }
 
-/// Whether a settle's answer confirms the work is settled: it settled now, or the host REFUSED it
-/// because it was settled already (the contract's "settling one twice is REFUSED"), so retrying it
-/// can never land. Any other failure is not proof of settlement: custody is kept and it is retried.
+/// Only a successful settlement confirms durable completion. REFUSED can also mean that the
+/// work is still live under another owner, or that another settlement is merely in flight and
+/// may yet fail. Neither permits abandoning custody; retry after this completion is retired.
 fn confirmed(settled: Result<(), ServiceError>) -> bool {
-    matches!(
-        settled,
-        Ok(()) | Err(ServiceError::Declined(Outcome::Refused))
-    )
+    settled.is_ok()
 }
 
 #[cfg(test)]

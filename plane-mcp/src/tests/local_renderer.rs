@@ -423,8 +423,9 @@ fn audit_renderer_work_budgets_and_invalid_arguments() {
         super::add_rendered(Some(super::MAX_RENDERED_BYTES), 1),
         None
     );
-    let config =
-        held(json!({"s":{"url":"https://up.test", "prompts_allow":{"p":{"template":"{value}"}}}}));
+    let config = held(
+        json!({"s":{"url":"https://up.test", "pin":{"mechanism":"unpinned"}, "prompts_allow":{"p":{"template":"{value}"}}}}),
+    );
     assert!(Local::prompt(
         config,
         "s_p".into(),
@@ -438,7 +439,7 @@ fn audit_renderer_work_budgets_and_invalid_arguments() {
 #[test]
 fn audit_audio_is_refused_only_for_2024_and_resource_not_found_is_revision_specific() {
     let config = held(
-        json!({"s":{"url":"https://up.test", "prompts_allow":{"p":{"messages":[
+        json!({"s":{"url":"https://up.test", "pin":{"mechanism":"unpinned"}, "prompts_allow":{"p":{"messages":[
             {"content":{"type":"audio", "data":"YQ==", "mime_type":"audio/wav"}}
         ]}}}}),
     );
@@ -486,9 +487,11 @@ fn audit_audio_is_refused_only_for_2024_and_resource_not_found_is_revision_speci
 
 #[test]
 fn audit_virtual_expansion_is_refused_before_rendering() {
-    let config = held(json!({"s":{"url":"https://up.test", "prompts_allow":{"p":{
-        "template":"{value}".repeat(8193)
-    }}}}));
+    let config = held(
+        json!({"s":{"url":"https://up.test", "pin":{"mechanism":"unpinned"}, "prompts_allow":{"p":{
+            "template":"{value}".repeat(8193)
+        }}}}),
+    );
     assert!(Local::prompt(
         config,
         "s_p".into(),
@@ -501,9 +504,11 @@ fn audit_virtual_expansion_is_refused_before_rendering() {
 
 #[test]
 fn served_resource_rejects_oversized_selector_before_lookup_or_echo() {
-    let config = held(json!({"s":{"url":"https://up.test","resources_allow":{
-        "urn:example":{"text":"ok"}
-    }}}));
+    let config = held(
+        json!({"s":{"url":"https://up.test", "pin":{"mechanism":"unpinned"},"resources_allow":{
+            "urn:example":{"text":"ok"}
+        }}}),
+    );
     let uri = "x".repeat(8193);
     let error = Local::resource(
         config,

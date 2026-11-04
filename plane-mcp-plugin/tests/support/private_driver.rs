@@ -337,6 +337,10 @@ fn a_reply_post_closes_on_its_final_head_without_reading_an_endless_body() {
             posted(&mut l, 20);
             let mut issued = driver();
             l.post_replies(host, ticket(1), &mut issued, &mut Vec::new());
+            assert_eq!(l.dead.is_some(), !(200..300).contains(&final_code));
+            // Production drive invokes reply maintenance again after reading the link.
+            // A rejected POST first kills the link, then retires its connector here.
+            l.post_replies(host, ticket(1), &mut issued, &mut Vec::new());
             let state = state.borrow();
             assert_eq!(
                 state.reads.len(),

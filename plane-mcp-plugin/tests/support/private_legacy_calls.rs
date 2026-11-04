@@ -130,7 +130,10 @@ fn run(generation: u64) {
                 "already read answers are retained"
             );
             link.answers.clear();
+            assert!(link.failed.contains(&ticket(8)));
         });
+        // The old caller must consume its failure or be cancelled before replacement.
+        cancelled(&plane, ticket(8));
         assert!(poll_call(
             &plane,
             ("binding", "fs"),

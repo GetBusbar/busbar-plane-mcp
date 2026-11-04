@@ -600,12 +600,7 @@ pub fn admit_trusted(
     };
     if !granted(admit, &entry.server, &entry.namespaced) {
         return Admission::Refused(
-            catalogue_refusal(
-                STATUS_NOT_FOUND,
-                id,
-                not_exposed(name),
-                vocab::REASON_NOT_GRANTED,
-            ),
+            not_granted(id, name),
             Some(CallLine::asked(name, vocab::REASON_NOT_GRANTED)),
         );
     }
@@ -1681,15 +1676,18 @@ fn completed(admitted: &AdmittedCall, value: &Value, body: &[u8]) -> Settled {
             admitted.entry.server
         );
 
+        // The tool ran; rejecting its malformed result does not undo that execution.
+        let mut line = CallLine::resolved(
+            &admitted.entry,
+            vocab::OUTCOME_DISPATCHED,
+            "ask_not_proxied",
+        );
+        line.audit = Some(AuditRow::tool(&admitted.entry.namespaced, true));
         return Settled::Answer {
             status: STATUS_FORBIDDEN,
             body: catalogue_refusal(STATUS_FORBIDDEN, &admitted.id, message, "ask_not_proxied")
                 .body(),
-            line: CallLine::resolved(
-                &admitted.entry,
-                vocab::OUTCOME_DISPATCHED,
-                "ask_not_proxied",
-            ),
+            line,
         };
     }
     Settled::Answer {

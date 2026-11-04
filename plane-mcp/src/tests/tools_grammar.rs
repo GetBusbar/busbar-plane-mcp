@@ -636,8 +636,8 @@ fn a_servers_timeout_bounds_the_doors_own_fetches_and_the_kernel_owns_its_judgem
         "docs/mcp.md's default"
     );
     assert!(
-        door_validate(&json!({ "zero": server(json!({ "timeout": "0s" })) })).is_ok(),
-        "the zero timeout is the kernel's to refuse, not the door's"
+        door_validate(&json!({ "zero": server(json!({ "timeout": "0s" })) })).is_err(),
+        "door validation delegates zero-timeout rejection to the shared kernel parser"
     );
 }
 
