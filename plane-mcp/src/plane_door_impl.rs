@@ -2883,7 +2883,7 @@ fn open_child_work(
             let now_ms = wall_ms(Some(services), ticket, issued);
 
             let Some(now_ms) = now_ms else {
-                door_relay_cleanup::hold(plane, opened.handle, 0);
+                door_relay_cleanup::hold(plane, opened.handle, opened.reference, 0);
                 *asked = None;
                 return ChildOpened::Refused(
                     c,
@@ -2896,6 +2896,7 @@ fn open_child_work(
             door_relay_cleanup::hold(
                 plane,
                 opened.handle,
+                opened.reference,
                 now_ms.saturating_add(crate::ask::DEFAULT_TTL_SECS.saturating_mul(1000)),
             );
             ChildOpened::Open(c)
@@ -3038,7 +3039,7 @@ fn bind_child_work(
         Poll::Ready(Ok(())) => {}
         Poll::Ready(Err(error)) => return Poll::Ready(child_work_failure(error)),
     }
-    plane.relays.remove(&st.handle);
+    door_relay_cleanup::settled(plane, st.handle);
     st.done = true;
     Poll::Ready(Ok(true))
 }

@@ -63,6 +63,8 @@ pub(super) struct Driver {
     pub(super) retirement: Retirement,
     issued: u32,
     reusable: Vec<u32>,
+    pub(super) retired_hosts: Vec<u32>,
+    pub(super) cleanup_clock_seq: Option<u32>,
     pub(super) failure: Option<Error>,
 }
 
@@ -102,6 +104,14 @@ impl Driver {
         Some(handle)
     }
 
+    /// The SDK found no host slot, so no crossing or stored completion exists to retire.
+    /// Only use for ServiceError::Unserved, never for a host refusal or failure.
+    pub(super) fn host_unserved(&mut self, pending: &mut Option<CompletionHandle>) {
+        if let Some(handle) = pending.take() {
+            self.reusable.push(handle.seq);
+        }
+    }
+
     /// Retire a terminal host result only after its caller copied and consumed it.
     pub(super) fn host_consumed(&mut self, pending: &mut Option<CompletionHandle>) -> bool {
         let Some(handle) = *pending else { return true };
@@ -127,6 +137,18 @@ impl Driver {
         extensions: &[u8],
     ) -> Result<(), Error> {
         let reusable = self.retirement.begin(owner, ticket, extensions)?;
+        self.retired_hosts = reusable
+            .iter()
+            .filter(|handle| handle.domain == Domain::Host)
+            .map(|handle| handle.seq)
+            .collect();
+        // Observe the clock's acknowledgement even when no relays remain this cycle.
+        if self
+            .cleanup_clock_seq
+            .is_some_and(|seq| self.retired_hosts.contains(&seq))
+        {
+            self.cleanup_clock_seq = None;
+        }
         self.reusable
             .extend(reusable.into_iter().map(|handle| handle.seq));
         Ok(())

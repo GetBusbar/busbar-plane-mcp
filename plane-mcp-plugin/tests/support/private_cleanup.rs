@@ -2,7 +2,9 @@
 // Actual private maintenance/cancellation/refresh assertions, without a test-only door.
 use super::*;
 use busbar_contract::abi::host::service::{
-    ClockNowIn, ClockReading, HostSlots, ItemSpan, ServiceOut, WorkOpenIn, WorkSettleIn, SERVICES,
+    ClockNowIn, ClockReading, HostSlots, ItemSpan, ServiceOut, WorkOpenIn, WorkSettleIn,
+    WorkStatusIn, SERVICES, WORK_STATUS_ABSENT, WORK_STATUS_LIVE, WORK_STATUS_SETTLED,
+    WORK_STATUS_SETTLING,
 };
 use busbar_contract::abi::mechanism::call::{Outcome, RawOutcome, Span};
 use busbar_contract::abi::mechanism::ticket::{HostCtx, HostTables};
@@ -20,7 +22,11 @@ struct State {
     confirm: bool,
     now_ms: u64,
     clock_fails: bool,
+    foreign_completion_each_drive: bool,
     mode: Outcome,
+    status_mode: Outcome,
+    status_value: u64,
+    status_calls: Vec<CompletionHandle>,
     calls: Vec<CompletionHandle>,
     records: Vec<Vec<u8>>,
     applied: usize,
@@ -41,7 +47,11 @@ impl Default for State {
             confirm: true,
             now_ms: 500,
             clock_fails: false,
+            foreign_completion_each_drive: false,
             mode: Outcome::Pending,
+            status_mode: Outcome::Ready,
+            status_value: WORK_STATUS_LIVE,
+            status_calls: Vec::new(),
             calls: Vec::new(),
             records: Vec::new(),
             applied: 0,
@@ -146,6 +156,21 @@ extern "C" fn settle(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> 
     });
     finish(out, outcome, 0, 0, 0)
 }
+extern "C" fn status(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
+    let input = unsafe { input.cast::<WorkStatusIn>().read_unaligned() };
+    let reference = unsafe { std::slice::from_raw_parts(input.reference.ptr, input.reference.len) };
+    let (mode, value) = STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        if reference != b"0123456789abcdef0123456789abcdef" {
+            state
+                .violations
+                .push("status must use the retained receipt");
+        }
+        state.status_calls.push(input.head.handle);
+        (state.status_mode, state.status_value)
+    });
+    finish(out, mode, value, 0, 0)
+}
 struct CleanupHost {
     tables: Box<HostTables>,
     _slots: Box<HostSlots>,
@@ -157,6 +182,7 @@ fn cleanup_host() -> CleanupHost {
     slots.clock_now = Some(clock);
     slots.work_open = Some(open_work);
     slots.work_settle = Some(settle);
+    slots.work_status = Some(status);
     let tables = Box::new(HostTables {
         size: std::mem::size_of::<HostTables>() as u32,
         _reserved: 0,
@@ -212,7 +238,7 @@ impl<'host> MaintenanceCase<'host> {
             );
             assert!(matches!(opened, ChildOpened::Refused(..)));
         } else {
-            door_relay_cleanup::hold(&plane, WORK, 1000);
+            door_relay_cleanup::hold(&plane, WORK, "0123456789abcdef0123456789abcdef", 1000);
         }
         Self {
             plane,
@@ -220,6 +246,11 @@ impl<'host> MaintenanceCase<'host> {
         }
     }
     fn drive(&self) {
+        STATE.with(|state| {
+            self.plane
+                .driver
+                .insert((), (DRIVER, state.borrow().now_ms * 1_000_000))
+        });
         let extensions =
             STATE.with(|state| wire::append_capability(&[], state.borrow().cap).unwrap());
         self.plane.legacy_seq.with_all(|states| {
@@ -227,6 +258,19 @@ impl<'host> MaintenanceCase<'host> {
             driver
                 .begin(HostCtx { handle: 71 }, DRIVER, &extensions)
                 .unwrap();
+            if STATE.with(|state| state.borrow().foreign_completion_each_drive) {
+                let mut foreign = None;
+                let handle = driver
+                    .host_handle(DRIVER, &mut foreign)
+                    .expect("foreign handle");
+                self.plane
+                    .services
+                    .unwrap()
+                    .clock_now(handle)
+                    .expect("foreign clock service");
+                assert!(driver.host_consumed(&mut foreign));
+                assert!(driver.retirement.queued());
+            }
             let pending = door_relay_cleanup::drive(&self.plane, DRIVER, driver);
             assert!(
                 driver.failure.is_none(),
@@ -310,18 +354,26 @@ fn expiry_is_maintained_without_another_ask_and_pending_keeps_the_full_handle() 
         state.confirm = true;
         state.mode = Outcome::Refused;
     });
-    fixture.drive();
+    // Retire the failed completion, probe live status, then retry after backoff.
+    for _ in 0..8 {
+        fixture.drive();
+        STATE.with(|state| state.borrow_mut().now_ms += 1000);
+    }
     STATE.with(|state| {
         let mut state = state.borrow_mut();
+        assert_eq!(state.remaining, 1);
+        assert!(state.calls.len() > 3);
         assert_ne!(
             state.calls[2], state.calls[3],
-            "terminal failure must use a fresh completion handle"
+            "fresh completion after terminal failure"
         );
-        assert_eq!(state.remaining, 1);
+        assert!(!state.status_calls.is_empty());
         state.mode = Outcome::Ready;
     });
-    fixture.drive();
-    fixture.drive();
+    for _ in 0..8 {
+        STATE.with(|state| state.borrow_mut().now_ms += 30_000);
+        fixture.drive();
+    }
     STATE.with(|state| {
         let state = state.borrow();
         assert_eq!(state.remaining, 0);
@@ -376,4 +428,192 @@ fn pending_cleanup_survives_config_reload_and_old_generation_retirement() {
         assert_eq!(state.remaining, 0);
         assert_eq!(state.applied, 1);
     });
+}
+
+#[test]
+fn terminal_status_proof_releases_reply_loss_only_after_retirement() {
+    let host = cleanup_host();
+    let fixture = MaintenanceCase::new(&host, false);
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        state.now_ms = 1500;
+        state.mode = Outcome::Refused;
+        state.status_mode = Outcome::Pending;
+    });
+    fixture.drive(); // refused settlement
+    fixture.drive(); // acknowledged; status pending
+    fixture.drive(); // same pending status
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        assert_eq!(state.status_calls.len(), 2);
+        assert_eq!(state.status_calls[0], state.status_calls[1]);
+        assert_ne!(state.calls[0], state.status_calls[0]);
+        state.status_mode = Outcome::Ready;
+        state.status_value = WORK_STATUS_SETTLED;
+        state.confirm = false;
+    });
+    fixture.drive();
+    fixture.drive();
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        assert_eq!(
+            state.remaining, 1,
+            "proof retained until completion retirement"
+        );
+        assert_eq!(
+            state.calls.len(),
+            1,
+            "no duplicate settlement after durable proof"
+        );
+        state.confirm = true;
+    });
+    fixture.drive();
+    fixture.drive();
+    STATE.with(|state| assert_eq!(state.borrow().remaining, 0));
+}
+
+#[test]
+fn nonterminal_status_and_missing_service_keep_custody_with_backoff() {
+    for (mode, value, missing) in [
+        (Outcome::Ready, WORK_STATUS_LIVE, 0),
+        (Outcome::Ready, WORK_STATUS_SETTLING, 0),
+        (Outcome::Ready, WORK_STATUS_ABSENT, 0),
+        (Outcome::Refused, 0, 0),
+        (Outcome::Failed, 0, 0),
+        (Outcome::Ready, WORK_STATUS_SETTLED, 1),
+        (Outcome::Ready, WORK_STATUS_SETTLED, 2),
+    ] {
+        let mut host = cleanup_host();
+        if missing == 1 {
+            host._slots.work_status = None;
+        } else if missing == 2 {
+            host._slots.size = std::mem::offset_of!(HostSlots, work_status) as u32;
+            host._slots.slots = busbar_contract::abi::host::service::op::WORK_STATUS;
+        }
+        let fixture = MaintenanceCase::new(&host, false);
+        STATE.with(|state| {
+            let mut state = state.borrow_mut();
+            state.now_ms = 1500;
+            state.mode = Outcome::Refused;
+            state.status_mode = mode;
+            state.status_value = value;
+        });
+        for _ in 0..12 {
+            fixture.drive();
+        }
+        STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.remaining, 1);
+            assert_eq!(state.calls.len(), 1, "no tight retry loop at fixed time");
+            assert_eq!(state.status_calls.len(), usize::from(missing == 0));
+        });
+        // A pending settlement can fail after the status observed SETTLING. A later
+        // successful settlement, not that earlier observation, establishes completion.
+        STATE.with(|state| {
+            let mut state = state.borrow_mut();
+            state.now_ms += 30_000;
+            state.mode = Outcome::Ready;
+        });
+        fixture.drive();
+        fixture.drive();
+        STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.remaining, 0);
+            assert_eq!(state.applied, 1);
+        });
+    }
+}
+
+#[test]
+fn unrelated_completions_cannot_starve_cleanup_expiry_clock() {
+    let host = cleanup_host();
+    let fixture = MaintenanceCase::new(&host, false);
+    STATE.with(|state| state.borrow_mut().foreign_completion_each_drive = true);
+    fixture.drive();
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        assert!(state.calls.is_empty());
+        state.now_ms = 1500;
+        state.mode = Outcome::Ready;
+    });
+    fixture.drive();
+    fixture.drive();
+    STATE.with(|state| {
+        let state = state.borrow();
+        assert_eq!(
+            state.applied, 1,
+            "expired work settles despite foreign receipts every drive"
+        );
+        assert_eq!(state.remaining, 0);
+    });
+}
+
+#[test]
+fn successful_binder_preserves_pending_cleanup_probe_until_retirement() {
+    let host = cleanup_host();
+    let fixture = MaintenanceCase::new(&host, false);
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        state.now_ms = 1500;
+        state.mode = Outcome::Refused;
+        state.status_mode = Outcome::Pending;
+    });
+    fixture.drive();
+    fixture.drive();
+    let pending = STATE.with(|state| state.borrow().status_calls[0]);
+    let mut unit = super::child_work_custody_tests::unit();
+    unit.child_work.handle = WORK;
+    unit.child_work.resumed = true;
+    let child = crate::ask::ChildLeg {
+        launch: None,
+        generation: 1,
+        wait: serde_json::json!(7),
+        asks: Vec::new(),
+        work: Some("0123456789abcdef0123456789abcdef".into()),
+    };
+    STATE.with(|state| state.borrow_mut().mode = Outcome::Ready);
+    assert!(matches!(
+        bind_child_work(
+            &fixture.plane,
+            Ticket {
+                slot: 17,
+                generation: 3
+            },
+            &mut unit,
+            "fs",
+            &child,
+            true
+        ),
+        std::task::Poll::Ready(Ok(true))
+    ));
+    assert!(fixture
+        .plane
+        .relays
+        .with_all(|works| works.contains_key(&WORK)));
+    fixture.drive();
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        assert_eq!(state.status_calls.last(), Some(&pending));
+        state.status_mode = Outcome::Failed;
+        state.confirm = false;
+    });
+    fixture.drive();
+    fixture.drive();
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        assert_eq!(
+            state.remaining, 1,
+            "binder proof cannot discard the probe's receipt"
+        );
+        assert!(state.status_calls.iter().all(|handle| *handle == pending));
+        assert_eq!(
+            state.calls.len(),
+            2,
+            "one maintenance attempt and one caller settlement"
+        );
+        state.confirm = true;
+    });
+    fixture.drive();
+    fixture.drive();
+    STATE.with(|state| assert_eq!(state.borrow().remaining, 0));
 }

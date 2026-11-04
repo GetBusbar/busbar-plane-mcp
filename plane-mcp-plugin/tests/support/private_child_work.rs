@@ -157,7 +157,7 @@ extern "C" fn settle_work(_: HostCtx, input: *const c_void, out: *mut ServiceOut
     finish(out, Outcome::Ready, 0, 0, 0)
 }
 /// Only the binder's child_work/issued fields are relevant; the other unit state is inert.
-fn unit() -> CallUnit {
+pub(super) fn unit() -> CallUnit {
     CallUnit {
         key: 7,
         held: None,
@@ -213,7 +213,7 @@ fn run(case: Case) -> Calls {
     };
     let case = CASE.with(|case| case.borrow().as_ref().unwrap().clone());
     if case.owned_here {
-        door_relay_cleanup::hold(&plane, WORK, 1000);
+        door_relay_cleanup::hold(&plane, WORK, REFERENCE, 1000);
     }
     let child = crate::ask::ChildLeg {
         launch: case.launch,
