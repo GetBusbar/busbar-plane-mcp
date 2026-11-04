@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE SOURCE SCANS' SHARED READERS (`tests/invariance.rs`, `tests/purity.rs`): the crate's source
+//! THE SOURCE SCANS' SHARED READERS (`tests/invariance.rs`, `tests/purity.rs`): the crate's
+//! source directory, its sibling plane crates, and a walk over the source a shipped build
+//! compiles.
 
 use std::path::{Path, PathBuf};
 
@@ -25,7 +27,9 @@ pub fn sibling_plane_crates() -> Vec<String> {
     out
 }
 
-/// Walk every source file on the SURFACE, the code a shipped build compiles: every one under `dir`
+/// Walk every source file on the SURFACE, the code a shipped build compiles: every one
+/// under `dir` less the test-module directories (`src/tests/`, and each module's own
+/// `tests/`).
 pub fn walk_surface(dir: &Path, f: &mut impl FnMut(&Path, &str)) {
     for entry in std::fs::read_dir(dir)
         .expect("the source directory is readable")

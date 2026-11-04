@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE APPROVAL DIGEST, PINNED: the plane's own [`tool_digest`] (name, description and canonical
+//! THE APPROVAL DIGEST, PINNED: the plane's own [`tool_digest`] (name, description and
+//! canonical input schema, each length-framed) over two fixed inputs, to the constants
+//! every other reader of the digest asserts.
 
 use crate::trust::tool_digest;
 use serde_json::json;

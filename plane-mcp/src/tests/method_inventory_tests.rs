@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE STDIO CLIENT LEG AGAINST THE METHOD INVENTORY: `tests/data/method-inventory.json` (generated
+//! THE STDIO CLIENT LEG AGAINST THE METHOD INVENTORY: `tests/data/method-inventory.json`
+//! (generated from rmcp's own model; it moved here from busbar's `qa/`).
 
 use crate::client::peer::{classify, ServerMessage};
 use crate::client::verb::UpstreamVerb;
@@ -15,7 +16,8 @@ fn line(raw: &str) -> serde_json::Value {
     serde_json::from_str(raw).expect("the fixture is JSON")
 }
 
-/// Every `mcp|<transport>|client|client|<method>` cell the generated inventory names, over both
+/// Every `mcp|<transport>|client|client|<method>` cell the generated inventory names, over
+/// both transports: the methods a client may originate.
 fn inventory_methods() -> std::collections::BTreeSet<String> {
     let raw = inventory();
     let doc: serde_json::Value = serde_json::from_str(&raw).expect("method-inventory.json parses");
@@ -34,7 +36,8 @@ fn inventory_methods() -> std::collections::BTreeSet<String> {
         .collect()
 }
 
-/// The client-originated methods of the inventory busbar does NOT send an upstream: no production
+/// The client-originated methods of the inventory busbar does NOT send an upstream: no
+/// production site constructs them.
 const NOT_ISSUED: &[&str] = &[
     "completion/complete",
     "logging/setLevel",
@@ -90,7 +93,8 @@ fn the_issued_method_set_accounts_for_the_inventory() {
     );
 }
 
-/// EVERY server-originated method in the inventory column is classified, and none of them lands in
+/// EVERY server-originated method in the inventory column is classified, and none of them
+/// lands in an "unknown" arm.
 #[test]
 fn every_server_originated_method_in_the_inventory_is_classified() {
     let raw = inventory();

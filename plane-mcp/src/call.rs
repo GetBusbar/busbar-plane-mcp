@@ -22,6 +22,7 @@
 
 use serde_json::{json, Map, Value};
 
+use crate::answer::TASKS_EXTENSION_ID;
 use crate::catalogue::{complete, granted, Catalogue, ToolEntry};
 use crate::checks::decode_sentinel;
 use crate::client::jsonrpc::{self as wire, AdvertisedCaps, RpcOutcome};
@@ -46,6 +47,9 @@ use busbar_contract::vocab;
 pub const REASON_TOOL_ARGUMENT_REFUSED: &str = "tool_argument_refused";
 
 /// THE CEILING ON `params.name`, IN BYTES, checked before the per-call log opens: the name is
+/// written verbatim into a durable, hash-chained record the instant any terminal fires, so an
+/// oversized one is refused, and its log line and audit row hold only a bounded rendering of it
+/// ([`bounded_name`]).
 pub const MAX_TOOL_NAME_BYTES: usize = 256;
 
 /// The call-log and audit reason of a call whose `params.name` is past [`MAX_TOOL_NAME_BYTES`].
@@ -55,6 +59,9 @@ pub const REASON_TOOL_NAME_TOO_LONG: &str = "tool_name_too_long";
 const OVERSIZED_NAME_PREFIX_BYTES: usize = 64;
 
 /// AN OVERSIZED NAME AS THE LOG AND THE AUDIT HOLD IT: its first
+/// [`OVERSIZED_NAME_PREFIX_BYTES`] (cut at a character boundary) and its length, a rendering no
+/// real tool name spells (`…` and the byte count), so the refusal is on the record without the
+/// record holding what the ceiling exists to keep out of it.
 fn bounded_name(name: &str) -> String {
     let mut end = OVERSIZED_NAME_PREFIX_BYTES.min(name.len());
     while !name.is_char_boundary(end) {
@@ -79,9 +86,8 @@ pub const REASON_TASKS_UNDECLARED: &str = "tasks_capability_undeclared";
 /// The call-log reason of an answer naming an input busbar did not ask for.
 pub const REASON_ANSWER_UNDECLARED: &str = "caller_ask_answer_undeclared";
 /// The call-log reason of a call that NEVER LEFT ITS QUEUE: it waited its turn on a stdio member's
+/// child (another call held it) and its deadline passed first.
 pub const REASON_QUEUE_DEADLINE: &str = "queue_deadline";
-
-use crate::answer::TASKS_EXTENSION_ID;
 
 /// ONE LINE OF THE PER-CALL LOG, as the call ended: what it named, what it resolved to, and how it
 /// ended. `server` and `tool_digest` stay empty on a refusal that never reached a registration.
@@ -164,6 +170,7 @@ impl CallLine {
     }
 
     /// A call that resolved to `entry`: audited applied only for a plain dispatch (a dispatch with a
+    /// reason came back badly; a refusal never went).
     fn resolved(entry: &ToolEntry, outcome: &'static str, reason: &str) -> Self {
         CallLine {
             server: entry.server.clone(),
@@ -185,6 +192,7 @@ impl CallLine {
     }
 
     /// The row is busbar's ask of its caller (`applied`: asked; rejected: its answer refused), on
+    /// the same tool.
     fn asking(mut self, applied: bool) -> Self {
         if let Some(row) = &mut self.audit {
             row.action = ACTION_CALLER_ASK;
@@ -274,18 +282,22 @@ fn catalogue_refusal(status: u32, id: &Value, message: String, reason: &str) -> 
 }
 
 /// The words of a tool the caller cannot reach: one sentence whether it does not exist or the
+/// caller may not see it, so the catalogue does not leak what it hides.
 fn not_exposed(name: &str) -> String {
     format!("`{name}` is not a tool this server exposes")
 }
 
 /// The answer to a call the caller is not granted: `404`, the same
+/// sentence an unknown tool gets (the catalogue does not leak what it hides), its audit reason
+/// `not_granted` in `data`.
 #[must_use]
 pub fn not_granted(id: &Value, name: &str) -> Refusal {
-    catalogue_refusal(
+    error(
         STATUS_NOT_FOUND,
         id,
+        CODE_INVALID_PARAMS,
         not_exposed(name),
-        vocab::REASON_NOT_GRANTED,
+        Some(json!({"reason": vocab::REASON_NOT_GRANTED})),
     )
 }
 
@@ -309,6 +321,7 @@ pub fn client_declares_tasks(capabilities: &Value) -> bool {
 }
 
 /// The `-32021` refusal of a request that needs the tasks extension the caller did not declare:
+/// `400`, which `MissingRequiredClientCapabilityError` fixes, naming what to add.
 #[must_use]
 pub fn missing_tasks_capability(id: &Value) -> Refusal {
     error(
@@ -328,6 +341,8 @@ pub fn missing_tasks_capability(id: &Value) -> Refusal {
 }
 
 /// The pure dispatch's fallback refusal for a task verb after the extension gate. The served
+/// door routes task verbs through `door_tasks::verb` before this fallback, resolving the caller's
+/// task from the host's work and records.
 #[must_use]
 pub fn task_verb(id: &Value, params: Option<&Value>) -> Refusal {
     if !client_declares_tasks(&client_capabilities(params)) {
@@ -347,12 +362,16 @@ pub fn task_verb(id: &Value, params: Option<&Value>) -> Refusal {
 }
 
 /// SEP-2243: the first disagreement between a tool's `x-mcp-header` properties and the caller's
+/// `Mcp-Param-*` headers, in the engine's words.
 #[must_use]
 pub fn custom_param_mismatch(
     entry: &ToolEntry,
     arguments: &Value,
     header: &impl Fn(&str) -> Option<String>,
 ) -> Option<String> {
+    if let Err(error) = crate::adapt::validate_param_annotations(entry.input_schema.as_ref()) {
+        return Some(error);
+    }
     let mut suffixes = std::collections::BTreeSet::new();
     for (path, suffix) in crate::adapt::annotated_params(entry.input_schema.as_ref()) {
         if !crate::adapt::param_suffix_valid(&suffix) {
@@ -428,6 +447,8 @@ pub enum Trust {
 pub const REASON_UNKNOWN_TOOL: &str = "unknown_tool";
 
 /// THE KERNEL'S VERDICT RENDERED in this dialect's words: `None` when it serves. An item the kernel
+/// never sighted is not found (`404`, as a name the catalogue does not carry); one it knows and the
+/// operator has not granted, and every other distrust, is refused (`403`).
 fn trust_answer(id: &Value, name: &str, entry: &ToolEntry, trust: Trust) -> Option<Admission> {
     let server = &entry.server;
     let refused = |message: String, reason: &str| {
@@ -494,6 +515,8 @@ fn trust_answer(id: &Value, name: &str, entry: &ToolEntry, trust: Trust) -> Opti
 }
 
 /// THE GRANT AND THE KERNEL'S VERDICT of an entry already resolved, as [`admit_trusted`] asks
+/// them and in its words: what a task's continuation asks again of the entry it actually sends (a
+/// pool's twin included) at the moment it sends it.
 pub(crate) fn admits_entry(
     entry: &ToolEntry,
     admit: &impl Fn(&str, &str) -> bool,
@@ -520,6 +543,8 @@ pub(crate) fn admits_entry(
 }
 
 /// [`admit`], with THE KERNEL'S TRUST VERDICT: `trust` answers, for the named tool, what the
+/// kernel's Approve said of it ([`Trust`], `trust.serves` over the tool's registration and trust
+/// key after the door's re-fetch sighted it), rendered by [`trust_answer`].
 pub fn admit_trusted(
     catalogue: &Catalogue,
     id: &Value,
@@ -721,6 +746,7 @@ pub fn admit_trusted(
 }
 
 /// BUSBAR'S OWN ANSWERS `admitted` goes out with: its arguments under the keys its tool's
+/// `ask_caller` rounds declare, as merged.
 #[must_use]
 pub fn own_answers(admitted: &AdmittedCall) -> Option<Map<String, Value>> {
     let arguments = admitted.arguments.as_object()?;
@@ -735,6 +761,10 @@ pub fn own_answers(admitted: &AdmittedCall) -> Option<Map<String, Value>> {
 }
 
 /// The argument guard ([`crate::argguard`]) on an admitted call: the arguments that go out (the
+/// caller's, with the operator-bounded answers merged) are walked against the tool's approved input
+/// schema, and every URL or host they carry is asked of the host's ONE destination judge: `judge`
+/// answers `dest.judge`'s verdict for the tool and the host,
+/// `None` when it gave none.
 pub fn judge_arguments(
     admission: Admission,
     judge: &mut dyn FnMut(&ToolEntry, &str) -> Option<u64>,
@@ -751,7 +781,18 @@ pub fn judge_arguments(
             &undeclared
         }
     };
-    match crate::argguard::guard(schema, &admitted.arguments, |dest| judge(entry, dest)) {
+    let checked = crate::argguard::guard(schema, &admitted.arguments, |dest| judge(entry, dest))
+        .and_then(|scan| {
+            if let Some(responses) = admitted
+                .relay
+                .as_ref()
+                .and_then(|r| r.continuation.get("inputResponses"))
+            {
+                crate::argguard::guard(&Value::Null, responses, |dest| judge(entry, dest))?;
+            }
+            Ok(scan)
+        });
+    match checked {
         Ok(_) => Admission::Go(admitted),
         Err(refused) => Admission::Refused(
             catalogue_refusal(
@@ -770,6 +811,7 @@ pub fn judge_arguments(
 }
 
 /// What busbar declares to `def`'s server for `admitted`'s call: each ask kind the operator lets the
+/// server put to callers AND the caller declared it can answer (the ask is relayed, Law 11).
 fn advertised(admitted: &AdmittedCall, def: &McpServerDefCfg) -> AdvertisedCaps {
     let declares = |k: &str| admitted.capabilities.get(k).is_some_and(|v| !v.is_null());
     AdvertisedCaps {
@@ -781,6 +823,8 @@ fn advertised(admitted: &AdmittedCall, def: &McpServerDefCfg) -> AdvertisedCaps 
 }
 
 /// THE `{tool, arguments}` PROJECTION of a `tools/call` body, as the hook kind reads an invocation:
+/// the published name and the arguments as the caller sent them, moved out of the parsed request.
+/// `None` for any other body.
 #[must_use]
 pub fn invocation(request: Value) -> Option<busbar_contract::ir::invoke::InvokeReq> {
     let mut document = busbar_contract::ir::invoke::InvokeReq {
@@ -804,6 +848,7 @@ pub fn invocation(request: Value) -> Option<busbar_contract::ir::invoke::InvokeR
 }
 
 /// A request-stage hook's rewrite, applied to a `tools/call` (`project`'s `rewrite`: the plane
+/// applies it in its own dialect and re-projects).
 #[must_use]
 pub fn rewritten(request: &mut Value, rewrite: &[u8]) -> Option<()> {
     let reply: Value = serde_json::from_slice(rewrite).ok()?;
@@ -812,7 +857,10 @@ pub fn rewritten(request: &mut Value, rewrite: &[u8]) -> Option<()> {
         let candidate = match message.get("content") {
             Some(content) => content,
             None if message.get("role").is_none() => message,
-            None => continue,
+            None => {
+                arguments = None;
+                continue;
+            }
         };
         let resolved = match candidate {
             Value::Object(_) => Some(candidate.clone()),
@@ -821,9 +869,7 @@ pub fn rewritten(request: &mut Value, rewrite: &[u8]) -> Option<()> {
                 .filter(Value::is_object),
             _ => None,
         };
-        if resolved.is_some() {
-            arguments = resolved;
-        }
+        arguments = resolved;
     }
     let arguments = arguments?;
     if request.get("method").and_then(Value::as_str) != Some(crate::codec::METHOD_TOOLS_CALL) {
@@ -861,6 +907,7 @@ pub fn path_of(url: &str) -> String {
 }
 
 /// THE REQUEST FOR ONE ROUND to `member`'s registration `def`, with the continuation that answers
+/// the previous round's ask.
 #[must_use]
 pub fn outbound(
     admitted: &AdmittedCall,
@@ -896,6 +943,8 @@ pub fn outbound(
 }
 
 /// The request for one round to a `transport: stdio` member: the same `tools/call` body, carrying `id` (the unit's own on the
+/// child, `crate::tool_program::call_id`), sent as one message on the member's program; no head
+/// field rides a pipe.
 #[must_use]
 pub fn outbound_program(
     admitted: &AdmittedCall,
@@ -940,6 +989,7 @@ fn call_request(
 }
 
 /// A relayed call that was NEVER SENT: it waited its turn on its member and its deadline passed first
+/// (`reason`, the sentence the caller reads).
 #[must_use]
 pub fn never_sent(admitted: &AdmittedCall, reason: &str) -> Settled {
     failure_answer(
@@ -951,6 +1001,8 @@ pub fn never_sent(admitted: &AdmittedCall, reason: &str) -> Settled {
 }
 
 /// A relayed call whose upstream leg failed before an answer (`reason`, in the previous release's
+/// words): the caller is answered the upstream-failure result, the call log names it dispatched and
+/// failed.
 #[must_use]
 pub fn upstream_failed(admitted: &AdmittedCall, reason: &str) -> Settled {
     failure_answer(
@@ -979,6 +1031,8 @@ fn failure_answer(
 }
 
 /// The payload of the LAST `data:` field in an event-stream body: a POST answered as a stream may
+/// carry progress ahead of the response, and the response is what the stream was opened to
+/// deliver.
 #[must_use]
 pub fn last_sse_data(raw: &[u8]) -> Vec<u8> {
     event_stream_data(&String::from_utf8_lossy(raw))
@@ -988,6 +1042,7 @@ pub fn last_sse_data(raw: &[u8]) -> Vec<u8> {
 }
 
 /// The `data` of every event in a complete event-stream body that carries any, in arrival order:
+/// its `data:` lines joined with `\n`, an event ending only at a blank line; incomplete final events are discarded.
 fn event_stream_data(text: &str) -> Vec<String> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut events = Vec::new();
@@ -997,19 +1052,19 @@ fn event_stream_data(text: &str) -> Vec<String> {
             current
                 .get_or_insert_with(Vec::new)
                 .push(rest.strip_prefix(' ').unwrap_or(rest));
+        } else if line == "data" {
+            current.get_or_insert_with(Vec::new).push("");
         } else if line.is_empty() {
             if let Some(done) = current.take() {
                 events.push(done.join("\n"));
             }
         }
     }
-    if let Some(done) = current.take() {
-        events.push(done.join("\n"));
-    }
     events
 }
 
 /// THE LINES OF A COMPLETE EVENT-STREAM BODY, ended as the event-stream grammar ends them: CRLF, a
+/// lone LF or a lone CR (the rule `client::compat::EventReader` reads a live stream by).
 fn event_stream_lines(text: &str) -> impl Iterator<Item = &str> {
     let mut rest = text;
     std::iter::from_fn(move || {
@@ -1027,8 +1082,14 @@ fn event_stream_lines(text: &str) -> impl Iterator<Item = &str> {
 }
 
 /// Every `notifications/progress` frame in an event-stream body, in arrival order: the one
+/// server-originated frame busbar relays to its own caller.
 #[must_use]
+#[cfg(test)]
 pub fn progress_frames(raw: &[u8]) -> Vec<Value> {
+    progress_frames_bounded(raw, usize::MAX)
+}
+
+pub(crate) fn progress_frames_bounded(raw: &[u8], limit: usize) -> Vec<Value> {
     use crate::client::peer::{NotificationEffect, ServerMessage};
     event_stream_data(&String::from_utf8_lossy(raw))
         .into_iter()
@@ -1039,14 +1100,18 @@ pub fn progress_frames(raw: &[u8]) -> Vec<Value> {
                 Some(ServerMessage::Notification(n)) if n.effect() == NotificationEffect::RelayProgress
             )
         })
+        .take(limit)
         .collect()
 }
 
 /// Which MRTR ask field, if any, a supposedly complete result still carries: the discriminator, or
+/// either member that carries an ask's content.
 #[must_use]
 pub fn upstream_ask_field(value: &Value) -> Option<&'static str> {
     let obj = value.as_object()?;
-    if obj.get("resultType").and_then(|v| v.as_str()) == Some("input_required") {
+    if obj.get("resultType").and_then(|v| v.as_str())
+        == Some(crate::codec::RESULT_TYPE_INPUT_REQUIRED)
+    {
         return Some("resultType");
     }
     ["inputRequests", "requestState"]
@@ -1055,10 +1120,11 @@ pub fn upstream_ask_field(value: &Value) -> Option<&'static str> {
 }
 
 /// The tool-execution-error RESULT for an upstream leg that failed: `isError: true` with the
+/// failure, busbar-attributed and naming the server, in one text block.
 #[must_use]
 pub fn upstream_failure_result(server: &str, reason: &str) -> Value {
     json!({
-        "resultType": "complete",
+        "resultType": RESULT_TYPE_COMPLETE,
         "isError": true,
         "content": [{
             "type": "text",
@@ -1066,6 +1132,8 @@ pub fn upstream_failure_result(server: &str, reason: &str) -> Value {
         }],
     })
 }
+
+const INPUT_RESPONSE_BOUND_KEY: &str = "max_input_response_bytes";
 
 /// Why busbar declined to carry an upstream's ask to its caller, in the engine's words. Every arm is
 /// busbar enforcing the operator's policy or the limits of the deployment; none answers the ask on
@@ -1155,7 +1223,7 @@ impl std::fmt::Display for AskRefusal {
             ),
             AskRefusal::SamplingBound {
                 server,
-                key: "max_input_response_bytes",
+                key: INPUT_RESPONSE_BOUND_KEY,
                 limit,
                 got,
             } => write!(
@@ -1226,6 +1294,9 @@ pub enum Settled {
 }
 
 /// SETTLE ONE ROUND's far-end answer. `status` is the far end's, `sse` = its answer is an event
+/// stream, `round` the round it answered, `def` the registration of the member that answered and
+/// `sent_id` the id the round's request carried (a `transport: stdio` member's carries the unit's
+/// own, `crate::tool_program::call_id`).
 #[must_use]
 pub fn settle_call_as(
     admitted: &AdmittedCall,
@@ -1269,6 +1340,7 @@ pub fn settle_call_as(
 }
 
 /// The correlated response of an event stream, else the body itself. Notifications may follow
+/// the response; they do not replace it.
 pub(crate) fn answer_body(raw: &[u8], sse: bool, sent_id: &Value) -> Vec<u8> {
     if sse {
         let events = event_stream_data(&String::from_utf8_lossy(raw));
@@ -1291,6 +1363,7 @@ pub(crate) fn answer_body(raw: &[u8], sse: bool, sent_id: &Value) -> Vec<u8> {
 }
 
 /// Why one round's answer is an UPSTREAM FAILURE (the call went out and the far end did not answer
+/// it), in the engine's words; `None` for a result or an ask.
 fn failure_reason(status: u32, outcome: &RpcOutcome) -> Option<String> {
     match outcome {
         RpcOutcome::Error { code, message } => Some(format!(
@@ -1322,6 +1395,7 @@ pub enum Leg {
 }
 
 /// A task reads the synchronous settlement's verdict, which already checked the actual wire id,
+/// redirects and upstream ask fields.
 #[must_use]
 pub fn leg_of(settled: &Settled, raw: &[u8], sse: bool, sent_id: impl Into<Value>) -> Leg {
     let Settled::Answer { body, line, .. } = settled else {
@@ -1346,6 +1420,8 @@ pub fn leg_of(settled: &Settled, raw: &[u8], sse: bool, sent_id: impl Into<Value
 }
 
 /// The call-log line of a call answered on the task path under `reason`: `refused`, because at the
+/// moment the caller is answered nothing has gone out (the served engine recorded a task it created
+/// as `refused`/`task_created`).
 #[must_use]
 pub fn task_line(entry: &ToolEntry, reason: &str) -> CallLine {
     let mut line = CallLine::resolved(entry, vocab::OUTCOME_REFUSED, reason);
@@ -1356,6 +1432,7 @@ pub fn task_line(entry: &ToolEntry, reason: &str) -> CallLine {
 }
 
 /// The ask judged: the bound, then the grant of EVERY recognized kind it asks for. An unknown
+/// method cannot be checked and is refused.
 fn judge_ask(
     admitted: &AdmittedCall,
     def: Option<&McpServerDefCfg>,
@@ -1381,7 +1458,11 @@ fn judge_ask(
     for request in requests.values() {
         if !matches!(
             request.get("method").and_then(Value::as_str),
-            Some("roots/list" | "elicitation/create" | "sampling/createMessage")
+            Some(
+                crate::tools_config::ASK_ROOTS
+                    | crate::tools_config::ASK_ELICITATION
+                    | crate::tools_config::ASK_SAMPLING
+            )
         ) {
             return Err(AskRefusal::Malformed {
                 server,
@@ -1413,6 +1494,7 @@ fn judge_ask(
 }
 
 /// THE CALLER'S REPLY TO AN ASK, bounded (`sampling_bounds.max_input_response_bytes`): `forwarded` is
+/// the serialised byte length of exactly what would be sent upstream.
 pub fn judge_input_response(
     server: &str,
     bounds: &SamplingBoundsCfg,
@@ -1421,7 +1503,7 @@ pub fn judge_input_response(
     if forwarded as u64 > u64::from(bounds.max_input_response_bytes) {
         return Err(AskRefusal::SamplingBound {
             server: server.to_string(),
-            key: "max_input_response_bytes",
+            key: INPUT_RESPONSE_BOUND_KEY,
             limit: bounds.max_input_response_bytes.to_string(),
             got: format!("{forwarded} bytes"),
         });
@@ -1430,6 +1512,9 @@ pub fn judge_input_response(
 }
 
 /// The one judgement of a relayed ask's size, shared by the http path
+/// ([`judge_ask`]) and the stdio relay (the door's child-ask judgement): every request whose
+/// `method` is `sampling/createMessage` is measured against the server's `sampling_bounds`, and the
+/// first bound it exceeds is returned as a named refusal.
 pub fn judge_sampling_bounds<'a>(
     server: &str,
     bounds: &SamplingBoundsCfg,
@@ -1442,7 +1527,8 @@ pub fn judge_sampling_bounds<'a>(
         got,
     };
     for request in requests {
-        if request.get("method").and_then(Value::as_str) != Some("sampling/createMessage") {
+        if request.get("method").and_then(Value::as_str) != Some(crate::tools_config::ASK_SAMPLING)
+        {
             continue;
         }
         let malformed = |reason: &str| AskRefusal::Malformed {
@@ -1487,7 +1573,7 @@ pub fn judge_sampling_bounds<'a>(
                     part.get("text").and_then(Value::as_str),
                 ) {
                     (Some("text"), Some(text)) => text.len(),
-                    _ => part.to_string().len(),
+                    _ => crate::codec::json_len(part),
                 };
                 prompt_bytes = prompt_bytes.saturating_add(bytes);
             }
@@ -1555,12 +1641,14 @@ pub fn judge_sampling_bounds<'a>(
 }
 
 /// The call-log line of a call whose upstream's ask was relayed to its caller: it went out and was
+/// answered (`dispatched`, `ask_relayed`), audited as busbar's ask of its caller, applied.
 #[must_use]
 pub fn relayed_line(entry: &ToolEntry) -> CallLine {
     CallLine::resolved(entry, vocab::OUTCOME_DISPATCHED, "ask_relayed").asking(true)
 }
 
 /// The call-log line of a relayed ask's retry refused under `reason` (its state, or the work handle
+/// it is correlated under): audited as busbar's ask of its caller, rejected.
 #[must_use]
 pub fn retry_refused_line(entry: &ToolEntry, reason: &str) -> CallLine {
     CallLine::resolved(entry, vocab::OUTCOME_REFUSED, reason).asking(false)
@@ -1582,6 +1670,7 @@ fn forbidden(admitted: &AdmittedCall, message: String, reason: &str) -> Settled 
 }
 
 /// A finished result: the terminal ask check, then the upstream's result relayed as it came
+/// (Law 11).
 fn completed(admitted: &AdmittedCall, value: &Value, body: &[u8]) -> Settled {
     if let Some(field) = upstream_ask_field(value) {
         let message = format!(
@@ -1592,7 +1681,16 @@ fn completed(admitted: &AdmittedCall, value: &Value, body: &[u8]) -> Settled {
             admitted.entry.server
         );
 
-        return forbidden(admitted, message, "ask_not_proxied");
+        return Settled::Answer {
+            status: STATUS_FORBIDDEN,
+            body: catalogue_refusal(STATUS_FORBIDDEN, &admitted.id, message, "ask_not_proxied")
+                .body(),
+            line: CallLine::resolved(
+                &admitted.entry,
+                vocab::OUTCOME_DISPATCHED,
+                "ask_not_proxied",
+            ),
+        };
     }
     Settled::Answer {
         status: STATUS_OK,
@@ -1602,6 +1700,7 @@ fn completed(admitted: &AdmittedCall, value: &Value, body: &[u8]) -> Settled {
 }
 
 /// The caller's answer carrying the upstream's `result` as the upstream wrote it: its own bytes,
+/// under the caller's id.
 fn relayed(id: &Value, value: &Value, body: &[u8]) -> Vec<u8> {
     let Some(sent) = result_bytes(body) else {
         return complete(id, value.clone());
@@ -1621,6 +1720,7 @@ fn relayed(id: &Value, value: &Value, body: &[u8]) -> Vec<u8> {
 }
 
 /// The upstream's `result` member as it sits in `body` (an answer serde_json already read): its
+/// value's own bytes, found by the SDK's span scanner, never re-written.
 fn result_bytes(body: &[u8]) -> Option<&str> {
     let text = std::str::from_utf8(body).ok()?;
     let (mut found, mut twice) = (None, false);

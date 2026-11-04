@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! The trust surface's derivations: the digest, the observation, the state, the changes queue and
+//! The trust surface's derivations: the digest, the observation, the state, the changes
+//! queue and the views.
 
 use serde_json::json;
 
@@ -36,7 +37,8 @@ fn seen(tools: Value) -> Sighting {
     Sighting::Seen(observe(&json!({ "tools": tools })).expect("a tool list"))
 }
 
-/// The digest frames its three parts and reads the schema canonically: key order is not drift, a
+/// The digest frames its three parts and reads the schema canonically: key order is not
+/// drift, a changed description or schema is.
 #[test]
 fn the_digest_frames_its_parts_and_reads_the_schema_canonically() {
     let a = tool_digest("read", "reads", &json!({"a": 1, "b": [true, null]}));
@@ -57,7 +59,8 @@ fn the_digest_frames_its_parts_and_reads_the_schema_canonically() {
     );
 }
 
-/// A tool list is strict about names and defaults the optional fields, which are hashed at their
+/// A tool list is strict about names and defaults the optional fields, which are hashed at
+/// their default.
 #[test]
 fn an_observation_is_read_strictly() {
     assert!(observe(&json!({})).is_err());
@@ -80,6 +83,7 @@ fn item(name: &str, word: &str, approved: Option<&str>) -> KernelItem {
 }
 
 /// The view's state, in precedence order, and the changes queue on each axis, read off the
+/// KERNEL's trust state (ARCHITECT Q3): the plane derives no verdict of its own.
 #[test]
 fn the_views_state_reads_the_kernels_trust_state_and_the_last_sighting() {
     let digest = tool_digest("read", "reads a file", &schema());
@@ -148,7 +152,9 @@ fn the_views_render_the_served_engines_fields_in_its_order() {
     );
 }
 
-/// THE CATALOGUE HASH the kernel's trust book records is the SHA-256 of the observed set, one
+/// THE CATALOGUE HASH the kernel's trust book records is the SHA-256 of the observed set,
+/// one `name NUL digest LF` line per capability in name order: pinned to the bytes, so a
+/// change of framing or order is a different hash.
 #[test]
 fn the_catalogue_hash_is_the_sha256_of_the_name_ordered_lines() {
     assert_eq!(
@@ -179,7 +185,10 @@ fn the_catalogue_hash_is_the_sha256_of_the_name_ordered_lines() {
     );
 }
 
-/// THE VIEWS READ THE VERDICT THE KERNEL ENFORCES. After a restart the kernel replays a durable
+/// THE VIEWS READ THE VERDICT THE KERNEL ENFORCES. After a restart the kernel replays a
+/// durable demotion (every item `quarantined`) while the plane has sighted nothing
+/// (`Never`), and a revoked counterparty or an unapproved pin answers every item `new`
+/// beside the configured digest.
 #[test]
 fn the_views_read_the_verdict_the_kernel_enforces() {
     let digest = tool_digest("read", "reads a file", &schema());
@@ -214,3 +223,25 @@ fn the_views_read_the_verdict_the_kernel_enforces() {
 
 #[path = "reported_trust.rs"]
 mod reported;
+
+#[test]
+fn demoted_capability_keeps_its_approved_digest_visible() {
+    let registration = rooted("sha256:old");
+    let items = [item("read", "drifted", Some("sha256:old"))];
+    let view: Value =
+        serde_json::from_str(&trust_view("fs", &registration, &Sighting::Never, &items)).unwrap();
+    assert_eq!(view["capabilities"][0]["approved_digest"], "sha256:old");
+    assert_eq!(view["capabilities"][0]["status"], "rejected");
+}
+
+#[test]
+fn page_shape_validation_matches_observation_validation() {
+    for page in [
+        json!({}),
+        json!({"tools":[{"name":"read"},{"name":"read"}]}),
+        json!({"tools":[{"name":"read","description":3}]}),
+        json!({"tools":[{"name":"read","inputSchema":{"type":"object"}}]}),
+    ] {
+        assert_eq!(validate_tools(&page), observe(&page).map(|_| ()));
+    }
+}

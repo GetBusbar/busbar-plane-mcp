@@ -1,4 +1,5 @@
-//! The MCP plane: the plugin contract's plane kind for the Model Context Protocol, served through
+//! The MCP plane: the plugin contract's plane kind for the Model Context Protocol, served
+//! through its door ([`door`]) and declared metadata ([`DECLARES`]).
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -6,7 +7,8 @@
 /// The session revisions raised into, and lowered out of, the one dispatch.
 mod adapt;
 mod answer;
-/// The argument half of the dispatch SSRF guard: a schema-aware walk judging every URL and host a
+/// The argument half of the dispatch SSRF guard: a schema-aware walk judging every URL and
+/// host a call's arguments carry.
 mod argguard;
 mod ask;
 mod call;
@@ -14,7 +16,8 @@ mod catalogue;
 mod checks;
 mod client;
 mod codec;
-/// The plane's diagnostic catalog: the codes it raises, which its `declares.json` states (the tests
+/// The plane's diagnostic catalog: the codes it raises, which its `declares.json` states
+/// (the tests hold the two equal, and the codes equal to the ones the door raises).
 #[cfg(test)]
 mod diagnostics;
 mod endpoint;
@@ -41,7 +44,8 @@ mod tools_config;
 /// The plugin's memory-ABI door.
 pub use plane_door::door;
 
-/// The plane's declared metadata (`declares.json`), linked by the distribution and signed into a
+/// The plane's declared metadata (`declares.json`), linked by the distribution and signed
+/// into a dropped-in plane's manifest.
 pub const DECLARES: &str = include_str!("../declares.json");
 
 mod reads;

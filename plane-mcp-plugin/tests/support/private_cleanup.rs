@@ -25,6 +25,7 @@ struct State {
     records: Vec<Vec<u8>>,
     applied: usize,
     remaining: usize,
+    violations: Vec<&'static str>,
 }
 
 impl Default for State {
@@ -45,6 +46,7 @@ impl Default for State {
             records: Vec::new(),
             applied: 0,
             remaining: 0,
+            violations: Vec::new(),
         }
     }
 }
@@ -109,7 +111,15 @@ extern "C" fn open_work(_: HostCtx, input: *const c_void, out: *mut ServiceOut) 
             len: 0,
         },
     };
-    assert!(input.into.cap >= reference.len() && input.into.spans_cap >= 1);
+    if input.into.cap < reference.len() || input.into.spans_cap < 1 {
+        STATE.with(|state| {
+            state
+                .borrow_mut()
+                .violations
+                .push("short work-open buffers")
+        });
+        return finish(out, Outcome::Failed, 0, 0, 0);
+    }
     unsafe {
         std::ptr::copy_nonoverlapping(reference.as_ptr(), input.into.buf, reference.len());
         input.into.spans.write(span);
@@ -121,12 +131,16 @@ extern "C" fn settle(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> 
     let record = unsafe { std::slice::from_raw_parts(input.record.ptr, input.record.len) };
     let outcome = STATE.with(|state| {
         let mut state = state.borrow_mut();
-        assert_eq!(input.handle, WORK);
+        if input.handle != WORK {
+            state.violations.push("wrong work handle");
+        }
         state.calls.push(input.head.handle);
         state.records.push(record.to_vec());
         if state.mode == Outcome::Ready {
             state.applied += 1;
-            assert_eq!(state.applied, 1, "confirmed cleanup was issued twice");
+            if state.applied != 1 {
+                state.violations.push("confirmed cleanup was issued twice");
+            }
         }
         state.mode
     });
@@ -230,7 +244,15 @@ impl<'host> MaintenanceCase<'host> {
                     }
                 }
             });
-            let _ = pending;
+            STATE.with(|state| {
+                let state = state.borrow();
+                assert!(state.violations.is_empty(), "{:?}", state.violations);
+                assert_eq!(
+                    pending,
+                    state.remaining != 0 && (state.now_ms >= 1000 || state.clock_fails),
+                    "due cleanup remains pending until retired"
+                );
+            });
         });
     }
     fn reload_and_retire(&self) {

@@ -215,6 +215,8 @@ fn the_param_mirror_names_every_annotated_string_integer_and_boolean_argument() 
 }
 
 /// LOWERING CUTS ONLY THE STATELESS-ONLY MEMBERS' SPANS: an answer with nothing to lower is its own
+/// bytes; one with them keeps every other member's order, spacing and number spelling, wherever
+/// the cut members sit (first, between, last, all); an incomplete result is not expressible.
 #[test]
 fn lowering_an_answer_splices_its_own_bytes() {
     let plain = br#"{"id":1,"result":{"z":1.0,"a":1e3}}"#;
@@ -255,6 +257,7 @@ fn lowering_an_answer_splices_its_own_bytes() {
     assert_eq!(lower_answer(b"not json"), None);
 }
 /// M3-1: a bare CR is JSON whitespace, and every event-stream reader ends a line at one; a frame
+/// splits on CR, LF and CRLF alike, so no `data:` line carries a CR.
 #[test]
 fn a_bare_cr_in_framed_data_ends_its_data_line() {
     let framed = frame(None, Some(EVENT_MESSAGE), "{\"a\":1\r,\"b\":2}");
@@ -268,4 +271,30 @@ fn a_bare_cr_in_framed_data_ends_its_data_line() {
         "data: a\ndata: b\n\n",
         "CRLF stays one break"
     );
+}
+
+#[test]
+fn invalid_annotations_are_reported_instead_of_ignored() {
+    for suffix in [
+        serde_json::json!(true),
+        serde_json::json!(""),
+        serde_json::json!("bad name"),
+    ] {
+        let schema = serde_json::json!({"properties":{"a":{"x-mcp-header":suffix}}});
+        assert!(validate_param_annotations(Some(&schema))
+            .unwrap_err()
+            .contains("field-name token"));
+    }
+    let duplicate =
+        serde_json::json!({"properties":{"a":{"x-mcp-header":"One"},"b":{"x-mcp-header":"one"}}});
+    assert!(validate_param_annotations(Some(&duplicate))
+        .unwrap_err()
+        .contains("repeat"));
+    let mut deep = serde_json::json!({"properties":{"target":{"x-mcp-header":"Target"}}});
+    for _ in 0..MAX_PARAM_DEPTH {
+        deep = serde_json::json!({"properties":{"nested":deep}});
+    }
+    assert!(validate_param_annotations(Some(&deep))
+        .unwrap_err()
+        .contains("depth"));
 }

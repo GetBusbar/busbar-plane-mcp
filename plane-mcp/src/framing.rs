@@ -2,10 +2,24 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE ANSWER'S FRAMING: one JSON-RPC answer re-framed as an event stream, with the log records
+//! busbar writes about its own handling of the request riding ahead of it. Pure: the caller's
+//! `Accept` value, its `_meta` and the finished answer in; the event-stream bytes out.
+//!
+//! A caller that did not ask for a stream is answered in JSON, unchanged: [`prefers_event_stream`]
+//! is false for every `Accept` that puts `application/json` first, which is every MCP client that
+//! has not deliberately asked otherwise. A caller that supplied a `progressToken` has asked for
+//! progress, and a stream is the only shape progress can arrive in, so the token is itself a request
+//! for one. Only a `200` whose body is one JSON document is re-framed; every other answer goes out as
+//! it was written.
+//!
+//! The log records describe BUSBAR, never an upstream: an upstream's own records would arrive at
+//! busbar's caller under busbar's name. Their `logger` is prefixed `busbar.` so that stays visible.
 
 use serde_json::{json, Value};
 
 /// The `_meta` key a caller names the least severe log level it wants with. An extension key under
+/// busbar's own prefix: this revision has no `logging/setLevel` (no session to remember it in), so
+/// the level rides the request it applies to.
 pub const META_LOGGING_LEVEL: &str = "io.busbar/loggingLevel";
 
 /// The level a caller that names none is given.
@@ -47,6 +61,8 @@ pub(crate) fn severity_of(name: &str) -> Option<usize> {
 }
 
 /// The least severe level the caller asked for in `_meta`, or [`DEFAULT_LEVEL`]. A level the
+/// protocol does not name is the default, never a refusal: the caller asked for a stream, and an
+/// unknown filter is not a reason to deny it one.
 #[must_use]
 pub fn requested_level(meta: Option<&Value>) -> &'static str {
     let named = meta
@@ -59,6 +75,7 @@ pub fn requested_level(meta: Option<&Value>) -> &'static str {
 }
 
 /// Whether a record at `level` passes a caller that asked for `requested`. An unknown name on
+/// either side passes: the filter only ever removes what it can place.
 #[must_use]
 pub fn level_allows(requested: &str, level: &str) -> bool {
     match (severity_of(requested), severity_of(level)) {
@@ -68,6 +85,7 @@ pub fn level_allows(requested: &str, level: &str) -> bool {
 }
 
 /// Whether the caller's `Accept` value prefers an event stream to JSON: by quality, then by
+/// position, and never when the stream is listed at `q=0` or not at all.
 #[must_use]
 pub fn prefers_event_stream(accept: Option<&str>) -> bool {
     let Some(accept) = accept else {
@@ -77,15 +95,12 @@ pub fn prefers_event_stream(accept: Option<&str>) -> bool {
     let mut json: Option<(f32, usize)> = None;
     for (position, entry) in accept.split(',').enumerate() {
         let mut parts = entry.split(';');
-        let media = parts.next().unwrap_or("").trim().to_ascii_lowercase();
-        let q = parts
-            .filter_map(|p| p.trim().strip_prefix("q=").map(str::trim))
-            .find_map(|v| v.parse::<f32>().ok())
-            .unwrap_or(1.0);
-        match media.as_str() {
-            EVENT_STREAM => sse = sse.or(Some((q, position))),
-            JSON => json = json.or(Some((q, position))),
-            _ => {}
+        let media = parts.next().unwrap_or("").trim();
+        let q = weight(parts);
+        if media.eq_ignore_ascii_case(EVENT_STREAM) {
+            sse = sse.or(Some((q, position)));
+        } else if media.eq_ignore_ascii_case(JSON) {
+            json = json.or(Some((q, position)));
         }
     }
     let Some((sse_q, sse_pos)) = sse else {
@@ -104,6 +119,26 @@ pub fn prefers_event_stream(accept: Option<&str>) -> bool {
             }
         }
     }
+}
+
+/// The weight (RFC 9110 section 12.4.2) among one `Accept` entry's `params`: `1` when none is
+/// named. The `q` name is matched case-insensitively, as the grammar's literal is; a weight that is
+/// not a number in `0..=1` (`q=abc`, `q=`, `NaN`) makes the entry unacceptable (`0`), never the
+/// most preferred.
+fn weight<'a>(params: impl Iterator<Item = &'a str>) -> f32 {
+    for param in params {
+        let param = param.trim();
+        let Some((name, value)) = param.split_once('=') else {
+            continue;
+        };
+        if name.trim_end().eq_ignore_ascii_case("q") {
+            return match value.trim().parse::<f32>() {
+                Ok(q) if (0.0..=1.0).contains(&q) => q,
+                _ => 0.0,
+            };
+        }
+    }
+    1.0
 }
 
 /// One `message` event carrying `data` as it is: one `data:` line per line of it.
@@ -130,6 +165,11 @@ fn push_raw_event(out: &mut String, data: &str) {
 }
 
 /// One answer as an event stream: each of `frames`, then the answer, one `message` event each.
+/// `None` when `body` is not one JSON document (it goes out as it was).
+///
+/// The answer is its own bytes: never parsed and printed again, which would re-order its
+/// members and re-spell its numbers. Each of its lines is one `data:` line, and a client joins them
+/// back with `\n`: a JSON document carries a line break only between its tokens.
 #[must_use]
 pub fn event_stream(body: &[u8], frames: &[Value]) -> Option<Vec<u8>> {
     let text = std::str::from_utf8(body).ok()?;
@@ -193,6 +233,13 @@ impl Framing {
     }
 
     /// The answer `(status, body)` framed: a `200` with a JSON body as an event stream, and
+    /// `true`; anything else as it was, and `false`. The stream is each progress frame, then the
+    /// two `notifications/message` records busbar writes about its own handling (what was
+    /// dispatched, `debug`, and how it ended, `info`) at the caller's level, then the answer.
+    ///
+    /// The answer is its own bytes: never parsed and printed again, which would re-order
+    /// its members and re-spell its numbers. Each of its lines is one `data:` line, and a client
+    /// joins them back with `\n`: a JSON document carries a line break only between its tokens.
     #[must_use]
     pub fn frame(&self, status: u32, body: Vec<u8>, progress: &[Value]) -> (Vec<u8>, bool) {
         if status != 200 {
@@ -228,7 +275,8 @@ impl Framing {
         frames
     }
 
-    pub(super) fn local_prefix(&self) -> Vec<u8> {
+    /// Encode locally generated progress and log frames before the terminal response.
+    pub(crate) fn local_prefix(&self) -> Vec<u8> {
         events(&self.frames(200, &[]))
     }
 }
@@ -236,3 +284,7 @@ impl Framing {
 #[cfg(test)]
 #[path = "tests/framing.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/framing_audit.rs"]
+mod framing_audit;

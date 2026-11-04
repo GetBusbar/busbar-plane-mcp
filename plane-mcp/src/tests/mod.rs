@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! The crate-level test modules: the suites that moved in from `tests/` when this crate's only
+//! Crate-level suites exercise the plane through its internal interfaces.
 
 /// A grant check that admits every grant: the unit suites' stand-in for a caller entitled to all.
 pub(crate) fn everyone(_: &str, _: &str) -> bool {
@@ -12,9 +12,9 @@ pub(crate) fn everyone(_: &str, _: &str) -> bool {
 mod battery_vocabulary_tests;
 /// The plane's own declarations agree with each other (`tests/declarations_agree.rs`).
 mod digest_pin_tests;
-/// A sealed state's window judged at the host clock's time: a clock that fails refuses
+/// A failed host clock prevents minting and opening sealed request state.
 mod door_clock_tests;
-/// The door's facts the door-driven tests restate (`tests/support/door_facts.rs`), held to the
+/// The door's declared facts agree with the door-driven integration fixtures.
 pub(crate) mod door_facts_tests;
 /// The stdio client leg against busbar's method inventory (`tests/method_inventory.rs`).
 mod method_inventory_tests;

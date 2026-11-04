@@ -2,6 +2,8 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE ARGUMENT HALF OF THE DISPATCH SSRF GUARD: a value-driven walk of `tools/call` arguments
+//! against the pinned input schema, asking the host's one destination judge (`dest.judge`)
+//! about every host they carry.
 
 use busbar_contract::abi::host::service::{
     DEST_ALLOWED, DEST_INTERNAL, DEST_METADATA, DEST_NO_HOST, DEST_OBFUSCATED,
@@ -11,12 +13,19 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 /// THE HOST'S JUDGE, as the walk asks it: one host an argument names (an IPv6 literal bracketed,
+/// as `dest.judge` reads a `host[:port]`), answered with the host's `DEST_*` verdict, or `None`
+/// when the host gave none (the value is then refused: fail closed).
 pub type Judge<'a> = dyn FnMut(&str) -> Option<u64> + 'a;
 
 /// How deep into the ARGUMENT value the walk goes before refusing. Arguments arrive as already
+/// parsed JSON, so this is a floor under stack safety rather than the primary bound; exceeding it
+/// is a refusal instead of a truncation, because a walk that silently stops is a walk that reports
+/// "nothing found" on the one document built to make it stop.
 const MAX_VALUE_DEPTH: usize = 64;
 
 /// How far the SCHEMA-side expansion follows `allOf`/`anyOf`/`oneOf` nesting. Bounded separately
+/// from the value depth because a pinned schema can nest combinators independently of how deep the
+/// arguments go.
 const MAX_COMBINATOR_DEPTH: usize = 8;
 
 /// What a URL-ish format says the value IS, which decides how it is read.
@@ -56,8 +65,13 @@ pub enum ArgWhy {
     DepthExceeded,
     /// A schema property pattern could not be compiled or reliably evaluated.
     SchemaPattern,
+    /// The combined schema and argument inspection exceeds the per-call work bound.
+    WorkExceeded,
     /// A schema combinator nested beyond the inspection budget.
     SchemaDepth,
+    /// A schema reference (`$ref`, `$dynamicRef`, `$recursiveRef`) that does not resolve inside the
+    /// pinned schema, so what it declares cannot be inspected.
+    SchemaRef(String),
 }
 
 impl std::fmt::Display for ArgWhy {
@@ -100,6 +114,7 @@ impl std::fmt::Display for ArgWhy {
                 "the tool arguments nest deeper than {MAX_VALUE_DEPTH} levels, which is refused \
                  rather than walked partially"
             ),
+            ArgWhy::WorkExceeded => write!(f, "the schema and arguments exceed the inspection work budget"),
             ArgWhy::SchemaPattern => write!(
                 f,
                 "a schema `patternProperties` expression could not be checked, so the argument is refused"
@@ -107,6 +122,11 @@ impl std::fmt::Display for ArgWhy {
             ArgWhy::SchemaDepth => write!(
                 f,
                 "the input schema nests combinators beyond {MAX_COMBINATOR_DEPTH} levels, so the argument is refused rather than inspected partially"
+            ),
+            ArgWhy::SchemaRef(reference) => write!(
+                f,
+                "the input schema reference `{reference}` does not resolve inside the schema, so the \
+                 argument is refused rather than inspected partially"
             ),
         }
     }
@@ -139,7 +159,14 @@ impl std::fmt::Display for ArgRefusal {
                 "tool argument {at} (schema format `{fmt}`) was refused: {}",
                 self.why
             ),
-            None if matches!(self.why, ArgWhy::SchemaPattern | ArgWhy::SchemaDepth) => {
+            None if matches!(
+                self.why,
+                ArgWhy::SchemaPattern
+                    | ArgWhy::SchemaDepth
+                    | ArgWhy::SchemaRef(_)
+                    | ArgWhy::WorkExceeded
+            ) =>
+            {
                 write!(f, "tool argument {at} was refused: {}", self.why)
             }
             None => write!(
@@ -169,46 +196,158 @@ pub struct ArgScan {
 }
 
 /// THE ENTRY POINT: walk `arguments` against the PINNED `schema` and refuse on the first
+/// inadmissible value.
+///
+/// Fails on the first refusal rather than collecting all of them, because the call is refused
+/// either way and the operator's question is "why was this refused", which one named field answers.
+/// Every host found is asked of `judge` ([`Judge`]).
 pub fn guard(
     schema: &Value,
     arguments: &Value,
     mut judge: impl FnMut(&str) -> Option<u64>,
 ) -> Result<ArgScan, ArgRefusal> {
+    inspection_budget(schema, arguments).map_err(|why| ArgRefusal {
+        pointer: String::new(),
+        declared_format: None,
+        why,
+    })?;
+    let mut verdicts = BTreeMap::new();
+    let mut cached_judge = |host: &str| {
+        *verdicts
+            .entry(host.to_string())
+            .or_insert_with(|| judge(host))
+    };
     let mut scan = ArgScan::default();
     let mut pointer = String::new();
-    let mut patterns = BTreeMap::new();
+    let mut inspect = Inspect {
+        references: SchemaReferences::new(schema).map_err(|why| ArgRefusal {
+            pointer: String::new(),
+            declared_format: None,
+            why,
+        })?,
+        patterns: BTreeMap::new(),
+    };
     walk(
         &[schema],
         arguments,
         &mut pointer,
         0,
-        &mut judge,
+        &mut cached_judge,
         &mut scan,
-        &mut patterns,
+        &mut inspect,
     )?;
     Ok(scan)
 }
 
+/// Bound the cross product before schema expansion, regex evaluation or reference searches.
+/// References may search the entire schema, so their cost is included in the schema weight.
+const MAX_INSPECTION_WORK: usize = 1_000_000;
+fn inspection_budget(schema: &Value, arguments: &Value) -> Result<(), ArgWhy> {
+    fn weight(
+        value: &Value,
+        depth: usize,
+        nodes: &mut usize,
+        refs: &mut usize,
+        patterns: &mut usize,
+    ) -> Result<(), ArgWhy> {
+        if depth > MAX_VALUE_DEPTH {
+            return Err(ArgWhy::DepthExceeded);
+        }
+        *nodes = nodes.saturating_add(1 + value.as_str().map_or(0, str::len));
+        if *nodes > MAX_INSPECTION_WORK {
+            return Err(ArgWhy::WorkExceeded);
+        }
+        match value {
+            Value::Object(map) => {
+                *refs += REFERENCES
+                    .iter()
+                    .filter(|key| map.contains_key(**key))
+                    .count();
+                if let Some(Value::Object(p)) = map.get("patternProperties") {
+                    *patterns = patterns.saturating_add(p.keys().map(String::len).sum::<usize>());
+                }
+                for (key, child) in map {
+                    *nodes = nodes.saturating_add(key.len());
+                    if *nodes > MAX_INSPECTION_WORK {
+                        return Err(ArgWhy::WorkExceeded);
+                    }
+                    weight(child, depth + 1, nodes, refs, patterns)?;
+                }
+            }
+            Value::Array(items) => {
+                for child in items {
+                    weight(child, depth + 1, nodes, refs, patterns)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    let (mut schemas, mut refs, mut patterns) = (0, 0, 0);
+    weight(schema, 0, &mut schemas, &mut refs, &mut patterns)?;
+    let (mut values, mut unused_refs, mut unused_patterns) = (0, 0, 0);
+    weight(
+        arguments,
+        0,
+        &mut values,
+        &mut unused_refs,
+        &mut unused_patterns,
+    )?;
+    let work = schemas
+        .saturating_mul(refs + 1)
+        .saturating_add(patterns)
+        .saturating_mul(values);
+    if work > MAX_INSPECTION_WORK {
+        Err(ArgWhy::WorkExceeded)
+    } else {
+        Ok(())
+    }
+}
+
+/// A bounded diagnostic excerpt; do not copy hostile argument strings into errors wholesale.
+fn excerpt(value: &str) -> String {
+    const LIMIT: usize = 256;
+    let mut end = value.len().min(LIMIT);
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut out = value[..end].to_string();
+    if end < value.len() {
+        out.push('…');
+    }
+    out
+}
+
+/// Resource scopes and property patterns compiled once for this walk.
+struct Inspect<'a> {
+    /// The pinned schema resource index.
+    references: SchemaReferences<'a>,
+    /// Each distinct `patternProperties` expression, compiled once for this walk.
+    patterns: BTreeMap<String, jsonschema::Validator>,
+}
+
 /// The value-driven walk. The VALUE drives and the schema rides alongside, which is what lets the
-fn walk(
-    schemas: &[&Value],
+/// undeclared detector see fields the schema never mentioned — a schema-driven walk cannot, by
+/// construction, visit a field the schema omits.
+fn walk<'a>(
+    schemas: &[&'a Value],
     value: &Value,
     pointer: &mut String,
     depth: usize,
     judge: &mut Judge<'_>,
     scan: &mut ArgScan,
-    patterns: &mut BTreeMap<String, jsonschema::Validator>,
+    inspect: &mut Inspect<'a>,
 ) -> Result<(), ArgRefusal> {
     if depth > MAX_VALUE_DEPTH {
         return Err(ArgRefusal {
-            pointer: pointer.clone(),
+            pointer: excerpt(pointer),
             declared_format: None,
             why: ArgWhy::DepthExceeded,
         });
     }
 
-    expanded(schemas).map_err(|why| ArgRefusal {
-        pointer: pointer.clone(),
+    let nodes = expanded(&inspect.references, schemas).map_err(|why| ArgRefusal {
+        pointer: excerpt(pointer),
         declared_format: None,
         why,
     })?;
@@ -218,12 +357,13 @@ fn walk(
                 let mark = pointer.len();
                 pointer.push('/');
                 pointer.push_str(&escape_token(k));
-                let children = child_for_key(schemas, k, patterns).map_err(|why| ArgRefusal {
-                    pointer: pointer.clone(),
-                    declared_format: None,
-                    why,
-                })?;
-                walk(&children, v, pointer, depth + 1, judge, scan, patterns)?;
+                let children =
+                    child_for_key(&nodes, k, &mut inspect.patterns).map_err(|why| ArgRefusal {
+                        pointer: excerpt(pointer),
+                        declared_format: None,
+                        why,
+                    })?;
+                walk(&children, v, pointer, depth + 1, judge, scan, inspect)?;
                 pointer.truncate(mark);
             }
             Ok(())
@@ -234,30 +374,27 @@ fn walk(
                 pointer.push('/');
                 pointer.push_str(&i.to_string());
                 walk(
-                    &child_for_index(schemas, i).map_err(|why| ArgRefusal {
-                        pointer: pointer.clone(),
-                        declared_format: None,
-                        why,
-                    })?,
+                    &child_for_index(&nodes, i),
                     v,
                     pointer,
                     depth + 1,
                     judge,
                     scan,
-                    patterns,
+                    inspect,
                 )?;
                 pointer.truncate(mark);
             }
             Ok(())
         }
-        Value::String(s) => judge_string(schemas, s, pointer, judge, scan),
+        Value::String(s) => judge_string(&nodes, s, pointer, judge, scan),
         _ => Ok(()),
     }
 }
 
-/// One string leaf: declared first, then the undeclared `http(s)://` detector.
+/// One string leaf: declared first, then the undeclared `http(s)://` detector. `nodes` is the
+/// position's schema set already [`expanded`].
 fn judge_string(
-    schemas: &[&Value],
+    nodes: &[&Value],
     s: &str,
     pointer: &str,
     judge: &mut Judge<'_>,
@@ -267,12 +404,12 @@ fn judge_string(
     let trimmed = s.trim();
     let refused = |declared_format: Option<String>| {
         move |why| ArgRefusal {
-            pointer: pointer.to_string(),
+            pointer: excerpt(pointer),
             declared_format,
             why,
         }
     };
-    let declared = urlish_formats(schemas).map_err(refused(None))?;
+    let declared = urlish_formats(nodes);
     if !declared.is_empty() {
         scan.declared_judged += 1;
         for (format, kind) in declared {
@@ -289,7 +426,7 @@ fn judge_string(
         return match found {
             Some(host) => judge_host(&host, judge)
                 .and_then(|()| judge_rfc_authority(&whatwg_cleaned(s), judge)),
-            None => Err(ArgWhy::NoHost(s.to_string())),
+            None => Err(ArgWhy::NoHost(excerpt(s))),
         }
         .map_err(refused(None));
     }
@@ -297,9 +434,24 @@ fn judge_string(
 }
 
 /// THE WHATWG SPECIAL SCHEMES: the six a WHATWG URL reader reads by the web rules (a backslash is a
+/// slash, any run of slashes after the scheme is skipped, the authority ends at `/`, `\`, `?` or
+/// `#`).
 const SPECIAL_SCHEMES: [&str; 6] = ["http", "https", "ws", "wss", "ftp", "file"];
 
 /// THE HOST A WHATWG URL READER FINDS IN `value`, read as a fetching client reads it, by the
+/// contract's one URL reader (`busbar_contract::net::parse_url`, the reader the host's own
+/// destination guard reads with): leading and trailing C0 controls and spaces stripped, every tab
+/// and newline removed, a backslash read as a slash under a special scheme and any run of slashes
+/// after it skipped, the authority ended at `/`, `?`, `#` or `\`, the host percent-decoded.
+/// All six WHATWG special schemes are read so: the contract reads `http`, `https`, `ws` and `wss`
+/// itself, `ftp` is read as `http` is, and `file` by [`file_host`].
+/// A host outside ASCII is judged as the punycode name a fetching client dials, as the client dials
+/// it: `judge_host` maps every host it is handed through UTS-46 ([`dial_host`]).
+/// `Some(Some(host))`: the value is a URL naming `host`, lower-cased. `Some(None)`: a URL no reader
+/// accepts, refused rather than passed: it opens with any `scheme://`, or with a special scheme
+/// and `:` and holds no ASCII whitespace or control character (a raw URL holds none, so prose such
+/// as `http: the protocol` is not one), and no host could be read from it. `None`: it names no
+/// host.
 fn whatwg_host(value: &str) -> Option<Option<String>> {
     let cleaned = whatwg_cleaned(value);
     let special = special_scheme(&cleaned);
@@ -328,6 +480,7 @@ fn whatwg_host(value: &str) -> Option<Option<String>> {
 }
 
 /// The scheme of `cleaned` and what follows its `:`, when the scheme is a WHATWG special one (in any
+/// case).
 fn special_scheme(cleaned: &str) -> Option<(&str, &str)> {
     let (scheme, after) = cleaned.split_once(':')?;
     SPECIAL_SCHEMES
@@ -337,6 +490,7 @@ fn special_scheme(cleaned: &str) -> Option<(&str, &str)> {
 }
 
 /// Whether `cleaned` opens with an RFC 3986 scheme and `://`: a URL with an authority by its
+/// spelling, whether or not a reader accepts the rest.
 fn opens_with_authority(cleaned: &str) -> bool {
     cleaned.split_once("://").is_some_and(|(scheme, _)| {
         scheme.starts_with(|c: char| c.is_ascii_alphabetic())
@@ -357,6 +511,7 @@ enum FileHost {
 }
 
 /// THE HOST OF A `file` URL, by the WHATWG file rule: a host follows only two slashes (either of
+/// `/` and `\`), and runs to the next `/`, `\`, `?` or `#`; an empty one names no host.
 fn file_host(after: &str) -> FileHost {
     let mut chars = after.chars();
     let two_slashes = matches!(
@@ -379,6 +534,7 @@ fn file_host(after: &str) -> FileHost {
 }
 
 /// THE HOST A `uri-reference` NAMES, under the WHATWG reading: an absolute one's own, or a relative
+/// one resolved against a web base.
 fn reference_host(value: &str) -> Option<Option<String>> {
     if let Some(found) = whatwg_host(value) {
         return Some(found);
@@ -396,12 +552,17 @@ fn reference_host(value: &str) -> Option<Option<String>> {
 }
 
 /// Whether the WHOLE value is an `http(s)` URL. Deliberately a prefix test on the whole trimmed
+/// string rather than a search, so a URL merely mentioned inside free text does not make the whole
+/// value one.
 fn starts_with_http(v: &str) -> bool {
-    let lower = v.to_ascii_lowercase();
-    lower.starts_with("http://") || lower.starts_with("https://")
+    v.get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("http://"))
+        || v.get(..8)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://"))
 }
 
 /// The WHATWG URL parser's first step, as a connecting stack applies it: leading and trailing C0
+/// controls and spaces trimmed, then every tab, LF and CR removed (`ht\ttp://` is `http://`).
 fn whatwg_cleaned(v: &str) -> String {
     v.trim_matches(|c: char| c <= '\u{1f}' || c == ' ')
         .chars()
@@ -427,7 +588,7 @@ fn judge_argument(kind: Urlish, value: &str, judge: &mut Judge<'_>) -> Result<()
 
             match reference_host(value) {
                 Some(Some(host)) => judge_host(&host, judge),
-                Some(None) => Err(ArgWhy::NoHost(value.to_string())),
+                Some(None) => Err(ArgWhy::NoHost(excerpt(value))),
                 None => Ok(()),
             }?;
             judge_rfc_authority(&cleaned, judge)
@@ -443,10 +604,11 @@ fn judge_argument(kind: Urlish, value: &str, judge: &mut Judge<'_>) -> Result<()
 }
 
 /// An absolute URL, read as a WHATWG parser reads it ([`whatwg_cleaned`]): the scheme allowlist,
+/// then the host.
 fn judge_absolute(url: &str, judge: &mut Judge<'_>) -> Result<(), ArgWhy> {
     let cleaned = whatwg_cleaned(url);
     if !http_scheme(&cleaned) {
-        return Err(ArgWhy::Scheme(url.to_string()));
+        return Err(ArgWhy::Scheme(excerpt(url)));
     }
 
     let host = if cleaned.contains("://") {
@@ -456,7 +618,7 @@ fn judge_absolute(url: &str, judge: &mut Judge<'_>) -> Result<(), ArgWhy> {
             .ok()
             .map(|p| p.host)
     }
-    .ok_or_else(|| ArgWhy::NoHost(url.to_string()))?;
+    .ok_or_else(|| ArgWhy::NoHost(excerpt(url)))?;
     judge_host(&host, judge)?;
     judge_rfc_authority(&cleaned, judge)
 }
@@ -478,8 +640,9 @@ fn judge_rfc_authority(cleaned: &str, judge: &mut Judge<'_>) -> Result<(), ArgWh
 }
 
 /// The host, asked of the host's one judge (`dest.judge`):
+/// the plane reads the host and holds no rule about it.
 fn judge_host(raw: &str, judge: &mut Judge<'_>) -> Result<(), ArgWhy> {
-    let host = dial_host(raw).ok_or_else(|| ArgWhy::NoHost(raw.to_string()))?;
+    let host = dial_host(raw).ok_or_else(|| ArgWhy::NoHost(excerpt(raw)))?;
     let dest = if host.contains(':') {
         format!("[{host}]")
     } else {
@@ -502,8 +665,12 @@ fn judge_host(raw: &str, judge: &mut Judge<'_>) -> Result<(), ArgWhy> {
 
 /// One host asked of the judge, its verdict rendered as the refusal.
 fn ask(host: &str, dest: &str, judge: &mut Judge<'_>) -> Result<(), ArgWhy> {
-    let host = host.to_string();
-    match judge(dest) {
+    let verdict = judge(dest);
+    if verdict == Some(DEST_ALLOWED) {
+        return Ok(());
+    }
+    let host = excerpt(host);
+    match verdict {
         Some(DEST_ALLOWED) => Ok(()),
         Some(DEST_METADATA) => Err(ArgWhy::CloudMetadata(host)),
         Some(DEST_OBFUSCATED) => Err(ArgWhy::ObfuscatedHost(host)),
@@ -515,6 +682,9 @@ fn ask(host: &str, dest: &str, judge: &mut Judge<'_>) -> Result<(), ArgWhy> {
 }
 
 /// THE NAME A CONNECTING CLIENT DIALS for the host `raw`: read as a URL's host is read
+/// ([`normalize_host`]), then, outside ASCII, mapped through UTS-46 by the contract's
+/// `url_host_to_ascii`, with the one trailing root dot the
+/// mapping can make dropped.
 fn dial_host(raw: &str) -> Option<String> {
     let read = normalize_host(raw)?;
     if read.is_ascii() {
@@ -526,6 +696,8 @@ fn dial_host(raw: &str) -> Option<String> {
 }
 
 /// Normalize a bare host the same way a URL's host component is normalized, by routing it through
+/// the same reader: an IPv6 literal is bracketed so the reader sees an authority rather than a
+/// host:port, and everything else is passed as written.
 fn normalize_host(raw: &str) -> Option<String> {
     extract_normalized_host(
         &if busbar_contract::net::host_ip(raw).is_some_and(|ip| ip.is_ipv6()) {
@@ -537,6 +709,7 @@ fn normalize_host(raw: &str) -> Option<String> {
 }
 
 /// Drop a `:port` suffix from an authority, leaving a bracketed IPv6 literal intact for
+/// [`normalize_host`] to unwrap.
 fn strip_port(authority: &str) -> &str {
     if authority.starts_with('[') {
         return authority;
@@ -548,39 +721,71 @@ fn strip_port(authority: &str) -> &str {
 }
 
 /// RFC 6901 token escaping: `~` becomes `~0` and `/` becomes `~1`, in that order, so a key
+/// containing either cannot forge a different pointer than the one it is at.
 fn escape_token(key: &str) -> String {
     key.replace('~', "~0").replace('/', "~1")
 }
 
 /// Every URL-ish `format` declared for this position, in declaration order. Overlapping property
-fn urlish_formats(schemas: &[&Value]) -> Result<Vec<(String, Urlish)>, ArgWhy> {
+/// patterns apply together, so a relative-reference declaration cannot mask a hostname declaration.
+fn urlish_formats(nodes: &[&Value]) -> Vec<(String, Urlish)> {
     let mut out = Vec::new();
-    for node in expanded(schemas)? {
+    for node in nodes {
         let Some(format) = node.get("format").and_then(Value::as_str) else {
             continue;
         };
 
         let kind = match format.to_ascii_lowercase().as_str() {
-            "uri-reference" => Urlish::Reference,
+            "uri-reference" | "iri-reference" => Urlish::Reference,
             "hostname" | "idn-hostname" | "ipv4" | "ipv6" => Urlish::Host,
             "uri" | "iri" | "url" => Urlish::AbsoluteUrl,
             _ => continue,
         };
         out.push((format.to_string(), kind));
     }
+    out
+}
+
+/// A schema node plus every subschema that applies at the SAME position, so a URL-ish format
+/// hidden behind any of them is still found: the `allOf`/`anyOf`/`oneOf` branches, the
+/// `if`/`then`/`else` arms, the `dependentSchemas` (and draft-7 `dependencies`) schemas, and the
+/// target of every `$ref`/`$dynamicRef`/`$recursiveRef`, resolved inside the pinned resource index. Every arm counts,
+/// whichever one a value would select, so a declaration cannot be hidden behind a condition. A node
+/// is taken once, so a reference cycle ends instead of spending the budget; a reference that does
+/// not resolve refuses ([`ArgWhy::SchemaRef`]) rather than leaving its declaration unread.
+fn expanded<'a>(
+    references: &SchemaReferences<'a>,
+    schemas: &[&'a Value],
+) -> Result<Vec<&'a Value>, ArgWhy> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    expand_into(
+        references,
+        schemas,
+        &mut out,
+        &mut seen,
+        MAX_COMBINATOR_DEPTH,
+    )?;
     Ok(out)
 }
 
-/// A schema node plus every `allOf`/`anyOf`/`oneOf` branch reachable from it, so a URL-ish format
-fn expanded<'a>(schemas: &[&'a Value]) -> Result<Vec<&'a Value>, ArgWhy> {
-    let mut out = Vec::new();
-    expand_into(schemas, &mut out, MAX_COMBINATOR_DEPTH)?;
-    Ok(out)
-}
+/// The keywords whose value is an array of subschemas applying at the same position.
+const SAME_POSITION_LISTS: [&str; 3] = ["allOf", "anyOf", "oneOf"];
+
+/// The keywords whose value is one subschema applying at the same position.
+const SAME_POSITION_SINGLES: [&str; 3] = ["if", "then", "else"];
+
+/// The keywords whose value maps a property name to a subschema applying at the same position.
+const SAME_POSITION_MAPS: [&str; 2] = ["dependentSchemas", "dependencies"];
+
+/// The keywords that name another schema to apply at the same position.
+const REFERENCES: [&str; 3] = ["$ref", "$dynamicRef", "$recursiveRef"];
 
 fn expand_into<'a>(
+    references: &SchemaReferences<'a>,
     schemas: &[&'a Value],
     out: &mut Vec<&'a Value>,
+    seen: &mut std::collections::BTreeSet<*const Value>,
     budget: usize,
 ) -> Result<(), ArgWhy> {
     if budget == 0 {
@@ -590,29 +795,341 @@ fn expand_into<'a>(
             Err(ArgWhy::SchemaDepth)
         };
     }
-    for node in schemas {
-        if !node.is_object() {
+    for &node in schemas {
+        if !node.is_object() || !seen.insert(node as *const Value) {
             continue;
         }
         out.push(node);
-        for key in ["allOf", "anyOf", "oneOf"] {
+        let mut applied: Vec<&'a Value> = Vec::new();
+        for key in SAME_POSITION_LISTS {
             if let Some(branches) = node.get(key).and_then(Value::as_array) {
-                let refs: Vec<&Value> = branches.iter().collect();
-                expand_into(&refs, out, budget - 1)?;
+                applied.extend(branches);
             }
         }
+        for key in SAME_POSITION_SINGLES {
+            if let Some(arm) = node.get(key) {
+                applied.push(arm);
+            }
+        }
+        for key in SAME_POSITION_MAPS {
+            if let Some(dependents) = node.get(key).and_then(Value::as_object) {
+                applied.extend(dependents.values());
+            }
+        }
+        for key in REFERENCES {
+            if let Some(reference) = node.get(key) {
+                let target = reference
+                    .as_str()
+                    .and_then(|spelled| references.resolve(node, spelled))
+                    .ok_or_else(|| {
+                        ArgWhy::SchemaRef(
+                            reference
+                                .as_str()
+                                .map_or_else(|| "non-string reference".to_string(), excerpt),
+                        )
+                    })?;
+                applied.push(target);
+                // Dynamic scope can select an outer anchor. Inspect every possible pinned
+                // override as well as the static target; never silently treat it as $ref.
+                if key == "$dynamicRef" {
+                    if let Some(name) = target.get("$dynamicAnchor").and_then(Value::as_str) {
+                        applied.extend(
+                            references
+                                .dynamic
+                                .iter()
+                                .filter_map(|(anchor, schema)| (anchor == name).then_some(*schema)),
+                        );
+                    }
+                } else if key == "$recursiveRef"
+                    && target.get("$recursiveAnchor").and_then(Value::as_bool) == Some(true)
+                {
+                    applied.extend(references.recursive.iter().copied());
+                }
+            }
+        }
+        applied.retain(|schema| schema.is_object());
+        expand_into(references, &applied, out, seen, budget - 1)?;
     }
     Ok(())
 }
 
+/// Index only schema-bearing keywords: example/default/enum objects are data, not resources.
+/// All identifiers are unique within their resource scope. Ambiguity refuses the call.
+struct SchemaReferences<'a> {
+    bases: BTreeMap<*const Value, std::sync::Arc<url::Url>>,
+    resources: BTreeMap<String, &'a Value>,
+    anchors: BTreeMap<String, &'a Value>,
+    dynamic: Vec<(String, &'a Value)>,
+    recursive: Vec<&'a Value>,
+    identifier_bytes: usize,
+}
+
+impl<'a> SchemaReferences<'a> {
+    fn new(root: &'a Value) -> Result<Self, ArgWhy> {
+        let mut index = Self {
+            bases: BTreeMap::new(),
+            resources: BTreeMap::new(),
+            anchors: BTreeMap::new(),
+            dynamic: Vec::new(),
+            recursive: Vec::new(),
+            identifier_bytes: 0,
+        };
+        let base = url::Url::parse("https://schema.invalid/__pinned__/")
+            .map_err(|_| ArgWhy::SchemaRef("schema base".into()))?;
+        let base = std::sync::Arc::new(base);
+        index.resources.insert(base.to_string(), root);
+        index.visit(root, &base)?;
+        Ok(index)
+    }
+
+    fn charge_identifier(&mut self, bytes: usize) -> Result<(), ArgWhy> {
+        self.identifier_bytes = self.identifier_bytes.saturating_add(bytes);
+        if self.identifier_bytes > MAX_INSPECTION_WORK {
+            return Err(ArgWhy::WorkExceeded);
+        }
+        Ok(())
+    }
+
+    fn insert_unique(
+        map: &mut BTreeMap<String, &'a Value>,
+        key: String,
+        node: &'a Value,
+    ) -> Result<(), ArgWhy> {
+        if map.get(&key).is_some_and(|old| !std::ptr::eq(*old, node)) {
+            return Err(ArgWhy::SchemaRef(excerpt(&key)));
+        }
+        map.insert(key, node);
+        Ok(())
+    }
+
+    fn visit(&mut self, node: &'a Value, parent: &std::sync::Arc<url::Url>) -> Result<(), ArgWhy> {
+        if !node.is_object() && !node.is_boolean() {
+            return Ok(());
+        }
+        let mut base = parent.clone();
+        if node.get("$id").is_some()
+            && node.get("id").is_some()
+            && node.get("$id") != node.get("id")
+        {
+            return Err(ArgWhy::SchemaRef("conflicting id and $id".into()));
+        }
+        if let Some(id) = node.get("$id").or_else(|| node.get("id")) {
+            let mut resolved = id
+                .as_str()
+                .and_then(|id| schema_uri(parent, id))
+                .ok_or_else(|| ArgWhy::SchemaRef("invalid schema identifier".into()))?;
+            if resolved
+                .fragment()
+                .is_some_and(|fragment| !fragment.is_empty())
+            {
+                self.charge_identifier(resolved.as_str().len())?;
+                Self::insert_unique(&mut self.anchors, resolved.to_string(), node)?;
+                // Legacy fragment identifiers name anchors, not separate resources.
+                resolved.set_fragment(None);
+                if resolved != **parent {
+                    return Err(ArgWhy::SchemaRef(
+                        "fragment identifier changes resource".into(),
+                    ));
+                }
+            } else {
+                resolved.set_fragment(None);
+                base = std::sync::Arc::new(resolved);
+                self.charge_identifier(base.as_str().len().saturating_mul(2))?;
+                Self::insert_unique(&mut self.resources, base.to_string(), node)?;
+            }
+        }
+        self.bases.insert(node as *const Value, base.clone());
+        for key in ["$anchor", "$dynamicAnchor"] {
+            if let Some(anchor) = node.get(key) {
+                let name = anchor
+                    .as_str()
+                    .filter(|name| {
+                        !name.is_empty()
+                            && name
+                                .bytes()
+                                .all(|c| c.is_ascii_alphanumeric() || b"-_.:".contains(&c))
+                    })
+                    .ok_or_else(|| ArgWhy::SchemaRef("invalid anchor".into()))?;
+                let mut address = (*base).clone();
+                address.set_fragment(Some(name));
+                self.charge_identifier(address.as_str().len())?;
+                Self::insert_unique(&mut self.anchors, address.to_string(), node)?;
+                if key == "$dynamicAnchor" {
+                    self.dynamic.push((name.to_string(), node));
+                }
+            }
+        }
+        if node.get("$recursiveAnchor").and_then(Value::as_bool) == Some(true) {
+            self.recursive.push(node);
+        }
+        for key in [
+            "$defs",
+            "definitions",
+            "properties",
+            "patternProperties",
+            "dependentSchemas",
+            "dependencies",
+        ] {
+            if let Some(map) = node.get(key).and_then(Value::as_object) {
+                for child in map.values() {
+                    self.visit(child, &base)?;
+                }
+            }
+        }
+        for key in ["allOf", "anyOf", "oneOf", "prefixItems"] {
+            if let Some(array) = node.get(key).and_then(Value::as_array) {
+                for child in array {
+                    self.visit(child, &base)?;
+                }
+            }
+        }
+        for key in [
+            "not",
+            "if",
+            "then",
+            "else",
+            "contains",
+            "propertyNames",
+            "additionalProperties",
+            "unevaluatedProperties",
+            "additionalItems",
+            "unevaluatedItems",
+            "items",
+            "contentSchema",
+        ] {
+            if let Some(child) = node.get(key) {
+                if let Some(array) = child.as_array() {
+                    if key == "items" {
+                        for child in array {
+                            self.visit(child, &base)?;
+                        }
+                    }
+                } else {
+                    self.visit(child, &base)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn resolve(&self, node: &Value, reference: &str) -> Option<&'a Value> {
+        let base = self.bases.get(&(node as *const Value))?;
+        let mut address = schema_uri(base, reference)?;
+        let fragment = percent_decoded(address.fragment().unwrap_or(""))?;
+        address.set_fragment(None);
+        let resource = *self.resources.get(address.as_str())?;
+        if fragment.is_empty() {
+            return Some(resource);
+        }
+        if fragment.starts_with('/') {
+            let target = resource.pointer(&fragment)?;
+            return (target.is_object() || target.is_boolean()).then_some(target);
+        }
+        address.set_fragment(Some(&fragment));
+        self.anchors.get(address.as_str()).copied()
+    }
+}
+
+/// Restrict WHATWG normalization to unambiguous URI spellings. The schema contract uses URI
+/// references, so browser-only cleanup (backslashes, whitespace, encoded dot segments) refuses.
+fn schema_uri(base: &url::Url, reference: &str) -> Option<url::Url> {
+    if reference
+        .chars()
+        .any(|c| c.is_whitespace() || c.is_control() || c == '\\')
+    {
+        return None;
+    }
+    percent_decoded(reference)?;
+    let document = reference.split('#').next()?;
+    if document.to_ascii_lowercase().contains("%2e") {
+        return None;
+    }
+    if reference.starts_with('#') || reference.is_empty() {
+        let mut address = base.clone();
+        address.set_fragment(reference.strip_prefix('#'));
+        return Some(address);
+    }
+    if let Ok(absolute) = url::Url::parse(reference) {
+        // The artificial retrieval URI must never masquerade as a supplied resource.
+        if absolute
+            .as_str()
+            .starts_with("https://schema.invalid/__pinned__/")
+        {
+            return None;
+        }
+        if matches!(absolute.scheme(), "http" | "https" | "ftp" | "ws" | "wss") {
+            let authority = document
+                .split_once("://")?
+                .1
+                .split('/')
+                .next()?
+                .split('?')
+                .next()?;
+            if !schema_authority(&absolute, authority) {
+                return None;
+            }
+        } else if absolute.scheme() == "file" {
+            return None;
+        }
+        return Some(absolute);
+    }
+    let joined = base.join(reference).ok()?;
+    if let Some(network) = document.strip_prefix("//") {
+        let authority = network.split('/').next()?.split('?').next()?;
+        if !schema_authority(&joined, authority) {
+            return None;
+        }
+    }
+    Some(joined)
+}
+
+/// Reject browser host rewrites that are not URI host equivalence (numeric aliases, IDNA,
+/// percent decoding). Schema identifiers are names, not destinations to dial.
+fn schema_authority(address: &url::Url, authority: &str) -> bool {
+    let host_port = authority.rsplit('@').next().unwrap_or("");
+    let host = if host_port.starts_with('[') {
+        host_port
+            .find(']')
+            .map(|end| &host_port[..=end])
+            .unwrap_or("")
+    } else {
+        host_port.split(':').next().unwrap_or("")
+    };
+    address
+        .host_str()
+        .is_some_and(|parsed| parsed.eq_ignore_ascii_case(host))
+}
+
+/// A URI fragment with its `%XX` escapes decoded; `None` for a malformed escape or a decoding that
+/// is not UTF-8.
+fn percent_decoded(fragment: &str) -> Option<String> {
+    let bytes = fragment.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = std::str::from_utf8(bytes.get(i + 1..i + 3)?).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
 /// Named properties and every matching property pattern apply together. `additionalProperties`
+/// applies only when neither names the member, as JSON Schema requires, and
+/// `unevaluatedProperties` unless that schema itself evaluates the member. `nodes`
+/// is the position's schema set already [`expanded`].
 fn child_for_key<'a>(
-    schemas: &[&'a Value],
+    nodes: &[&'a Value],
     key: &str,
     patterns: &mut BTreeMap<String, jsonschema::Validator>,
 ) -> Result<Vec<&'a Value>, ArgWhy> {
     let mut out = Vec::new();
-    for node in expanded(schemas)? {
+    for &node in nodes {
         let mut covered = false;
         if let Some(named) = node
             .get("properties")
@@ -631,10 +1148,17 @@ fn child_for_key<'a>(
             }
         }
         if !covered {
-            if let Some(extra) = node
-                .get("additionalProperties")
-                .filter(|extra| extra.is_object())
-            {
+            if let Some(extra) = node.get("additionalProperties") {
+                covered = true;
+                if extra.is_object() {
+                    out.push(extra);
+                }
+            }
+        }
+        // Only this schema's unconditional local evaluation suppresses its fallback.
+        // A sibling branch may fail and therefore contribute no evaluated properties.
+        if !covered {
+            if let Some(extra) = node.get("unevaluatedProperties").filter(|s| s.is_object()) {
                 out.push(extra);
             }
         }
@@ -643,6 +1167,7 @@ fn child_for_key<'a>(
 }
 
 /// Use the fleet's JSON Schema engine's ECMA-262 translation, not Rust regex syntax. Compile each
+/// distinct expression once for this walk; no tool arguments or matchers survive the call.
 fn pattern_matches(
     pattern: &str,
     key: &str,
@@ -673,33 +1198,40 @@ fn pattern_matches(
 }
 
 /// The schema(s) governing array element `index`: the tuple position where the schema gives one
-fn child_for_index<'a>(schemas: &[&'a Value], index: usize) -> Result<Vec<&'a Value>, ArgWhy> {
+/// (`prefixItems`, or the legacy array form of `items`), otherwise the single `items` schema, and
+/// `contains` conservatively applies to every item, and `unevaluatedItems` applies unless that
+/// schema itself gives the element an unconditional item schema. `nodes` is
+/// the position's schema set already [`expanded`].
+fn child_for_index<'a>(nodes: &[&'a Value], index: usize) -> Vec<&'a Value> {
     let mut out = Vec::new();
-    for node in expanded(schemas)? {
-        if let Some(tuple) = node.get("prefixItems").and_then(Value::as_array) {
-            if let Some(at) = tuple.get(index) {
-                out.push(at);
-                continue;
-            }
+    for &node in nodes {
+        if let Some(contains) = node.get("contains").filter(|schema| schema.is_object()) {
+            out.push(contains);
         }
-        match node.get("items") {
-            Some(Value::Array(tuple)) => {
-                if let Some(at) = tuple.get(index) {
-                    out.push(at);
-                } else if let Some(extra) = node
-                    .get("additionalItems")
-                    .filter(|extra| extra.is_object())
-                {
-                    out.push(extra);
+        let tuple = node.get("prefixItems").and_then(Value::as_array);
+        let item = if let Some(at) = tuple.and_then(|tuple| tuple.get(index)) {
+            Some(at)
+        } else {
+            match node.get("items") {
+                Some(Value::Array(tuple)) => {
+                    tuple.get(index).or_else(|| node.get("additionalItems"))
                 }
+                single => single,
             }
-            Some(single) if single.is_object() => out.push(single),
-            _ => {}
+        };
+        if let Some(item) = item.filter(|s| s.is_object() || s.is_boolean()) {
+            out.push(item);
+        } else if let Some(extra) = node.get("unevaluatedItems").filter(|s| s.is_object()) {
+            out.push(extra);
         }
     }
-    Ok(out)
+    out
 }
 
 #[cfg(test)]
 #[path = "tests/argguard_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/argguard_audit.rs"]
+mod argguard_audit;

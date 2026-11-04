@@ -104,7 +104,9 @@ extern "C" fn write_request(_: HostCtx, input: *const c_void, out: *mut ServiceO
     let piece = unsafe { input.piece.read_unaligned() };
     if piece.kind == REQUEST_BODY {
         let bytes = unsafe { std::slice::from_raw_parts(input.buf, input.len) };
-        let body = serde_json::from_slice(bytes).unwrap();
+        let Ok(body) = serde_json::from_slice(bytes) else {
+            return finish(out, Outcome::Failed, 0, 0);
+        };
         STATE.with(|state| state.borrow_mut().bodies.push(body));
     }
     finish(out, Outcome::Ready, 0, input.len as u64)
@@ -566,11 +568,13 @@ fn repeated_polls_park_once_until_the_endpoint_event_arrives() {
 }
 
 #[test]
-fn closing_an_instance_destroys_a_pending_initialize_without_sending_it() {
+fn closing_a_fixture_with_a_pending_dial_sends_no_initialize() {
     let host = legacy_host();
     let fixture = InitializationCase::new(&host, INITIALIZE_STREAM, false);
     pending_owner(&fixture);
+    assert!(CALLS.with(|calls| !calls.borrow().is_empty()));
     drop(fixture);
+    assert!(CALLS.with(|calls| calls.borrow().is_empty()));
     STATE.with(|state| {
         let state = state.borrow();
         assert!(state.bodies.is_empty());

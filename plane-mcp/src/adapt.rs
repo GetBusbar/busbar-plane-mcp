@@ -2,6 +2,23 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE SESSION REVISIONS, READ INTO AND WRITTEN OUT OF THE ONE DISPATCH.
+//!
+//! The plane has one method dispatch, written against the stateless `2026-07-28` shape: every
+//! request carries its revision and the client's capabilities in `params._meta`, and mirrors its
+//! method (and target name) into request headers. A session revision states those facts once, in
+//! `initialize`, and then relies on the session. So a session request is RAISED into the stateless
+//! shape before dispatch ([`raise`]), and the answer is LOWERED back into the session revision after
+//! it ([`lower_result`]). There is no second dispatch table.
+//!
+//! What a session client is allowed to reach is decided here too ([`session_method`]): the methods
+//! the session revisions define. The stateless revision's own methods (`server/discover`,
+//! `subscriptions/listen`, the tasks extension) are never offered to a session client, whether it
+//! asks for them by name or reads the capabilities `initialize` answered with. The session's own
+//! verbs (`resources/subscribe`, `resources/unsubscribe`, `logging/setLevel`) stay for the old
+//! revisions and are answered from the session's state.
+//!
+//! The `2024-11-05` event-stream framing lives here as values ([`frame`], [`endpoint_event`]);
+//! writing them to a connection is the caller's.
 
 use busbar_contract::spans::members;
 use serde_json::{Map, Value};
@@ -36,6 +53,8 @@ pub enum PostKind {
 }
 
 /// Classifies a POST. The stateless revision is recognised by its own marker (`_meta` carrying the
+/// protocol version) and wins over everything else, and a request with neither a session nor an
+/// `initialize` keeps the stateless reading too, so the stateless path's answers are unchanged.
 #[must_use]
 pub fn classify_post(
     body: &Value,
@@ -121,6 +140,8 @@ pub fn session_method(method: Option<&str>, has_id: bool) -> SessionMethod {
 }
 
 /// RAISES a session request into the stateless shape: `params._meta` gains the stateless revision
+/// and an EMPTY client-capability declaration (a session client's own capabilities would read as
+/// consent to an input-required answer it cannot receive).
 #[must_use]
 pub fn raise(message: &mut Value) -> Option<()> {
     message.get("method")?.as_str()?;
@@ -139,9 +160,11 @@ pub fn raise(message: &mut Value) -> Option<()> {
 }
 
 /// How deep a chain of `properties` the annotation walk follows. A pinned schema is the operator's,
+/// so this bounds stack use, not an attack.
 const MAX_PARAM_DEPTH: usize = 16;
 
 /// THE `x-mcp-header` ANNOTATIONS of a tool's `inputSchema`: each annotated property's path (its
+/// chain of `properties` keys, outermost first) and its header suffix.
 #[must_use]
 pub fn annotated_params(input_schema: Option<&Value>) -> Vec<(Vec<String>, String)> {
     let mut found = Vec::new();
@@ -157,6 +180,40 @@ pub(crate) fn param_suffix_valid(suffix: &str) -> bool {
         && suffix
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
+}
+
+/// Validate annotation grammar before treating the schema as a complete header contract.
+pub(crate) fn validate_param_annotations(schema: Option<&Value>) -> Result<(), String> {
+    fn visit(
+        schema: &Value,
+        depth: usize,
+        seen: &mut std::collections::BTreeSet<String>,
+    ) -> Result<(), String> {
+        let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
+            return Ok(());
+        };
+        if depth >= MAX_PARAM_DEPTH && !properties.is_empty() {
+            return Err(
+                "The tool's header annotations exceed the supported property depth.".into(),
+            );
+        }
+        for definition in properties.values() {
+            if let Some(raw) = definition.get("x-mcp-header") {
+                let suffix = raw.as_str().filter(|s| param_suffix_valid(s)).ok_or_else(||
+                    "The tool's `x-mcp-header` annotation is not a nonempty HTTP field-name token.".to_string())?;
+                if !seen.insert(suffix.to_ascii_lowercase()) {
+                    return Err("The tool's `x-mcp-header` annotations repeat a header name after case folding.".into());
+                }
+            } else {
+                visit(definition, depth + 1, seen)?;
+            }
+        }
+        Ok(())
+    }
+    if let Some(schema) = schema {
+        visit(schema, 0, &mut std::collections::BTreeSet::new())?;
+    }
+    Ok(())
 }
 
 fn annotations(schema: &Value, path: &mut Vec<String>, found: &mut Vec<(Vec<String>, String)>) {
@@ -183,6 +240,7 @@ pub fn argument_at<'a>(arguments: &'a Value, path: &[String]) -> Option<&'a Valu
 }
 
 /// THE TEXT AN `Mcp-Param-*` HEADER CARRIES for one argument value: a string as it is, an integer
+/// in decimal, a boolean as `true` or `false`; `None` for any other value (no header mirrors it).
 #[must_use]
 pub fn param_text(value: &Value) -> Option<String> {
     match value {
@@ -194,6 +252,9 @@ pub fn param_text(value: &Value) -> Option<String> {
 }
 
 /// THE CUSTOM PARAMETER MIRROR a raised or relayed `tools/call` must carry (a session client's
+/// revision has none): for every `x-mcp-header` annotation ([`annotated_params`]) whose argument is
+/// a string, an integer or a boolean ([`param_text`]), (`mcp-param-<suffix>`, the value in the
+/// name sentinel where it needs one).
 #[must_use]
 pub fn param_mirror(
     input_schema: Option<&Value>,
@@ -221,6 +282,7 @@ pub fn param_mirror(
 const STATELESS_ONLY_MEMBERS: &[&str] = &["resultType", "cacheScope", "ttlMs"];
 
 /// LOWERS a stateless result into a session revision's shape: `false` when it is not a complete
+/// one (an input-required or task answer), which no session revision can express.
 pub fn lower_result(result: &mut Value) -> bool {
     let Some(obj) = result.as_object_mut() else {
         return true;
@@ -247,6 +309,10 @@ pub enum Lowered {
 }
 
 /// LOWERS one JSON-RPC answer as BYTES, never parsed and printed again (Law 11, as
+/// `framing::event_stream` relays the stateless answer): an answer [`lower_result`] would change
+/// nothing in is [`Lowered::Unchanged`], and otherwise only the removed members' spans are cut out
+/// of the answer's own text, so every other member keeps its order, its spacing and its numbers'
+/// spelling.
 #[must_use]
 pub fn lower_answer(answer: &[u8]) -> Option<Lowered> {
     let text = std::str::from_utf8(answer).ok()?;
@@ -268,6 +334,7 @@ pub fn lower_answer(answer: &[u8]) -> Option<Lowered> {
 }
 
 /// `text` (one JSON-RPC answer) with every stateless-only member of its `result` cut out, with the
+/// one comma that joined it: `None` when `text` is not one object with an object `result`.
 fn splice_result(text: &str) -> Option<Vec<u8>> {
     let top = members(text.as_bytes(), 0)?;
     if !text
@@ -308,6 +375,9 @@ fn splice_result(text: &str) -> Option<Vec<u8>> {
 }
 
 /// Builds the `initialize` result from the stateless discovery document, for `revision`: only the
+/// capability groups the session revisions define and discovery declared (`tools`, `prompts`,
+/// `resources` with `subscribe`, `logging`, and from `2025-06-18` `completions`); no list-changed
+/// notifications are offered.
 #[must_use]
 pub fn initialize_result(discovery: &Value, revision: Revision) -> Value {
     let declared = discovery.get("capabilities");
@@ -339,6 +409,7 @@ pub fn initialize_result(discovery: &Value, revision: Revision) -> Value {
 }
 
 /// One event-stream event. `data` is written one `data:` line per line it holds, so a multi-line
+/// payload survives framing.
 #[must_use]
 pub fn frame(id: Option<&str>, event: Option<&str>, data: &str) -> String {
     let mut out = String::with_capacity(data.len() + 48);
@@ -371,6 +442,7 @@ pub fn frame(id: Option<&str>, event: Option<&str>, data: &str) -> String {
 }
 
 /// The `2024-11-05` stream's first event: the address, relative to the endpoint's own origin, that
+/// messages for this session are POSTed to.
 #[must_use]
 pub fn endpoint_event(mount_path: &str, session: &str) -> String {
     frame(

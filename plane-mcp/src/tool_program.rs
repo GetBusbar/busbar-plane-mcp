@@ -2,6 +2,34 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! Stdio upstream servers: a `transport: stdio`
+//! registration is a member of the door's PROGRAM need ([`crate::statement::NEED_PROGRAM`]), and the
+//! host keeps ONE long-lived program per member. Every exchange the door has with that program — the
+//! relayed `tools/call` over the kernel's walk, verify-on-call's `tools/list`, an operator's
+//! `connect`, a further round, a reply to the program's own ask — is a lease on the same running
+//! child, so this module correlates what it reads BY JSON-RPC ID, the previous release's rule:
+//!
+//! * Each lease reads every message the child writes after it opened. A message is a JSON value
+//!   ([`Frames`]: the child's frames, read whole however the host's buffer cut them); only a
+//!   response carrying the id this exchange sent is its answer ([`Correlator::take`]). A response
+//!   to another id is another exchange's and is passed over.
+//! * A message of the child's own is handled as the previous release handled it on the stdio leg
+//!   (`client::peer`): `notifications/progress` carrying this call's token is relayed; a list-changed
+//!   notification brings verify-on-call forward; every other notification is passed over; `ping`,
+//!   an unknown method and an UNGRANTED authority ask are ANSWERED (the empty result, `-32601`, the
+//!   operator's refusal), once per child generation whichever exchange read it first
+//!   ([`Peer::claim`]). A granted authority ask is busbar's caller's to answer, and only
+//!   the caller whose call it serves: calls whose asks may be relayed reach a child ONE AT A TIME,
+//!   in arrival order (the door's line), so the ask is the call's first in line ([`first_in_line`],
+//!   fixed by the first exchange to read it, [`Peer::owner`]); that call's exchange takes it
+//!   ([`Correlator::asks`]) and busbar writes nothing back, every other exchange passes it over,
+//!   and an ask raised while no such call is open is refused on the child's input, once. At most
+//!   [`MAX_INTERLEAVED_MESSAGES`] such messages per exchange.
+//! * `initialize` runs ONCE PER GENERATION of the child (the generation each lease's head names):
+//!   an exchange that opens on a generation the door has not greeted greets it first
+//!   ([`ProgramExchange`]); a JSON-RPC refusal of the handshake is recorded and the leg continues,
+//!   as the previous release did, and only a transport failure fails it.
+//! * Every id busbar sends a child is its own: a call's carries the unit, so concurrent exchanges on
+//!   one child never share one ([`call_id`], [`list_id`]).
 
 #![cfg_attr(not(test), allow(dead_code))]
 
@@ -19,15 +47,20 @@ use crate::client::jsonrpc::{ServerRequestGrants, HANDSHAKE_REQUEST_ID};
 use crate::client::peer::{NotificationEffect, ServerMessage};
 
 /// THE WORK BUDGET of one exchange: how many messages of its own a child may send while busbar
+/// waits for one answer (the previous release's bound, and its reason: the deadline bounds the
+/// exchange in time, this bounds it in work).
 pub const MAX_INTERLEAVED_MESSAGES: u32 = 256;
 
 /// The most host services one exchange makes (each read is one): past it the exchange fails
+/// rather than read without end. A further exchange on the same ticket numbers its services this
+/// far apart.
 pub const EXCHANGE_SERVICES: u32 = 1 << 12;
 
 /// How much one read of a child's messages asks for.
 const READ_CHUNK: usize = 16 * 1024;
 
 /// The ids busbar's program exchanges carry: above every dispatch id and the handshake's, so none
+/// meets another's (`client::jsonrpc`'s id space).
 const PROGRAM_IDS: u64 = 1 << 40;
 
 /// Within [`PROGRAM_IDS`]: the `tools/list` exchanges.
@@ -36,6 +69,7 @@ const LIST_IDS: u64 = 1 << 39;
 const _: () = assert!(PROGRAM_IDS > HANDSHAKE_REQUEST_ID);
 
 /// The JSON-RPC id unit `unit`'s call carries on a child, round `round`: the unit's own, so two
+/// units' calls on one child never share an id.
 #[must_use]
 pub fn call_id(unit: u64, round: u32) -> Value {
     if unit <= u64::from(u32::MAX) && round <= 0x7F {
@@ -46,6 +80,7 @@ pub fn call_id(unit: u64, round: u32) -> Value {
 }
 
 /// A unit's `tools/list` id. Existing numeric ids stay byte-for-byte the same when the complete
+/// key and fetch fit; larger values use their full identity in a disjoint string namespace.
 #[must_use]
 pub fn unit_list_id(key: u64, n: u32) -> Value {
     if key <= u64::from(u32::MAX) && n <= 0x7F {
@@ -56,6 +91,7 @@ pub fn unit_list_id(key: u64, n: u32) -> Value {
 }
 
 /// An operator's `tools/list` id, with its complete slot, generation and fetch. Its string
+/// namespace is disjoint from unit list ids even for slot zero or the same numeric key.
 #[must_use]
 pub fn list_id(key: u64, n: u32) -> Value {
     Value::String(format!(
@@ -89,12 +125,15 @@ pub trait Peer {
     /// The member's grants, read now.
     fn grants(&self) -> ServerRequestGrants;
     /// Whether this exchange is the first to read the request `id` of the child of `generation`,
+    /// and so answers it.
     fn claim(&mut self, generation: u64, id: &Value) -> bool;
     /// WHOSE the child's GRANTED ask `id` of `generation` is, fixed by the first exchange to read
+    /// it ([`first_in_line`]) and the same for every exchange after.
     fn owner(&mut self, generation: u64, id: &Value) -> AskOwner;
     /// The child said its lists changed: verify-on-call is brought forward.
     fn notice(&mut self);
     /// The child announced that its resource `uri` changed (`notifications/resources/updated`):
+    /// the sessions watching it are told. A peer that holds no session hears nothing.
     fn announced(&mut self, uri: &str) {
         let _ = uri;
     }
@@ -164,6 +203,14 @@ pub enum AskOwner {
 }
 
 /// The call a child's ask belongs to. A request over stdio names no call it serves
+/// (MCP carries no related-request id on the wire, a call's progress token is its own and is never
+/// echoed on an ask, and the child numbers its own requests), so the door makes the answer
+/// unambiguous instead: calls whose asks may be relayed reach a child one at a time, in arrival
+/// order, and the ask is the call FIRST in that line. `line` is the child's member's calls in
+/// arrival order, each its id and the generation its lease reached (`0` before its head, which
+/// counts on every generation). An empty line, or one whose first call is on another generation's
+/// child, is `None`: the ask is refused, never handed to whichever exchange reads first (relayed
+/// down the session it belongs to, as-is).
 pub fn first_in_line(
     line: impl IntoIterator<Item = (Value, u64)>,
     generation: u64,
@@ -181,6 +228,7 @@ pub const UNATTRIBUTED: &str = "ask_unattributed";
 pub struct Correlator {
     frames: Frames,
     interleaved: u32,
+    interleaved_bytes: usize,
     /// The replies to the child's own requests, owed on its input, in order.
     pub outbox: VecDeque<Vec<u8>>,
     /// The progress frames carrying this exchange's token, in order.
@@ -203,6 +251,8 @@ pub struct ChildAsk {
 }
 
 /// THE CHILD'S ASKS AS THE CALLER IS HANDED THEM: an `input_required` result whose `inputRequests`
+/// carries each request verbatim, keyed by the child's own id (a string id as it is, any other as
+/// its JSON), and the keys paired with the ids the answers go back under.
 #[must_use]
 pub fn relayed_asks(asks: &[ChildAsk]) -> (Value, Vec<(String, Value)>) {
     let mut requests = serde_json::Map::new();
@@ -230,6 +280,8 @@ pub fn relayed_asks(asks: &[ChildAsk]) -> (Value, Vec<(String, Value)>) {
 }
 
 /// THE CALLER'S ANSWERS, AS THE CHILD IS WRITTEN THEM: one JSON-RPC response per request it asked,
+/// under the child's own id, its `result` the caller's answer verbatim. A key the caller did not
+/// answer has no reply ([`crate::ask::decide`] refuses such a retry before it gets here).
 #[must_use]
 pub fn child_replies(child: &crate::ask::ChildLeg, responses: Option<&Value>) -> Vec<Vec<u8>> {
     child
@@ -256,6 +308,13 @@ impl Correlator {
     }
 
     /// Read `bytes` of member `member`'s messages (its child of `generation`), waiting for the
+    /// answer to `wait`: that answer (its bytes) once it came. Messages of the child's own are
+    /// handled on the way.
+    ///
+    /// # Errors
+    ///
+    /// The child sent more than [`MAX_INTERLEAVED_MESSAGES`] of its own, or one message past the
+    /// bound, in the previous release's words.
     pub fn take(
         &mut self,
         bytes: &[u8],
@@ -306,6 +365,12 @@ impl Correlator {
             }
             return Ok(());
         };
+        self.interleaved_bytes = self
+            .interleaved_bytes
+            .saturating_add(value.to_string().len());
+        if self.interleaved_bytes > MESSAGE_MAX {
+            return Err("stdio MCP child exceeded the interleaved message byte limit".to_string());
+        }
         self.interleaved = self.interleaved.saturating_add(1);
         if self.interleaved > MAX_INTERLEAVED_MESSAGES {
             return Err(format!(
@@ -415,7 +480,7 @@ enum Step {
     Head,
     Greeting,
     Next,
-    Write(Vec<u8>),
+    Write(std::sync::Arc<[u8]>, usize),
     Read,
     Close,
 }
@@ -455,6 +520,9 @@ pub struct ProgramExchange {
 }
 
 /// THE LEASE OPERATIONS AN EXCHANGE MAKES on its member's program: each is the host connector's
+/// service of the same name, numbered `issued` on `ticket` ([`Host`]'s connector). The exchange
+/// drives its child through this seam, so its logic is tested in the crate over a child that is a
+/// plain Rust value (`src/tests/program_tests.rs`); a served door drives it over the host's own.
 pub trait ProgramConn {
     /// Lease the member's program over `need`, its dial bounded by `timeout_ms`: the stream.
     fn establish(
@@ -534,6 +602,7 @@ impl ProgramConn for Host {
 
 impl ProgramExchange {
     /// An exchange with member `member` over need `need`: `messages` sent in order, each read to
+    /// the answer to its id when it names one; `greet` = greet a generation the door has not.
     #[must_use]
     pub fn new(
         member: &str,
@@ -616,6 +685,8 @@ impl ProgramExchange {
     }
 
     /// Drive the exchange on `ticket`, its services numbered from `base`: READY with what it came
+    /// to, PENDING (to be driven again on the op's next entry), or why it failed. `greeted` says
+    /// whether the door already greeted a generation.
     pub fn drive(
         &mut self,
         host: &dyn ProgramConn,
@@ -709,31 +780,41 @@ impl ProgramExchange {
                 }
                 Step::Next => {
                     if let Some(reply) = self.corr.outbox.pop_front() {
-                        self.step = Step::Write(reply);
+                        self.step = Step::Write(reply.into(), 0);
                     } else if self.waiting.is_some() {
                         self.step = Step::Read;
                     } else if let Some((message, wait)) = self.queue.pop_front() {
                         self.waiting = wait;
-                        self.step = Step::Write(message);
+                        self.step = Step::Write(message.into(), 0);
                     } else {
                         self.step = Step::Close;
                     }
                 }
-                Step::Write(message) => match host.write(ticket, seq, self.stream, &message) {
-                    Poll::Pending => return Poll::Pending,
-                    Poll::Ready(Ok(_)) => {
-                        self.issued += 1;
-                        if message == initialized_notification() {
-                            self.greeted = true;
-                            self.completed_greeting(peer);
+                Step::Write(message, offset) => {
+                    match host.write(ticket, seq, self.stream, &message[offset..]) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(Ok(written)) => {
+                            self.issued += 1;
+                            if written == 0 || written > message.len() - offset {
+                                self.fail("stdio MCP host made invalid write progress".to_string());
+                                continue;
+                            }
+                            if offset + written < message.len() {
+                                self.step = Step::Write(message, offset + written);
+                                continue;
+                            }
+                            if message.as_ref() == initialized_bytes() {
+                                self.greeted = true;
+                                self.completed_greeting(peer);
+                            }
+                            self.step = Step::Next;
                         }
-                        self.step = Step::Next;
+                        Poll::Ready(Err(e)) => {
+                            self.issued += 1;
+                            self.fail(e);
+                        }
                     }
-                    Poll::Ready(Err(e)) => {
-                        self.issued += 1;
-                        self.fail(e);
-                    }
-                },
+                }
                 Step::Read => {
                     match host.read_reply(ticket, seq, self.stream, &mut self.buf, &mut self.slot) {
                         Poll::Pending => return Poll::Pending,
@@ -753,7 +834,10 @@ impl ProgramExchange {
                                         Ok(Some(answer)) => {
                                             self.waiting = None;
                                             if wait.as_u64() == Some(HANDSHAKE_REQUEST_ID) {
-                                                self.greeted(&answer);
+                                                if let Err(reason) = self.greeted(&answer) {
+                                                    self.fail(reason);
+                                                    continue;
+                                                }
                                                 if self.greeted {
                                                     self.completed_greeting(peer);
                                                 }
@@ -809,17 +893,21 @@ impl ProgramExchange {
         }
     }
 
-    /// The handshake's answer: a result is acknowledged; a refusal (a child that does no handshake)
-    fn greeted(&mut self, answer: &[u8]) {
-        let accepted = matches!(
-            crate::client::jsonrpc::parse_response(answer, HANDSHAKE_REQUEST_ID),
-            crate::client::jsonrpc::RpcOutcome::Result(_)
-        );
-        if accepted {
-            return;
+    /// Validate the handshake before acknowledging it or sending ordinary requests.
+    fn greeted(&mut self, answer: &[u8]) -> Result<(), String> {
+        if let crate::client::jsonrpc::RpcOutcome::Result(result) =
+            crate::client::jsonrpc::parse_response(answer, HANDSHAKE_REQUEST_ID)
+        {
+            let supported = result
+                .get("protocolVersion")
+                .and_then(Value::as_str)
+                .and_then(crate::revision::Revision::parse)
+                .is_some_and(crate::revision::Revision::has_sessions);
+            if supported && result.get("capabilities").is_some_and(Value::is_object) {
+                return Ok(());
+            }
         }
-        self.queue.retain(|(m, _)| *m != initialized_notification());
-        self.greeted = true;
+        Err("stdio MCP child returned an invalid or failed initialization response".to_string())
     }
 }
 
@@ -854,9 +942,16 @@ pub fn initialize() -> Vec<u8> {
 /// The handshake's acknowledgement, a notification.
 #[must_use]
 pub fn initialized_notification() -> Vec<u8> {
-    crate::client::verb::UpstreamVerb::NotificationsInitialized
-        .build("", HANDSHAKE_REQUEST_ID, None)
-        .body
+    initialized_bytes().to_vec()
+}
+
+fn initialized_bytes() -> &'static [u8] {
+    static BYTES: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    BYTES.get_or_init(|| {
+        crate::client::verb::UpstreamVerb::NotificationsInitialized
+            .build("", HANDSHAKE_REQUEST_ID, None)
+            .body
+    })
 }
 
 #[cfg(test)]

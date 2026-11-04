@@ -147,7 +147,7 @@ pub fn host(wake: ConnWake, anchors: Option<&str>) -> Arc<dyn DeclaredConns> {
             target
                 .to_socket_addrs()
                 .ok()
-                .and_then(|mut addresses| addresses.find(|a| a.ip().is_loopback()))
+                .and_then(|mut addresses| addresses.find(|a| a.is_ipv4() && a.ip().is_loopback()))
                 .ok_or(busbar_contract::abi::host::service::DEST_UNRESOLVABLE),
         )
     };

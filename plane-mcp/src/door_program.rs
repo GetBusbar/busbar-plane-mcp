@@ -2,6 +2,26 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The stdio servers' leg, in the door: a
+//! `transport: stdio` registration is a member of the program need ([`statement::NEED_PROGRAM`]); the
+//! host keeps one long-lived child per member, and every exchange the door has with it is
+//! correlated by id ([`crate::tool_program`]).
+//!
+//! * Before a call is relayed to a stdio member, its child's generation is GREETED once
+//!   ([`ready`]): an exchange that only opens a lease, reads the generation and, for one the door
+//!   has not greeted, runs `initialize` and its acknowledgement.
+//! * The relayed `tools/call` goes over the kernel's walk on the member's route like any other
+//!   member's; its answer is the message carrying the unit's id among everything the child writes
+//!   ([`far`]), and a request of the child's own read on the way is answered on a lease of its own
+//!   (`ping`, an unknown method, an ungranted ask) or, a granted authority ask, handed up as busbar's
+//!   caller's to answer ([`Far::Asked`]) — the caller of the call FIRST IN THE CHILD'S
+//!   LINE ([`Relaying`]): calls to a member whose grants let its asks be relayed reach its child one
+//!   at a time, in arrival order, each holding its place until its answer is read (across a relayed
+//!   ask's round trip, until its retry or the ask's state lapses); a call behind it waits its turn
+//!   within its own deadline ([`in_line`]). An ask raised while no such call is open is refused. The
+//!   caller's answer comes back on a retry of the call ([`ProgramRelay::retrying`]): written to the
+//!   child under its own request id, and the call the child still owes read on.
+//! * Verify-on-call's `tools/list` ([`tools_listed`]), an operator's `connect`, and a further round reach the
+//!   same child the same way.
 
 use super::*;
 use crate::tool_program::{
@@ -10,6 +30,10 @@ use crate::tool_program::{
 use std::task::Poll;
 
 /// THE LINE OF CALLS RELAYED TO STDIO CHILDREN, by serial (arrival order): every
+/// relayed call is entered before its request could reach the kernel's walk and leaves when its
+/// relay is dropped (or, holding its place across a relayed ask's round trip, when that lapses).
+/// For a member whose asks may be relayed, only the call first in its line is sent ([`in_line`]),
+/// so the child serves one such call at a time and its ask is that call's ([`first_in_line`]).
 pub(super) type Relaying = Arc<Keyed<u64, InLine>>;
 
 /// One call in a stdio member's line.
@@ -29,6 +53,7 @@ pub(super) struct InLine {
 }
 
 /// Whether member `def`'s calls wait their turn on its child: its grants let a child's ask be
+/// relayed to a caller (a call whose asks are all refused may share the child freely).
 pub(super) fn serialised(def: &crate::tools_config::McpServerDefCfg) -> bool {
     let g = def.grants;
     g.sampling || g.elicitation || g.roots
@@ -40,12 +65,15 @@ pub(super) const BUSY: &str = "the stdio MCP child was serving another call whos
                                waited its turn; it was never sent";
 
 /// Where the door's own program exchanges number their host services on a unit's ticket: the
+/// greeting before each attempt, [`crate::tool_program::EXCHANGE_SERVICES`] apart per attempt.
 const READY_SEQ: u32 = 1 << 31;
 
 /// Where the replies a relayed call owes its child number theirs: one exchange per reply batch,
+/// [`crate::tool_program::EXCHANGE_SERVICES`] apart.
 const REPLY_SEQ: u32 = (1 << 31) + (1 << 30);
 
 /// The most requests of a child's own the door remembers having answered or put to a call (per
+/// member and generation, by id), so two exchanges reading one request decide it once.
 const MAX_ANSWERED: usize = 4096;
 
 /// Whether `def` is a `transport: stdio` registration: a member of the program need.
@@ -76,6 +104,7 @@ pub(super) struct ProgramRelay {
     /// The answer (or why there is none), held while the replies are written.
     settled: Option<Result<Vec<u8>, String>>,
     /// A retry answering the child's own requests: the generation that asked, which is the only one
+    /// its answers and its wait mean anything to.
     expect: Option<u64>,
     /// Its place in the line ([`Relaying`]), left when it is dropped.
     open: (Relaying, u64),
@@ -118,6 +147,7 @@ impl Drop for ProgramRelay {
 
 impl ProgramRelay {
     /// The relay of a call to member `member` whose round carries `wait`: entered at the end of
+    /// the member's line.
     pub(super) fn waiting(plane: &McpDoor, member: &str, wait: impl Into<Value>) -> Self {
         let wait = wait.into();
         let serial = plane.relaying.with_all(|line| {
@@ -154,11 +184,15 @@ impl ProgramRelay {
     }
 
     /// Its asks went to its caller: dropped, it keeps its place in the line until `until` (the
+    /// host's monotonic clock, ms), for the retry that answers them.
     pub(super) fn hold(&mut self, until: u64) {
         self.hold = until;
     }
 
     /// THE RETRY OF A CHILD'S RELAYED ASK: the caller's answers after the first (which the walk's
+    /// own lease carries) owed on the child of `generation`, and the call `wait` it still owes read
+    /// on, on that generation only. It takes up the place in the line the call held while its
+    /// caller answered.
     pub(super) fn retrying(
         plane: &McpDoor,
         member: &str,
@@ -189,6 +223,8 @@ pub(super) const RESTARTED: &str = "the stdio MCP child that asked was restarted
                                     caller's answer reached it, so the call it was serving is gone";
 
 /// WHETHER `relay`'s CALL IS FIRST IN ITS MEMBER'S LINE, so may be sent: a place held across a
+/// relayed ask's round trip that lapsed by `now` (the host's monotonic clock, ms) is given up first.
+/// One that is not waits its turn, its unit's `ticket` woken when the call ahead of it leaves.
 pub(super) fn in_line(
     plane: &McpDoor,
     relay: &ProgramRelay,
@@ -215,6 +251,7 @@ pub(super) fn in_line(
 }
 
 /// The earlier existing deadline a queued call must re-enter on: its own request deadline or a
+/// held place ahead of it expiring. An unread clock or absent request deadline stays unchanged.
 pub(super) fn queue_wake_at(
     plane: &McpDoor,
     relay: &ProgramRelay,
@@ -248,6 +285,7 @@ struct DoorPeer<'a> {
 
 impl DoorPeer<'_> {
     /// What became of the child's request `id` of `generation`: the call it was put to (`None` =
+    /// busbar answered it), decided by `first` when this exchange is the first to read it (`true`).
     fn decide(
         &self,
         generation: u64,
@@ -270,17 +308,20 @@ pub(super) type AnsweredKey = (String, u64, String);
 
 /// THE MEMO OF A CHILD'S OWN REQUESTS THE DOOR DECIDED: the call each was put to (`None` = busbar
 /// answered it), so two exchanges reading one request decide it once. Bounded at its cap by
-/// forgetting the OLDEST decision first: the order a decision was made in, never its key's order,
-/// which would forget the alphabetically-first member's live decision.
+/// forgetting the OLDEST decision of the member holding the MOST decisions first: the order a
+/// decision was made in, never its key's order (which would forget the alphabetically-first
+/// member's live decision), and never another member's while one member's child floods the memo.
 #[derive(Debug)]
 pub(super) struct Answered {
     cap: usize,
     /// The number the next decision is made under.
     next: u64,
     /// Each decision, and the number it was made under.
-    by_key: std::collections::BTreeMap<AnsweredKey, (u64, Option<Value>)>,
+    by_key: BTreeMap<AnsweredKey, (u64, Option<Value>)>,
     /// Each decision's key, by the number it was made under: oldest first.
-    by_age: std::collections::BTreeMap<u64, AnsweredKey>,
+    by_age: BTreeMap<u64, AnsweredKey>,
+    /// The numbers each member's decisions were made under: its oldest first.
+    by_member: BTreeMap<String, std::collections::BTreeSet<u64>>,
     greetings: Arc<Keyed<(), GreetingBook>>,
 }
 
@@ -308,13 +349,15 @@ impl Answered {
         Answered {
             cap,
             next: 0,
-            by_key: std::collections::BTreeMap::new(),
-            by_age: std::collections::BTreeMap::new(),
+            by_key: BTreeMap::new(),
+            by_age: BTreeMap::new(),
+            by_member: BTreeMap::new(),
             greetings: Arc::default(),
         }
     }
 
     /// What became of request `key`: the decision already made (`false`), or `first`'s, remembered
+    /// (`true`).
     pub(super) fn decide(
         &mut self,
         key: AnsweredKey,
@@ -324,17 +367,48 @@ impl Answered {
             return (owner.clone(), false);
         }
         while self.by_key.len() >= self.cap {
-            let Some((_, oldest)) = self.by_age.pop_first() else {
+            let Some(age) = self.evictee() else {
                 break;
             };
-            self.by_key.remove(&oldest);
+            if !self.forget(age) {
+                break;
+            }
         }
         let owner = first();
         let made = self.next;
         self.next = self.next.wrapping_add(1);
         self.by_age.insert(made, key.clone());
+        self.by_member
+            .entry(key.0.clone())
+            .or_default()
+            .insert(made);
         self.by_key.insert(key, (made, owner.clone()));
         (owner, true)
+    }
+
+    /// The decision forgotten next: the oldest of the member holding the most (of those holding
+    /// equally many, the one whose oldest decision is oldest).
+    fn evictee(&self) -> Option<u64> {
+        self.by_member
+            .values()
+            .filter_map(|ages| Some((ages.len(), *ages.first()?)))
+            .max_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)))
+            .map(|(_, age)| age)
+    }
+
+    /// Forgets the decision made under `age`: whether there was one.
+    fn forget(&mut self, age: u64) -> bool {
+        let Some(key) = self.by_age.remove(&age) else {
+            return false;
+        };
+        if let Some(ages) = self.by_member.get_mut(&key.0) {
+            ages.remove(&age);
+            if ages.is_empty() {
+                self.by_member.remove(&key.0);
+            }
+        }
+        self.by_key.remove(&key);
+        true
     }
 }
 
@@ -520,7 +594,7 @@ fn exchange_child(
     member: &str,
     def: &crate::tools_config::McpServerDefCfg,
     exchange: &mut ProgramExchange,
-) -> std::task::Poll<Result<Exchanged, String>> {
+) -> Poll<Result<Exchanged, String>> {
     exchange_child_on(plane, host, ticket, base, member, def, exchange)
 }
 
@@ -532,7 +606,7 @@ fn exchange_child_on(
     member: &str,
     def: &crate::tools_config::McpServerDefCfg,
     exchange: &mut ProgramExchange,
-) -> std::task::Poll<Result<Exchanged, String>> {
+) -> Poll<Result<Exchanged, String>> {
     let greeted = |g: u64| plane.greeted.get(&member.to_string()) == Some(g);
     let mut peer = DoorPeer {
         plane,
@@ -544,6 +618,8 @@ fn exchange_child_on(
 }
 
 /// GREET the member's child before the attempt's call ([`Purpose::Ready`]): once per attempt, a
+/// lease that reads the generation and runs the handshake on one the door has not greeted. A child
+/// that cannot be reached is the walk's to find: the call goes on and its open answers.
 pub(super) fn ready(
     plane: &McpDoor,
     ticket: Ticket,
@@ -569,11 +645,11 @@ pub(super) fn ready(
             .saturating_mul(crate::tool_program::EXCHANGE_SERVICES),
     );
     match exchange_child(plane, host, ticket, base, member, def, &mut exchange) {
-        std::task::Poll::Pending => {
+        Poll::Pending => {
             unit.program = Some((Purpose::Ready, exchange));
             Looked::Pending
         }
-        std::task::Poll::Ready(result) => {
+        Poll::Ready(result) => {
             match result {
                 Ok(exchanged) => unit.program_ready = Some((unit.attempt, exchanged.generation)),
                 Err(reason) => {
@@ -594,6 +670,8 @@ pub(super) fn ready(
 }
 
 /// VERIFY-ON-CALL's fetch from a stdio member: its `tools/list`, on a lease
+/// of its own, answered by id, the child greeted first where its generation is new. The answer as
+/// the exchange SDK spells one (a child's answer is a success), or why it failed.
 pub(super) fn tools_listed(
     plane: &McpDoor,
     ticket: Ticket,
@@ -601,10 +679,9 @@ pub(super) fn tools_listed(
     def: &crate::tools_config::McpServerDefCfg,
     server: &str,
     base: u32,
-) -> std::task::Poll<Result<(busbar_contract::abi::sdk::exchange::ExchangeResponse, Value), String>>
-{
+) -> Poll<Result<(busbar_contract::abi::sdk::exchange::ExchangeResponse, Value), String>> {
     let Some(host) = plane.host.as_ref() else {
-        return std::task::Poll::Ready(Err(
+        return Poll::Ready(Err(
             busbar_contract::abi::sdk::conn::ConnFailure::Unarmed.to_string()
         ));
     };
@@ -615,11 +692,11 @@ pub(super) fn tools_listed(
         .filter(|listing| listing.root_id == id && listing.server == server)
         .unwrap_or_else(|| ProgramList::new(server, def, id.clone()));
     match listing.drive(plane, host, ticket, base, server, def) {
-        std::task::Poll::Pending => {
+        Poll::Pending => {
             unit.program_list = Some(listing);
-            std::task::Poll::Pending
+            Poll::Pending
         }
-        std::task::Poll::Ready(answer) => std::task::Poll::Ready(answer.map(|body| {
+        Poll::Ready(answer) => Poll::Ready(answer.map(|body| {
             (
                 busbar_contract::abi::sdk::exchange::ExchangeResponse {
                     status: 200,
@@ -634,19 +711,20 @@ pub(super) fn tools_listed(
 }
 
 /// An operator's `connect` to a stdio member: its `tools/list` on the verb's own ticket (the
+/// exchange parked on the instance while it pends), correlated by `id`.
 pub(super) fn connect_child(
     instance: &Instance<'_, McpDoor>,
     plane: &McpDoor,
     def: &crate::tools_config::McpServerDefCfg,
     server: &str,
-) -> std::task::Poll<(Result<Vec<u8>, String>, Value)> {
+) -> Poll<(Result<Vec<u8>, String>, Value)> {
     let ticket = instance.ticket();
     let id = list_id(
         (u64::from(ticket.slot) << 32) | u64::from(ticket.generation),
         0,
     );
     let Some(host) = plane.host.as_ref() else {
-        return std::task::Poll::Ready((
+        return Poll::Ready((
             Err(busbar_contract::abi::sdk::conn::ConnFailure::Unarmed.to_string()),
             id,
         ));
@@ -656,11 +734,11 @@ pub(super) fn connect_child(
         None => ProgramList::new(server, def, id.clone()),
     };
     match listing.drive(plane, host, ticket, 0, server, def) {
-        std::task::Poll::Pending => {
+        Poll::Pending => {
             instance.park(listing);
-            std::task::Poll::Pending
+            Poll::Pending
         }
-        std::task::Poll::Ready(answer) => std::task::Poll::Ready((answer, id)),
+        Poll::Ready(answer) => Poll::Ready((answer, id)),
     }
 }
 
@@ -704,37 +782,35 @@ impl ProgramList {
         base: u32,
         server: &str,
         def: &crate::tools_config::McpServerDefCfg,
-    ) -> std::task::Poll<Result<Vec<u8>, String>> {
+    ) -> Poll<Result<Vec<u8>, String>> {
         use crate::client::jsonrpc::{parse_response_id, Paged, RpcOutcome};
         loop {
             let Some(at) = base.checked_add(self.used) else {
-                return std::task::Poll::Ready(Err(
-                    "the tool-list service-handle range is exhausted".to_string(),
+                return Poll::Ready(Err(
+                    "the tool-list service-handle range is exhausted".to_string()
                 ));
             };
             let done =
                 match exchange_child(plane, host, ticket, at, server, def, &mut self.exchange) {
-                    std::task::Poll::Pending => return std::task::Poll::Pending,
-                    std::task::Poll::Ready(Err(error)) => {
-                        return std::task::Poll::Ready(Err(error));
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Err(error)) => {
+                        return Poll::Ready(Err(error));
                     }
-                    std::task::Poll::Ready(Ok(done)) => done,
+                    Poll::Ready(Ok(done)) => done,
                 };
             let body = done.answer.unwrap_or_default();
             let result = match parse_response_id(&body, &self.page_id) {
                 RpcOutcome::Result(result) => result,
                 RpcOutcome::Error { code, message } => {
-                    return std::task::Poll::Ready(Err(format!(
+                    return Poll::Ready(Err(format!(
                         "the upstream answered JSON-RPC error {code}: {message}"
                     )));
                 }
                 RpcOutcome::InputRequired { .. } => {
-                    return std::task::Poll::Ready(Err(
-                        "tools/list cannot request caller input".to_string()
-                    ));
+                    return Poll::Ready(Err("tools/list cannot request caller input".to_string()));
                 }
                 RpcOutcome::Malformed(error) | RpcOutcome::Uncorrelated(error) => {
-                    return std::task::Poll::Ready(Err(error));
+                    return Poll::Ready(Err(error));
                 }
             };
             match self.pages.take(result) {
@@ -747,13 +823,13 @@ impl ProgramList {
                             &crate::codec::json(&result),
                         )
                     };
-                    return std::task::Poll::Ready(Ok(bytes));
+                    return Poll::Ready(Ok(bytes));
                 }
                 Ok(Paged::Next(cursor)) => {
                     self.used =
                         match self.used.checked_add(self.exchange.services_used()) {
                             Some(used) if used < crate::tool_program::EXCHANGE_SERVICES => used,
-                            _ => return std::task::Poll::Ready(Err(
+                            _ => return Poll::Ready(Err(
                                 "the complete tool list exceeds its existing service-handle range"
                                     .to_string(),
                             )),
@@ -773,7 +849,7 @@ impl ProgramList {
                     .timed(def.timeout_ms())
                     .within_services(crate::tool_program::EXCHANGE_SERVICES - self.used);
                 }
-                Err(error) => return std::task::Poll::Ready(Err(error)),
+                Err(error) => return Poll::Ready(Err(error)),
             }
         }
     }
@@ -784,14 +860,20 @@ pub(super) enum Far {
     /// Read; nothing settled yet.
     Taken,
     /// A host service pended (a reply the child is owed): called again on its wake, the piece
+    /// already read.
     Pending,
     /// The answer to the call's id, or why there is none.
     Settled(Result<Vec<u8>, String>),
     /// The child asked for something busbar's caller answers: its granted requests, in
+    /// order, unanswered.
     Asked(Vec<crate::tool_program::ChildAsk>),
 }
 
 /// ONE FAR PIECE of a stdio member's answer: the head names the child's generation; each body
+/// piece is read for the message carrying the round's id, the child's own requests answered on a
+/// lease of their own (only to the same generation) and its progress kept; the end without an
+/// answer fails the call with [`crate::tool_program::CLOSED`]. A failure writing the replies the
+/// child is owed fails a call still unanswered, never one whose answer was already read.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn far(
     plane: &McpDoor,
@@ -849,7 +931,11 @@ pub(super) fn far(
     }
     match replying(plane, ticket, member, def, relay) {
         Poll::Pending => return Far::Pending,
-        Poll::Ready(Err(why)) => relay.settled = Some(Err(why)),
+        Poll::Ready(Err(why)) => {
+            if !matches!(relay.settled, Some(Ok(_))) {
+                relay.settled = Some(Err(why));
+            }
+        }
         Poll::Ready(Ok(())) => {}
     }
     match relay.settled.take() {
@@ -904,6 +990,8 @@ fn replying(
 }
 
 /// ASKS BUSBAR COULD NOT RELAY, refused on the child's input (`replies`, one per ask: the round
+/// cap, or a relay the deployment cannot carry) so the child is never left waiting on an answer
+/// nobody will give; the call it serves is read on. `Pending` while the replies are written.
 pub(super) fn refuse_asks(
     plane: &McpDoor,
     ticket: Ticket,
@@ -926,3 +1014,7 @@ pub(super) fn refuse_asks(
 #[cfg(test)]
 #[path = "tests/door_program_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/door_program_audit.rs"]
+mod door_program_audit;

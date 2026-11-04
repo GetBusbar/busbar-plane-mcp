@@ -2,11 +2,15 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! Local results over pinned original inputs: nonrecursive substitution, whole-string markup
+//! normalisation and resumable compact JSON without materialising the amplified text/result.
+//! Planning admits at most 64 MiB of virtual text and encoded output, and 65,536 normalization
+//! operations, so caller substitutions cannot amplify synchronous work without bound.
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::revision::Revision;
 use serde_json::Value;
 
 /// A range of an immutable original string, never a range of a materialised expansion.
@@ -45,6 +49,16 @@ enum RopeKind {
 
 #[derive(Clone, Copy, Debug)]
 struct LengthOverflow;
+
+// Bound synchronous planning work before retained-history admission.
+const MAX_NORMALISE_OPERATIONS: usize = 65_536;
+const MAX_RENDERED_BYTES: usize = 64 * 1024 * 1024;
+
+fn add_rendered(length: Option<usize>, bytes: usize) -> Option<usize> {
+    length
+        .and_then(|n| n.checked_add(bytes))
+        .filter(|n| *n <= MAX_RENDERED_BYTES)
+}
 
 impl Rope {
     fn span(span: Span) -> Self {
@@ -307,7 +321,7 @@ impl KnownWord {
 }
 
 fn names(byte: Option<&u8>) -> bool {
-    matches!(byte, Some(byte) if byte.is_ascii_alphabetic() || matches!(*byte, b'!' | b'?'))
+    crate::sanitize::names_tag(byte)
 }
 
 fn head_demand(bytes: &[u8]) -> Option<DemandKind> {
@@ -321,6 +335,7 @@ fn head_demand(bytes: &[u8]) -> Option<DemandKind> {
 }
 
 /// The suffix is a word of bare `<` and closing `</` openers; every other byte makes the
+/// preceding prefix permanently inert. A slash can extend only a bare opener.
 fn opener_suffix(bytes: &[u8]) -> usize {
     let mut start = 0;
     let mut bare = false;
@@ -451,6 +466,9 @@ fn compile_summary<'a>(
     let mut start = span.start;
     for (at, byte) in text.as_bytes()[span.start..span.end].iter().enumerate() {
         if *byte == b'>' {
+            if operations.len() == MAX_NORMALISE_OPERATIONS {
+                return Err(LengthOverflow);
+            }
             let end = span.start + at + 1;
             operations.push(operation(span.source, start, end, text));
             start = end;
@@ -628,6 +646,7 @@ fn source_summary<'a>(
 }
 
 /// Select a virtual range without copying its bytes. Boundary fragments are bounded by the
+/// physical template's substitution sites, even when an argument's value is repeated.
 fn range_rope(parts: &[Span], from: usize, to: usize) -> Result<Rope, LengthOverflow> {
     let mut at = 0usize;
     let mut result = Rope::default();
@@ -732,6 +751,8 @@ fn boundary_segment<'a>(
 }
 
 /// Normalise the virtual concatenation, sharing each original source's interior summary across
+/// repeated argument occurrences. The only non-source-sized state is one shared-rope frame per
+/// physical substitution site; no expanded opener stack or expanded output string is allocated.
 fn normalise_spans<'a>(
     pieces: &[Span],
     reusable: &[bool],
@@ -997,6 +1018,8 @@ struct Builder {
     input: Input,
     substitutions: BTreeMap<String, usize>,
     summaries: HashMap<usize, Option<SourceSummary>>,
+    work_bytes: usize,
+    work_operations: usize,
     parts: Vec<Part>,
 }
 
@@ -1068,6 +1091,23 @@ impl Builder {
                 end: self.input.source(original).len(),
             }]
         };
+        // Charge virtual input before normalization, including text that stripping later removes.
+        for piece in &pieces {
+            self.work_bytes = self
+                .work_bytes
+                .checked_sub(piece.len())
+                .ok_or(LengthOverflow)?;
+            if normalise && !self.summaries.contains_key(&piece.source) {
+                let operations = self.input.source(piece.source).as_bytes()[piece.start..piece.end]
+                    .iter()
+                    .filter(|byte| **byte == b'>')
+                    .count();
+                self.work_operations = self
+                    .work_operations
+                    .checked_sub(operations)
+                    .ok_or(LengthOverflow)?;
+            }
+        }
         let ropes = if normalise {
             let input = &self.input;
             normalise_spans(&pieces, &input.reusable, &mut self.summaries, &|index| {
@@ -1087,12 +1127,12 @@ impl Builder {
         let mut length = Some(0usize);
         for part in &self.parts {
             match part {
-                Part::Raw(bytes) => length = length.and_then(|n| n.checked_add(bytes.len())),
-                Part::Id(bytes) => length = length.and_then(|n| n.checked_add(bytes.len())),
+                Part::Raw(bytes) => length = add_rendered(length, bytes.len()),
+                Part::Id(bytes) => length = add_rendered(length, bytes.len()),
                 Part::String(ropes) => {
                     let mut cursor = RopeString::default();
                     cursor.write_with(ropes, &|index| input.source(index), |bytes| {
-                        length = length.and_then(|n| n.checked_add(bytes.len()));
+                        length = add_rendered(length, bytes.len());
                         if length.is_some() {
                             bytes.len()
                         } else {
@@ -1289,7 +1329,7 @@ fn unrepresentable(id: &Value) -> crate::tool_arrival::Refusal {
         500,
         id,
         crate::codec::CODE_REFUSED,
-        "The local result length cannot be represented on this host.".to_string(),
+        "The local result exceeds the rendering work or encoded-length budget.".to_string(),
         None,
     )
 }
@@ -1464,8 +1504,26 @@ impl Local {
         published: String,
         id: Value,
         params: Option<Value>,
-        legacy: bool,
+        revision: Revision,
     ) -> Result<Self, crate::tool_arrival::Refusal> {
+        let legacy = revision.has_sessions();
+        if params
+            .as_ref()
+            .and_then(|p| p.get("arguments"))
+            .is_some_and(|arguments| {
+                !arguments
+                    .as_object()
+                    .is_some_and(|args| args.values().all(Value::is_string))
+            })
+        {
+            return Err(crate::call::error(
+                400,
+                &id,
+                crate::codec::CODE_INVALID_PARAMS,
+                "`params.arguments` must be an object of strings.".to_string(),
+                None,
+            ));
+        }
         let prompt = held
             .catalogue
             .prompt_for(&|_, _| true, &published)
@@ -1478,6 +1536,22 @@ impl Local {
                     None,
                 )
             })?;
+        if revision == Revision::R2024_11_05
+            && prompt.messages.iter().any(|message| {
+                matches!(
+                    message.content,
+                    crate::tools_config::PromptContentCfg::Audio { .. }
+                )
+            })
+        {
+            return Err(crate::call::error(
+                400,
+                &id,
+                crate::codec::CODE_INVALID_PARAMS,
+                "This prompt contains audio, which MCP 2024-11-05 cannot represent.".to_string(),
+                None,
+            ));
+        }
         let server = held
             .section
             .servers
@@ -1508,6 +1582,8 @@ impl Local {
             input,
             substitutions,
             summaries: HashMap::new(),
+            work_bytes: MAX_RENDERED_BYTES,
+            work_operations: MAX_NORMALISE_OPERATIONS,
             parts: Vec::new(),
         };
         builder
@@ -1520,8 +1596,9 @@ impl Local {
         id: Value,
         mut params: Option<Value>,
         admit: &impl Fn(&str, &str) -> bool,
-        legacy: bool,
+        revision: Revision,
     ) -> Result<Self, crate::tool_arrival::Refusal> {
+        let legacy = revision.has_sessions();
         use crate::catalogue::Lookup;
         let Some(uri) = params
             .as_ref()
@@ -1536,6 +1613,7 @@ impl Local {
                 None,
             ));
         };
+        crate::reads::check_selector(&id, uri)?;
         let selected = match held.catalogue.resource_by_uri(admit, uri) {
             Lookup::One(resource) => {
                 let server = held
@@ -1577,7 +1655,11 @@ impl Local {
                 Lookup::NotFound => Err(crate::call::error(
                     404,
                     &id,
-                    crate::codec::CODE_INVALID_PARAMS,
+                    if legacy {
+                        -32002
+                    } else {
+                        crate::codec::CODE_INVALID_PARAMS
+                    },
                     format!("`{uri}` is not a resource this server exposes."),
                     Some(serde_json::json!({"uri": uri})),
                 )),
@@ -1614,6 +1696,8 @@ impl Local {
             input,
             substitutions,
             summaries: HashMap::new(),
+            work_bytes: MAX_RENDERED_BYTES,
+            work_operations: MAX_NORMALISE_OPERATIONS,
             parts: Vec::new(),
         };
         builder
@@ -1629,18 +1713,6 @@ impl Local {
     }
     pub(crate) fn done(&self) -> bool {
         self.cursor.part == self.plan.parts.len()
-    }
-    #[cfg(test)]
-    pub(crate) fn rewind(&mut self) {
-        self.cursor = Delivery::default();
-    }
-    #[cfg(test)]
-    pub(crate) fn fresh_clone(&self) -> Self {
-        Self {
-            input: self.input.clone(),
-            plan: self.plan.clone(),
-            cursor: Delivery::default(),
-        }
     }
     pub(crate) fn write_with(&mut self, mut write: impl FnMut(&[u8]) -> usize) -> usize {
         let mut written = 0;
@@ -1690,16 +1762,6 @@ impl Local {
             self.cursor.string = RopeString::default();
         }
         written
-    }
-    #[cfg(test)]
-    pub(crate) fn write(&mut self, output: &mut [u8]) -> usize {
-        let mut at = 0;
-        self.write_with(|bytes| {
-            let copied = bytes.len().min(output.len() - at);
-            output[at..at + copied].copy_from_slice(&bytes[..copied]);
-            at += copied;
-            copied
-        })
     }
 }
 

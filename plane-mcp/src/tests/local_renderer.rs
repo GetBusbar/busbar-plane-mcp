@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 
 use super::{normalise_spans, Local, RopeCursor, Span};
 use crate::plane_door::Held;
+use crate::revision::Revision;
 
 fn normalised(sources: &[&str], sequence: &[usize]) -> String {
     let pieces: Vec<_> = sequence
@@ -160,7 +161,7 @@ fn leading_slash_extends_only_an_incoming_bare_opener_across_every_source_seam()
 
 #[test]
 fn deep_reconstitution_and_its_source_summary_drop_use_no_recursive_demand_chain() {
-    let depth = 100_000;
+    let depth = super::MAX_NORMALISE_OPERATIONS - 1;
     let input = format!("{}a{}", "<".repeat(depth), ">a".repeat(depth));
     assert_eq!(
         normalised(&[&input], &[0]),
@@ -172,7 +173,7 @@ fn held(section: Value) -> Arc<Held> {
     let bytes = serde_json::to_vec(&section).expect("section JSON");
     Arc::new(Held::of(
         7,
-        crate::statement::read_tools_section(&bytes).expect("section reads"),
+        crate::statement::test_support::read_tools_section(&bytes).expect("section reads"),
     ))
 }
 
@@ -234,12 +235,12 @@ fn every_prompt_content_form_and_legacy_schema_match_the_old_api_byte_for_byte()
             ("<<a>/ ", "<b>name>"),
             ("<b>text", ""),
         ] {
-            let params = json!({"name":name, "arguments":{"a":a,"b":b,"number":3,"empty":""}});
+            let params = json!({"name":name, "arguments":{"a":a,"b":b,"number":"3","empty":""}});
             let id = json!("quote\"\\\n中文");
             let prompt =
                 crate::reads::prompt_named(&held.catalogue, &id, Some(&params), &|_, _| true)
                     .expect("prompt");
-            let expected = crate::reads::prompts_get(prompt, &id, Some(&params));
+            let expected = crate::reads::prompts_get(prompt, &id, Some(&params)).unwrap();
             for session in [false, true] {
                 for room in [1, 2, 7, 257] {
                     let local = Local::prompt(
@@ -247,7 +248,11 @@ fn every_prompt_content_form_and_legacy_schema_match_the_old_api_byte_for_byte()
                         name.to_string(),
                         id.clone(),
                         Some(params.clone()),
-                        session,
+                        if session {
+                            Revision::R2025_11_25
+                        } else {
+                            Revision::R2026_07_28
+                        },
                     )
                     .expect("local prompt");
                     assert_eq!(
@@ -292,7 +297,11 @@ fn concrete_and_template_resources_and_refusals_match_the_old_api() {
                     json!(9),
                     Some(params.clone()),
                     &admit,
-                    session,
+                    if session {
+                        Revision::R2025_11_25
+                    } else {
+                        Revision::R2026_07_28
+                    },
                 );
                 match (&old, new) {
                     (Ok(bytes), Ok(local)) => {
@@ -300,7 +309,14 @@ fn concrete_and_template_resources_and_refusals_match_the_old_api() {
                     }
                     (Err(old), Err(new)) => {
                         assert_eq!(new.status, old.status);
-                        assert_eq!(new.body(), old.body());
+                        let mut expected: Value = serde_json::from_slice(&old.body()).unwrap();
+                        if session && new.status == 404 {
+                            expected["error"]["code"] = json!(-32002);
+                        }
+                        assert_eq!(
+                            serde_json::from_slice::<Value>(&new.body()).unwrap(),
+                            expected
+                        );
                     }
                     _ => panic!("resource lookup outcomes differ for {uri}"),
                 }
@@ -311,7 +327,13 @@ fn concrete_and_template_resources_and_refusals_match_the_old_api() {
         let old =
             crate::reads::resources_read(&held.catalogue, &json!(9), params.as_ref(), &|_, _| true)
                 .expect_err("invalid URI");
-        let Err(new) = Local::resource(held.clone(), json!(9), params, &|_, _| true, false) else {
+        let Err(new) = Local::resource(
+            held.clone(),
+            json!(9),
+            params,
+            &|_, _| true,
+            Revision::R2026_07_28,
+        ) else {
             panic!("invalid URI accepted")
         };
         assert_eq!(old.status, new.status);
@@ -336,7 +358,7 @@ fn replay_and_abandonment_keep_the_original_arguments_and_generation_until_last_
         "s_p".to_string(),
         json!(4),
         Some(params),
-        false,
+        Revision::R2026_07_28,
     )
     .expect("local prompt");
     assert!(local
@@ -361,4 +383,141 @@ fn replay_and_abandonment_keep_the_original_arguments_and_generation_until_last_
     assert_eq!(collect(replay, 7), expected);
     assert!(original.upgrade().is_none());
     assert!(generation.upgrade().is_none());
+}
+
+impl Local {
+    pub(crate) fn rewind(&mut self) {
+        self.cursor = super::Delivery::default();
+    }
+    pub(crate) fn fresh_clone(&self) -> Self {
+        Self {
+            input: self.input.clone(),
+            plan: self.plan.clone(),
+            cursor: super::Delivery::default(),
+        }
+    }
+    pub(crate) fn write(&mut self, output: &mut [u8]) -> usize {
+        let mut at = 0;
+        self.write_with(|bytes| {
+            let copied = bytes.len().min(output.len() - at);
+            output[at..at + copied].copy_from_slice(&bytes[..copied]);
+            at += copied;
+            copied
+        })
+    }
+}
+
+#[test]
+fn audit_renderer_work_budgets_and_invalid_arguments() {
+    let text = ">".repeat(super::MAX_NORMALISE_OPERATIONS + 1);
+    assert!(super::compile_summary(
+        Span {
+            source: 0,
+            start: 0,
+            end: text.len()
+        },
+        &|_| text.as_str()
+    )
+    .is_err());
+    assert_eq!(
+        super::add_rendered(Some(super::MAX_RENDERED_BYTES), 1),
+        None
+    );
+    let config =
+        held(json!({"s":{"url":"https://up.test", "prompts_allow":{"p":{"template":"{value}"}}}}));
+    assert!(Local::prompt(
+        config,
+        "s_p".into(),
+        json!(1),
+        Some(json!({"arguments":{"value":42}})),
+        Revision::R2026_07_28
+    )
+    .is_err());
+}
+
+#[test]
+fn audit_audio_is_refused_only_for_2024_and_resource_not_found_is_revision_specific() {
+    let config = held(
+        json!({"s":{"url":"https://up.test", "prompts_allow":{"p":{"messages":[
+            {"content":{"type":"audio", "data":"YQ==", "mime_type":"audio/wav"}}
+        ]}}}}),
+    );
+    assert!(Local::prompt(
+        config.clone(),
+        "s_p".into(),
+        json!(1),
+        None,
+        Revision::R2024_11_05
+    )
+    .is_err());
+    assert!(Local::prompt(
+        config.clone(),
+        "s_p".into(),
+        json!(1),
+        None,
+        Revision::R2025_11_25
+    )
+    .is_ok());
+    for revision in [
+        Revision::R2024_11_05,
+        Revision::R2025_06_18,
+        Revision::R2025_11_25,
+        Revision::R2026_07_28,
+    ] {
+        let error = Local::resource(
+            config.clone(),
+            json!(1),
+            Some(json!({"uri":"urn:missing"})),
+            &|_, _| true,
+            revision,
+        )
+        .unwrap_err();
+        let body: Value = serde_json::from_slice(&error.body()).unwrap();
+        assert_eq!(
+            body["error"]["code"],
+            if revision.has_sessions() {
+                -32002
+            } else {
+                -32602
+            }
+        );
+    }
+}
+
+#[test]
+fn audit_virtual_expansion_is_refused_before_rendering() {
+    let config = held(json!({"s":{"url":"https://up.test", "prompts_allow":{"p":{
+        "template":"{value}".repeat(8193)
+    }}}}));
+    assert!(Local::prompt(
+        config,
+        "s_p".into(),
+        json!(1),
+        Some(json!({"arguments":{"value":"x".repeat(8192)}})),
+        Revision::R2026_07_28
+    )
+    .is_err());
+}
+
+#[test]
+fn served_resource_rejects_oversized_selector_before_lookup_or_echo() {
+    let config = held(json!({"s":{"url":"https://up.test","resources_allow":{
+        "urn:example":{"text":"ok"}
+    }}}));
+    let uri = "x".repeat(8193);
+    let error = Local::resource(
+        config,
+        json!(1),
+        Some(json!({"uri":uri})),
+        &|_, _| true,
+        Revision::R2026_07_28,
+    )
+    .unwrap_err();
+    let body: Value = serde_json::from_slice(&error.body()).unwrap();
+    assert_eq!(body["error"]["code"], -32602);
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("byte limit"));
+    assert!(error.body().len() < 1024);
 }

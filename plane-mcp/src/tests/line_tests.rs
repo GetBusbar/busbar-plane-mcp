@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! The line carrier's meanings: the fields a body implies, the stdio-era verbs, busbar's own asks
+//! The line carrier's meanings: the fields a body implies, the stdio-era verbs, busbar's
+//! own asks issued in order and their retry, and what a line that answers busbar is.
 
 use serde_json::json;
 
@@ -117,7 +118,7 @@ fn initialize_advertises_neither_subscribe_nor_logging() {
 }
 
 #[test]
-fn a_live_ask_lapses_at_its_timeout_and_a_request_is_livened_a_bounded_number_of_times() {
+fn a_live_ask_lapses_at_its_timeout() {
     let result = json!({
         "resultType": "input_required",
         "inputRequests": { "a": { "method": "roots/list", "params": {} } },

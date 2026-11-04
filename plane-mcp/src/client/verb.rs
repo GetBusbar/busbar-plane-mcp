@@ -2,6 +2,37 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE CLOSED SET OF METHODS BUSBAR ISSUES TO AN UPSTREAM MCP SERVER THROUGH ONE BUILDER, each with
+//! a production construction site.
+//!
+//! ## Why a closed enum and not a `&str` method name
+//!
+//! `tests/data/method-inventory.json` is a MATRIX and this module is one of its columns: `mcp × <transport>
+//! × busbar-as-client × client-originated`. A builder that took the method as a string would make
+//! the column's contents a property of its call sites, so a method could be added by one caller and
+//! be invisible to every gate. The enum is what makes an enumeration of the column possible, and
+//! `src/tests/method_inventory_tests.rs` compares the variants PRODUCTION CONSTRUCTS (counted in
+//! the shipped source, never in this file's own list) against the generated inventory: a variant
+//! with no production construction site does not ship, and is not here.
+//!
+//! ## What is issued, and from where
+//!
+//! - `initialize` and `notifications/initialized`: the handshake a STDIO CHILD demands before any
+//!   other request (`crate::tool_program::initialize`, `initialized_notification`). Over streamable
+//!   HTTP the stateless revision deleted the handshake; a session revision's is the client
+//!   ladder's (`super::compat`).
+//!
+//! A caller's resource subscription is never carried upstream: busbar records the uri and relays
+//! what the member announces, so `resources/subscribe` and `resources/unsubscribe` are not issued.
+//!
+//! `tools/call` and `tools/list` are built by `super::jsonrpc` on the dispatch and verify paths.
+//! Every other client-originated method of the inventory is one busbar does not send an upstream
+//! today; the inventory test names each, so issuing one means adding its variant here AND its
+//! production construction site.
+//!
+//! ## Params are DATA, never argv
+//!
+//! Every variant's payload is serialised into the JSON-RPC `params` object. Nothing here can reach
+//! a child's argument vector, which is config-only.
 
 use super::jsonrpc::{envelope, OutboundRequest};
 use crate::codec::{META_CLIENT_CAPABILITIES, META_PROTOCOL_VERSION, PROTOCOL_VERSION};
@@ -38,6 +69,8 @@ impl UpstreamVerb {
     }
 
     /// The `params` object, WITHOUT `_meta` — which [`Self::build`] adds, once, for every verb.
+    ///
+    /// Split that way so no variant can forget the revision's required `_meta`.
     fn params(&self) -> serde_json::Value {
         match self {
             UpstreamVerb::Initialize { client_version } => serde_json::json!({
@@ -87,19 +120,6 @@ impl UpstreamVerb {
             )
         };
         envelope(url, method, self.target().as_deref(), body, authorization)
-    }
-}
-
-#[cfg(test)]
-impl UpstreamVerb {
-    /// ONE INSTANCE OF EVERY VARIANT, for the tests of the builder's shape. The method inventory
-    pub fn all() -> Vec<UpstreamVerb> {
-        vec![
-            UpstreamVerb::Initialize {
-                client_version: "0.0.0",
-            },
-            UpstreamVerb::NotificationsInitialized,
-        ]
     }
 }
 

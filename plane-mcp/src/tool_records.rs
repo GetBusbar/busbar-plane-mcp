@@ -1,4 +1,8 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2026 Busbar Inc and contributors
+
 //! The plane's durable state, as record schemas the kernel holds (a plane holds no store): the call
+//! and demotion schemas take the codec's own record kinds; the others name state it re-derives.
 
 /// The `call` kind — the per-call log record's tag on the store seam.
 pub const KIND_CALL: &str = "call";
@@ -10,4 +14,5 @@ pub const KIND_DEMOTION: &str = "demotion";
 pub const KIND_APPROVAL: &str = "approval";
 
 /// The `task` kind — a long-running task's work handle (`work.open`) and its result, in chunks
+/// ([`crate::tool_tasks`]).
 pub const KIND_TASK: &str = "task";

@@ -5,7 +5,7 @@
 
 use super::*;
 
-/// Every field LengthPrefixed (`len:u64-be ⧺ bytes`, a number its eight big-endian bytes), in the
+/// Each field is length-prefixed (`len:u64-be ⧺ bytes`) in digest order; numbers use eight big-endian bytes.
 #[test]
 fn the_call_suffix_is_length_prefixed_in_digest_order() {
     fn lp(out: &mut Vec<u8>, b: &[u8]) {

@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! An upstream's `InputRequiredResult`, recognised as an ask and judged against grants that are
+//! An upstream's `InputRequiredResult`, recognised as an ask and judged against grants that
+//! are deny-by-default.
 
 use crate::client::jsonrpc::{parse_response, RpcOutcome, ServerAsk, ServerRequestGrants};
 
-/// An `InputRequiredResult` in the shape the SPECIFICATION defines, which is the only shape a
+/// An `InputRequiredResult` in the shape the SPECIFICATION defines, which is the only shape
+/// a conformant upstream ever puts on the wire.
 fn input_required(method: &str) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({
         "jsonrpc": "2.0",
@@ -26,7 +28,6 @@ fn an_input_required_result_is_recognised_and_not_reported_as_a_plain_result() {
         ("elicitation/create", ServerAsk::Elicitation),
         ("roots/list", ServerAsk::Roots),
     ];
-    assert_eq!(cases.len(), 3);
     for (request, expected) in cases {
         assert_eq!(
             parse_response(&input_required(request), 1),
@@ -36,7 +37,8 @@ fn an_input_required_result_is_recognised_and_not_reported_as_a_plain_result() {
     }
 }
 
-/// An ask naming something we do not recognise is still an ask. Returning it as a plain result would
+/// An ask naming something we do not recognise is still an ask. Returning it as a plain
+/// result would hand an unrecognised request for authority straight through.
 #[test]
 fn an_unrecognised_ask_is_refused_rather_than_passed_through_as_a_result() {
     assert_eq!(
@@ -47,7 +49,9 @@ fn an_unrecognised_ask_is_refused_rather_than_passed_through_as_a_result() {
     );
 }
 
-/// `mrtr.mdx:245`: a server MUST include AT LEAST ONE of `inputRequests` or `requestState`. So a
+/// `mrtr.mdx:245`: a server MUST include AT LEAST ONE of `inputRequests` or `requestState`.
+/// So a result carrying `resultType: "input_required"` and nothing else is a conformant
+/// ask, and it must terminate exactly like one that names methods.
 #[test]
 fn an_ask_carrying_only_request_state_is_still_an_ask() {
     let body = serde_json::to_vec(&serde_json::json!({
@@ -64,7 +68,8 @@ fn an_ask_carrying_only_request_state_is_still_an_ask() {
     );
 }
 
-/// The recogniser must not over-match either: a plain, complete result is a result, and answering
+/// The recogniser must not over-match either: a plain, complete result is a result, and
+/// answering `InputRequired` to one would refuse every ordinary tool call.
 #[test]
 fn a_complete_result_is_not_mistaken_for_an_ask() {
     for result in [
@@ -83,7 +88,9 @@ fn a_complete_result_is_not_mistaken_for_an_ask() {
     }
 }
 
-/// A single `inputRequests` map can name SEVERAL methods (`mrtr.mdx` allows it, and the conformance
+/// A single `inputRequests` map can name SEVERAL methods (`mrtr.mdx` allows it, and the
+/// conformance suite's `multiple-input-requests` scenario requires a server to emit three
+/// at once).
 #[test]
 fn a_multi_method_ask_is_judged_against_the_most_privileged_method_it_names() {
     let body = serde_json::to_vec(&serde_json::json!({
@@ -106,7 +113,7 @@ fn a_multi_method_ask_is_judged_against_the_most_privileged_method_it_names() {
 }
 
 #[test]
-fn grants_are_all_false_at_construction_and_there_is_no_way_to_turn_them_all_on() {
+fn grants_deny_each_known_ask_at_construction() {
     let g = ServerRequestGrants::default();
     for ask in [
         ServerAsk::Sampling,

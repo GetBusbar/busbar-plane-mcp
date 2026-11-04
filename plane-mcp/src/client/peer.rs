@@ -2,6 +2,19 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! WHAT AN UPSTREAM SENDS BUSBAR UNASKED: every line a child writes (or an event stream carries)
+//! classified, so a response is never confused with a notification or the server's own request.
+//!
+//! | class | what busbar does |
+//! |---|---|
+//! | the correlated response | returned to the caller; the exchange ends |
+//! | a notification busbar knows | the effect in [`NotificationEffect`], then keep reading |
+//! | a notification busbar does not know | dropped, then keep reading, never adopted |
+//! | `ping` | answered, then keep reading |
+//! | a granted authority ask | relayed to busbar's caller, who answers it |
+//! | an ungranted authority ask | refused (`ask_ungranted`), then keep reading |
+//! | a request busbar does not know | answered `-32601`, then keep reading |
+//!
+//! Notification payloads are never read for a routing or trust decision.
 
 use super::jsonrpc::{ServerAsk, ServerRequestGrants};
 use crate::codec::CODE_METHOD_NOT_FOUND;
@@ -115,6 +128,9 @@ impl ServerNotification {
 }
 
 /// CLASSIFY one line a child wrote. `None`: a response, or not a JSON-RPC message at all.
+///
+/// A known notification method is a notification whatever `id` holds; anything else is a request
+/// exactly when the `id` MEMBER is present (a `null` id is still a request, and is answered).
 pub fn classify(value: &serde_json::Value) -> Option<ServerMessage> {
     let obj = value.as_object()?;
 
@@ -155,14 +171,16 @@ fn notification_of(method: &str) -> Option<ServerNotification> {
 fn request_of(method: &str) -> Option<ServerRequestVerb> {
     Some(match method {
         "ping" => ServerRequestVerb::Ping,
-        "roots/list" => ServerRequestVerb::RootsList,
-        "sampling/createMessage" => ServerRequestVerb::SamplingCreateMessage,
-        "elicitation/create" => ServerRequestVerb::ElicitationCreate,
+        crate::tools_config::ASK_ROOTS => ServerRequestVerb::RootsList,
+        crate::tools_config::ASK_SAMPLING => ServerRequestVerb::SamplingCreateMessage,
+        crate::tools_config::ASK_ELICITATION => ServerRequestVerb::ElicitationCreate,
         _ => return None,
     })
 }
 
 /// THE REPLY BUSBAR WRITES BACK to a child's request: `ping`'s empty result, or an ungranted ask's
+/// refusal. `None` for a granted ask: it is the caller's to answer. The grants are read
+/// at the moment of the decision, so a revocation bites on the next message.
 pub fn answer(
     id: &serde_json::Value,
     verb: ServerRequestVerb,
@@ -195,6 +213,7 @@ pub fn refused(id: &serde_json::Value, reason: &str, message: String) -> serde_j
 }
 
 /// The `-32601` a child gets for a request busbar does not implement: answered, never dropped (a
+/// dropped request is a child blocked on a reply forever).
 pub fn method_not_found(id: &serde_json::Value, method: &str) -> serde_json::Value {
     let message = format!(
         "busbar's MCP client leg does not implement `{method}`; it answers `ping` and gates \

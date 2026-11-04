@@ -2,8 +2,8 @@ use super::*;
 use serde_json::json;
 
 #[test]
-fn the_progress_mapping_applies_the_same_existing_bound_to_every_transport() {
-    let section=crate::statement::read_tools_section(br#"{"srv":{"transport":"stdio","command":"/fixture/child","pin":{"mechanism":"unpinned"},"tools_allow":{"echo":{"schema_hash":"sha256:a"}}}}"#).unwrap();
+fn stdio_progress_mapping_applies_the_existing_frame_bound() {
+    let section=crate::statement::test_support::read_tools_section(br#"{"srv":{"transport":"stdio","command":"/fixture/child","pin":{"mechanism":"unpinned"},"tools_allow":{"echo":{"schema_hash":"sha256:a"}}}}"#).unwrap();
     let catalogue = crate::catalogue::Catalogue::build(1, &section);
     let mut admitted = crate::call::AdmittedCall {
         entry: catalogue.tool_on("srv", "echo").unwrap().clone(),

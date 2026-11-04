@@ -2,6 +2,32 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE TRUST SURFACE, PLANE SIDE: what a registered server was last seen to OFFER, judged against
+//! what the operator APPROVED in the `tools:` section, and the three admin answers that render it
+//! (`connect`, `changes`, `health`). Pure: the section's registration and
+//! the last sighting in, a state, a changes queue and the views out.
+//!
+//! * **The approval** is the registration as the operator wrote it: an authenticity root (a pin
+//!   whose mechanism is a root and carries its key) and, per tool, the `sha256:` digest approved for
+//!   it. A tool allowed with no digest is absent from the approval, which is `pending`; a
+//!   registration with no root approves nothing.
+//! * **The observation** is a live `tools/list`, each tool re-hashed here from the definition the
+//!   upstream sent ([`tool_digest`]: name, description and input schema, length-framed, the schema in
+//!   canonical JSON), never a digest the upstream supplied.
+//! * **The verdicts are the kernel's**: the plane sights the catalogue
+//!   (`trust.sight`) and each tool (`trust.sight_item`), the kernel's Approve answers every call
+//!   (`trust.serves`), and these views read the kernel's trust state (`trust.state`). A failed
+//!   contact is the one plane fact a view renders on its own (`error`).
+//!
+//! The kernel's trust book records each sighting's catalogue hash ([`catalogue_hash`],
+//! `trust.sight`), which stamps the server's re-verification clock; the operator's view and the
+//! dispatch gate read the comparison above, so both answer the one question the operator is looking
+//! at. The identity axis (`pin_changed`) is reported `false`, and that is the truth rather than a
+//! gap: under `cert_spki` and `mtls` the pin's key is the far end's key
+//! (`PinMechanismDecl::peer_key`), which the host seals into the registration's member route and the
+//! connector holds every connection to, refusing one whose server presents another key before a
+//! request byte is written. A contact that met a substituted key is a failed contact (`error`),
+//! never a sighting, so every sighting this view renders was made against the pinned key.
+//! `pinned_pubkey` verifies no manifest signature in this build and is refused at validation.
 
 use std::collections::BTreeMap;
 
@@ -11,6 +37,7 @@ use serde_json::Value;
 use crate::tools_config::McpServerDefCfg;
 
 /// One tool's identity, as `sha256:<hex>` over its name, description and input schema: one digest,
+/// because the operator's question is "is this the same tool I approved".
 #[must_use]
 pub fn tool_digest(name: &str, description: &str, input_schema: &Value) -> String {
     let mut framed = Vec::new();
@@ -23,6 +50,7 @@ pub fn tool_digest(name: &str, description: &str, input_schema: &Value) -> Strin
 }
 
 /// `value` with every object's keys sorted, recursively: key ORDER is not drift, any change of key,
+/// value or shape is.
 #[must_use]
 pub fn canonical_json(value: &Value) -> String {
     let mut out = String::new();
@@ -33,13 +61,14 @@ pub fn canonical_json(value: &Value) -> String {
 fn write_canonical(value: &Value, out: &mut String) {
     match value {
         Value::Object(map) => {
-            let sorted: BTreeMap<&String, &Value> = map.iter().collect();
+            let mut sorted: Vec<_> = map.iter().collect();
+            sorted.sort_unstable_by_key(|(a, _)| *a);
             out.push('{');
             for (i, (k, v)) in sorted.iter().enumerate() {
                 if i > 0 {
                     out.push(',');
                 }
-                out.push_str(&Value::String((*k).clone()).to_string());
+                out.push_str(&serde_json::to_string(k).unwrap_or_default());
                 out.push(':');
                 write_canonical(v, out);
             }
@@ -67,11 +96,31 @@ pub struct Observation {
 }
 
 /// THE OBSERVATION a `tools/list` result carries, or why it is not one. Strict about the shape: a
+/// missing `description` is the empty string and a missing `inputSchema` is `{}`, both hashed at
+/// their defaulted value, so an upstream that later supplies one has drifted.
+///
+/// # Errors
+///
+/// The result carries no `tools` array, or an entry with no (or an empty) `name`.
 pub fn observe(result: &Value) -> Result<Observation, String> {
+    let mut capabilities = BTreeMap::new();
+    visit_tools(result, |name, description, schema| {
+        capabilities.insert(name.to_string(), tool_digest(name, description, schema));
+    })?;
+    Ok(Observation { capabilities })
+}
+
+/// Validate a tools page without computing digests which its eventual observation will compute.
+pub fn validate_tools(result: &Value) -> Result<(), String> {
+    visit_tools(result, |_, _, _| {})
+}
+
+fn visit_tools(result: &Value, mut visit: impl FnMut(&str, &str, &Value)) -> Result<(), String> {
     let Some(items) = result.get("tools").and_then(Value::as_array) else {
         return Err("the `tools/list` result carries no `tools` array".to_string());
     };
-    let mut capabilities = BTreeMap::new();
+    let mut names = std::collections::BTreeSet::new();
+    let empty_schema = serde_json::json!({});
     for item in items {
         let Some(name) = item.get("name").and_then(Value::as_str) else {
             return Err("a `tools/list` entry carries no `name`".to_string());
@@ -85,24 +134,23 @@ pub fn observe(result: &Value) -> Result<Observation, String> {
             Some(_) => {
                 return Err(
                     "a `tools/list` entry carries a `description` that is not a string".to_string(),
-                );
+                )
             }
         };
-        let schema = item
-            .get("inputSchema")
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!({}));
-        if capabilities
-            .insert(name.to_string(), tool_digest(name, description, &schema))
-            .is_some()
-        {
+        if !names.insert(name) {
             return Err("a `tools/list` result repeats a tool name".to_string());
         }
+        visit(
+            name,
+            description,
+            item.get("inputSchema").unwrap_or(&empty_schema),
+        );
     }
-    Ok(Observation { capabilities })
+    Ok(())
 }
 
 /// The hash a sighting reports to the kernel's trust book (`trust.sight`): the observed capability
+/// set, `name` and digest per line in name order.
 #[must_use]
 pub fn catalogue_hash(observation: &Observation) -> String {
     let mut bytes = Vec::new();
@@ -116,6 +164,8 @@ pub fn catalogue_hash(observation: &Observation) -> String {
 }
 
 /// The last contact: the SDK's one shape of a sighting
+/// ([`busbar_contract::abi::sdk::trust::Sighting`]), over what the server offered. `Never` is not
+/// a failure: a declaratively approved server has legitimately never been reached.
 pub type Sighting = busbar_contract::abi::sdk::trust::Sighting<Observation>;
 
 /// One item of the kernel's trust state (`trust.state`): the kernel owns every
@@ -132,17 +182,23 @@ pub struct KernelItem {
 
 impl KernelItem {
     /// The kernel serves it: its word is `approved` or `same` and it holds an approved digest. A
+    /// digest beside any other word (`new` for a revoked counterparty or an unapproved pin) is the
+    /// configured approval the kernel is not honouring now.
     fn serves(&self) -> bool {
         self.approved.is_some() && (self.word == "approved" || self.word == "same")
     }
 
     /// The kernel holds it demoted: `drifted`, or `quarantined` (a durable demotion it replayed
+    /// after a restart included), whatever the plane last sighted.
     fn demoted(&self) -> bool {
         self.word == "drifted" || self.word == "quarantined"
     }
 }
 
 /// The view's state word: the SDK's one state word of a trust view
+/// ([`busbar_contract::abi::sdk::trust::State`]). `Approved`: something is approved and the kernel
+/// holds no drift on what the server offers; `Quarantined`: the kernel holds a tool drifted or
+/// quarantined, or the server offers what nothing approved.
 pub use busbar_contract::abi::sdk::trust::State;
 
 /// The changes queue: what the server offers now against what the kernel holds approved.
@@ -157,6 +213,9 @@ pub struct Drift {
 }
 
 /// The changes queue of `sighting` against the kernel's `items`. The verdict on a tool offered at
+/// another digest is the kernel's word, never a comparison here, so a tool the kernel holds demoted
+/// is `changed` with or without a successful sighting (after a restart the plane has sighted
+/// nothing while the kernel replayed the demotion); `added` and `removed` need a sighting.
 #[must_use]
 pub fn drift(items: &[KernelItem], sighting: &Sighting) -> Drift {
     let Sighting::Seen(obs) = sighting else {
@@ -169,7 +228,11 @@ pub fn drift(items: &[KernelItem], sighting: &Sighting) -> Drift {
             ..Drift::default()
         };
     };
-    let held = |name: &str| items.iter().find(|i| i.item == name);
+    let indexed: BTreeMap<_, _> = items
+        .iter()
+        .map(|item| (item.item.as_str(), item))
+        .collect();
+    let held = |name: &str| indexed.get(name).copied();
     let mut d = Drift::default();
     for name in obs.capabilities.keys() {
         match held(name) {
@@ -187,6 +250,8 @@ pub fn drift(items: &[KernelItem], sighting: &Sighting) -> Drift {
 }
 
 /// The view's state, read off the verdict the kernel enforces. Order is precedence: a failed
+/// contact is never reported as trust; a tool the kernel holds demoted is quarantine; nothing the
+/// kernel serves is pending; drift is quarantine.
 #[must_use]
 pub fn state(items: &[KernelItem], sighting: &Sighting) -> State {
     if matches!(sighting, Sighting::Failed(_)) {
@@ -259,6 +324,7 @@ struct HealthView<'a> {
 }
 
 /// The trust view of registration `name` (`def`) under `sighting` and the kernel's trust state of
+/// it (`items`), serialized in declaration order.
 #[must_use]
 pub fn trust_view(
     name: &str,
@@ -269,14 +335,19 @@ pub fn trust_view(
     let d = drift(items, sighting);
     let mut capabilities: BTreeMap<&str, CapabilityView<'_>> = items
         .iter()
-        .filter(|i| i.serves())
         .filter_map(|i| {
             let digest = i.approved.as_deref()?;
             Some((
                 i.item.as_str(),
                 CapabilityView {
                     tool: &i.item,
-                    status: "approved",
+                    status: if i.serves() {
+                        "approved"
+                    } else if i.demoted() {
+                        "rejected"
+                    } else {
+                        "pending"
+                    },
                     approved_digest: Some(digest),
                 },
             ))
@@ -308,6 +379,7 @@ pub fn trust_view(
 }
 
 /// The health view of registration `name` under `sighting` and the kernel's trust state of it
+/// (`items`), serialized in declaration order.
 #[must_use]
 pub fn health_view(name: &str, sighting: &Sighting, items: &[KernelItem]) -> String {
     let derived = state(items, sighting);

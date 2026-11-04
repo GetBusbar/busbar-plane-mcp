@@ -75,7 +75,7 @@ fn a_refusal_moves_the_ladder_and_an_outage_does_not() {
     );
 }
 
-/// RED: ANY `4xx` to the stateless request refuses its revision, whatever JSON-RPC error rides it.
+/// ANY `4xx` to the stateless request refuses its revision, whatever JSON-RPC error rides it.
 #[test]
 fn red_any_4xx_to_the_stateless_request_refuses_its_revision() {
     for status in [400u16, 401, 404, 405, 409, 422] {
@@ -195,7 +195,8 @@ fn only_a_revision_this_plane_carries_is_accepted_from_initialize() {
     }
 }
 
-/// RED: the message address a `2024-11-05` stream names can never move busbar's POSTs (and the
+/// the message address a `2024-11-05` stream names can never move busbar's POSTs (and
+/// the credential on them) to another origin.
 #[test]
 fn red_a_message_address_on_another_origin_is_refused() {
     let base = "https://up.example:8443/events";
@@ -205,7 +206,7 @@ fn red_a_message_address_on_another_origin_is_refused() {
     );
     assert_eq!(
         message_address(base, "https://UP.example:8443/m").as_deref(),
-        Ok("https://UP.example:8443/m")
+        Ok("https://up.example:8443/m")
     );
     for hostile in [
         "https://evil.example/m",
@@ -219,8 +220,8 @@ fn red_a_message_address_on_another_origin_is_refused() {
         Err(AddressRefused::CrossOrigin)
     );
     assert_eq!(
-        message_address(base, "messages"),
-        Err(AddressRefused::Malformed)
+        message_address(base, "messages").as_deref(),
+        Ok("https://up.example:8443/messages")
     );
     assert_eq!(
         message_address(base, "/a b"),
@@ -244,7 +245,9 @@ fn the_event_reader_joins_split_chunks_and_is_bounded() {
     );
 }
 
-/// B5: THE EVENT-STREAM LINE RULE. CRLF, a lone LF and a lone CR each end a line, so a stream
+/// B5: THE EVENT-STREAM LINE RULE. CRLF, a lone LF and a lone CR each end a line, so a
+/// stream framed with bare CRs reads as the same events as one framed with LFs: a CR is
+/// never dropped into the line beside it.
 #[test]
 fn the_event_reader_ends_a_line_on_a_lone_cr() {
     let mut r = EventReader::new(1024);
@@ -273,15 +276,51 @@ fn the_event_reader_ends_a_line_on_a_lone_cr() {
     );
 }
 
-/// B5: THE BOUND COUNTS THE BYTES HELD, carriage returns included: a peer that sends nothing but
+/// An unfinished line cannot grow beyond the retained-byte budget.
 #[test]
-fn the_event_reader_bound_counts_every_byte_held() {
+fn the_event_reader_bound_counts_the_unfinished_line() {
     let mut r = EventReader::new(64);
     let mut held = b"data: ".to_vec();
-    held.extend(b"\rx".repeat(40));
+    held.extend(b"x".repeat(80));
     let _ = r.feed(&held);
     assert!(r.overflowed(), "a tail of 86 bytes held past a bound of 64");
 }
 
 #[path = "reported_events.rs"]
 mod reported;
+
+#[test]
+fn audit_sse_dispatch_and_retained_budget() {
+    let mut reader = EventReader::new(64);
+    assert!(reader.feed(b"event: endpoint\n\n").is_empty());
+    for _ in 0..1000 {
+        assert!(reader
+            .feed(b": keepalive\nretry: 1\nid: ignored\n")
+            .is_empty());
+    }
+    assert!(!reader.overflowed());
+    assert_eq!(
+        reader.feed(b"event:\ndata: x\n\n"),
+        vec![StreamEvent {
+            event: None,
+            data: "x".into()
+        }]
+    );
+    let mut reader = EventReader::new(64);
+    reader.feed(b"data: x\n".repeat(100).as_slice());
+    assert!(reader.overflowed());
+}
+
+#[test]
+fn audit_endpoint_relative_references_and_default_ports() {
+    for (reference, expected) in [
+        ("messages?s=1", "https://host.test/a/messages?s=1"),
+        ("?s=1", "https://host.test/a/events?s=1"),
+        ("https://host.test:443/m", "https://host.test/m"),
+    ] {
+        assert_eq!(
+            message_address("https://host.test/a/events", reference).as_deref(),
+            Ok(expected)
+        );
+    }
+}

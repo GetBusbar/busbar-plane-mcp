@@ -1,12 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! The plane's vocabulary against the conformance battery: its method names, error code table,
+//! The plane's vocabulary against the conformance battery: its method names, error code
+//! table, metadata keys and revision, read from the battery's own sources (this repo's
+//! `testing/mcp-conformance`, moved here from busbar by busbar 7f43d8a777), so a battery
+//! that starts sending something new fails HERE rather than in a run someone has to
+//! interpret.
 
 use crate::{codec, tool_ops as ops};
 use std::path::PathBuf;
 
-/// The battery's own source tree: this repo's `testing/mcp-conformance` (busbar at the pin no
+/// The battery's own source tree: this repo's `testing/mcp-conformance` (busbar at the pin
+/// no longer carries it).
 fn battery() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../testing/mcp-conformance")
 }
@@ -21,7 +26,7 @@ fn battery_methods() -> Vec<String> {
             let path = entry.path();
             if path.extension().is_some_and(|e| e == "mjs") {
                 let text = std::fs::read_to_string(&path).expect("a battery source is readable");
-                for piece in text.split('\'').skip(1).step_by(2) {
+                for piece in text.split(['\'', '"', '`']) {
                     if looks_like_a_method(piece) && !found.contains(&piece.to_string()) {
                         found.push(piece.to_string());
                     }
@@ -108,7 +113,8 @@ fn rows_of(sender: ops::Sender) -> Vec<&'static ops::RpcMethodRow> {
     ops::METHODS.iter().filter(|r| r.sender == sender).collect()
 }
 
-/// The method table keeps the roles the door serves: how many rows each role has, and every row's
+/// The method table keeps the roles the door serves: how many rows each role has, and every
+/// row's class is one the plane declares.
 #[test]
 fn the_method_table_keeps_its_roles_and_its_declared_classes() {
     assert_eq!(rows_of(ops::Sender::Client).len(), CLIENT_ROWS);

@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The `mcp` plane as a droppable busbar plugin: the `cdylib` a signed tarball carries
+//! (`kind: plane`, key `mcp`).
 
 #![deny(unsafe_code)]
 

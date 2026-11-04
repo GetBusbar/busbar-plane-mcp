@@ -364,7 +364,9 @@ pub(super) extern "C" fn trust_state(
     RawOutcome::of(outcome)
 }
 
-/// Render only approvals and sightings the existing mock book actually holds. Reading this view
+/// Render only approvals and sightings the existing mock book actually holds. Reading this
+/// view never creates an approval; no book means no known items and an unapproved
+/// counterparty.
 fn trust_rows() -> (u64, Vec<u8>, Vec<ItemSpan>) {
     let held = book();
     let Some(book) = held.as_ref() else {

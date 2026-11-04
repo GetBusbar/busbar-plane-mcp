@@ -15,7 +15,9 @@ fn cfg(uri: &str) -> McpCfg {
     }
 }
 
-/// THE DERIVATION, which is the whole reason the mount path is not a separate config key: the path
+/// THE DERIVATION, which is the whole reason the mount path is not a separate config key:
+/// the path a client posts to and the identifier its token is bound to come from ONE
+/// string, so they cannot drift.
 #[test]
 fn the_mount_and_the_metadata_path_are_derived_from_the_one_canonical_uri() {
     let r = McpResource::from_cfg(&cfg("https://gateway.example.com/mcp")).unwrap();
@@ -26,17 +28,12 @@ fn the_mount_and_the_metadata_path_are_derived_from_the_one_canonical_uri() {
     );
 }
 
-/// A multi-segment path is refused (below); a trailing slash does not create a second spelling of
+/// Canonical audiences must spell the exact path used in their metadata URL.
 #[test]
-fn a_trailing_slash_derives_the_same_mount() {
-    let bare = format!("https://h.example{DEFAULT_MOUNT}");
-    let slashed = format!("{bare}/");
-    let r = McpResource::from_cfg(&cfg(&bare)).unwrap();
-    let s = McpResource::from_cfg(&cfg(&slashed)).unwrap();
-    let metadata = format!("https://h.example/.well-known/oauth-protected-resource{DEFAULT_MOUNT}");
-    assert_eq!(s.metadata_url(), metadata);
-    assert_eq!(s.metadata_url(), r.metadata_url());
-    assert_eq!(s.canonical_uri(), slashed);
+fn a_trailing_slash_cannot_advertise_a_different_resource() {
+    for path in ["/mcp/", "//mcp//"] {
+        assert!(McpResource::from_cfg(&cfg(&format!("https://h.example{path}"))).is_err());
+    }
 }
 
 #[test]
@@ -70,7 +67,11 @@ fn a_canonical_uri_naming_any_other_path_is_refused_at_boot() {
     }
 }
 
-/// The canonical URI is NOT normalised, only recognised. It is compared byte-for-byte against the
+/// The canonical URI is NOT normalised, only recognised. It is compared byte-for-byte
+/// against the `aud` an authorization server minted, and a parser that helpfully
+/// lower-cased the host or stripped a default port would hand back a string that no longer
+/// equals what the IdP issued — turning a correct client into a refused one, for a reason
+/// nothing logs.
 #[test]
 fn the_canonical_uri_is_preserved_verbatim_rather_than_normalised() {
     let uri = format!("https://Gateway.Example.COM:443{DEFAULT_MOUNT}");
@@ -79,7 +80,8 @@ fn the_canonical_uri_is_preserved_verbatim_rather_than_normalised() {
     assert!(r.metadata_url().ends_with(DEFAULT_MOUNT));
 }
 
-/// Every refusal arm, with the exact error, because a boot refusal that names the wrong field sends
+/// Every refusal arm, with the exact error, because a boot refusal that names the wrong
+/// field sends an operator to edit the wrong line.
 #[test]
 fn every_malformed_canonical_uri_is_refused_with_its_own_diagnosis() {
     let cases: &[(&str, McpCfgError)] = &[
@@ -135,7 +137,10 @@ fn every_malformed_canonical_uri_is_refused_with_its_own_diagnosis() {
     }
 }
 
-/// The MCP plane may not mount at the deployment root. The LLM plane is the RESIDUAL — its catch-all
+/// The MCP plane may not mount at the deployment root. The LLM plane is the RESIDUAL — its
+/// catch-all claims every unclaimed path by construction — so an MCP mount at `/` would sit
+/// in front of every protocol endpoint in the process and answer them all with JSON-RPC
+/// errors.
 #[test]
 fn the_plane_cannot_mount_at_the_deployment_root() {
     assert!(matches!(
@@ -144,7 +149,8 @@ fn the_plane_cannot_mount_at_the_deployment_root() {
     ));
 }
 
-/// An authorization-server list is the ENTIRE content of the answer a credential-less client came
+/// An authorization-server list is the ENTIRE content of the answer a credential-less
+/// client came for.
 #[test]
 fn a_resource_with_no_authorization_server_is_refused() {
     let mut c = cfg("https://gateway.example.com/mcp");
@@ -160,7 +166,8 @@ fn a_resource_with_no_authorization_server_is_refused() {
     );
 }
 
-/// The allowlist is the operator's list verbatim: the default is empty, and what the operator wrote
+/// The allowlist is the operator's list verbatim: the default is empty, and what the
+/// operator wrote is what the block carries.
 #[test]
 fn the_origin_allowlist_is_carried_as_written_and_empty_by_default() {
     let base = r#""canonical_uri": "https://gateway.example.com/mcp",
@@ -180,7 +187,9 @@ fn the_origin_allowlist_is_carried_as_written_and_empty_by_default() {
     );
 }
 
-/// The `mcp:` block parses with the field names an operator actually writes, and an unknown key is
+/// The `mcp:` block parses with the field names an operator actually writes, and an unknown
+/// key is REFUSED rather than silently ignored — a typo'd `allowed_origin:` that parsed to
+/// an empty allowlist would look like a working config and be a closed door.
 #[test]
 fn the_config_block_parses_and_refuses_an_unknown_key() {
     let parsed: McpCfg = serde_json::from_str(

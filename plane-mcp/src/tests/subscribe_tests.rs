@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! A subscription: the acknowledgement first and narrowed, a change only when what THIS caller can
+//! see changed, the permission re-asked on every frame, a keepalive when quiet, and its bound.
 
 use serde_json::json;
 
@@ -28,7 +29,7 @@ const SECTION_MORE: &[u8] = br#"{
 fn catalogue(generation: u64, section: &[u8]) -> Catalogue {
     Catalogue::build(
         generation,
-        &crate::statement::read_tools_section(section).expect("the section reads"),
+        &crate::statement::test_support::read_tools_section(section).expect("the section reads"),
     )
 }
 
@@ -235,6 +236,11 @@ fn an_upstream_announcement_reaches_only_a_subscriber_entitled_to_the_announcing
 }
 
 /// CHOKE POINT J (OPEN-AND-TRUSTED): a subscription is a long-lived response, and it holds NO
+/// principal it resolved at open. It is opened from the request alone (`Listen::open` takes no
+/// identity), and every frame is judged under the permission the door re-asks that frame (the
+/// kernel's live re-resolution, `ENTITLEMENT_STANDING`): the same open stream that wrote frames
+/// while its principal stood ends on the first frame after it stops standing, with the identity
+/// refusal, and writes nothing after.
 #[test]
 fn the_long_lived_response_holds_no_principal_it_resolved_at_open() {
     let params = json!({ "notifications": { "toolsListChanged": true } });
@@ -283,6 +289,8 @@ fn the_long_lived_response_holds_no_principal_it_resolved_at_open() {
 }
 
 /// A request naming more distinct uris than the ceiling is refused as soon as the distinct count
+/// passes it, never after reading the rest of the array; duplicates are folded without a scan of
+/// what was kept, so many copies of a few uris are accepted.
 #[test]
 fn the_distinct_uris_are_counted_through_a_set_and_the_ceiling_refuses_at_once() {
     let many: Vec<String> = (0..200).map(|n| format!("file:///r{n}")).collect();
@@ -332,4 +340,20 @@ fn a_tool_change_key_keeps_each_name_paired_with_its_schema() {
         change_keys(&catalogue(1, before), &everything)[0],
         change_keys(&catalogue(2, after), &everything)[0]
     );
+}
+
+#[test]
+fn malformed_notification_filter_reports_its_shape() {
+    let params = json!({"notifications":{"toolsListChanged":true,"resourceSubscriptions":[3]}});
+    let error = Listen::open(Some(&params), json!(1), 0, |_| true).unwrap_err();
+    assert!(error["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("boolean list categories"));
+}
+
+/// The three keys of the complete rendered lists one caller can see.
+#[must_use]
+pub fn change_keys(catalogue: &Catalogue, admit: &impl Fn(&str, &str) -> bool) -> [u64; 3] {
+    change_keys_visible(catalogue, admit, &|_| false)
 }

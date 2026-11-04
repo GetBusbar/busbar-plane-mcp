@@ -2,6 +2,8 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE CATALOGUE THE DOOR ANSWERS FROM: every capability the operator's `tools:` section
+//! registers, built once per generation from the section that generation's snapshot was published
+//! over.
 
 use std::collections::BTreeMap;
 
@@ -126,35 +128,56 @@ impl<T> Lookup<T> {
 }
 
 /// MATCH one level-1 uri template against a concrete uri. A binding is non-empty and holds no `/`,
+/// so one template approves one shape and never a subtree.
 #[must_use]
 pub fn match_uri_template(template: &str, uri: &str) -> Option<BTreeMap<String, String>> {
-    let mut bindings = BTreeMap::new();
-    let mut t = template;
-    let mut u = uri;
-    loop {
-        let Some(open) = t.find('{') else {
-            return (t == u).then_some(bindings);
-        };
-        let literal = &t[..open];
-        u = u.strip_prefix(literal)?;
-        let after = &t[open + 1..];
-        let close = after.find('}')?;
-        let name = &after[..close];
-        t = &after[close + 1..];
-        let stop = &t[..t.find('{').unwrap_or(t.len())];
-        let value = if stop.is_empty() {
-            std::mem::take(&mut u)
-        } else {
-            let at = u.find(stop)?;
-            let (v, rest) = u.split_at(at);
-            u = rest;
-            v
-        };
-        if value.is_empty() || value.contains('/') {
+    fn matching(
+        template: &str,
+        uri: &str,
+        depth: usize,
+        budget: &mut usize,
+    ) -> Option<BTreeMap<String, String>> {
+        *budget = budget.checked_sub(1)?;
+        if depth > 64 {
             return None;
         }
-        bindings.insert(name.to_string(), value.to_string());
+        let Some(open) = template.find('{') else {
+            return (template == uri).then(BTreeMap::new);
+        };
+        let uri = uri.strip_prefix(&template[..open])?;
+        let after = &template[open + 1..];
+        let close = after.find('}')?;
+        let name = &after[..close];
+        let tail = &after[close + 1..];
+        let stop = &tail[..tail.find('{').unwrap_or(tail.len())];
+        if stop.is_empty() {
+            if uri.is_empty() || uri.contains('/') || !tail.is_empty() {
+                return None;
+            }
+            return Some(BTreeMap::from([(name.to_string(), uri.to_string())]));
+        }
+        for (at, _) in uri.char_indices() {
+            *budget = budget.checked_sub(1)?;
+            if !uri[at..].starts_with(stop) {
+                continue;
+            }
+            let value = &uri[..at];
+            if value.contains('/') {
+                break;
+            }
+            if value.is_empty() {
+                continue;
+            }
+            if let Some(mut bindings) = matching(tail, &uri[at..], depth + 1, budget) {
+                bindings
+                    .entry(name.to_string())
+                    .or_insert_with(|| value.to_string());
+                return Some(bindings);
+            }
+        }
+        None
     }
+    matching(template, uri, 0, &mut 100_000)
 }
 
 /// A blank hash is no hash.
@@ -303,6 +326,7 @@ impl Catalogue {
     }
 
     /// EVERY GRANT A REQUEST ON THIS CATALOGUE CAN ASK, `(scope kind, name)`: each server, then each
+    /// capability's published name.
     #[must_use]
     pub fn grants(&self) -> Vec<(&'static str, &str)> {
         let servers = self.servers.iter().map(|s| (SCOPE, s.as_str()));
@@ -328,6 +352,7 @@ impl Catalogue {
     }
 
     /// The entry of the tool the upstream spells `bare` on `server` (a pool member's own twin of a
+    /// tool called on another member), whatever it is published as.
     #[must_use]
     pub fn tool_on(&self, server: &str, bare: &str) -> Option<&ToolEntry> {
         self.tools
@@ -336,6 +361,7 @@ impl Catalogue {
     }
 
     /// Every tool registration `server` publishes, whoever asks, in published-name order: the items
+    /// a live re-fetch of that server sights on the kernel's trust book.
     pub fn tools_of<'a>(&'a self, server: &'a str) -> impl Iterator<Item = &'a ToolEntry> + 'a {
         self.tools.values().filter(move |t| t.server == server)
     }
@@ -366,6 +392,7 @@ impl Catalogue {
     }
 
     /// The prompt a published name names, under the caller's grants. `None` covers no such prompt
+    /// and not the caller's alike, so the answer leaks nothing about what the grant hides.
     pub fn prompt_for(
         &self,
         admit: &impl Fn(&str, &str) -> bool,
@@ -377,28 +404,32 @@ impl Catalogue {
     }
 
     /// The resource a caller's uri names, among those its grants reach. Two reachable approvals of
+    /// one uri are named, sorted by server, never picked between.
     pub fn resource_by_uri(
         &self,
         admit: &impl Fn(&str, &str) -> bool,
         uri: &str,
     ) -> Lookup<&ResourceEntry> {
         let found = self
-            .resources_for(admit)
-            .into_iter()
-            .filter(|r| r.uri == uri);
+            .resources
+            .values()
+            .filter(|r| r.uri == uri)
+            .filter(|r| granted(admit, &r.server, &r.namespaced));
         Lookup::of(found.collect(), |r| r.server.clone())
     }
 
     /// The template a caller's expanded uri matches, among those its grants reach, with its
+    /// bindings.
     pub fn resource_template_for(
         &self,
         admit: &impl Fn(&str, &str) -> bool,
         uri: &str,
     ) -> Lookup<(&ResourceTemplateEntry, BTreeMap<String, String>)> {
         let found = self
-            .resource_templates_for(admit)
-            .into_iter()
-            .filter_map(|t| match_uri_template(&t.uri_template, uri).map(|b| (t, b)));
+            .resource_templates
+            .values()
+            .filter_map(|t| match_uri_template(&t.uri_template, uri).map(|b| (t, b)))
+            .filter(|(t, _)| granted(admit, &t.server, &t.namespaced));
         Lookup::of(found.collect(), |(t, _)| t.namespaced.clone())
     }
 

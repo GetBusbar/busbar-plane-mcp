@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE RELAYED CALL IS THE REQUEST AND THE ANSWER THE PLANE SAYS. The linked door is admitted
+//! THE RELAYED CALL IS THE REQUEST AND THE ANSWER THE PLANE SAYS. The linked door is
+//! admitted through the one loader and driven op by op, as `tests/both_ways.rs` drives it,
+//! and its transcript is held to what the plane's own builders answer: the request bound
+//! for the member is `call::outbound`'s, the settled answers are `call::settle_call_as`'s,
+//! the call record is `record::call_suffix`'s.
 
 #[path = "../../plane-mcp/tests/support/door_facts.rs"]
 #[allow(dead_code)]
@@ -207,7 +211,8 @@ impl Push {
     }
 }
 
-/// One `on_piece` of `unit` with a reply buffer of `cap` bytes, then re-called with the same
+/// One `on_piece` of `unit` with a reply buffer of `cap` bytes, then re-called with the
+/// same `from` and zero bytes while the door answers `more = 1`.
 fn push(p: &Plugin<Plane>, what: &'static str, unit: u64, given: Push, cap: usize) -> Step {
     let mut reply = vec![0_u8; cap];
     let (mut fields, mut arena) = ([OUT_FIELD; 16], vec![0_u8; 4096]);
@@ -316,6 +321,7 @@ fn length_of(reply: &[u8]) -> (String, String) {
 }
 
 /// A HOST whose entitlement answer is a fixed table of `"<kind>:<name>"` grants, and which
+/// serves nothing else: the kernel's entitlement service, as the door asks it.
 struct Grants(&'static [&'static str]);
 
 impl busbar_contract::services::HostServices for Grants {
@@ -420,7 +426,9 @@ impl busbar_contract::services::HostServices for Grants {
     ) -> busbar_plugin_loader::dispatch::Ran {
         busbar_plugin_loader::dispatch::Ran::Now(Stored::refused(UNSERVED))
     }
-    /// The kernel's Approve as this section's approvals seed it: `read_file` approved at its
+    /// The kernel's Approve as this section's approvals seed it: `read_file` approved
+    /// at its digest, `draft` allowed and pending (ARCHITECT Q3: the door renders the
+    /// verdict).
     fn trust_serves(
         &self,
         _: &Caller,
@@ -611,7 +619,9 @@ fn relay_script(p: &Plugin<Plane>) -> Vec<Step> {
     t
 }
 
-/// The relayed call: the ATTEMPT is taken, the caller's body becomes the request bound for the
+/// The relayed call: the ATTEMPT is taken, the caller's body becomes the request bound for
+/// the member (the dialect's own builder, at the path of the member's URL), and the far
+/// end's answer is settled as the plane's pure settle says, in JSON.
 #[test]
 fn a_relayed_call_is_the_request_and_the_answer_the_plane_says() {
     let t = relay_script(&linked(&served(ALL)));

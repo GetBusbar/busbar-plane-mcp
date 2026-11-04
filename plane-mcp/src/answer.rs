@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE ANSWERS THE PLANE GIVES FROM WHAT IT HOLDS: every request whose answer is the generation's
+//! catalogue or the section's own content, and that reaches no far end.
 
 use serde_json::{json, Value};
 
@@ -68,11 +69,13 @@ fn discover_visible(
         .collect();
     let prompts = catalogue.prompts_for(admit);
     let resources = catalogue.resources_for(admit);
+    let templates = catalogue.resource_templates_for(admit);
     let mut servers: Vec<&str> = tools
         .iter()
         .map(|t| t.server.as_str())
         .chain(prompts.iter().map(|p| p.server.as_str()))
         .chain(resources.iter().map(|r| r.server.as_str()))
+        .chain(templates.iter().map(|r| r.server.as_str()))
         .collect();
     servers.sort_unstable();
     servers.dedup();
@@ -97,6 +100,7 @@ fn discover_visible(
                 "tools": tools.len(),
                 "prompts": prompts.len(),
                 "resources": resources.len(),
+                "resourceTemplates": templates.len(),
             },
             "registryEmpty": catalogue.is_empty(),
             "cacheScope": CACHE_SCOPE,
@@ -106,6 +110,7 @@ fn discover_visible(
 }
 
 /// ANSWER ONE ARRIVAL from what the plane holds. `params` is the request body's `params`;
+/// `hidden` is the kernel's trust verdict for a listed tool: `true` hides it.
 pub fn answer(
     disposition: &Disposition,
     params: Option<&Value>,
@@ -141,7 +146,10 @@ pub fn answer(
                 match reads::prompt_named(catalogue, id, params, admit) {
                     Err(refusal) => Answer::refused(&refusal),
                     Ok(prompt) if !prompt.ask_caller.is_empty() || retried => Answer::Far,
-                    Ok(prompt) => Answer::ok(reads::prompts_get(prompt, id, params)),
+                    Ok(prompt) => match reads::prompts_get(prompt, id, params) {
+                        Ok(body) => Answer::ok(body),
+                        Err(refusal) => Answer::refused(&refusal),
+                    },
                 }
             } else if op == OP_TASK_GET || op == OP_TASK_UPDATE || op == OP_TASK_CANCEL {
                 Answer::refused(&crate::call::task_verb(id, params))

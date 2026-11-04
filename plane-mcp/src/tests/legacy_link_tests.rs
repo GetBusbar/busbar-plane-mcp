@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! The held `2024-11-05` link's reading of its stream: the message address named once and only on
+//! The held `2024-11-05` link's reading of its stream: the message address named once and
+//! only on the endpoint's origin, answers handed only to the call waiting for their id,
+//! once, and the waiting calls bounded.
 
 use super::*;
 
@@ -94,4 +96,129 @@ fn red_a_link_refuses_a_cross_origin_endpoint() {
         "a stream naming another origin is unusable"
     );
     assert_eq!(woken, vec![ticket(3)], "and its parked calls learn why");
+}
+
+#[test]
+fn retired_generations_are_never_reused() {
+    let first = next_generation().unwrap();
+    let second = next_generation().unwrap();
+    assert!(second > first);
+}
+
+#[test]
+fn death_keeps_woken_call_ownership_until_failure_is_consumed() {
+    let mut l = link();
+    l.wait(7, ticket(1));
+    l.parked.push(ticket(2));
+    let mut woken = Vec::new();
+    l.die("launch refused", &mut woken);
+    assert_eq!(l.failed, vec![ticket(1), ticket(2)]);
+    assert_eq!(woken, l.failed);
+    assert_eq!(l.dead.as_deref(), Some("launch refused"));
+}
+
+#[test]
+fn malformed_event_json_fails_waiting_calls() {
+    let mut l = link();
+    l.wait(7, ticket(1));
+    let woken = feed(&mut l, "event: message\ndata: {broken\n\n");
+    assert!(l.dead.as_deref().unwrap().contains("malformed JSON"));
+    assert!(woken.contains(&ticket(1)));
+}
+
+#[test]
+fn reply_queue_overflow_fails_the_link_loudly() {
+    let mut l = link();
+    for _ in 0..MAX_OUTBOX {
+        l.outbox.push_back(Vec::new());
+    }
+    feed(
+        &mut l,
+        "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"ping\"}\n\n",
+    );
+    assert!(l.dead.as_deref().unwrap().contains("reply queue limit"));
+    assert_eq!(l.outbox.len(), MAX_OUTBOX);
+}
+
+#[test]
+fn failed_call_post_releases_retained_progress_bytes() {
+    let plane = McpDoor::default();
+    let mut l = link();
+    l.init = Init::Done;
+    l.address = Some("https://up.example/messages".into());
+    l.wait(7, ticket(1));
+    l.notes
+        .insert("7".into(), vec![serde_json::json!({"progress":1})]);
+    l.notes_bytes.insert("7".into(), 14);
+    plane.legacy.insert("key".into(), l);
+    let request = crate::client::jsonrpc::envelope(
+        "https://up.example/events",
+        "tools/call",
+        None,
+        crate::codec::json(&serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call"})),
+        None,
+    );
+    let mut state = Some(Calling {
+        generation: 1,
+        id: Some(7),
+        posted: false,
+        init: CallInit::Done,
+    });
+    let answer = call_using(
+        ticket(1),
+        &plane,
+        ("key", "fs"),
+        &request,
+        &mut state,
+        (0, 1000),
+        |_, _, _| Poll::Ready(Err("POST failed".into())),
+    );
+    assert!(matches!(answer, Poll::Ready(Err(_))));
+    plane.legacy.with(&"key".to_string(), |l| {
+        let l = l.unwrap();
+        assert!(l.notes.is_empty());
+        assert!(l.notes_bytes.is_empty());
+        assert!(l.waiters.is_empty());
+    });
+}
+
+#[test]
+fn peer_reply_post_requires_a_successful_final_head() {
+    for code in [200, 202, 204, 299] {
+        assert_eq!(
+            reply_step(&ReplyPiece {
+                kind: REPLY_HEAD,
+                code,
+                ..ReplyPiece::default()
+            }),
+            Some(ReplyStep::Close)
+        );
+    }
+    for code in [101, 300, 400, 500, 503] {
+        assert_eq!(
+            reply_step(&ReplyPiece {
+                kind: REPLY_HEAD,
+                code,
+                ..ReplyPiece::default()
+            }),
+            None
+        );
+    }
+    for kind in [REPLY_END, REPLY_ACK] {
+        assert_eq!(
+            reply_step(&ReplyPiece {
+                kind,
+                ..ReplyPiece::default()
+            }),
+            None
+        );
+    }
+    assert_eq!(
+        reply_step(&ReplyPiece {
+            kind: REPLY_HEAD,
+            code: 100,
+            ..ReplyPiece::default()
+        }),
+        Some(ReplyStep::Read)
+    );
 }

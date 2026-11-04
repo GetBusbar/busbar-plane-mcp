@@ -20,7 +20,10 @@ fn an_unarmed_reply_exchange_is_failed_instead_of_reported_as_delivered() {
         vec![br#"{"jsonrpc":"2.0","id":8,"error":{"code":-32000,"message":"refused"}}"#.to_vec()],
     );
     match result {
-        Far::Settled(Err(reason)) => assert!(!reason.is_empty()),
+        Far::Settled(Err(reason)) => assert_eq!(
+            reason,
+            busbar_contract::abi::sdk::conn::ConnFailure::Unarmed.to_string()
+        ),
         _ => panic!("an unsent child reply must retain the actual exchange failure"),
     }
 }

@@ -2,6 +2,8 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! Local-program roots through the production settings reader. A root names the configured
+//! absolute command path, byte for byte, and requires an explicit absolute working
+//! directory.
 
 use serde_json::{json, Value};
 
@@ -25,7 +27,7 @@ const ENV_SECRET_MARKER: &str = "local-program-grammar-env-secret-marker";
 
 /// A literal section, sent through the reader used by validate, open and refresh.
 fn read(section: &Value) -> Result<ToolsCfg, String> {
-    crate::statement::read_tools_section(
+    crate::statement::test_support::read_tools_section(
         &serde_json::to_vec(section).expect("a test section serialises"),
     )
 }
@@ -58,7 +60,9 @@ fn refuses(section: &Value) -> String {
     error
 }
 
-/// This is the positive control for every refusal family. Before local_program is implemented,
+/// This is the positive control for every refusal family. Before local_program is
+/// implemented, it fails at the production enum's unsupported-mechanism reading, rather
+/// than proving a mirror.
 fn accepts_local_program() -> ToolsCfg {
     read(&local_section()).expect("stdio local_program with matching command/key and absolute cwd")
 }

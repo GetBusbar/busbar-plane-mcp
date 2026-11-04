@@ -2,8 +2,8 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE ROUTING KEY: `{server}_{tool}`, a pair that renders, never a string that is parsed. A
-
-#![cfg_attr(not(test), allow(dead_code))]
+//! server id may not contain `_`, so the rendering splits one way and one `mcp_tool` grant names
+//! one tool.
 
 use std::fmt;
 
@@ -53,6 +53,7 @@ impl fmt::Display for NameError {
 }
 
 /// The `{server}_{tool}` separator, named once so the rendering, the parse and the refusal above
+/// cannot disagree about what it is.
 const SEP: char = '_';
 
 /// `name` (a `what`) refused when empty or carrying a character outside `[A-Za-z0-9_.-]`.

@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE TASKS EXTENSION ON THE DOOR: who creates a task, who runs it, and how the `tasks/*` verbs
+//! read and move it; the task itself (state, shapes, sweep, durable rows) is [`crate::tool_tasks`].
 
 use std::task::Poll;
 
@@ -56,6 +57,7 @@ pub(super) enum Retry {
 
 impl TaskUnit {
     /// A continuation of task `reference`, running `params`; `retry` = the caller's answer to the
+    /// upstream's ask it carries back (the retry of a relayed ask).
     pub(super) fn run(reference: String, params: Value, retry: Option<Retry>) -> Self {
         TaskUnit::Run(Box::new(Run {
             digest: run_digest(&params),
@@ -73,6 +75,7 @@ impl TaskUnit {
 /// settles leave to strike.
 #[derive(Default)]
 pub(super) struct Create {
+    prepared: Option<(Value, String)>,
     open: Option<u32>,
     nest: Option<u32>,
     opened: Option<(u64, String)>,
@@ -87,12 +90,16 @@ pub(super) struct Create {
     cleaned_writes: usize,
 }
 
+/// A cache-evicted task's chunk cleanup, owed until the host no longer retains it: its owner and
+/// how many result and live chunks are left to strike.
 pub(super) struct Strikes {
     owner: String,
     chunks: u32,
     live_chunks: u32,
 }
 
+/// One of the caller's strikes a creating unit checks: its task, the handle number its find was
+/// issued under, and whether it is done.
 struct Clean {
     reference: String,
     find: Option<u32>,
@@ -100,6 +107,7 @@ struct Clean {
 }
 
 /// A task left behind, being settled: its reference, the handle number its find was issued under,
+/// the live handle and row it found, its live state's records read, and whether it is done.
 pub(super) struct Left {
     reference: String,
     find: Option<u32>,
@@ -127,7 +135,29 @@ pub(super) struct Listing {
     page: Option<u32>,
     after: Option<Vec<u8>>,
     rows: Vec<(Vec<u8>, Vec<u8>)>,
+    bytes: usize,
     done: bool,
+}
+
+const MAX_LISTING_BYTES: usize = 16 * 1024 * 1024;
+const MAX_LISTING_ROWS: usize = 16_384;
+
+impl Listing {
+    fn push(&mut self, key: &[u8], value: &[u8]) -> bool {
+        let Some(bytes) = self
+            .bytes
+            .checked_add(key.len())
+            .and_then(|n| n.checked_add(value.len()))
+        else {
+            return false;
+        };
+        if self.rows.len() >= MAX_LISTING_ROWS || bytes > MAX_LISTING_BYTES {
+            return false;
+        }
+        self.rows.push((key.to_vec(), value.to_vec()));
+        self.bytes = bytes;
+        true
+    }
 }
 
 /// A continuation.
@@ -204,10 +234,14 @@ enum End {
 }
 
 /// The words of a task this caller has no task under: the one answer for an id that does not
+/// exist and one that is another caller's (anti-enumeration).
 const UNKNOWN_TASK: &str = "No task with that `taskId` exists for this caller.";
 
 /// The status of a `400` answer.
 const STATUS_BAD_REQUEST: u32 = 400;
+
+/// The status of a task the host could not serve now (a retry may succeed).
+const STATUS_UNAVAILABLE: u32 = 503;
 
 /// The call-log reason of a call whose task could not be started.
 const REASON_TASK_UNAVAILABLE: &str = "task_unavailable";
@@ -217,6 +251,14 @@ const WORK_BYTES: usize = 512;
 
 /// The most result chunks one page of a listing reads.
 const PAGE: u32 = 64;
+
+/// The bytes a listing's page is first read into (a short answer re-reads it at the host's size).
+const PAGE_BYTES: usize = 64 * 1024;
+
+/// The most cache-evicted tasks whose chunk cleanup this instance remembers. Past it the oldest
+/// gives way: its caller's index row is the durable cleanup intent, and the next create of that
+/// caller re-learns the strike from it ([`settle_left`]).
+const MAX_STRIKE_ENTRIES: usize = tasks::MAX_RETAINED_TASKS;
 
 /// The most stale result chunks one creating unit strikes as it writes.
 const MAX_STRIKES: usize = 64;
@@ -244,6 +286,7 @@ pub(super) fn handle(ticket: Ticket, issued: &mut u32, slot: &mut Option<u32>) -
 }
 
 /// Whether `entry` answers this caller's call (`params`) with a task: the operator's declaration
+/// crossed with the caller's.
 pub(super) fn creates(entry: &crate::catalogue::ToolEntry, params: Option<&Value>) -> bool {
     entry
         .task_support
@@ -253,6 +296,7 @@ pub(super) fn creates(entry: &crate::catalogue::ToolEntry, params: Option<&Value
 }
 
 /// Whether `unit`'s arrival is a `tools/call` that creates a task (its refusal by the caller's
+/// budget is said as the served engine's task path said it).
 pub(super) fn creates_task(unit: &CallUnit) -> bool {
     let (Some(held), crate::tool_arrival::Disposition::Request { row, .. }) =
         (unit.held.as_ref(), &unit.disposition)
@@ -282,6 +326,10 @@ pub(super) fn budget_refused(id: Option<Value>, status: u32, message: &str) -> R
 }
 
 /// THE CONTINUATION'S ARRIVAL on the task-run claim: its reference, the call it runs, and that call
+/// as the `tools/call` body the one dispatch decides (its head fields mirrored from it), and — the
+/// retry of a relayed ask — `relay: {requestState, inputResponses}`, or — the resume of an answered
+/// round of the task's own asks — `resume: <round>` and its `seal`. `None` for a body that is not
+/// one (a resume with no seal included).
 pub(super) fn run_arrival(body: &[u8]) -> Option<(String, Value, Vec<u8>, Option<Retry>)> {
     let value: Value = serde_json::from_slice(body).ok()?;
     let reference = value.get("taskId")?.as_str()?.to_string();
@@ -318,6 +366,8 @@ pub(super) fn unknown_arrival() -> Refusal {
 }
 
 /// The call a continuation runs: the published name, the arguments as admitted (the answers to
+/// busbar's own asks merged in), and the caller's `_meta` (its capabilities), its progress token cut
+/// (nobody is listening for the continuation's progress).
 fn run_params(admitted: &AdmittedCall, params: Option<&Value>) -> Value {
     let mut out = Map::new();
     out.insert("name".into(), admitted.entry.namespaced.clone().into());
@@ -354,6 +404,8 @@ fn invalid(id: &Value, message: &str) -> Refusal {
 }
 
 /// SETTLE handle `work` with `row`, on a fresh handle of `ticket`: whether it LANDED (settled now, or
+/// settled first by another unit). One that pends or fails is owed ([`owe`]): its task is held
+/// unsettled and the next create's sweep settles it again, until it lands.
 fn settled(
     services: StaticServices,
     ticket: Ticket,
@@ -366,6 +418,7 @@ fn settled(
 }
 
 /// SETTLE handle `work` with `row` on `h`: `Some(true)` settled now, `Some(false)` settled first by
+/// another unit, `None` the host could not say.
 fn settle(
     services: StaticServices,
     h: CompletionHandle,
@@ -382,15 +435,79 @@ fn settle(
 }
 
 /// A settle of `task` that did not land, OWED: the instance holds the task unsettled, for the next
+/// create's sweep.
+///
+/// The settle carried `task`'s terminal state: a held entry that has not reached one takes it (its
+/// own halves kept, [`Task::hosted`]), so the sweep that re-settles it settles that state and never
+/// the entry's stale live one.
 fn owe(plane: &McpDoor, task: &Task) {
     plane.tasks.with_all(|m| {
-        m.entry(task.id.clone())
-            .or_insert_with(|| task.clone())
-            .unsettled = true;
+        let held = m.entry(task.id.clone()).or_insert_with(|| task.clone());
+        if task.status().is_terminal() && !held.status().is_terminal() {
+            held.hosted(task.clone());
+        }
+        held.unsettled = true;
     });
 }
 
+/// Remembers `reference`'s chunk cleanup in `strikes`, the oldest giving way past
+/// [`MAX_STRIKE_ENTRIES`].
+fn strike(
+    strikes: &mut std::collections::BTreeMap<String, Strikes>,
+    reference: String,
+    entry: Strikes,
+) {
+    while strikes.len() >= MAX_STRIKE_ENTRIES && !strikes.contains_key(&reference) {
+        if strikes.pop_first().is_none() {
+            break;
+        }
+    }
+    strikes.insert(reference, entry);
+}
+
+/// How many chunks the records listed under `prefix` number (one past the highest index), `None`
+/// when a key under it is not a chunk index.
+fn chunk_count(rows: &[(Vec<u8>, Vec<u8>)], prefix: &[u8]) -> Option<u32> {
+    let mut count = 0;
+    for (key, _) in rows {
+        let next = key
+            .strip_prefix(prefix)
+            .and_then(|n| std::str::from_utf8(n).ok())
+            .and_then(|n| n.parse::<u32>().ok())
+            .and_then(|n| n.checked_add(1))?;
+        count = count.max(next);
+    }
+    Some(count)
+}
+
+/// Whether this instance's own view of `task` moved on since the host's records `task` was read
+/// from: a run bound to it, a settle owed, or an update newer than the records say. A task that
+/// moved is not left behind, whatever the index row read earlier said.
+fn moved_on(plane: &McpDoor, task: &Task) -> bool {
+    plane.tasks.with(&task.id, |held| {
+        held.is_some_and(|t| t.runner.is_some() || t.unsettled || t.stamps().1 > task.stamps().1)
+    })
+}
+
+/// A listing that failed for a task this instance holds no copy of: the host could not say, which
+/// is not the task's absence (`Err`: the caller is told to retry, never that no such task exists).
+fn unlisted(held: Option<Task>) -> Poll<Result<Option<Box<Task>>, ServiceError>> {
+    Poll::Ready(held.map(|t| Some(Box::new(t))).ok_or(ServiceError::Broken))
+}
+
+/// The words of a `work.open` the host did not answer with a handle.
+fn not_opened(error: ServiceError) -> &'static str {
+    match error {
+        ServiceError::Declined(AbiOutcome::Refused) => {
+            "the deployment holds as many live tasks as it keeps"
+        }
+        ServiceError::Unserved => "the deployment keeps no store for them",
+        _ => "the host could not open its work handle; retry the call",
+    }
+}
+
 /// The task's live state as its records: its live chunks, any this instance wrote past them struck, and — `until` given — its caller's index row,
+/// its run's lease `until` (`0`: no run holds it).
 fn live_records(plane: &McpDoor, task: &Task, until: Option<u64>) -> Result<tasks::Records, usize> {
     let mut out = tasks::live_parts(&task.id, &task.live())?;
     let wrote = u32::try_from(out.len()).unwrap_or(u32::MAX);
@@ -412,6 +529,7 @@ fn not_kept(what: &str, bytes: usize) -> String {
 }
 
 /// ITS CALLER'S INDEX ROW alone, its run's lease `until`: what rides a request whose task's live
+/// state is already in the records.
 fn lease_record(task: &Task, until: u64) -> (Vec<u8>, Vec<u8>) {
     let lease = tasks::TaskLease {
         until_ms: until,
@@ -421,6 +539,8 @@ fn lease_record(task: &Task, until: u64) -> (Vec<u8>, Vec<u8>) {
 }
 
 /// A settled task's live chunks are struck. Its existing caller index remains as durable cleanup
+/// intent until an authorized lookup says the host no longer retains the task and all result
+/// chunks have been removed.
 fn struck_records(task: &Task) -> Vec<(Vec<u8>, Vec<u8>)> {
     let mut out: Vec<(Vec<u8>, Vec<u8>)> = (0..task.live_chunks.max(tasks::LIVE_STRIKES))
         .map(|n| (tasks::live_key(&task.id, n), Vec::new()))
@@ -430,6 +550,10 @@ fn struck_records(task: &Task) -> Vec<(Vec<u8>, Vec<u8>)> {
 }
 
 /// The records a terminal state leaves: `task`'s result chunks, written whether or not its settle `landed`, the count kept in
+/// hand. A settle that landed strikes its live chunks and retains its cleanup index; one that is
+/// owed leaves its live state, terminal, and its index row with its run's lease lapsed at its last
+/// update: every node then answers its result from the records, and the next create of its caller
+/// on any node settles it with that state, a restart between them included.
 fn ended_records(plane: &McpDoor, task: &Task, landed: bool) -> tasks::Records {
     let mut out = task
         .terminal()
@@ -473,7 +597,7 @@ fn list_records(
 ) -> Poll<bool> {
     while !l.done {
         let h = handle(ticket, issued, &mut l.page);
-        let mut sizes = (64 * 1024, PAGE as usize);
+        let mut sizes = (PAGE_BYTES, PAGE as usize);
         let mut page: Option<(usize, Option<Vec<u8>>)> = None;
         for _ in 0..2 {
             let mut buf = vec![0u8; sizes.0];
@@ -490,13 +614,18 @@ fn list_records(
                 Poll::Ready(Ok(records)) => {
                     let mut n = 0;
                     for (key, value) in records.records() {
-                        l.rows.push((key.to_vec(), value.to_vec()));
+                        if !l.push(key, value) {
+                            return Poll::Ready(false);
+                        }
                         n += 1;
                     }
                     page = Some((n, records.last_key().map(<[u8]>::to_vec)));
                     break;
                 }
                 Poll::Ready(Err(ServiceError::Short { bytes, items })) => {
+                    if bytes > MAX_LISTING_BYTES as u64 || items > MAX_LISTING_ROWS as u64 {
+                        return Poll::Ready(false);
+                    }
                     sizes = (
                         usize::try_from(bytes).unwrap_or(usize::MAX).max(sizes.0),
                         usize::try_from(items).unwrap_or(usize::MAX).max(sizes.1),
@@ -512,6 +641,12 @@ fn list_records(
         if n < PAGE as usize || last.is_none() {
             l.done = true;
         } else {
+            if last
+                .as_ref()
+                .is_some_and(|next| l.after.as_ref().is_some_and(|after| next <= after))
+            {
+                return Poll::Ready(false);
+            }
             l.after = last;
         }
     }
@@ -519,6 +654,10 @@ fn list_records(
 }
 
 /// A TASK LEFT BEHIND, settled: found (scoped to this caller) and its live state read from the
+/// plane's records; one whose run reached its terminal state but whose settle never landed (the
+/// process that ran it gone) is settled with that state, its result already in the records; any
+/// other is cancelled and settled. Settled handles keep their index until actual absence permits
+/// chunk cleanup; read errors defer the check.
 fn settle_left(
     plane: &McpDoor,
     services: StaticServices,
@@ -568,19 +707,10 @@ fn settle_left(
             }
             Poll::Ready(true) => {}
         }
-        let mut chunks = 0;
-        for (key, _) in &left.result.rows {
-            let Some(next) = key
-                .strip_prefix(prefix.as_slice())
-                .and_then(|n| std::str::from_utf8(n).ok())
-                .and_then(|n| n.parse::<u32>().ok())
-                .and_then(|n| n.checked_add(1))
-            else {
-                left.done = true;
-                return Poll::Ready(Vec::new());
-            };
-            chunks = chunks.max(next);
-        }
+        let Some(chunks) = chunk_count(&left.result.rows, &prefix) else {
+            left.done = true;
+            return Poll::Ready(Vec::new());
+        };
         let live_prefix = tasks::live_prefix(&left.reference);
         match list_records(services, ticket, issued, &live_prefix, &mut left.live) {
             Poll::Pending => return Poll::Pending,
@@ -590,27 +720,23 @@ fn settle_left(
             }
             Poll::Ready(true) => {}
         }
-        let mut live_chunks = 0;
-        for (key, _) in &left.live.rows {
-            let Some(next) = key
-                .strip_prefix(live_prefix.as_slice())
-                .and_then(|n| std::str::from_utf8(n).ok())
-                .and_then(|n| n.parse::<u32>().ok())
-                .and_then(|n| n.checked_add(1))
-            else {
-                left.done = true;
-                return Poll::Ready(Vec::new());
-            };
-            live_chunks = live_chunks.max(next);
-        }
-        plane.strikes.insert(
-            left.reference.clone(),
-            Strikes {
-                owner: principal.to_string(),
-                chunks,
-                live_chunks,
-            },
-        );
+        let Some(live_chunks) = chunk_count(&left.live.rows, &live_prefix) else {
+            left.done = true;
+            return Poll::Ready(Vec::new());
+        };
+        left.result.rows = Vec::new();
+        left.live.rows = Vec::new();
+        plane.strikes.with_all(|m| {
+            strike(
+                m,
+                left.reference.clone(),
+                Strikes {
+                    owner: principal.to_string(),
+                    chunks,
+                    live_chunks,
+                },
+            );
+        });
         left.done = true;
         return Poll::Ready(Vec::new());
     }
@@ -627,9 +753,15 @@ fn settle_left(
         return Poll::Ready(Vec::new());
     }
     let mut task = Task::from_row(&left.reference, principal, work, &row, None);
-    let bytes: Vec<u8> = left.live.rows.iter().flat_map(|(_, v)| v.clone()).collect();
+    let bytes: Vec<u8> = std::mem::take(&mut left.live.rows)
+        .into_iter()
+        .flat_map(|(_, v)| v)
+        .collect();
     if let Some(live) = tasks::read_live(&bytes) {
         task.take_live(&live);
+    }
+    if moved_on(plane, &task) {
+        return Poll::Ready(Vec::new());
     }
     if !task.status().is_terminal() {
         task.cancel(now);
@@ -643,6 +775,8 @@ fn settle_left(
 }
 
 /// THE CREATING UNIT: the sweep, the handle opened, the task held, the continuation nested, and the
+/// `CreateTaskResult` written (with the call-log line `refused`/`task_created`, as the served engine
+/// recorded it: at the moment the caller is answered nothing has gone out).
 pub(super) fn create(
     plane: &McpDoor,
     ticket: Ticket,
@@ -662,6 +796,7 @@ pub(super) fn create(
     step
 }
 
+/// The creating unit's steps, from where `st` says it is ([`create`]).
 fn creating(
     plane: &McpDoor,
     ticket: Ticket,
@@ -675,7 +810,7 @@ fn creating(
 
     let unavailable = |unit: &mut CallUnit, struck: &mut tasks::Records, why: &str| {
         let refusal = Refusal {
-            status: 503,
+            status: STATUS_UNAVAILABLE,
             id: Some(admitted.id.clone()),
             code: crate::codec::CODE_REFUSED,
             message: format!("this task could not be started: {why}"),
@@ -699,8 +834,11 @@ fn creating(
     let Some(services) = plane.services else {
         return unavailable(unit, &mut st.struck, "the host keeps no work handles");
     };
-    let run = run_params(admitted, params);
-    let digest = run_digest(&run);
+    let (run, digest) = &*st.prepared.get_or_insert_with(|| {
+        let run = run_params(admitted, params);
+        let digest = run_digest(&run);
+        (run, digest)
+    });
     let now = match st.at {
         Some(at) => at,
         None => {
@@ -732,7 +870,8 @@ fn creating(
         plane.strikes.with_all(|m| {
             for (id, chunks) in swept.strike {
                 if let Some(owner) = swept.owners.remove(&id) {
-                    m.insert(
+                    strike(
+                        m,
                         id,
                         Strikes {
                             owner,
@@ -747,8 +886,13 @@ fn creating(
 
     let prefix = tasks::index_prefix(principal);
     if !st.indexed {
-        if list_records(services, ticket, &mut unit.issued, &prefix, &mut st.index).is_pending() {
-            return Step::Pending;
+        match list_records(services, ticket, &mut unit.issued, &prefix, &mut st.index) {
+            Poll::Pending => return Step::Pending,
+            Poll::Ready(false) => tracing::warn!(
+                "MCP task create could not list this caller's task index; tasks it left behind \
+                 are settled by a later create"
+            ),
+            Poll::Ready(true) => {}
         }
         st.indexed = true;
     }
@@ -760,10 +904,9 @@ fn creating(
             continue;
         };
         let left = tasks::TaskLease::read(&value).is_some_and(|l| l.left_behind(now));
-        let running = plane
-            .tasks
-            .get(&id.to_string())
-            .is_some_and(|t| t.runner.is_some() || t.unsettled);
+        let running = plane.tasks.with(&id.to_string(), |t| {
+            t.is_some_and(|t| t.runner.is_some() || t.unsettled)
+        });
         if left && !running {
             st.left.push(Left {
                 reference: id.to_string(),
@@ -812,16 +955,12 @@ fn creating(
                 let reference = opened.reference.to_string();
                 plane.tasks.insert(
                     reference.clone(),
-                    Task::new(&reference, principal, opened.handle, &digest, now),
+                    Task::new(&reference, principal, opened.handle, digest, now),
                 );
                 st.opened = Some((opened.handle, reference));
             }
-            Poll::Ready(Err(_)) => {
-                return unavailable(
-                    unit,
-                    &mut st.struck,
-                    "the deployment holds as many live tasks as it keeps, or keeps no store for them",
-                );
+            Poll::Ready(Err(error)) => {
+                return unavailable(unit, &mut st.struck, not_opened(error));
             }
         }
     }
@@ -924,6 +1063,8 @@ fn creating(
     Step::Write
 }
 
+/// THE CALLER'S OWED CHUNK CLEANUP: each of its strikes whose task the host no longer retains has its
+/// result and live chunks struck (at most [`MAX_STRIKES`] writes per creating unit), then its index.
 fn clean_chunks(
     plane: &McpDoor,
     services: StaticServices,
@@ -1002,6 +1143,7 @@ pub(super) fn is_run(unit: &CallUnit) -> bool {
 }
 
 /// THE CONTINUATION'S CALLER BODY has arrived (or arrived again, for another member of its walk):
+/// its phases run from where they are.
 pub(super) fn begin(plane: &McpDoor, ticket: Ticket, principal: &str, unit: &mut CallUnit) -> Step {
     let far = matches!(unit.task.as_ref(), Some(TaskUnit::Run(r)) if r.phase == Phase::Far);
     let turn = if far {
@@ -1027,6 +1169,7 @@ pub(super) fn begin(plane: &McpDoor, ticket: Ticket, principal: &str, unit: &mut
 }
 
 /// A continuation called again part way through a phase that waits on the host (a pend's wake): the
+/// phase goes on. `None` for any other unit.
 pub(super) fn resume(
     plane: &McpDoor,
     ticket: Ticket,
@@ -1042,6 +1185,12 @@ pub(super) fn resume(
 }
 
 /// The far end asked the continuation's caller, the ask granted
+/// ([`crate::call::settle_call_as`]): the task parks `input_required` with the upstream's `result`'s
+/// `inputRequests` verbatim under busbar's sealed state, bound to the principal, the tool (`digest`:
+/// the arguments as sent) and the member that asked, nesting the upstream's own state; the
+/// continuation ends with the handle live, and `tasks/update` answers it. A deployment that cannot
+/// seal the state fails the task in the refusal's words. `server` is the asking registration's,
+/// `answered` the length of the document it answered with.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn continuation_asked(
     plane: &McpDoor,
@@ -1142,6 +1291,8 @@ fn asking(
 }
 
 /// What a task's relayed-ask state is bound to: the principal, the tool (`name`, as published) and,
+/// in the state's leg, the member; not the catalogue generation, because a task parked on a human
+/// outlives a configuration move.
 fn relay_bind<'a>(principal: &'a str, name: &'a str, now: u64) -> crate::ask::Bind<'a> {
     crate::ask::Bind {
         principal,
@@ -1153,7 +1304,22 @@ fn relay_bind<'a>(principal: &'a str, name: &'a str, now: u64) -> crate::ask::Bi
     }
 }
 
+fn continuation_ask_error(body: &[u8]) -> String {
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|v| {
+            v.pointer("/error/message")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .filter(|message| !message.is_empty())
+        .unwrap_or_else(|| {
+            "the upstream asked for input that this continuation could not relay".to_string()
+        })
+}
+
 /// THE FAR END ANSWERED THE CONTINUATION'S CALL: the tool's result as it came is `completed`
+/// (`isError` and all); an upstream failure or a refused ask, `failed`; then the handle settled.
 pub(super) fn continuation_answered(
     plane: &McpDoor,
     ticket: Ticket,
@@ -1168,16 +1334,7 @@ pub(super) fn continuation_answered(
         run.end = Some(match leg {
             Leg::Done(value) => End::Completed(value),
             Leg::Failed(reason) => End::Failed(format!("the MCP upstream call failed: {reason}")),
-            Leg::Asked => End::Failed(
-                serde_json::from_slice::<Value>(body)
-                    .ok()
-                    .and_then(|v| {
-                        v.pointer("/error/message")
-                            .and_then(Value::as_str)
-                            .map(str::to_string)
-                    })
-                    .unwrap_or_default(),
-            ),
+            Leg::Asked => End::Failed(continuation_ask_error(body)),
         });
         run.phase = Phase::Settle;
     }
@@ -1201,6 +1358,7 @@ fn with_run(unit: &mut CallUnit, f: impl FnOnce(&mut CallUnit, &mut Run) -> Step
 }
 
 /// The continuation's reply: `{taskId, status}`, the tool call it made reported (never a fee: the
+/// unit that drew the fee is the one that created the task), and the result's chunks.
 fn reply(
     unit: &mut CallUnit,
     run: &mut Run,
@@ -1224,6 +1382,7 @@ fn reply(
 }
 
 /// A continuation that may not run (no such task for its principal, not the admitted call, or run
+/// already): the unknown-task answer, nothing moved.
 fn not_run(unit: &mut CallUnit, run: &mut Run) -> Step {
     run.phase = Phase::Done;
     let refusal = unknown_arrival();
@@ -1236,7 +1395,7 @@ fn not_run(unit: &mut CallUnit, run: &mut Run) -> Step {
 fn claim_unavailable(unit: &mut CallUnit, run: &mut Run) -> Step {
     run.phase = Phase::Done;
     let refusal = Refusal {
-        status: 503,
+        status: STATUS_UNAVAILABLE,
         id: None,
         code: TASK_PROTOCOL_ERROR_CODE,
         message: "the host's records.claim failed; this invocation could not confirm ownership of the task"
@@ -1250,6 +1409,10 @@ fn claim_unavailable(unit: &mut CallUnit, run: &mut Run) -> Step {
 }
 
 /// THE RETRY'S STATE, opened ([`crate::ask::open_relayed`]): busbar's own, sealed for this
+/// principal and this task's tool over the arguments it sends (the admitted ones with busbar's own
+/// answers merged), nesting an upstream leg, and spent once. `None` for a state that is forged,
+/// spent, another caller's or another call's, or for a task that is not this principal's or has
+/// ended.
 fn relayed_leg(
     plane: &McpDoor,
     services: StaticServices,
@@ -1503,26 +1666,16 @@ fn running(
             Phase::Call => {
                 if let Some(status) = plane
                     .tasks
-                    .get(&run.reference)
-                    .map(|t| t.status())
+                    .with(&run.reference, |t| t.map(|t| t.status()))
                     .filter(|s| s.is_terminal())
                 {
                     return reply(unit, run, status, Vec::new());
                 }
                 let answers = plane
                     .tasks
-                    .get(&run.reference)
-                    .map(|t| t.answers().clone())
+                    .with(&run.reference, |t| t.map(|t| t.answers().clone()))
                     .unwrap_or_default();
-                match call(
-                    plane,
-                    ticket,
-                    principal,
-                    &held,
-                    unit,
-                    run,
-                    (services, &answers),
-                ) {
+                match call(plane, ticket, principal, &held, unit, run, &answers) {
                     Ok(Step::Write) => {
                         if let Some(task) = plane.tasks.get(&run.reference) {
                             let timeout = unit
@@ -1612,6 +1765,8 @@ fn running(
 }
 
 /// The terminal state as the host's records keep it: a result longer than they keep settles the task
+/// `failed` in words, the same on every node, never held only in hand; a failure's words longer
+/// than they keep are cut to what they keep.
 fn kept_end(reference: &str, end: End) -> End {
     let terminal = match &end {
         End::Completed(value) => json!({ "result": value }),
@@ -1624,6 +1779,8 @@ fn kept_end(reference: &str, end: End) -> End {
         Err(bytes) => match end {
             End::Completed(_) => End::Failed(not_kept("result", bytes)),
 
+            // A char is at most 4 UTF-8 bytes and 6 once JSON-escaped (`\u001f`): an eighth of the
+            // kept bytes in chars leaves room for the escaping and the error's envelope.
             End::Failed(message) => {
                 End::Failed(message.chars().take(tasks::kept_bytes() / 8).collect())
             }
@@ -1632,6 +1789,12 @@ fn kept_end(reference: &str, end: End) -> End {
 }
 
 /// THE CALL, sent to the member the continuation's walk picked: the arguments as admitted with the
+/// answers to the task's own rounds merged in (`answers`, never over an admitted argument), judged
+/// again by the argument guard on what is actually about to be dispatched (the answers were never
+/// screened), a pool's twin taken as the synchronous path takes it, and sent by the one
+/// member-send the synchronous call uses ([`super::send_to_member`]): the caller's down-scope to a `token_exchange:` member, the client ladder, a stdio
+/// member's child, the bound on the caller's reply to a relayed ask. Every host the arguments name
+/// is asked of `dest.judge` on `ticket`. `Err` = the task ends here, in the engine's words.
 #[allow(clippy::too_many_lines)]
 fn call(
     plane: &McpDoor,
@@ -1640,7 +1803,7 @@ fn call(
     held: &Held,
     unit: &mut CallUnit,
     run: &mut Run,
-    (_services, answers): (StaticServices, &Map<String, Value>),
+    answers: &Map<String, Value>,
 ) -> Result<Step, End> {
     let name = run.params.get("name").and_then(Value::as_str).unwrap_or("");
     let Some(entry) = held.catalogue.tool(name).cloned() else {
@@ -1678,6 +1841,16 @@ fn call(
         return Ok(Step::Pending);
     }
     super::admit_task_send(plane, ticket, unit, held, &entry, &arguments).map_err(End::Failed)?;
+
+    if let Some(Retry::Relayed { responses, .. }) = &run.retry {
+        crate::argguard::guard(&json!({}), responses, |destination| {
+            let h = handle(ticket, &mut unit.issued, &mut None);
+            plane
+                .services
+                .and_then(|services| super::dest_verdict(services, h, held, &entry, destination))
+        })
+        .map_err(|refusal| End::Failed(refusal.to_string()))?;
+    }
 
     let relay = run.leg.as_ref().map(|leg| {
         let mut continuation = Map::new();
@@ -1729,6 +1902,9 @@ fn call(
 }
 
 /// THE RUN THAT CONTINUES A TASK, nested by the `tasks/update` that answered it (under the updating
+/// caller's principal, the task's own) on the task-run claim: `body` names the task, its call and
+/// what continues it. The records the update leaves: the task's live state, its run's lease taken;
+/// a host that runs no continuation for it fails the task, its settle owed until it lands.
 fn nest_run(
     plane: &McpDoor,
     services: StaticServices,
@@ -1754,6 +1930,7 @@ fn nest_run(
 }
 
 /// THE CONTINUATION `body`, nested on the task-run claim on `h`: whether it runs (its answer is its
+/// own, and nobody waits for it here).
 fn nest(services: StaticServices, h: CompletionHandle, body: &Value) -> bool {
     let body = serde_json::to_vec(body).unwrap_or_default();
     let (mut buf, mut spans) = (vec![0u8; 1024], vec![blank(); 8]);
@@ -1765,6 +1942,7 @@ fn nest(services: StaticServices, h: CompletionHandle, body: &Value) -> bool {
 }
 
 /// A TASK NOTHING CAN CONTINUE, failed in `why` and its handle settled (owed until it lands): the
+/// records its terminal state leaves ([`ended_records`]).
 fn fail_unrun(
     plane: &McpDoor,
     (services, ticket, issued): (StaticServices, Ticket, &mut u32),
@@ -1813,6 +1991,9 @@ pub(super) fn door_seal<'a>(
 }
 
 /// A `tasks/*` VERB (`op`) under the caller's request id `id`: behind the `-32021` gate, then
+/// `params.taskId`, then the task — `tasks/get` the detailed task with its result INLINED when
+/// terminal, `tasks/update` the input delivered (an empty ack), `tasks/cancel` the handle settled
+/// `cancelled` (an empty ack, idempotent on a settled task).
 pub(super) fn verb(
     plane: &McpDoor,
     ticket: Ticket,
@@ -1880,10 +2061,11 @@ fn verbing(
             return refuse(
                 unit,
                 &Refusal {
-                    status: 503,
+                    status: STATUS_UNAVAILABLE,
                     id: Some(id.clone()),
                     code: TASK_PROTOCOL_ERROR_CODE,
-                    message: "the host's work.find failed; retry reading the task".to_string(),
+                    message: "the host could not read this task; retry reading the task"
+                        .to_string(),
                     data: None,
                 },
             );
@@ -1912,7 +2094,7 @@ fn verbing(
             return refuse(
                 unit,
                 &Refusal {
-                    status: 503,
+                    status: STATUS_UNAVAILABLE,
                     id: Some(id.clone()),
                     code: TASK_PROTOCOL_ERROR_CODE,
                     message: words,
@@ -2080,6 +2262,10 @@ fn verbing(
 }
 
 /// The task `task_id` names for this caller, from the host's rows: `work.find` (scoped to the instance and the principal; every denial alike); a
+/// live handle's live state in the plane's records (and its result, when that state is terminal and
+/// its settle owed); a settled one's row and the result written there (or the result this instance
+/// holds, when it holds one the records could not), a result they do not hold answered `failed` in
+/// words. The instance's own halves of the task are kept beside what the host says.
 fn resolve(
     plane: &McpDoor,
     services: StaticServices,
@@ -2114,7 +2300,6 @@ fn resolve(
         return Poll::Ready(Ok(Some(Box::new(task.clone()))));
     }
 
-    let unlisted = |held: Option<Task>| Poll::Ready(Ok(held.map(Box::new)));
     let Some(row) = row else {
         return Poll::Ready(Ok(None));
     };
@@ -2127,7 +2312,12 @@ fn resolve(
             Poll::Ready(true) => {}
         }
         let mut task = Task::from_row(task_id, principal, work, &row, None);
-        let bytes: Vec<u8> = st.live.rows.iter().flat_map(|(_, v)| v.clone()).collect();
+        let bytes: Vec<u8> = st
+            .live
+            .rows
+            .iter()
+            .flat_map(|(_, v)| v.iter().copied())
+            .collect();
         if let Some(live) = tasks::read_live(&bytes) {
             task.take_live(&live);
         }
@@ -2163,6 +2353,8 @@ fn resolve(
 const RESULT_NOT_KEPT: &str = "this task ended, but its result is not in the host's records";
 
 /// A TERMINAL TASK read back from its `row` (completed or failed) and its result chunks
+/// (`terminal`); a result the records do not hold is said `failed` in words, never as a task that
+/// does not exist.
 fn ended_task(
     task_id: &str,
     principal: &str,
@@ -2186,6 +2378,7 @@ fn ended_task(
 }
 
 /// The task the host's rows and records made (`host`), laid over what the instance holds of
+/// `task_id`, the instance keeping its own halves ([`Task::hosted`]).
 fn hosted(plane: &McpDoor, task_id: &str, host: Task) -> Poll<Option<Box<Task>>> {
     let mut task = host.clone();
     plane.tasks.with_all(|m| {
@@ -2198,6 +2391,9 @@ fn hosted(plane: &McpDoor, task_id: &str, host: Task) -> Poll<Option<Box<Task>>>
 }
 
 /// The kernel cancelled the unit on `ticket` (its caller went, its deadline passed, the node
+/// drains): a continuation running on it leaves its task `cancelled` — the transition a caller's
+/// `tasks/cancel` makes, as the served engine's runner settled a task its shutdown stopped. The
+/// handle is settled by the next create's sweep.
 pub(super) fn cancelled(plane: &McpDoor, ticket: Ticket) -> Vec<String> {
     let now = clock_now(plane);
     let mut moved = Vec::new();
@@ -2216,6 +2412,8 @@ pub(super) fn cancelled(plane: &McpDoor, ticket: Ticket) -> Vec<String> {
     moved
 }
 
+/// A creating unit cancelled before it nested its continuation: a task it opened that never started
+/// is cancelled, its settle owed, and the records its terminal state leaves ([`ended_records`]).
 pub(super) fn abandoned_create(
     plane: &McpDoor,
     unit: &CallUnit,
@@ -2240,6 +2438,9 @@ pub(super) fn abandoned_create(
 }
 
 /// The kernel refused the continuation `unit` (`text`: its walk was exhausted, its budget said no)
+/// before it settled its task: the task fails, as the served engine's runner failed a call that
+/// could not be carried. Only an actually bound runner may change its task. A refusal before
+/// Bind has no principal or exclusive custody receipt and changes no task named by its body.
 pub(super) fn continuation_refused(
     plane: &McpDoor,
     unit: u64,
@@ -2279,6 +2480,8 @@ pub(super) fn continuation_refused(
 }
 
 /// The run's retained bind receipt, including across a short refusal re-call after its runner was
+/// cleared. A body naming a task without a positive claim or successful authenticated bind
+/// carries no custody.
 pub(super) fn refusal_receipt(unit: &CallUnit) -> Option<(u64, String, Ticket)> {
     let Some(TaskUnit::Run(run)) = unit.task.as_ref() else {
         return None;
@@ -2305,6 +2508,10 @@ fn clock_now(plane: &McpDoor) -> Option<u64> {
         .ok()
         .map(|r| r.wall_ns / 1_000_000)
 }
+
+#[cfg(test)]
+#[path = "tests/door_tasks_audit.rs"]
+mod door_tasks_audit;
 
 #[cfg(test)]
 #[path = "tests/task_host_views.rs"]

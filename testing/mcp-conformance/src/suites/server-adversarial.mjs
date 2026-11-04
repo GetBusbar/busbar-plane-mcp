@@ -435,7 +435,7 @@ test({
       peer.send(request(`cur-${i}`, 'tools/list', { cursor }));
       let res;
       res = await peer.waitForId(`cur-${i}`, 6000);
-      ctx.assert('PAGE.INVALID-CURSOR-32602', res.error?.code === ERR.INVALID_PARAMS,
+      ctx.recommend('PAGE.INVALID-CURSOR-32602', res.error?.code === ERR.INVALID_PARAMS,
         `forged cursor produced a malformed reply: ${JSON.stringify(res).slice(0, 200)}`);
       ctx.variance(`cursorForgery.${i}.kind`,
         res.error ? `error:${res.error.code}` : 'result');

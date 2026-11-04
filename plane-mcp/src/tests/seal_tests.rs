@@ -5,7 +5,7 @@
 
 use super::*;
 
-/// A deterministic stand-in for the host's signature: the payload's digest, twice.
+/// A deterministic stand-in for the host's signature: the payload's SHA-256 digest encoded as 64 hexadecimal bytes.
 fn sign(payload: &[u8]) -> Option<Vec<u8>> {
     let hex = busbar_contract::redacted::sha256_hex(payload);
     Some(hex.as_bytes()[..SIGNATURE_LEN].to_vec())
@@ -62,3 +62,18 @@ fn a_tampered_or_foreign_state_is_refused() {
 
 #[path = "reported_seals.rs"]
 mod reported;
+
+#[test]
+fn audit_short_signature_never_invokes_host_signer() {
+    let mut calls = 0;
+    let mut signer = |_: &[u8]| {
+        calls += 1;
+        Some(vec![0; SIGNATURE_LEN])
+    };
+    assert!(!opens(b"payload", "YQ", &mut signer));
+    assert_eq!(
+        unseal_state("e30.YQ", &mut signer),
+        Err(Rejected::BadSignature)
+    );
+    assert_eq!(calls, 0);
+}

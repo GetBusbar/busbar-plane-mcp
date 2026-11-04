@@ -82,7 +82,7 @@ fn caps() -> Value {
 fn no_rounds_proceed_and_unasked_state_is_refused() {
     let d = decide(&[], 3, &caps(), Retry::default(), bind("k"), "d", None);
     assert_eq!(d, AskDecision::Proceed);
-    let answers = json!({ "ok": true });
+    let answers = json!({ "ok": true, "unasked": "must not be carried" });
     let retry = Retry {
         responses: Some(&answers),
         state: None,
@@ -178,7 +178,7 @@ fn the_exchange_asks_then_proceeds_once() {
     );
     assert_eq!(
         d,
-        AskDecision::Answered(answers.as_object().cloned().unwrap_or_default())
+        AskDecision::Answered(json!({"ok": true}).as_object().cloned().unwrap_or_default())
     );
     let AskDecision::Refuse(r) = decide(
         &confirm(),
@@ -336,6 +336,8 @@ fn the_digest_is_the_serialisations() {
 }
 
 /// THE OPERATOR-AUTHORED ASK (choke point H): the `params` a caller is shown are exactly the bytes
+/// the operator wrote, deserialised from configuration and carried verbatim into the
+/// `input_required` result; nothing else can make a [`CallerAsk`].
 #[test]
 fn the_asks_params_are_the_operators_bytes_and_nothing_else() {
     let params = json!({
@@ -372,6 +374,9 @@ fn the_asks_params_are_the_operators_bytes_and_nothing_else() {
 }
 
 /// LAW 11 (U16): AN UPSTREAM'S ASK IS RELAYED under busbar's one sealed state, which pins the member
+/// and nests the upstream's own. Its retry, on a tool with or without rounds of busbar's own, is
+/// the relayed retry, spent once; the state presented by another principal, on another call, or
+/// forged is refused.
 #[test]
 fn a_relayed_asks_retry_is_pinned_spent_once_and_bound_to_its_caller() {
     let mut seal = Plain::default();
@@ -467,6 +472,9 @@ fn child_leg() -> UpstreamLeg {
 }
 
 /// LAW 11, A STDIO CHILD'S OWN REQUESTS: busbar writes none of them, so a retry that
+/// leaves one unanswered is refused (`ask_unanswered`) BEFORE its state is spent, and the caller can
+/// still answer it; the complete retry is the relayed retry, carrying the child's leg, spent once.
+/// a forged state, and a spent one, are refused.
 #[test]
 fn a_childs_relayed_ask_is_answered_whole_by_the_caller_and_spent_once() {
     let mut seal = Plain::default();
@@ -483,10 +491,7 @@ fn a_childs_relayed_ask_is_answered_whole_by_the_caller_and_spent_once() {
         panic!("a partial answer is refused");
     };
     assert_eq!(refused.audit_reason(), "ask_unanswered");
-    assert!(
-        refused.to_string().contains('9'),
-        "names the unanswered key: {refused}"
-    );
+    assert!(matches!(&refused, AskRefusal::Unanswered { missing, .. } if missing == "9"));
 
     let whole = json!({ "srv-1": { "action": "accept" }, "9": { "roots": [] } });
     let retry = Retry {
@@ -508,14 +513,14 @@ fn a_childs_relayed_ask_is_answered_whole_by_the_caller_and_spent_once() {
     };
     assert_eq!(
         decide(&[], 3, &caps(), forged, bind("k"), "d", Some(&mut seal)),
-        AskDecision::Refuse(AskRefusal::Unsolicited {
-            capability: "fs_confirm".into()
-        }),
-        "a forged state is no relayed retry"
+        AskDecision::Refuse(AskRefusal::StateRejected(Rejected::BadSignature)),
+        "a forged state is explicitly rejected"
     );
 }
 
 /// THE TASK PATH'S RETRY: the state `tasks/update` carries back is opened, bound to
+/// its principal and call, and spent once; a forged state, a spent one, another caller's, and a
+/// state of busbar's own ask (no upstream leg) are refused.
 #[test]
 fn a_tasks_relayed_state_opens_once_for_its_caller_and_call() {
     let mut seal = Plain::default();
@@ -574,6 +579,9 @@ fn a_tasks_relayed_state_opens_once_for_its_caller_and_call() {
 }
 
 /// THE LAST ROUND'S ANSWER (BUSBAR-1.6.0 spec lines 379-390, the ask's gate; ask.rs's promise that a
+/// caller cannot strip the operator's confirmation gate): the state minted for the final round,
+/// re-sent with no `inputResponses` (or an empty map), is refused as unanswered and does not
+/// proceed; the same state with its answer proceeds once.
 #[test]
 fn the_final_rounds_state_re_sent_without_answers_does_not_proceed() {
     for answers in [None, Some(json!({}))] {

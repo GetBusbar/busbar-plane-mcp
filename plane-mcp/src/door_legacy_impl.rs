@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2026 Busbar Inc and contributors
+
 include!("legacy_wire.rs");
 use super::McpDoor;
 use busbar_contract::abi::plane::PlaneDriveOut;
@@ -24,6 +27,9 @@ pub(super) fn any(plane: &McpDoor) -> bool {
 }
 
 /// THE DRIVER'S PART, on the instance's driver ticket (`drive`): every held stream read as far as
+/// it goes, child work whose state lapsed settled, and every waiting call reached woken. A dead stream no call
+/// waits on any more is let go. Pending operations retain their handles. A terminal handle is
+/// acknowledged through the SDK and reused only after the host confirms its result was retired.
 pub(super) fn drive(
     instance: &Instance<'_, McpDoor>,
     plane: &McpDoor,
@@ -62,7 +68,11 @@ pub(super) fn drive(
                 );
             }
             m.retain(|_, l| {
-                l.dead.is_none() || l.retiring() || !l.waiters.is_empty() || !l.answers.is_empty()
+                l.dead.is_none()
+                    || l.retiring()
+                    || !l.waiters.is_empty()
+                    || !l.answers.is_empty()
+                    || !l.failed.is_empty()
             });
         });
         let cleanup_pending = super::door_relay_cleanup::drive(plane, driver, state);
@@ -116,6 +126,7 @@ fn pending(plane: &McpDoor) -> bool {
 }
 
 /// `dropped` replies a call took from the stream of `key` but has no answer to audit them on: counted
+/// on the stream again, for the next call's answer.
 pub(super) fn recount(plane: &McpDoor, key: &str, dropped: u32) {
     if dropped == 0 {
         return;
@@ -128,6 +139,9 @@ pub(super) fn recount(plane: &McpDoor, key: &str, dropped: u32) {
 }
 
 /// The op on `ticket` was cancelled: no call waits there any more, an answer still to come for it
+/// is a reply no call waits for, and one already read for it is dropped. A cancelled call that was
+/// running the stream's `initialize` hands it back: the next call runs it, and the calls parked
+/// behind it are woken to.
 pub(super) fn cancelled(plane: &McpDoor, ticket: Ticket) {
     let woken = plane.legacy.with_all(|m| {
         let mut woken = Vec::new();
@@ -152,6 +166,7 @@ pub(super) fn cancelled(plane: &McpDoor, ticket: Ticket) {
                 !mine
             });
             l.parked.retain(|t| *t != ticket);
+            l.failed.retain(|t| *t != ticket);
             if l.init == Init::Running && l.init_by == Some(ticket) {
                 l.init = Init::Idle;
                 l.init_by = None;
@@ -191,9 +206,12 @@ pub(super) struct Calling {
 }
 
 /// What a call came to: the answer under the id it carried (an event stream, its progress and the
+/// link's log records ahead of the answer, when the server said any: the `bool`), the replies dropped
+/// on its link since the last answer, or why it failed.
 pub(super) type Called = Result<(Vec<u8>, bool, u64, u32), String>;
 
 /// The answer `body`, with `frames` ahead of it as one event stream when there are any: `(bytes,
+/// is an event stream)`.
 fn framed_answer(body: Vec<u8>, frames: Vec<Value>) -> (Vec<u8>, bool) {
     if frames.is_empty() {
         return (body, false);
@@ -206,6 +224,9 @@ fn framed_answer(body: Vec<u8>, frames: Vec<Value>) -> (Vec<u8>, bool) {
 }
 
 /// A CALL OVER THE HELD STREAM of `key` (a member and a caller binding), on the call's own ticket:
+/// the stream opened if none is, its `initialize` run by the first call that finds none done, the
+/// call's request POSTed to the message address under an id of the stream's, and its answer taken
+/// once the driver read it. PENDING meanwhile.
 pub(super) fn call(
     instance: &Instance<'_, McpDoor>,
     plane: &McpDoor,
@@ -225,8 +246,7 @@ pub(super) fn call(
     )
 }
 
-/// The actual legacy call orchestration, with only its concrete POST exchange supplied by
-/// the caller. Production always supplies the original Instance-bound post adapter above.
+/// Legacy call orchestration with the POST exchange supplied by the caller.
 #[allow(clippy::too_many_arguments)]
 fn call_using(
     ticket: Ticket,
@@ -247,10 +267,10 @@ fn call_using(
                     &mut retired,
                 );
             }
-            if let Some(previous) = m
-                .get_mut(key)
-                .filter(|link| link.dead.is_some() && (!link.answers.is_empty() || link.retiring()))
-            {
+            if let Some(previous) = m.get_mut(key).filter(|link| {
+                link.dead.is_some()
+                    && (!link.answers.is_empty() || !link.failed.is_empty() || link.retiring())
+            }) {
                 if !previous.parked.contains(&ticket) {
                     previous.parked.push(ticket);
                 }
@@ -273,11 +293,12 @@ fn call_using(
                     }
                 }
 
-                let (generation, stale) = m.remove(key).map_or((1, Vec::new()), |old| {
+                let generation = next_generation()?;
+                let stale = m.remove(key).map_or_else(Vec::new, |old| {
                     let mut stale = old.stale;
                     stale.extend(old.stream);
                     stale.extend(old.replying.and_then(|r| r.stream));
-                    (old.generation.saturating_add(1), stale)
+                    stale
                 });
                 let mut link = Link::new(generation, &original.url, member, original);
                 link.stale = stale;
@@ -327,6 +348,7 @@ fn call_using(
                 }
             }
             if let Some(why) = &l.dead {
+                l.failed.retain(|t| *t != ticket);
                 if let Some(id) = st.id {
                     l.waiters.remove(&Value::from(id).to_string());
                 }
@@ -407,7 +429,7 @@ fn call_using(
                     Poll::Ready(Ok(())) => st.init = CallInit::Answer,
                     Poll::Ready(Err(why)) => {
                         *state = None;
-                        return Poll::Ready(Err(fail_link(plane, key, &why)));
+                        return Poll::Ready(Err(fail_link(plane, key, ticket, &why)));
                     }
                 }
             }
@@ -420,7 +442,7 @@ fn call_using(
                         message.escape_debug()
                     );
                     *state = None;
-                    return Poll::Ready(Err(fail_link(plane, key, &why)));
+                    return Poll::Ready(Err(fail_link(plane, key, ticket, &why)));
                 }
                 if offered_revision(&body) != Some(Revision::R2024_11_05) {
                     let why = format!(
@@ -428,7 +450,7 @@ fn call_using(
                          stream with a revision busbar does not carry there"
                     );
                     *state = None;
-                    return Poll::Ready(Err(fail_link(plane, key, &why)));
+                    return Poll::Ready(Err(fail_link(plane, key, ticket, &why)));
                 }
                 st.init = CallInit::Notifying;
             }
@@ -455,7 +477,7 @@ fn call_using(
                     }
                     Poll::Ready(Err(why)) => {
                         *state = None;
-                        return Poll::Ready(Err(fail_link(plane, key, &why)));
+                        return Poll::Ready(Err(fail_link(plane, key, ticket, &why)));
                     }
                 }
             }
@@ -476,8 +498,12 @@ fn call_using(
                     Poll::Ready(Ok(())) => st.posted = true,
                     Poll::Ready(Err(why)) => {
                         plane.legacy.with(&key.to_string(), |l| {
-                            if let Some(l) = l {
-                                l.waiters.remove(&Value::from(id).to_string());
+                            if let Some(l) = l.filter(|l| l.generation == st.generation) {
+                                let id = id.to_string();
+                                l.waiters.remove(&id);
+                                l.answers.remove(&id);
+                                l.notes.remove(&id);
+                                l.notes_bytes.remove(&id);
                             }
                         });
                         *state = None;
@@ -501,11 +527,12 @@ enum Next {
 }
 
 /// The link of `key` failed for `why`: every call on it is woken to read it.
-fn fail_link(plane: &McpDoor, key: &str, why: &str) -> String {
+fn fail_link(plane: &McpDoor, key: &str, ticket: Ticket, why: &str) -> String {
     let mut woken = Vec::new();
     plane.legacy.with(&key.to_string(), |l| {
         if let Some(l) = l {
             l.die(why, &mut woken);
+            l.failed.retain(|t| *t != ticket);
         }
     });
     wake_all(plane, woken);
@@ -513,6 +540,7 @@ fn fail_link(plane: &McpDoor, key: &str, why: &str) -> String {
 }
 
 /// ONE POST to the message address on the call's ticket: taken when the server answered it 2xx (the
+/// answer itself arrives on the stream).
 fn post(
     instance: &Instance<'_, McpDoor>,
     plane: &McpDoor,
@@ -554,3 +582,14 @@ fn post_result(
 #[cfg(test)]
 #[path = "tests/legacy_link_tests.rs"]
 mod tests;
+
+/// Allocate an incarnation that survives removal of a retired link from the instance map.
+fn next_generation() -> Result<u64, String> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_update(
+        std::sync::atomic::Ordering::Relaxed,
+        std::sync::atomic::Ordering::Relaxed,
+        |n| n.checked_add(1),
+    )
+    .map_err(|_| "legacy MCP link identity space exhausted".to_string())
+}

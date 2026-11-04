@@ -9,7 +9,7 @@ fn admitted() -> (
     crate::call::AdmittedCall,
     crate::tools_config::McpServerDefCfg,
 ) {
-    let section = crate::statement::read_tools_section(br#"{"srv":{"transport":"stdio","command":"/fixture/child","pin":{"mechanism":"unpinned"},"tools_allow":{"echo":{"schema_hash":"sha256:a"}}}}"#).unwrap();
+    let section = crate::statement::test_support::read_tools_section(br#"{"srv":{"transport":"stdio","command":"/fixture/child","pin":{"mechanism":"unpinned"},"tools_allow":{"echo":{"schema_hash":"sha256:a"}}}}"#).unwrap();
     let catalogue = crate::catalogue::Catalogue::build(1, &section);
     let admitted = crate::call::AdmittedCall {
         entry: catalogue.tool_on("srv", "echo").unwrap().clone(),

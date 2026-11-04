@@ -33,7 +33,7 @@ const SECTION: &[u8] = br#"{
 fn catalogue() -> Catalogue {
     Catalogue::build(
         1,
-        &crate::statement::read_tools_section(SECTION).expect("the section reads"),
+        &crate::statement::test_support::read_tools_section(SECTION).expect("the section reads"),
     )
 }
 
@@ -50,7 +50,7 @@ fn a_template_substitutes_once_then_normalises_and_keeps_unknown_placeholders() 
     let c = catalogue();
     let params = json!({"name": "fs_greet", "arguments": {"who": "{missing}"}});
     let prompt = prompt_named(&c, &json!(1), Some(&params), &everyone).expect("found");
-    let v = read(prompts_get(prompt, &json!(1), Some(&params)));
+    let v = read(prompts_get(prompt, &json!(1), Some(&params)).unwrap());
     assert_eq!(v["result"]["resultType"], "complete");
     assert_eq!(v["result"]["description"], "Greets.");
     let text = v["result"]["messages"][0]["content"]["text"]
@@ -66,7 +66,7 @@ fn a_typed_prompt_renders_each_message_and_leaves_media_untouched() {
     let c = catalogue();
     let params = json!({"name": "fs_typed", "arguments": {"who": "Ann"}});
     let prompt = prompt_named(&c, &json!(1), Some(&params), &everyone).expect("found");
-    let v = read(prompts_get(prompt, &json!(1), Some(&params)));
+    let v = read(prompts_get(prompt, &json!(1), Some(&params)).unwrap());
     assert_eq!(
         v["result"]["messages"],
         json!([
@@ -85,8 +85,8 @@ fn an_ungranted_prompt_answers_exactly_like_a_nonexistent_one() {
         prompt_named(&c, &json!(1), Some(&json!({"name": "fs_greet"})), &none).expect_err("hidden");
     let absent = prompt_named(&c, &json!(1), Some(&json!({"name": "fs_nope"})), &everyone)
         .expect_err("absent");
-    assert_eq!((hidden.status, hidden.code), (404, -32000));
-    assert_eq!((absent.status, absent.code), (404, -32000));
+    assert_eq!((hidden.status, hidden.code), (404, -32602));
+    assert_eq!((absent.status, absent.code), (404, -32602));
     assert_eq!(
         hidden.data, absent.data,
         "the refusal carries no grant-only data"
@@ -204,7 +204,7 @@ fn a_template_binds_one_segment_and_never_a_subtree() {
     );
 }
 
-/// RED: A TEMPLATE IS SUBSTITUTED IN ONE PASS. A bound value that itself spells another
+/// A template is substituted once; a bound value spelling another placeholder stays literal.
 #[test]
 fn a_bound_value_spelling_a_placeholder_is_not_substituted_again() {
     let bindings: std::collections::BTreeMap<String, String> = [
@@ -213,7 +213,10 @@ fn a_bound_value_spelling_a_placeholder_is_not_substituted_again() {
     ]
     .into_iter()
     .collect();
-    assert_eq!(super::substitute("{a}-{b}-{c}-{", &bindings), "{b}-x-{c}-{");
+    assert_eq!(
+        super::substitute("{a}-{b}-{c}-{", &bindings).unwrap(),
+        "{b}-x-{c}-{"
+    );
 }
 
 #[test]
@@ -227,7 +230,10 @@ fn prompt_arguments_substitute_inside_literal_json_braces_without_recursing_valu
         ),
         ("{value} {missing} {number}", "{city} {missing} {number}"),
     ] {
-        assert_eq!(substitute_arguments(template, Some(&params)), expected);
+        assert_eq!(
+            substitute_arguments(template, Some(&params)).unwrap(),
+            expected
+        );
     }
 }
 
@@ -252,7 +258,7 @@ fn hidden_and_absent_resource_answers_are_identical_for_the_same_requested_uri()
     let populated = catalogue();
     let empty = Catalogue::build(
         1,
-        &crate::statement::read_tools_section(b"{}").expect("empty section"),
+        &crate::statement::test_support::read_tools_section(b"{}").expect("empty section"),
     );
     let params = json!({"uri": "file:///shared"});
     let hidden =
@@ -261,4 +267,27 @@ fn hidden_and_absent_resource_answers_are_identical_for_the_same_requested_uri()
     assert_eq!(hidden.status, absent.status);
     assert_eq!(hidden.body(), absent.body());
     assert_eq!(read(hidden.body())["error"]["data"], params);
+}
+
+#[test]
+fn caller_substitution_is_bounded_before_amplification() {
+    let params = json!({"arguments":{"x":"x".repeat(MAX_RENDER_BYTES / 2 + 1)}});
+    assert!(substitute_arguments("{x}{x}", Some(&params)).is_err());
+    assert_eq!(
+        substitute_arguments("{x}", Some(&json!({"arguments":{"x":"ok"}}))).unwrap(),
+        "ok"
+    );
+}
+
+#[test]
+fn unknown_prompt_is_invalid_params_and_oversized_selectors_are_not_echoed() {
+    let c = catalogue();
+    let refusal =
+        prompt_named(&c, &json!(1), Some(&json!({"name":"missing"})), &everyone).unwrap_err();
+    assert_eq!(read(refusal.body())["error"]["code"], CODE_INVALID_PARAMS);
+    let long = "x".repeat(MAX_READ_SELECTOR_BYTES + 1);
+    let refusal = prompt_named(&c, &json!(1), Some(&json!({"name":long})), &everyone).unwrap_err();
+    assert!(refusal.body().len() < 1024);
+    let refusal = resources_read(&c, &json!(1), Some(&json!({"uri":long})), &everyone).unwrap_err();
+    assert!(refusal.body().len() < 1024);
 }

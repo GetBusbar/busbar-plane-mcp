@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE CLOSED SET OF ISSUED METHODS, checked against the GENERATED matrix rather than against a
+//! THE CLOSED SET OF ISSUED METHODS, checked against the GENERATED matrix rather than
+//! against a list in a comment.
 
 use super::super::verb::UpstreamVerb;
 
@@ -9,6 +10,17 @@ use super::super::verb::UpstreamVerb;
 #[test]
 fn every_variant_appears_in_all_exactly_once() {
     let all = UpstreamVerb::all();
+    let variants: std::collections::BTreeSet<_> = all
+        .iter()
+        .map(|verb| match verb {
+            UpstreamVerb::Initialize { .. } => "initialize",
+            UpstreamVerb::NotificationsInitialized => "notifications/initialized",
+        })
+        .collect();
+    assert_eq!(
+        variants,
+        std::collections::BTreeSet::from(["initialize", "notifications/initialized"])
+    );
     let mut names: Vec<&str> = all.iter().map(UpstreamVerb::method).collect();
     let before = names.len();
     names.sort_unstable();
@@ -123,5 +135,18 @@ fn the_credential_is_present_only_when_one_was_planned() {
             "{} must send the planned credential",
             verb.method()
         );
+    }
+}
+
+impl UpstreamVerb {
+    /// ONE INSTANCE OF EVERY VARIANT, for the tests of the builder's shape. The method inventory
+    /// test counts production construction sites, never this list.
+    pub fn all() -> Vec<UpstreamVerb> {
+        vec![
+            UpstreamVerb::Initialize {
+                client_version: "0.0.0",
+            },
+            UpstreamVerb::NotificationsInitialized,
+        ]
     }
 }

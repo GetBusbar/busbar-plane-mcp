@@ -43,7 +43,7 @@ struct Calls {
     done: bool,
     held_after: bool,
     resume_handles: Vec<CompletionHandle>,
-    pending_seen: bool,
+    violations: Vec<&'static str>,
     done_replay: Option<bool>,
     done_replay_issued_nothing: bool,
 }
@@ -101,7 +101,10 @@ fn finish(
 fn fill_child_record(into: ServiceBufs) -> usize {
     let bytes = found_bytes();
     let spans = found_spans(bytes.len());
-    assert!(into.cap >= bytes.len() && into.spans_cap >= spans.len());
+    if into.cap < bytes.len() || into.spans_cap < spans.len() {
+        CALLS.with(|calls| calls.borrow_mut().violations.push("short output buffers"));
+        return 0;
+    }
     // SAFETY: these are the exact live output slices lent by the actual binder's service call.
     unsafe {
         std::ptr::copy_nonoverlapping(bytes.as_ptr(), into.buf, bytes.len());
@@ -112,14 +115,18 @@ fn fill_child_record(into: ServiceBufs) -> usize {
 extern "C" fn find_work(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
     let input = unsafe { input.cast::<WorkFindIn>().read_unaligned() };
     let reference = unsafe { std::slice::from_raw_parts(input.reference.ptr, input.reference.len) };
-    assert_eq!(reference, REFERENCE.as_bytes());
+    if reference != REFERENCE.as_bytes() {
+        CALLS.with(|calls| calls.borrow_mut().violations.push("wrong reference"));
+    }
     CALLS.with(|calls| calls.borrow_mut().find += 1);
     let len = fill_child_record(input.into);
     finish(out, Outcome::Ready, WORK, len, 1)
 }
 extern "C" fn resume_work(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
     let input = unsafe { input.cast::<WorkResumeIn>().read_unaligned() };
-    assert_eq!(input.handle, WORK);
+    if input.handle != WORK {
+        CALLS.with(|calls| calls.borrow_mut().violations.push("wrong work handle"));
+    }
     let first = CALLS.with(|calls| {
         let mut calls = calls.borrow_mut();
         calls.resume += 1;
@@ -134,9 +141,18 @@ extern "C" fn resume_work(_: HostCtx, input: *const c_void, out: *mut ServiceOut
 }
 extern "C" fn settle_work(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
     let input = unsafe { input.cast::<WorkSettleIn>().read_unaligned() };
-    assert_eq!(input.handle, WORK);
+    if input.handle != WORK {
+        CALLS.with(|calls| calls.borrow_mut().violations.push("wrong work handle"));
+    }
     let record = unsafe { std::slice::from_raw_parts(input.record.ptr, input.record.len) };
-    assert_eq!(record, b"a1|answered");
+    if record != b"a1|answered" {
+        CALLS.with(|calls| {
+            calls
+                .borrow_mut()
+                .violations
+                .push("wrong settlement record")
+        });
+    }
     CALLS.with(|calls| calls.borrow_mut().settle += 1);
     finish(out, Outcome::Ready, 0, 0, 0)
 }
@@ -221,9 +237,8 @@ fn run(case: Case) -> Calls {
         assert!(!unit.child_work.done);
         assert!(plane.relays.with_all(|works| works.contains_key(&WORK)));
         CALLS.with(|calls| {
-            let mut calls = calls.borrow_mut();
+            let calls = calls.borrow();
             assert_eq!((calls.find, calls.resume, calls.settle), (1, 1, 0));
-            calls.pending_seen = true;
         });
         bound = bind_child_work(
             &plane,
@@ -233,7 +248,7 @@ fn run(case: Case) -> Calls {
             &child,
             case.require_local,
         );
-        assert_eq!(bound, std::task::Poll::Ready(true));
+        assert!(matches!(bound, std::task::Poll::Ready(Ok(true))));
         assert!(unit.child_work.done);
         assert!(!plane.relays.with_all(|works| works.contains_key(&WORK)));
         let before = CALLS.with(|calls| {
@@ -252,7 +267,7 @@ fn run(case: Case) -> Calls {
         CALLS.with(|calls| {
             let mut calls = calls.borrow_mut();
             calls.done_replay = match repeated {
-                std::task::Poll::Ready(bound) => Some(bound),
+                std::task::Poll::Ready(bound) => Some(bound.expect("child-work service succeeds")),
                 std::task::Poll::Pending => None,
             };
             calls.done_replay_issued_nothing = before == (calls.find, calls.resume, calls.settle);
@@ -261,13 +276,15 @@ fn run(case: Case) -> Calls {
     CALLS.with(|calls| {
         let mut calls = calls.borrow_mut();
         calls.result = match bound {
-            std::task::Poll::Ready(bound) => Some(bound),
+            std::task::Poll::Ready(bound) => Some(bound.expect("child-work service succeeds")),
             std::task::Poll::Pending => None,
         };
         calls.done = unit.child_work.done;
         calls.held_after = plane.relays.with_all(|works| works.contains_key(&WORK));
     });
-    CALLS.with(|calls| calls.borrow().clone())
+    let calls = CALLS.with(|calls| calls.borrow().clone());
+    assert!(calls.violations.is_empty(), "{calls:?}");
+    calls
 }
 
 fn rooted(owned_here: bool, record: &'static [u8]) -> Case {
@@ -299,7 +316,6 @@ fn same_plane_pending_resume_replays_its_handle_and_completed_unit_needs_no_cust
     let mut case = rooted(true, ROOTED_RECORD);
     case.resume_pending_once = true;
     let calls = run(case);
-    assert!(calls.pending_seen, "{calls:?}");
     assert_eq!(calls.result, Some(true), "{calls:?}");
     assert_eq!((calls.find, calls.resume, calls.settle), (1, 2, 1));
     assert_eq!(calls.resume_handles.len(), 2);

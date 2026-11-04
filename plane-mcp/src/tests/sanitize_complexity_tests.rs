@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE SANITISER'S COMPLEXITY GUARDS — the half of markup-normalisation that is measured in time.
+//! Large hostile-input smoke tests. The generous wall-clock budget catches severe regressions,
+//! but does not prove an asymptotic complexity bound.
 
 use crate::sanitize::normalise;
 
@@ -34,7 +35,7 @@ fn deep_reconstitution_nesting_does_not_reprocess_the_string_per_level() {
     let out = normalise(&hostile);
     let elapsed = started.elapsed();
 
-    let _ = &out;
+    assert_eq!(out, "", "every nested tag must collapse");
     assert!(
         elapsed < std::time::Duration::from_secs(5),
         "normalising {} bytes of {depth}-deep nesting took {elapsed:?}: the seam check is \

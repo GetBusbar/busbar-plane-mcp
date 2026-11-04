@@ -24,12 +24,13 @@ fn a_line_answer_preserves_json_bytes_without_physical_line_breaks() {
 }
 
 #[test]
-fn a_duplicate_line_reply_cannot_answer_a_queued_key_or_keep_the_old_deadline() {
+fn a_duplicate_line_reply_cannot_answer_a_queued_key_or_extend_the_deadline() {
     let plane = McpDoor::default();
     let original = json!({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"fs_read_file","arguments":{}}});
     let result = json!({"resultType":"input_required","inputRequests":{"a":{"method":"roots/list"},"b":{"method":"roots/list"}},"requestState":"sealed"});
     let mut live = LiveAsk::of(original, b"{}".to_vec(), &result, 0).unwrap();
     live.arm(1);
+    let original_deadline = live.deadline_ns;
     live.issue(7).unwrap();
     plane.live_asks.insert((1, 7), live);
     let reply = br#"{"jsonrpc":"2.0","id":"busbar:7","result":{"roots":[]}}"#;
@@ -47,9 +48,11 @@ fn a_duplicate_line_reply_cannot_answer_a_queued_key_or_keep_the_old_deadline() 
         let live = asks.values().next().unwrap();
         assert_eq!(live.responses.len(), 1);
         assert!(!live.responses.contains_key(""));
+        assert_eq!(live.deadline_ns, original_deadline);
+        assert!(!live.lapsed(original_deadline - 1));
         assert!(
-            !live.lapsed(u64::MAX),
-            "only the next actual emit arms a deadline"
+            live.lapsed(original_deadline),
+            "the queued ask retains the old expiry until emitted"
         );
     });
 }

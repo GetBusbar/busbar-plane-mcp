@@ -2,8 +2,7 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE STATELESS REVISION'S ENVELOPE CHECKS: `params._meta` and its required members, the mirrored
-
-#![cfg_attr(not(test), allow(dead_code))]
+//! request fields, and the revision the request names.
 
 use serde_json::Value;
 
@@ -14,6 +13,7 @@ use crate::codec::{
 };
 
 /// The revisions the STATELESS dispatch serves, as `data.supported` names them: the revision a
+/// request's own `_meta` may name.
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &[PROTOCOL_VERSION];
 
 /// The status every refusal here is answered with.
@@ -49,6 +49,7 @@ impl Refused {
 }
 
 /// A `Mcp-Name` (or `Mcp-Param-*`) value with this revision's `=?base64?…?=` sentinel decoded, or the
+/// value as it stands when it carries none.
 #[must_use]
 pub fn decode_sentinel(value: &str) -> Option<String> {
     use base64::Engine as _;
@@ -65,6 +66,10 @@ pub fn decode_sentinel(value: &str) -> Option<String> {
 }
 
 /// THE CHECKS, in the served order. `field` reads one request head field by its lower-case name.
+///
+/// # Errors
+///
+/// The first refusal the request earns.
 pub fn check_request<'a>(
     value: &Value,
     method: &str,
@@ -123,7 +128,7 @@ pub fn check_request<'a>(
             .and_then(Value::as_str);
         let Some(header_name) = field(H_MCP_NAME) else {
             return Err(Refused::header_mismatch(
-                "The `Mcp-Name` header is required on tools/call, resources/read, prompts/get, tasks/get, tasks/update and tasks/cancel.",
+                "The `Mcp-Name` header is required on this method.",
             ));
         };
         let Some(decoded) = decode_sentinel(header_name) else {

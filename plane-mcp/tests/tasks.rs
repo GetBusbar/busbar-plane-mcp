@@ -129,7 +129,9 @@ extern "C" fn clock_now(_: HostCtx, input: *const c_void, out: *mut ServiceOut) 
     ready(out, 0, 0, 0)
 }
 
-/// THE CALLER'S GRANT IS NARROW: while set, the kernel's entitlement answers say the caller holds
+/// THE CALLER'S GRANT IS NARROW: while set, the kernel's entitlement answers say the caller
+/// holds no wildcard tool grant (`mcp_tool:`, the door's `SCOPE_TOOL` kind with no name)
+/// and is not granted `tx_write_file`; every other target is entitled.
 static NARROW: AtomicBool = AtomicBool::new(false);
 
 /// The targets a narrow grant does not hold.
@@ -148,7 +150,8 @@ extern "C" fn entitled(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -
     ready(out, ENTITLED, 0, 0)
 }
 
-/// THE GRANTS REVOKED since a task was created: the targets the kernel's entitlement answers say
+/// THE GRANTS REVOKED since a task was created: the targets the kernel's entitlement
+/// answers say the caller no longer holds (none by default).
 static REVOKED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 fn revoked() -> MutexGuard<'static, Vec<String>> {
@@ -177,7 +180,9 @@ extern "C" fn serves(_: HostCtx, _: *const c_void, out: *mut ServiceOut) -> RawO
     ready(out, VERDICT.load(Ordering::SeqCst), 0, 0)
 }
 
-/// The host's destination judge: a private address (`10.…`) is internal when the registration
+/// The host's destination judge: a private address (`10.…`) is internal when the
+/// registration was granted no private reach (`DEST_REFUSE_PRIVATE`); every other
+/// destination is allowed.
 extern "C" fn dest_judge(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
     use busbar_contract::abi::host::service::{
         DestJudgeIn, DEST_ALLOWED, DEST_INTERNAL, DEST_REFUSE_PRIVATE,
@@ -566,7 +571,9 @@ fn json_head() -> Vec<(String, String)> {
     vec![(JSON_TYPE.0.to_string(), JSON_TYPE.1.to_string())]
 }
 
-/// What an upstream answers one request over the connector (the door's own fetches): the session
+/// What an upstream answers one request over the connector (the door's own fetches): the
+/// session upstream requires `initialize` first; every other upstream speaks the stateless
+/// revision.
 fn upstream_answer(url: &str, fields: &[(String, String)], body: &Value) -> Reply {
     let id = body.get("id").cloned().unwrap_or(Value::Null);
     let method = body.get("method").and_then(Value::as_str).unwrap_or("");
@@ -768,7 +775,8 @@ static TABLES: Tables = Tables(HostTables {
     services: &HOST_SLOTS,
 });
 
-/// The host with no connector lent: a `transport: stdio` member's child is the walk's to reach,
+/// The host with no connector lent: a `transport: stdio` member's child is the walk's to
+/// reach, and the door fetches nothing of its own.
 static UNCONNECTED: Tables = Tables(HostTables {
     size: std::mem::size_of::<HostTables>() as u32,
     _reserved: 0,
@@ -899,7 +907,9 @@ struct Arrived {
     outcome: Outcome,
 }
 
-/// The header fields a client mirrors from a JSON-RPC body (the plane's `codec::mirrored`, pinned to
+/// The header fields a client mirrors from a JSON-RPC body (the plane's `codec::mirrored`,
+/// pinned to it in `src/tests/door_facts_tests.rs`): `accept`, the method, the name it
+/// names, the revision.
 fn mirrored(value: &Value) -> Vec<(String, String)> {
     fn sentinel(name: &str) -> String {
         use base64::Engine as _;
@@ -1090,7 +1100,8 @@ impl Door {
         self.arrive_on(unit, claim("POST", "/mcp"), "/mcp", body)
     }
 
-    /// `body` arrives on the task-run claim as unit `unit`: a continuation, as the kernel runs a
+    /// `body` arrives on the task-run claim as unit `unit`: a continuation, as the
+    /// kernel runs a nested unit (or as a caller posting there itself).
     fn arrive_run(&self, unit: u64, body: &[u8]) -> Arrived {
         self.arrive_on(
             unit,
@@ -1100,7 +1111,8 @@ impl Door {
         )
     }
 
-    /// One piece of `unit`, re-called while the door says `more`. Every record write of the task
+    /// One piece of `unit`, re-called while the door says `more`. Every record write of
+    /// the task kind it carries is applied to the host's records.
     fn piece(&self, unit: u64, given: &Given<'_>) -> Answered {
         self.piece_on_ticket(
             unit,
@@ -1219,7 +1231,8 @@ impl Door {
         got
     }
 
-    /// The kernel REFUSES unit `unit` (its walk reached no member) in `text`, as it ends a unit it
+    /// The kernel REFUSES unit `unit` (its walk reached no member) in `text`, as it
+    /// ends a unit it cannot carry: the door's `refusal`.
     fn refuse(&self, unit: u64, text: &str) -> Outcome {
         use busbar_contract::abi::plane::{RefusalCode, RefusalIn, RefusalOut, REFUSAL_KERNEL};
         let ticket = Ticket {
@@ -1318,6 +1331,8 @@ fn pin() -> Value {
 }
 
 /// THE SECTION: an upstream that requires a session (`fs`), a stateless one (`st`), a
+/// `token_exchange:` one (`tx`) and one whose asks are relayed under a small reply bound
+/// (`ask`); every tool is answered as a task.
 fn section() -> Value {
     let task = json!({"read_file": {"task_support": "required"}});
     json!({
@@ -1384,7 +1399,10 @@ fn get(d: &Door, unit: u64, task: &str) -> Answered {
     d.piece(unit, &Given::caller(ALICE, &body))
 }
 
-/// C-H2 [HIGH]: a task's call to a `token_exchange:` member states the CALLER's down-scope, as the
+/// C-H2 [HIGH]: a task's call to a `token_exchange:` member states the CALLER's down-scope,
+/// as the synchronous call does (ARCHITECT round 5 Q-L3B-EXCHANGE (B), tools_config.rs
+/// `TokenExchangeCfg`: the scope is derived from the inbound caller's grant, never left for
+/// the member's whole set — the transitive confused deputy).
 #[test]
 fn a_tasks_call_to_an_exchanging_member_carries_the_callers_down_scope() {
     let _serial = fresh();
@@ -1404,7 +1422,10 @@ fn a_tasks_call_to_an_exchanging_member_carries_the_callers_down_scope() {
     );
 }
 
-/// C-H3 [HIGH], the ladder: a task's call to an upstream that requires a session rides the session
+/// C-H3 [HIGH], the ladder: a task's call to an upstream that requires a session rides the
+/// session busbar negotiated with it for this caller (THE DESIGN section 2, the mcp
+/// bullet), as the synchronous call does — never the stateless request the upstream
+/// refuses.
 #[test]
 fn a_tasks_call_to_a_session_upstream_rides_the_negotiated_session() {
     let _serial = fresh();
@@ -1420,7 +1441,9 @@ fn a_tasks_call_to_a_session_upstream_rides_the_negotiated_session() {
     );
 }
 
-/// C-H3 [HIGH], stdio: a task on a `transport: stdio` member is sent to the member's child, as the
+/// C-H3 [HIGH], stdio: a task on a `transport: stdio` member is sent to the member's child,
+/// as the synchronous call is (BUSBAR-1.6.0.md l.372-373: every plane supports the
+/// transports its protocol's official design defines) — never failed for want of a `url:`.
 #[test]
 fn a_task_on_a_stdio_member_is_sent_to_its_child() {
     let _serial = fresh();
@@ -1446,7 +1469,10 @@ fn a_task_on_a_stdio_member_is_sent_to_its_child() {
     assert_eq!(line["params"]["name"], json!("read_file"));
 }
 
-/// C-M4 [MEDIUM]: the caller's reply to an upstream's ask relayed on a task is measured against
+/// C-M4 [MEDIUM]: the caller's reply to an upstream's ask relayed on a task is measured
+/// against the member's `sampling_bounds.max_input_response_bytes` before it is forwarded
+/// (owner ruling Q22c), as the synchronous retry's is; one over the bound is refused by
+/// name and never sent.
 #[test]
 fn a_tasks_reply_to_a_relayed_ask_over_the_bound_is_never_forwarded() {
     let _serial = fresh();
@@ -1607,7 +1633,10 @@ fn a_tasks_result_reaches_the_host_records_when_its_settle_does_not_land_at_once
     assert_completed(&get(&restarted, 7, &task), "kept");
 }
 
-/// An owed settle whose process is gone (a restart before its sweep): the next create of its caller
+/// An owed settle whose process is gone (a restart before its sweep): the next create of
+/// its caller on another process finds the task left behind and settles it with the result
+/// its run reached, never `cancelled` over it, and the result answers from the host's
+/// records.
 #[test]
 fn a_task_whose_owed_settle_outlives_its_process_is_settled_with_its_result() {
     let _serial = fresh();
@@ -1629,7 +1658,11 @@ fn a_task_whose_owed_settle_outlives_its_process_is_settled_with_its_result() {
     assert_completed(&get(&restarted, 5, &task), "survives");
 }
 
-/// A continuation the KERNEL REFUSED (its walk reached no member) fails its task, the settle owed
+/// A continuation the KERNEL REFUSED (its walk reached no member) fails its task, the
+/// settle owed to the next create's sweep: the failure's words are written to the host's
+/// records at the refusal, so another node answers them before the sweep, and a node that
+/// started after the sweep answers them from the settled row, never as a task that does not
+/// exist.
 #[test]
 fn a_task_whose_continuation_the_kernel_refused_keeps_its_failure_in_the_host_records() {
     const WHY: &str = "no member of the pool could be reached";
@@ -1653,7 +1686,8 @@ fn a_task_whose_continuation_the_kernel_refused_keeps_its_failure_in_the_host_re
     assert_failed(&get(&restarted, 7, &task), WHY);
 }
 
-/// A SETTLED ROW WHOSE RESULT THE RECORDS DO NOT HOLD is answered `failed` in words, never as
+/// A SETTLED ROW WHOSE RESULT THE RECORDS DO NOT HOLD is answered `failed` in words, never
+/// as "No task with that `taskId` exists".
 #[test]
 fn a_settled_task_whose_result_is_not_in_the_records_is_failed_in_words() {
     let _serial = fresh();
@@ -1668,7 +1702,9 @@ fn a_settled_task_whose_result_is_not_in_the_records_is_failed_in_words() {
     assert_failed(&get(&d, 1, &reference), "not in the host's records");
 }
 
-/// P-M9 [MEDIUM]: a caller posting a `resume` to its own task on the task-run claim while the task
+/// P-M9 [MEDIUM]: a caller posting a `resume` to its own task on the task-run claim while
+/// the task runs does not run the task's call a second time (nor past the operator's
+/// rounds): only the resume a `tasks/update` nested is taken.
 #[test]
 fn a_caller_cannot_drive_its_own_tasks_continuation() {
     let _serial = fresh();
@@ -1696,14 +1732,17 @@ fn a_caller_cannot_drive_its_own_tasks_continuation() {
     assert_eq!(served.status, 400, "{}", served.text());
 }
 
-/// The seal the stand-in signer makes over `data` (key `k`, the signature the data's SHA-256 in
+/// The seal the stand-in signer makes over `data` (key `k`, the signature the data's
+/// SHA-256 in hex), as the plane spells a seal: unpadded base64url of the signature.
 fn mint_seal(data: &[u8]) -> String {
     use base64::Engine as _;
     let signature = busbar_contract::redacted::sha256_hex(data);
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature.as_bytes())
 }
 
-/// What a resume's seal is made over (the plane's `door_tasks::resume_data`): the principal, the
+/// What a resume's seal is made over (the plane's `door_tasks::resume_data`): the
+/// principal, the task, the round and the digest of the call it runs
+/// (`tool_tasks::run_digest`).
 fn resume_data(principal: &str, task: &str, round: u64, params: &Value) -> Vec<u8> {
     let digest = busbar_contract::redacted::sha256_hex(&serde_json::to_vec(params).unwrap());
     format!("busbar-mcp task resume v1\0{principal}\0{task}\0{round}\0{digest}").into_bytes()
@@ -1757,7 +1796,11 @@ fn a_task_answer_cannot_dispatch_through_an_uninspected_schema_branch() {
     assert_failed(&get(&door, 30_514, &task), "inspected partially");
 }
 
-/// THE SEAL AND THE ROUND: the resume a `tasks/update` nests runs the task's call;
+/// THE SEAL AND THE ROUND: the resume a `tasks/update` nests runs the task's call; the same
+/// resume under a forged seal, for the very round that update answered, is served as a task
+/// that does not exist with no call sent (the seal check alone refuses it: the round would
+/// be taken); and a seal the plane's own signer made for a round no update answered runs
+/// nothing.
 #[test]
 fn a_resume_runs_only_under_the_planes_seal_for_the_round_an_update_answered() {
     let _serial = fresh();
@@ -1814,7 +1857,9 @@ fn a_resume_runs_only_under_the_planes_seal_for_the_round_an_update_answered() {
     );
 }
 
-/// C-L10 [LOW]: a create settles every live task of its caller a process that is gone left behind
+/// C-L10 [LOW]: a create settles every live task of its caller a process that is gone left
+/// behind (BUSBAR-1.6.0.md, the design's first section: "Admission bounds live work;
+/// nothing evicts it"), past the first page of its index rows.
 #[test]
 fn a_create_settles_every_page_of_its_callers_left_behind_tasks() {
     let _serial = fresh();
@@ -1842,7 +1887,9 @@ fn a_create_settles_every_page_of_its_callers_left_behind_tasks() {
 }
 
 impl Door {
-    /// The kernel cancels the continuation running on `unit`'s ticket, lending `records_cap` record
+    /// The kernel cancels the continuation running on `unit`'s ticket, lending
+    /// `records_cap` record slots: the outcome, and the audit rows written (action,
+    /// resource).
     fn cancel_with(&self, unit: u64, records_cap: usize) -> (Outcome, Vec<(String, String)>) {
         use busbar_contract::abi::mechanism::lifecycle::CancelIn;
         use busbar_contract::abi::plane::{PlaneCancelIn, PlaneCancelOut, RECORD_AUDIT};
@@ -1907,7 +1954,10 @@ impl Door {
     }
 }
 
-/// RED: THE KERNEL'S CANCEL OF A RUNNING CONTINUATION writes its task's `mcp_task.cancel` audit
+/// THE KERNEL'S CANCEL OF A RUNNING CONTINUATION writes its task's `mcp_task.cancel`
+/// audit row, and rows the host's buffers cannot hold are a FAULT: `cancel` may not pend
+/// and is never re-called, so a short buffer is never answered READY with the row silently
+/// lost.
 #[test]
 fn a_cancel_whose_audit_row_does_not_fit_is_a_fault() {
     let _serial = fresh();
@@ -1929,7 +1979,9 @@ fn a_cancel_whose_audit_row_does_not_fit_is_a_fault() {
     assert_eq!(rows.len(), 1, "the task's cancel is audited once: {rows:?}");
 }
 
-/// M2-1 [HIGH], time of check: a grant the caller lost after the task was created is consulted
+/// M2-1 [HIGH], time of check: a grant the caller lost after the task was created is
+/// consulted when the continuation sends the call, as the synchronous call consults it; the
+/// task fails in words and nothing goes out.
 #[test]
 fn a_tasks_call_whose_grant_was_revoked_is_never_sent() {
     let _serial = fresh();
@@ -1945,7 +1997,8 @@ fn a_tasks_call_whose_grant_was_revoked_is_never_sent() {
     assert_failed(&get(&d, 3, &task), "not a tool this server exposes");
 }
 
-/// M2-1 [HIGH], time of check: a server the kernel quarantined after the task was created serves
+/// M2-1 [HIGH], time of check: a server the kernel quarantined after the task was created
+/// serves nothing to the continuation either.
 #[test]
 fn a_tasks_call_to_a_server_quarantined_since_its_create_is_never_sent() {
     let _serial = fresh();
@@ -1964,7 +2017,9 @@ fn a_tasks_call_to_a_server_quarantined_since_its_create_is_never_sent() {
     assert_failed(&get(&d, 3, &task), "quarantined");
 }
 
-/// M2-1 [HIGH], the pool's twin: the continuation's walk picked another member of the tool's
+/// M2-1 [HIGH], the pool's twin: the continuation's walk picked another member of the
+/// tool's pool, and the twin it sends is admitted as its own (its grants), as the
+/// synchronous call admits it.
 #[test]
 fn a_tasks_call_to_a_pool_twin_the_caller_is_not_granted_is_never_sent() {
     let _serial = fresh();
@@ -1986,7 +2041,9 @@ fn a_tasks_call_to_a_pool_twin_the_caller_is_not_granted_is_never_sent() {
     assert_failed(&get(&d, 3, &task), "not a tool this server exposes");
 }
 
-/// M2-1 [HIGH], the pool's twin: the arguments the continuation sends to the twin are judged under
+/// M2-1 [HIGH], the pool's twin: the arguments the continuation sends to the twin are
+/// judged under the twin's own registration (its private reach), as the synchronous call
+/// judges the twin it admits.
 #[test]
 fn a_tasks_call_to_a_pool_twin_is_judged_under_the_twins_own_reach() {
     let _serial = fresh();

@@ -1,8 +1,11 @@
-//! Tests for `claims.rs`. Lifted out of the implementation file so its line count
+//! Tests for `claims.rs`. Lifted out of the implementation file so its line count measures
+//! implementation and nothing else; still a direct child module, so `use super::*` reaches
+//! the private items it always did.
 
 use super::{DEFAULT_METADATA, DEFAULT_MOUNT};
 
 /// The default mount is the codec's own, and the discovery path is composed from it by the
+/// codec's own composer.
 #[test]
 fn the_default_mount_is_the_codecs_own() {
     assert_eq!(DEFAULT_MOUNT, "/mcp");
@@ -13,7 +16,10 @@ fn the_default_mount_is_the_codecs_own() {
     );
 }
 
-/// The discovery path is a FUNCTION OF THE MOUNT: the protected-resource metadata rule inserts the
+/// The discovery path is a FUNCTION OF THE MOUNT: the protected-resource metadata rule
+/// inserts the well-known segment between the origin and the resource's own path, so the
+/// fixed discovery claim is the one composed from the fixed mount, and another mount would
+/// compose another.
 #[test]
 fn the_discovery_path_is_composed_from_the_mount() {
     let moved = crate::codec::protected_resource_metadata_path("/elsewhere");

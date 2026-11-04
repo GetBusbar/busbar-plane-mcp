@@ -163,8 +163,9 @@ test({
     const res = await peer.waitForId(2);
     ctx.assert('TOOLS.LIST-RESPONDS', !res.error, `error=${JSON.stringify(res.error)}`);
     ctx.assert('BASE.RES.RESULTTYPE', res.result && res.result.resultType === 'complete');
-    const tools = (res.result && res.result.tools) || [];
+    const tools = res.result?.tools;
     ctx.assert('TOOLS.LIST-RESPONDS', Array.isArray(tools), 'tools is not an array');
+    if (!Array.isArray(tools)) return;
 
     for (const t of tools) {
       ctx.assert('TOOLS.INPUTSCHEMA-VALID',
@@ -396,7 +397,8 @@ test({
  *     instance that satisfies `properties` and `required` illegal anyway, so producing one would be
  *     asserting something false about the schema.
  */
-export function sampleArgsFromSchema(schema) {
+export function sampleArgsFromSchema(schema, depth = 0) {
+  if (depth > 6) return null;
   if (!schema || typeof schema !== 'object' || Array.isArray(schema)) return null;
   const UNMODELLED = ['allOf', 'anyOf', 'oneOf', 'not', 'if', 'then', 'else', 'dependentRequired',
     'dependentSchemas', '$ref'];
@@ -406,17 +408,18 @@ export function sampleArgsFromSchema(schema) {
   const required = Array.isArray(schema.required) ? schema.required : [];
   const out = {};
   for (const name of required) {
-    const v = sampleValue(props[name]);
+    const v = sampleValue(props[name], depth + 1);
     if (v === undefined) return null;      // a required property this function cannot instantiate
     out[name] = v;
   }
-  return out;
+  return validateAgainstSchema(out, schema).valid ? out : null;
 }
 
 /** One value for one property schema, or `undefined` when it cannot be derived. */
 function sampleValue(s, depth = 0) {
   if (depth > 6) return undefined;                       // a cycle, or a schema too deep to be a fixture
   if (!s || typeof s !== 'object' || Array.isArray(s)) return undefined;
+  if ((s.minLength ?? 0) > 4096 || (s.minItems ?? 0) > 64) return undefined;
   if ('$ref' in s) return undefined;                     // never dereferenced: see above
   if ('const' in s) return s.const;
   if (Array.isArray(s.enum)) return s.enum.length ? s.enum[0] : undefined;
@@ -435,7 +438,7 @@ function sampleValue(s, depth = 0) {
       return item === undefined ? undefined : Array.from({ length: min }, () => item);
     }
     case 'object': {
-      const nested = sampleArgsFromSchema({ ...s, type: 'object' });
+      const nested = sampleArgsFromSchema({ ...s, type: 'object' }, depth + 1);
       return nested === null ? undefined : nested;
     }
     // No `type` at all: any instance is legal, so the cheapest one is.
@@ -716,10 +719,9 @@ test({
         `${method} result has no ttlMs`);
       ctx.assert('CACHE.HINTS-REQUIRED', res.result.cacheScope !== undefined,
         `${method} result has no cacheScope`);
-      if (typeof res.result.ttlMs === 'number') {
-        ctx.assert('CACHE.TTL-NON-NEGATIVE', res.result.ttlMs >= 0,
-          `${method} ttlMs=${res.result.ttlMs}`);
-      }
+      ctx.assert('CACHE.TTL-NON-NEGATIVE',
+        Number.isFinite(res.result.ttlMs) && res.result.ttlMs >= 0,
+        `${method} ttlMs=${res.result.ttlMs}`);
       if (res.result.cacheScope !== undefined) {
         ctx.assert('CACHE.SCOPE-VALUES',
           ['public', 'private'].includes(res.result.cacheScope),

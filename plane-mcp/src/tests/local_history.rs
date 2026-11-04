@@ -21,7 +21,7 @@ fn local_history_retains_only_existing_quota_bytes_and_releases_original_generat
         .into_iter()
         .enumerate()
     {
-        let section = crate::statement::read_tools_section(br#"{"s":{"url":"https://mcp.example/s","pin":{"mechanism":"unpinned"},"prompts_allow":{"p":{"template":"{value}"}}}}"#).unwrap();
+        let section = crate::statement::test_support::read_tools_section(br#"{"s":{"url":"https://mcp.example/s","pin":{"mechanism":"unpinned"},"prompts_allow":{"p":{"template":"{value}"}}}}"#).unwrap();
         let held = Arc::new(Held::of(1, section));
         let generation = Arc::downgrade(&held);
         let local = crate::local_renderer::Local::prompt(
@@ -29,7 +29,7 @@ fn local_history_retains_only_existing_quota_bytes_and_releases_original_generat
             "s_p".to_string(),
             json!(index),
             Some(json!({"name":"s_p","arguments":{"value":argument}})),
-            true,
+            crate::revision::Revision::R2025_11_25,
         )
         .unwrap();
         drop(held);

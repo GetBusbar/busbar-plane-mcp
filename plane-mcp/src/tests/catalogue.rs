@@ -2,6 +2,8 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The catalogue answers as the served engine does: both grants for every capability, the
+//! published name, the normalised description, the caching hints, and an approval visible from the
+//! generation that carries it and no earlier one.
 
 use serde_json::{json, Value};
 
@@ -9,6 +11,7 @@ use super::*;
 use crate::tests::everyone;
 
 /// Two servers: `fs` with an approved tool, a pending tool, a renamed tool, a prompt, a resource
+/// and a template; `db` with one approved tool.
 const SECTION: &[u8] = br#"{
   "fs": {
     "url": "https://mcp.example/fs",
@@ -32,7 +35,7 @@ const SECTION: &[u8] = br#"{
 fn catalogue(generation: u64, section: &[u8]) -> Catalogue {
     Catalogue::build(
         generation,
-        &crate::statement::read_tools_section(section).expect("the section reads"),
+        &crate::statement::test_support::read_tools_section(section).expect("the section reads"),
     )
 }
 
@@ -55,6 +58,7 @@ fn names(listing: &Value, member: &str, key: &str) -> Vec<String> {
 }
 
 /// Every capability is listed under its published name, in published-name order, pending ones
+/// included, and each is rendered as the served engine renders it.
 #[test]
 fn the_whole_catalogue_is_listed_under_published_names_pending_included() {
     let c = catalogue(1, SECTION);
@@ -115,6 +119,7 @@ fn two_grants_see_two_catalogues_and_a_third_sees_none() {
 }
 
 /// The server grant alone reaches nothing, and the capability grant alone reaches nothing: both
+/// are asked for every kind of capability.
 #[test]
 fn the_server_grant_and_the_capability_grant_are_both_required() {
     let c = catalogue(1, SECTION);
@@ -167,6 +172,8 @@ fn a_quarantined_tool_is_hidden_and_only_granted_tools_are_asked() {
 }
 
 /// An APPROVAL IS VISIBLE FROM THE GENERATION THAT CARRIES IT, AND NOT BEFORE: the hash an
+/// operator approves appears in the listing built over the section that holds it, while the
+/// catalogue built before it still lists the tool as pending.
 #[test]
 fn an_approval_is_visible_from_its_generation_and_not_before() {
     let before = catalogue(1, SECTION);
@@ -195,4 +202,28 @@ fn an_empty_section_is_an_empty_registry() {
     let v = read(c.tools_list(&json!(1), &everyone, |_| false));
     assert_eq!(v["result"]["tools"], json!([]));
     assert!(!catalogue(1, SECTION).is_empty());
+}
+
+#[test]
+fn uri_template_backtracks_when_a_binding_contains_the_suffix() {
+    let bound = match_uri_template("notes://{id}.md", "notes://v1.md.md").unwrap();
+    assert_eq!(bound.get("id").map(String::as_str), Some("v1.md"));
+    assert!(match_uri_template("notes://{id}.md", "notes://a/b.md").is_none());
+}
+
+#[test]
+fn resource_lookup_does_not_probe_grants_for_unrelated_uris() {
+    let c = catalogue(1, SECTION);
+    let absent = c.resource_by_uri(
+        &|_, _| panic!("unrelated URI must not request grants"),
+        "file:///absent",
+    );
+    assert!(matches!(absent, Lookup::NotFound));
+}
+
+#[test]
+fn uri_template_matches_overlapping_literal_suffixes() {
+    let bound = match_uri_template("test:///{x}aa{y}", "test:///aaab").unwrap();
+    assert_eq!(bound.get("x").map(String::as_str), Some("a"));
+    assert_eq!(bound.get("y").map(String::as_str), Some("b"));
 }

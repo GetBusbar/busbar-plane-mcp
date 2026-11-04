@@ -2,6 +2,8 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! BUSBAR'S OWN ASK (elicitation): an `InputRequiredResult` composed entirely from operator
+//! configuration, filtered by the caller's declared capabilities and sealed in a `requestState`
+//! busbar mints.
 
 use busbar_contract::jsonrpc::result_bytes;
 use serde_json::{json, Map, Value};
@@ -13,6 +15,7 @@ use crate::tools_config::{AskRoundCfg, ASK_ELICITATION, ASK_ROOTS, ASK_SAMPLING}
 pub use authored::CallerAsk;
 
 /// THE PRIVACY BOUNDARY: outside this module a [`CallerAsk`]'s fields do not exist, so the one way
+/// to make one is [`CallerAsk::from_config`].
 mod authored {
     use crate::tools_config::AskEntryCfg;
 
@@ -71,6 +74,7 @@ impl CallerAsk {
 pub const DEFAULT_TTL_SECS: u64 = 300;
 
 /// The notification a caller announces its roots moved with: every state it was sealed under that
+/// carries a roots answer stops verifying.
 pub const NOTIFY_ROOTS_LIST_CHANGED: &str = "notifications/roots/list_changed";
 
 /// The principal an ungoverned deployment's state is bound to: it has exactly one.
@@ -255,6 +259,11 @@ impl AskState {
     }
 
     /// Whether this state was minted for `bind`'s principal, request and generation over
+    /// `args_digest`, and is still inside its window at `bind.now`.
+    ///
+    /// # Errors
+    ///
+    /// The first check it fails.
     pub fn matches(&self, bind: Bind<'_>, args_digest: &str) -> Result<(), Rejected> {
         if bind.now > self.expires_at() {
             return Err(Rejected::Expired);
@@ -276,10 +285,15 @@ impl AskState {
 }
 
 /// THE SEAL THE DOOR HANDS IN: minting and opening the integrity-protected state, a fresh nonce,
+/// and the one-time redemption of a completed exchange.
 pub trait Seal {
     /// The sealed form of `state`; `None` when it cannot be sealed.
     fn mint(&mut self, state: &AskState) -> Option<String>;
     /// The state `blob` seals.
+    ///
+    /// # Errors
+    ///
+    /// [`Rejected::Malformed`] or [`Rejected::BadSignature`].
     fn open(&mut self, blob: &str) -> Result<AskState, Rejected>;
     /// A fresh nonce; `None` when no randomness is reachable.
     fn nonce(&mut self) -> Option<String>;
@@ -371,6 +385,7 @@ impl AskRefusal {
     }
 
     /// The refusal as the caller is answered: `400` `-32602` for refused state, `400` `-32021`
+    /// naming the capabilities for an undeclared one, `403` `-32000` otherwise.
     #[must_use]
     pub fn refusal(&self, id: &Value) -> crate::tool_arrival::Refusal {
         let reason = json!({ "reason": self.audit_reason() });
@@ -483,6 +498,8 @@ pub fn digest_arguments(arguments: &Value) -> String {
 }
 
 /// THE ASKS OF ONE ROUND busbar makes of its caller from inside a task, filtered to the capabilities
+/// the caller declared (the served engine's `asks_for_round`): an ask whose capability the caller
+/// did not declare is not made.
 #[must_use]
 pub fn asks_for_round(round: &AskRoundCfg, capabilities: &Value) -> Vec<CallerAsk> {
     round
@@ -496,6 +513,8 @@ pub fn asks_for_round(round: &AskRoundCfg, capabilities: &Value) -> Vec<CallerAs
 }
 
 /// The decision, in order: no rounds; the presented state opened and matched; the
+/// cap; a completed exchange redeemed once; an unanswered retry; the round's asks filtered by the
+/// caller's capabilities; a fresh state sealed.
 pub fn decide(
     rounds: &[AskRoundCfg],
     cap: u32,
@@ -508,8 +527,13 @@ pub fn decide(
     let capability = || bind.capability.to_string();
     let mut seal = seal;
 
+    let mut opened_state = None;
     if let (Some(blob), Some(sealer)) = (retry.state, seal.as_deref_mut()) {
-        if let Ok(opened) = sealer.open(blob) {
+        {
+            let opened = match sealer.open(blob) {
+                Ok(opened) => opened,
+                Err(error) => return AskDecision::Refuse(AskRefusal::StateRejected(error)),
+            };
             if let Some(leg) = opened.upstream.clone() {
                 if let Err(e) = opened.matches(bind, args_digest) {
                     return AskDecision::Refuse(AskRefusal::StateRejected(e));
@@ -526,6 +550,7 @@ pub fn decide(
                 }
                 return AskDecision::Relayed(leg);
             }
+            opened_state = Some(opened);
         }
     }
     if rounds.is_empty() {
@@ -545,13 +570,9 @@ pub fn decide(
     let mut answers: Map<String, Value> = Map::new();
     let next_round = match retry.state {
         None => 0u32,
-        Some(blob) => {
-            let Some(seal) = seal.as_deref_mut() else {
+        Some(_) => {
+            let Some(opened) = opened_state.take() else {
                 return no_sealer();
-            };
-            let opened = match seal.open(blob) {
-                Ok(s) => s,
-                Err(e) => return AskDecision::Refuse(AskRefusal::StateRejected(e)),
             };
             if let Err(e) = opened.matches(bind, args_digest) {
                 return AskDecision::Refuse(AskRefusal::StateRejected(e));
@@ -562,8 +583,9 @@ pub fn decide(
             {
                 return AskDecision::Refuse(AskRefusal::StateRejected(Rejected::StaleRoots));
             }
-            answers = opened.answers.clone().unwrap_or_default();
-            presented = Some((opened.nonce.clone(), opened.expires_at()));
+            let expires_at = opened.expires_at();
+            answers = opened.answers.unwrap_or_default();
+            presented = Some((opened.nonce, expires_at));
             opened.round.saturating_add(1)
         }
     };
@@ -583,10 +605,11 @@ pub fn decide(
             .and_then(Value::as_object)
             .is_some_and(|m| m.keys().any(|key| previous_round.contains_key(key)));
         if !answered {
-            let previous = rounds
-                .get(next_round as usize - 1)
-                .map(|r| r.keys().cloned().collect::<Vec<_>>().join(", "))
-                .unwrap_or_default();
+            let previous = previous_round
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
             return AskDecision::Refuse(AskRefusal::Unanswered {
                 capability: capability(),
                 missing: previous,
@@ -595,9 +618,7 @@ pub fn decide(
 
         if let Some(given) = retry.responses.and_then(Value::as_object) {
             for (key, value) in given {
-                if !previous_round.contains_key(key)
-                    && rounds.iter().any(|round| round.contains_key(key))
-                {
+                if !previous_round.contains_key(key) {
                     continue;
                 }
                 answers.entry(key.clone()).or_insert_with(|| value.clone());
@@ -653,6 +674,7 @@ pub fn decide(
 }
 
 /// The `input_required` result busbar composes from its own asks: `200`, the asks keyed as the
+/// operator keyed them, and the sealed state.
 #[must_use]
 pub fn input_required_result(id: &Value, asks: &[CallerAsk], request_state: &str) -> Vec<u8> {
     let requests: Map<String, Value> = asks
@@ -683,6 +705,8 @@ fn unanswered(child: &ChildLeg, retry: Retry<'_>) -> Option<String> {
 }
 
 /// A relayed state standing `ttl_secs`: a task parked on its caller's answer waits as long as the
+/// task may stay active ([`crate::tool_tasks::ACTIVE_TASK_ABANDON_MS`]), not a request's replay
+/// window.
 #[must_use]
 pub fn relay_state_for(
     bind: Bind<'_>,
@@ -699,6 +723,8 @@ pub fn relay_state_for(
 }
 
 /// A RELAYED ASK'S STATE, presented on the task path's retry (the continuation `tasks/update` nests):
+/// opened, matched to the principal, the call and the generation it was sealed under, and spent
+/// once.
 pub fn open_relayed(
     blob: &str,
     bind: Bind<'_>,
@@ -717,6 +743,7 @@ pub fn open_relayed(
 }
 
 /// THE UPSTREAM'S `InputRequiredResult`, RELAYED: its result as it came (`inputRequests` verbatim),
+/// its own `requestState` replaced by busbar's sealed `state`.
 #[must_use]
 pub fn relayed_result(id: &Value, upstream: &Value, state: &str) -> Vec<u8> {
     let mut result = upstream.as_object().cloned().unwrap_or_default();

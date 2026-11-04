@@ -76,7 +76,8 @@ fn bytes(v: &Value) -> Vec<u8> {
     serde_json::to_vec(v).unwrap()
 }
 
-/// RED: the child's frames are read as whole messages however the host's buffer cut them, back to
+/// the child's frames are read as whole messages however the host's buffer cut them,
+/// back to back with no separator, and bytes that are not JSON are handed on as such.
 #[test]
 fn messages_are_read_whole_across_pieces() {
     let mut f = Frames::default();
@@ -102,7 +103,8 @@ fn messages_are_read_whole_across_pieces() {
     );
 }
 
-/// RED: only the response carrying the id this exchange sent is its answer; a response to another
+/// only the response carrying the id this exchange sent is its answer; a response to
+/// another id (another exchange's, on the same child) is passed over, wherever it falls.
 #[test]
 fn the_answer_is_the_response_carrying_this_exchanges_id() {
     let mut c = Correlator::default();
@@ -120,7 +122,11 @@ fn the_answer_is_the_response_carrying_this_exchanges_id() {
     );
 }
 
-/// RED: the child's own messages read while waiting are handled as the previous release handled
+/// the child's own messages read while waiting are handled as the previous release
+/// handled them on the stdio leg: progress carrying this call's token is kept (another
+/// call's is not); a list-changed notification brings verify-on-call forward; a `ping` and
+/// an unknown request are answered — ONCE per generation and id, whichever exchange read
+/// them first.
 #[test]
 fn the_childs_own_messages_are_handled_on_the_way() {
     let mut door = Door::default();
@@ -168,7 +174,8 @@ fn the_childs_own_messages_are_handled_on_the_way() {
     assert_eq!(next.outbox.len(), 3);
 }
 
-/// RED: past the work budget of messages of the child's own, the exchange is abandoned in the
+/// past the work budget of messages of the child's own, the exchange is abandoned in
+/// the previous release's words.
 #[test]
 fn a_child_that_floods_its_own_messages_abandons_the_exchange() {
     let mut door = Door::default();
@@ -184,7 +191,8 @@ fn a_child_that_floods_its_own_messages_abandons_the_exchange() {
     );
 }
 
-/// The ids busbar sends a child never meet: a unit's call ids, its list ids, the handshake's and
+/// The ids busbar sends a child never meet: a unit's call ids, its list ids, the
+/// handshake's and every dispatch id are disjoint.
 #[test]
 fn every_id_on_a_child_is_its_own() {
     assert_ne!(call_id(1, 0), call_id(2, 0));
@@ -255,7 +263,10 @@ fn list_ids_preserve_the_complete_key_and_fetch_and_legacy_numeric_ids() {
         .is_some());
 }
 
-/// LAW 11: a GRANTED authority ask the
+/// LAW 11: a GRANTED authority ask the child sends while busbar relays a call is TAKEN for
+/// the caller, verbatim, and busbar writes the child nothing in its place; an UNGRANTED one
+/// is still refused on the child's input (`ask_ungranted`); `ping` is still answered by
+/// busbar (keepalive, not an ask).
 #[test]
 fn a_granted_ask_is_taken_for_the_caller_and_never_answered_here() {
     let mut door = Door {
@@ -309,7 +320,9 @@ fn a_granted_ask_is_taken_for_the_caller_and_never_answered_here() {
     );
 }
 
-/// An exchange of the door's own (a greeting, a tool list) relays no call: reading a granted ask
+/// An exchange of the door's own (a greeting, a tool list) relays no call: reading a
+/// granted ask first, it neither takes nor answers it, and leaves it for the one call
+/// relaying to take.
 #[test]
 fn an_exchange_of_the_doors_own_leaves_a_granted_ask_for_the_call() {
     let mut door = Door {
@@ -332,7 +345,8 @@ fn an_exchange_of_the_doors_own_leaves_a_granted_ask_for_the_call() {
     assert_eq!(call.asks.len(), 1, "the call's exchange takes it");
 }
 
-/// The caller is handed the child's requests verbatim, keyed by the child's own ids; its answers go
+/// The caller is handed the child's requests verbatim, keyed by the child's own ids; its
+/// answers go back to the child under those ids, each the caller's answer verbatim.
 #[test]
 fn the_childs_asks_go_out_verbatim_and_the_answers_come_back_under_its_ids() {
     let asks = vec![
@@ -447,7 +461,9 @@ fn each_callers_ask_reaches_only_that_caller() {
     );
 }
 
-/// An ask is the call's first in its child's line: a call whose lease has not named its generation
+/// An ask is the call's first in its child's line: a call whose lease has not named its
+/// generation counts on every generation; a line whose first call is on another child, or
+/// an empty line, has no call for it.
 #[test]
 fn the_call_an_ask_belongs_to() {
     assert_eq!(
@@ -468,9 +484,12 @@ fn the_call_an_ask_belongs_to() {
 }
 
 /// A STDIO CHILD'S granted `sampling/createMessage` ask is judged against the same
+/// `tools.<server>.sampling_bounds` as the http path: over the cap is a named refusal
+/// (`sampling_bound_exceeded`) the door writes back on the child's input as `-32001`;
+/// exactly at the cap it goes to the caller.
 #[test]
 fn a_stdio_childs_sampling_ask_over_the_cap_is_refused_by_name() {
-    let mut def = crate::statement::read_tools_section(
+    let mut def = crate::statement::test_support::read_tools_section(
         br#"{"kid": {"url": "https://mcp.example/kid", "pin": {"mechanism": "unpinned"},
             "grants": {"sampling": true}}}"#,
     )
@@ -499,10 +518,13 @@ fn a_stdio_childs_sampling_ask_over_the_cap_is_refused_by_name() {
         .is_some_and(|m| m.contains("tools.kid.sampling_bounds.max_messages")));
 }
 
-/// THE CALLER'S ANSWER TO A STDIO CHILD'S ASK is bounded by `sampling_bounds.max_input_response_bytes`
+/// THE CALLER'S ANSWER TO A STDIO CHILD'S ASK is bounded by
+/// `sampling_bounds.max_input_response_bytes` the bytes that would be written to the child
+/// are measured, over the cap is the named refusal (nothing is written), exactly at the cap
+/// it is written.
 #[test]
 fn a_callers_answer_to_a_stdio_childs_ask_over_the_cap_is_refused() {
-    let mut def = crate::statement::read_tools_section(
+    let mut def = crate::statement::test_support::read_tools_section(
         br#"{"kid": {"url": "https://mcp.example/kid", "pin": {"mechanism": "unpinned"},
             "grants": {"sampling": true}}}"#,
     )
@@ -536,4 +558,88 @@ fn a_callers_answer_to_a_stdio_childs_ask_over_the_cap_is_refused() {
     assert!(refusal
         .to_string()
         .contains("tools.kid.sampling_bounds.max_input_response_bytes"));
+}
+
+#[test]
+fn initialization_requires_supported_session_revision_and_capabilities() {
+    let mut exchange = ProgramExchange::listing("child", 0, Value::from(1), true);
+    for result in [
+        json!({}),
+        json!({"protocolVersion":"unknown","capabilities":{}}),
+        json!({"protocolVersion":"2026-07-28","capabilities":{}}),
+        json!({"protocolVersion":"2025-11-25","capabilities":null}),
+    ] {
+        let answer =
+            serde_json::to_vec(&json!({"jsonrpc":"2.0","id":HANDSHAKE_REQUEST_ID,"result":result}))
+                .unwrap();
+        assert!(exchange.greeted(&answer).is_err());
+        assert!(!exchange.greeted);
+    }
+    assert!(exchange.greeted(b"not json").is_err());
+    let error = serde_json::to_vec(&json!({"jsonrpc":"2.0","id":HANDSHAKE_REQUEST_ID,"error":{"code":-32602,"message":"refused"}})).unwrap();
+    assert!(exchange.greeted(&error).is_err());
+    for revision in crate::revision::SESSION_REVISIONS {
+        let answer = serde_json::to_vec(&json!({"jsonrpc":"2.0","id":HANDSHAKE_REQUEST_ID,"result":{"protocolVersion":revision.wire(),"capabilities":{}}})).unwrap();
+        assert!(exchange.greeted(&answer).is_ok());
+        assert!(
+            !exchange.greeted,
+            "acknowledgement must finish writing first"
+        );
+    }
+}
+
+#[test]
+fn interleaved_messages_have_an_aggregate_byte_limit() {
+    let mut correlator = Correlator::default();
+    let mut peer = Door::default();
+    let message = json!({"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":crate::client::jsonrpc::progress_token(&Value::from(1)),"message":"x".repeat(MESSAGE_MAX / 2)}});
+    let bytes = serde_json::to_vec(&message).unwrap();
+    assert!(correlator.take(&bytes, 1, "child", 1, &mut peer).is_ok());
+    assert!(correlator.take(&bytes, 1, "child", 1, &mut peer).is_err());
+}
+
+#[test]
+fn partial_writes_resume_at_the_first_unwritten_byte() {
+    use std::cell::RefCell;
+    struct Partial(RefCell<Vec<u8>>);
+    impl ProgramConn for Partial {
+        fn establish(
+            &self,
+            _: Ticket,
+            _: u32,
+            _: u32,
+            _: &str,
+            _: u32,
+        ) -> Poll<Result<u64, String>> {
+            unreachable!()
+        }
+        fn read_reply(
+            &self,
+            _: Ticket,
+            _: u32,
+            _: u64,
+            _: &mut [u8],
+            _: &mut ReplyPiece,
+        ) -> Poll<Result<Replied, String>> {
+            unreachable!()
+        }
+        fn write(&self, _: Ticket, _: u32, _: u64, bytes: &[u8]) -> Poll<Result<usize, String>> {
+            let count = bytes.len().min(2);
+            self.0.borrow_mut().extend_from_slice(&bytes[..count]);
+            Poll::Ready(Ok(count))
+        }
+        fn close(&self, _: Ticket, _: u32, _: u64) -> Poll<()> {
+            Poll::Ready(())
+        }
+    }
+    let host = Partial(RefCell::new(Vec::new()));
+    let mut exchange = ProgramExchange::new("child", 0, vec![], false);
+    exchange.step = Step::Write(std::sync::Arc::from(&b"abcdefg"[..]), 0);
+    let mut peer = Door::default();
+    assert!(matches!(
+        exchange.drive(&host, Ticket::NONE, 0, &|_| false, &mut peer),
+        Poll::Ready(Ok(_))
+    ));
+    assert_eq!(&*host.0.borrow(), b"abcdefg");
+    assert_eq!(exchange.issued, 5, "four writes and close");
 }

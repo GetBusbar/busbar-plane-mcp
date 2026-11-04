@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Incremental parsing of the actual stdio MCP child message stream.
+// Copyright (C) 2026 Busbar Inc and contributors
+//! Incremental parsing of the stdio MCP child message stream.
 use serde_json::Value;
-/// The exchange SDK's existing reply bound.
+/// The exchange SDK's reply bound.
 pub(crate) const MESSAGE_MAX: usize = busbar_contract::abi::sdk::exchange::REPLY_MAX;
 
 /// One message a child wrote: a JSON value, or bytes that are none (returned as an answer, never

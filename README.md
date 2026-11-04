@@ -89,6 +89,21 @@ inode, signatures, script contents, or arbitrary malicious carrier payloads. Kee
 and its inputs under the operator's control. Tool content still requires the usual observation
 and approval; a valid launch receipt grants no tool approval on its own.
 
+## Input and resource limits
+
+Malformed endpoint URIs, protocol headers and tool parameter-header annotations are refused before
+dispatch. The destination policy checks both tool arguments and URL-bearing replies to relayed
+asks. Schema references must resolve inside the registered schema; an exhausted inspection budget
+refuses the request rather than inspecting only part of it.
+
+Stdio servers must return a valid initialization result for a supported session revision before
+receiving tool requests. A partial host write is resumed from its remaining bytes.
+
+Local rendered responses are limited to 64 MiB, with bounded normalization work. Task-record
+listings retain at most 16 MiB and 16,384 rows per lookup. The local approval replay ledger holds
+65,536 live nonces; when full it refuses new approvals until entries expire, without forgetting
+previously spent approvals.
+
 ## Diagnostics
 
 | code | slug | when |

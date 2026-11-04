@@ -164,7 +164,7 @@ fn a_terminal_reply_handle_is_reused_only_after_exact_host_retirement_confirmati
         let mut l = link();
         posted(&mut l, 20);
         state.borrow_mut().heads.push_back(202);
-        l.post_replies(host, ticket(1), &mut issued);
+        l.post_replies(host, ticket(1), &mut issued, &mut Vec::new());
         let completed = state.borrow().reads[0].1.seq;
         let ack = issued.retirement.acknowledgement(0).unwrap().unwrap();
         issued.issued = CYCLE_SPAN;
@@ -256,15 +256,15 @@ fn a_dead_link_keeps_a_pending_reply_establish_until_its_stream_is_closed() {
         l.address = Some("https://up.example/messages".into());
         l.outbox.push_back(b"{}".to_vec());
         let mut issued = driver();
-        l.post_replies(host, ticket(1), &mut issued);
+        l.post_replies(host, ticket(1), &mut issued, &mut Vec::new());
         l.die("cancelled", &mut Vec::new());
-        l.post_replies(host, ticket(1), &mut issued);
+        l.post_replies(host, ticket(1), &mut issued, &mut Vec::new());
         assert!(
             l.replying.is_some(),
             "the pending reply still owns its operation state"
         );
         state.borrow_mut().dial_ready = true;
-        l.post_replies(host, ticket(1), &mut issued);
+        l.post_replies(host, ticket(1), &mut issued, &mut Vec::new());
         let state = state.borrow();
         assert_eq!(state.dials.len(), 3);
         assert!(state.dials.iter().all(|handle| *handle == state.dials[0]));
@@ -336,7 +336,7 @@ fn a_reply_post_closes_on_its_final_head_without_reading_an_endless_body() {
             let mut l = link();
             posted(&mut l, 20);
             let mut issued = driver();
-            l.post_replies(host, ticket(1), &mut issued);
+            l.post_replies(host, ticket(1), &mut issued, &mut Vec::new());
             let state = state.borrow();
             assert_eq!(
                 state.reads.len(),

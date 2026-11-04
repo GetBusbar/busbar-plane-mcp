@@ -2,6 +2,27 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE REVISIONS OF THE ONE MCP DIALECT, and how two peers agree on one.
+//!
+//! MCP is one dialect with dated revisions. This plane speaks four of them, and a revision is not a
+//! plugin: it is a set of rules inside the dialect about how a conversation is opened and carried.
+//!
+//! | revision     | opened by                       | sessions | version header | carried as |
+//! |--------------|---------------------------------|----------|----------------|------------|
+//! | `2026-07-28` | nothing: every request is whole | none     | required       | one endpoint, POST only |
+//! | `2025-11-25` | `initialize`                    | yes      | required       | one endpoint, POST + GET stream + DELETE |
+//! | `2025-06-18` | `initialize`                    | yes      | required       | one endpoint, POST + GET stream + DELETE |
+//! | `2024-11-05` | `initialize`                    | yes      | none           | an event stream that names a message address |
+//!
+//! `2025-03-26` is not implemented: it is the only revision that allows batched bodies, and a
+//! client that asks for it (or for any revision this plane does not implement) is offered the
+//! latest session revision, `2025-11-25`, in the `initialize` answer ([`negotiate`]), which the
+//! spec's negotiation rule permits (the client disconnects if it cannot speak what it is offered).
+//!
+//! The plane interoperates with all four, in both directions. The revision
+//! negotiation below is the spec's own: the client names the revision it wants in `initialize`; a
+//! server that implements it answers with it, and otherwise answers with the latest revision it does
+//! implement. A client with a stateless probe that is refused falls back to `initialize`, and a
+//! client whose `initialize` POST is refused with a 4xx falls back to the event-stream revision.
 
 /// One revision of the MCP dialect.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -56,7 +77,7 @@ impl Revision {
         !matches!(self, Self::R2026_07_28)
     }
 
-    /// Whether every request after `initialize` carries the `MCP-Protocol-Version` header.
+    /// Whether requests carry `MCP-Protocol-Version` (after initialize for session revisions).
     #[must_use]
     pub const fn requires_version_header(self) -> bool {
         matches!(
@@ -66,6 +87,7 @@ impl Revision {
     }
 
     /// Whether this revision is carried as an event stream naming a message address, rather than
+    /// on the single endpoint.
     #[must_use]
     pub const fn is_event_stream_revision(self) -> bool {
         matches!(self, Self::R2024_11_05)
@@ -73,6 +95,8 @@ impl Revision {
 }
 
 /// THE SERVER HALF OF `initialize` NEGOTIATION. The client's requested revision is echoed when it is
+/// a session revision this plane implements; anything else, including an unknown string and the
+/// stateless revision (which has no `initialize`), is answered with the latest session revision.
 #[must_use]
 pub fn negotiate(requested: Option<&str>) -> Revision {
     requested
@@ -82,12 +106,16 @@ pub fn negotiate(requested: Option<&str>) -> Revision {
 }
 
 /// Whether a session request's `MCP-Protocol-Version` header names another revision than its
+/// session's (`400` per the spec). A session knows its revision, so an absent header never does.
 #[must_use]
 pub fn header_disagrees(session: Revision, header: Option<&str>) -> bool {
     header.is_some_and(|h| h != session.wire())
 }
 
 /// The sessionless GET: whether it opens the `2024-11-05` event
+/// stream (`false`: `405`). A `2024-11-05` client never sends `MCP-Protocol-Version` and every
+/// later revision's client does, so the header alone tells them apart; a revision this plane does
+/// not implement reads as the latest session revision, as [`negotiate`] reads it.
 #[must_use]
 pub fn sessionless_get_streams(version_header: Option<&str>) -> bool {
     match version_header {
@@ -111,6 +139,8 @@ pub enum StepOutcome {
 }
 
 /// THE CLIENT HALF OF `initialize` NEGOTIATION: the revision the server answered with, if this plane
+/// can speak it on a session. A server answering a revision this plane does not implement is a
+/// server the client must disconnect from, per the spec.
 #[must_use]
 pub fn accept_offered(offered: &str) -> Option<Revision> {
     Revision::parse(offered).filter(|r| r.has_sessions())

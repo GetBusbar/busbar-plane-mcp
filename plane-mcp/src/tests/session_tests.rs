@@ -378,7 +378,8 @@ fn red_an_owners_byte_pressure_never_costs_another_owner_a_stream() {
     assert_eq!(r.events[0].0, first);
 }
 
-/// Finding 18: a push whose trim frees more than the pushed event cost (one older large event
+/// a push whose trim frees more than the pushed event cost (one older large event
+/// gives way to a small one) charges the owner the difference back, never a negative amount.
 #[test]
 fn red_a_trim_that_frees_more_than_the_push_cost_gives_the_difference_back() {
     let mut t = small(10, 100, 1 << 30);
@@ -430,6 +431,8 @@ fn red_two_callers_of_one_member_never_share_a_session() {
 }
 
 /// EVERY REQUEST IN A SESSION TAKES ITS OWN ID: the numbering never repeats
+/// while the session is remembered and survives the session being remembered again; a stateless
+/// memory numbers nothing. a shared round id.
 #[test]
 fn red_every_request_in_a_session_takes_its_own_id() {
     let mut u = UpstreamTable::new(16, 1 << 16);
@@ -464,6 +467,10 @@ fn red_every_request_in_a_session_takes_its_own_id() {
 }
 
 /// NO ID IS ISSUED TWICE BY AN INSTANCE, whatever becomes of its memory: a remembered session
+/// evicted and remembered again, one forgotten and opened anew, and the id a call carried into a
+/// session the upstream then forgot (a `404` re-initialize keeps it for the new session) are all
+/// numbered from one counter that only goes up. each session counted from the first id
+/// again, so the re-put session and the re-initialized one reissued ids already in flight.
 #[test]
 fn red_no_id_is_issued_twice_whatever_becomes_of_the_memory() {
     let mut u = UpstreamTable::new(1, 1 << 16);
@@ -493,7 +500,12 @@ fn red_no_id_is_issued_twice_whatever_becomes_of_the_memory() {
     assert!(issued.insert(drawn), "id {drawn} was issued twice");
 }
 
-/// RED: LIVE WORK IS NEVER EVICTED. An owner at its session cap whose every session holds a live
+/// LIVE WORK IS NEVER EVICTED. An owner at its session cap whose every session holds a live
+/// stream is refused its next open ([`OpenRefused::OwnerFull`]) rather than losing one; with one of
+/// them idle, that one gives way. A session at its cursor cap whose every cursor a live stream
+/// reads refuses the next stream rather than dropping the oldest; a cursor no stream reads any
+/// more gives way. the open evicted the least recently used session, live stream and all, and
+/// the seventeenth stream dropped the first one's cursor.
 #[test]
 fn red_a_session_or_cursor_a_live_stream_reads_is_never_evicted() {
     let mut t = quotas(100, 2, usize::MAX, usize::MAX);
@@ -549,4 +561,22 @@ fn red_a_session_or_cursor_a_live_stream_reads_is_never_evicted() {
     assert!(t
         .replay(&s, &owner("bob"), &format!("{}-0", cursors[0]), 14)
         .is_none());
+}
+
+#[test]
+fn held_stream_prevents_idle_expiration_until_released() {
+    let mut table = SessionTable::new(Bounds {
+        idle_ms: 10,
+        ..Bounds::default()
+    });
+    let who = owner("alice");
+    let id = table
+        .open(entropy(901), who.clone(), Revision::R2025_06_18, 0)
+        .unwrap();
+    let stream = table.open_stream(&id, &who, 0).unwrap();
+    assert!(table.hold_stream(&id, stream));
+    assert_eq!(table.sweep(20), 0);
+    assert_eq!(table.revision(&id, &who, 20), Some(Revision::R2025_06_18));
+    table.release_stream(&id, stream);
+    assert_eq!(table.sweep(30), 1);
 }

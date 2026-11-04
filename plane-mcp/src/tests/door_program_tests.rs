@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! The memo of a stdio child's own requests: decided once, and bounded by forgetting the oldest
+//! The memo of a stdio child's own requests: decided once, and bounded by forgetting the
+//! oldest decision first.
 
 use super::*;
 
@@ -15,7 +16,10 @@ fn key(member: &str, id: u64) -> AnsweredKey {
     (member.to_string(), 1, id.to_string())
 }
 
-/// THE MEMO FORGETS ITS OLDEST DECISION FIRST, never a younger one. Evicting by key order instead
+/// THE MEMO FORGETS ITS OLDEST DECISION FIRST, never a younger one. Evicting by key order
+/// instead forgets the alphabetically-first member's live decision, and a second exchange
+/// reading that child request would decide it again (answer the child twice, or put one ask
+/// to a call twice).
 #[test]
 fn the_memo_forgets_its_oldest_decision_first() {
     let mut memo = Answered::with_cap(2);

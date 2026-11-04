@@ -2,8 +2,29 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE LINE CARRIER: one JSON-RPC message per line, each line its own request unit through the
-
-#![cfg_attr(not(test), allow(dead_code))]
+//! door: the carrier is the host's (it holds the
+//! process's own stdin/stdout open as one session and opens a unit per line); every meaning a line
+//! has is here, on the plane side, and what the plane writes unsolicited it writes with the host's
+//! `session.emit` on that session.
+//!
+//! - THE MIRRORED FIELDS a header block would carry are SYNTHESISED FROM THE BODY
+//!   ([`crate::codec::mirrored`]): nothing the body does not state is stated, so a body defect stays a
+//!   body defect.
+//! - THE STDIO-ERA VERBS (`initialize`, `ping`) are answered here ([`era`]), and none reaches the
+//!   dispatch, the catalogue or an upstream. `logging/setLevel`, `resources/subscribe` and
+//!   `resources/unsubscribe` are REFUSED (`-32601`) and not advertised: this revision keeps no
+//!   per-session floor or watch set, and nothing on the plane announces a resource's change to
+//!   deliver (a watch is `subscriptions/listen`'s; the 1.6.0 design, mcp bullet, keeps `subscribe` for
+//!   the old revisions, on their sessions).
+//! - BUSBAR'S OWN ASKS are LIVE REQUESTS on the line ([`LiveAsk`]): an `input_required` answer is
+//!   issued as one request per ask, in order, each spelled `busbar:<n>`; the caller's answers become
+//!   `inputResponses`, and the RETRY is the unit of the caller's last answer, through the whole
+//!   door (its own admission; the seal, the round charge and the epoch checks run as they do when
+//!   an HTTP caller retries itself). An upstream's ask, relayed, is livened the same way.
+//!   A live ask unanswered for [`ASK_TIMEOUT_NS`] is dropped and the caller handed the result
+//!   itself; a request is livened at most [`MAX_LIVE_ASK_ROUNDS`] times.
+//! - A SUBSCRIPTION is answered with its acknowledgement and kept on the session: what changes, a
+//!   keepalive and its end are emitted on the session, until the carrier ends.
 
 use serde_json::{json, Map, Value};
 
@@ -14,9 +35,11 @@ use crate::revision::Revision;
 pub const ASK_ID_PREFIX: &str = "busbar:";
 
 /// How long busbar waits for the caller to answer ONE live ask before handing it the
+/// `input_required` result itself (the sealed `requestState` makes that a continuation).
 pub const ASK_TIMEOUT_NS: u64 = 30 * 1_000_000_000;
 
 /// The most live ask rounds busbar drives for one request: the carrier's own belt against a
+/// composition that never converges (the per-capability `max_caller_ask_rounds` still applies).
 pub const MAX_LIVE_ASK_ROUNDS: u32 = 8;
 
 /// One success envelope.
@@ -36,6 +59,7 @@ fn unsupported(id: &Value, message: &str) -> Value {
 }
 
 /// The `initialize` answer to a client that names no session revision: the stateless revision,
+/// which needs no handshake and says so.
 #[must_use]
 pub fn initialize_result(id: &Value) -> Value {
     result(
@@ -54,6 +78,9 @@ pub fn initialize_result(id: &Value) -> Value {
 }
 
 /// The `initialize` answer to a client that asked for a SESSION revision this plane carries: that
+/// revision, by negotiation ([`crate::revision::accept_offered`]).
+/// The carrier session then speaks it: each following line is raised into the stateless shape and its
+/// answer lowered ([`crate::adapt`]).
 #[must_use]
 pub fn session_initialize_result(id: &Value, revision: Revision) -> Value {
     let mut caps = capabilities();
@@ -76,6 +103,7 @@ pub fn session_initialize_result(id: &Value, revision: Revision) -> Value {
 }
 
 /// The capabilities the line carrier declares, in every revision it speaks: no `subscribe` and no
+/// `logging`, which the carrier refuses (`-32601`, [`era`]).
 fn capabilities() -> Value {
     json!({
         "tools": { "listChanged": true },
@@ -106,6 +134,7 @@ pub enum Era {
 }
 
 /// THE STDIO-ERA VERBS, read off a request (`method`, `id`) before the `_meta` gate, because a
+/// legacy-era client sends them without one: that is what the era negotiation is for.
 #[must_use]
 pub fn era(value: &Value) -> Era {
     let Some(method) = value.get("method").and_then(Value::as_str) else {
@@ -143,8 +172,8 @@ pub fn era(value: &Value) -> Era {
         crate::adapt::METHOD_PING => Era::Answer(result(id, json!({}))),
         "logging/setLevel" => Era::Answer(unsupported(
             id,
-            "this revision has no `logging/setLevel`: there is no session to remember a floor in. A \
-             request states its floor in `params._meta`.",
+            "the line carrier does not carry `logging/setLevel` in any revision (it declares no \
+             `logging` capability): a request states its floor in `params._meta`.",
         )),
         "resources/subscribe" | "resources/unsubscribe" => Era::Answer(unsupported(
             id,
@@ -160,7 +189,8 @@ pub fn era(value: &Value) -> Era {
 pub enum Reply {
     /// The caller answered ask `n` with this result.
     Answered(u64, Value),
-    /// The caller answered ask `n` with an error, or with no answer.
+    /// The caller answered ask `n` with an error, or with no answer (an out-of-band elicitation
+    /// response carrying no `params.response`).
     Failed(u64),
 }
 
@@ -170,6 +200,9 @@ fn ask_of(id: &Value) -> Option<u64> {
 }
 
 /// Whether a line answers one of busbar's own requests, and which: a JSON-RPC RESPONSE (no
+/// `method`, a `result` or an `error`) whose id busbar minted, or SEP-1036's out-of-band
+/// `notifications/elicitation/response`, whose `params.requestId` names the elicitation (admissible
+/// only because this one authenticated single-caller channel is the binding HTTP lacks).
 #[must_use]
 pub fn reply(value: &Value) -> Option<Reply> {
     let obj = value.as_object()?;
@@ -195,13 +228,10 @@ pub fn reply(value: &Value) -> Option<Reply> {
                 return None;
             }
             let n = ask_of(value.pointer("/params/requestId")?)?;
-            Some(Reply::Answered(
-                n,
-                value
-                    .pointer("/params/response")
-                    .cloned()
-                    .unwrap_or(Value::Null),
-            ))
+            Some(match value.pointer("/params/response") {
+                Some(response) if !response.is_null() => Reply::Answered(n, response.clone()),
+                _ => Reply::Failed(n),
+            })
         }
         Some(_) => None,
     }
@@ -217,6 +247,7 @@ pub fn cancelled(value: &Value) -> Option<Value> {
 }
 
 /// A stable key for a JSON-RPC id: type-tagged, so the string `"1"` and the number `1` (which never
+/// correlate on the wire) never collide.
 #[must_use]
 pub fn id_key(id: &Value) -> String {
     match id {
@@ -245,10 +276,13 @@ pub struct LiveAsk {
     pub round: u32,
     /// When the ask in flight lapses, on the host's monotonic clock.
     pub deadline_ns: u64,
+    /// Failed attempts to emit the terminal fallback, bounded to three driver ticks.
+    pub fallback_attempts: u8,
 }
 
 impl LiveAsk {
     /// The round an `input_required` `result` asks of `original`; `None` when the result names no
+    /// asks or no state (it is then handed to the caller as it is).
     #[must_use]
     pub fn of(original: Value, fallback: Vec<u8>, result: &Value, round: u32) -> Option<Self> {
         let requests = result.get("inputRequests")?.as_object()?;
@@ -276,6 +310,7 @@ impl LiveAsk {
             state,
             round,
             deadline_ns: 0,
+            fallback_attempts: 0,
         })
     }
 
@@ -291,6 +326,7 @@ impl LiveAsk {
     }
 
     /// The next ask as the request line busbar writes, under ask number `n`; `None` once every ask
+    /// was issued.
     pub fn issue(&mut self, n: u64) -> Option<Vec<u8>> {
         let (key, method, params) = self.queued.pop()?;
         self.current = key;
@@ -311,6 +347,7 @@ impl LiveAsk {
     }
 
     /// THE RETRY: the request as the caller sent it, carrying the round's answers and the sealed
+    /// state. Its id stays the caller's, so its answer is the caller's answer.
     #[must_use]
     pub fn retry(&self) -> Option<Value> {
         let mut retry = self.original.clone();
@@ -327,3 +364,7 @@ impl LiveAsk {
 #[cfg(test)]
 #[path = "tests/line_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/line_audit.rs"]
+mod line_audit;

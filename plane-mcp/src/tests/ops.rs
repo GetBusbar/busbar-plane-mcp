@@ -1,4 +1,6 @@
-//! Tests for `ops.rs`. Lifted out of the implementation file so its line count
+//! Tests for `ops.rs`. Lifted out of the implementation file so its line count measures
+//! implementation and nothing else; still a direct child module, so `use super::*` reaches
+//! the private items it always did.
 
 use super::{method_row_for, Sender, METHODS, OP_CLASSES};
 

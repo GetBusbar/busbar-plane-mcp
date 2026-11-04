@@ -6,7 +6,8 @@
 mod adapt;
 #[path = "../../plane-mcp/src/answer.rs"]
 mod answer;
-/// The argument half of the dispatch SSRF guard: a schema-aware walk judging every URL and host a
+/// The argument half of the dispatch SSRF guard: a schema-aware walk judging every URL and host
+/// a call's arguments carry.
 #[path = "../../plane-mcp/src/argguard.rs"]
 mod argguard;
 #[path = "../../plane-mcp/src/ask.rs"]
@@ -21,7 +22,8 @@ mod checks;
 mod client;
 #[path = "../../plane-mcp/src/codec.rs"]
 mod codec;
-/// The plane's diagnostic catalog: the codes it raises, which its `declares.json` states (the tests
+/// The plane's diagnostic catalog: the codes it raises, which its `declares.json` states (the
+/// tests hold the two equal, and the codes equal to the ones the door raises).
 #[cfg(test)]
 #[path = "../../plane-mcp/src/diagnostics.rs"]
 mod diagnostics;
@@ -59,9 +61,9 @@ mod plane_door {
     }
     #[test]
     fn actual_sdk_parked_counts_and_instance_close_follow_the_real_mcp_path() {
-        LEGACY_EXCHANGE_COUNTS.with(|counts| counts.borrow_mut().clear());
+        exchange_observations::LEGACY_EXCHANGE_COUNTS.with(|counts| counts.borrow_mut().clear());
         crate::actual_sessions::closing_the_actual_plane_retires_its_pending_initialize_without_sending_a_post();
-        LEGACY_EXCHANGE_COUNTS.with(|counts| {
+        exchange_observations::LEGACY_EXCHANGE_COUNTS.with(|counts| {
             let counts = counts.borrow();
             let target = Ticket {
                 slot: 730,
@@ -82,9 +84,9 @@ mod plane_door {
                 "the actual SDK Instance parks exactly one Exchange before CLOSE"
             );
         });
-        LEGACY_EXCHANGE_COUNTS.with(|counts| counts.borrow_mut().clear());
+        exchange_observations::LEGACY_EXCHANGE_COUNTS.with(|counts| counts.borrow_mut().clear());
         crate::actual_sessions::a_cancelled_legacy_initialize_never_wedges_the_stream();
-        LEGACY_EXCHANGE_COUNTS.with(|counts| {
+        exchange_observations::LEGACY_EXCHANGE_COUNTS.with(|counts| {
             let counts = counts.borrow();
             let target = Ticket {
                 slot: 95,
@@ -136,7 +138,8 @@ mod tools_config;
 /// The plugin's memory-ABI door.
 pub use plane_door::door;
 
-/// The plane's declared metadata (`declares.json`), linked by the distribution and signed into a
+/// The plane's declared metadata (`declares.json`), linked by the distribution and signed into
+/// a dropped-in plane's manifest.
 pub const DECLARES: &str = include_str!("../../plane-mcp/declares.json");
 
 #[path = "../../plane-mcp/src/reads.rs"]

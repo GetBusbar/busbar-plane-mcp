@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2026 Busbar Inc and contributors
+
 //! The carriers and paths this plane serves.
 
 /// The request transport this plane's document routes are served on.
@@ -10,6 +13,7 @@ pub const CARRIER_SSE: &str = "sse";
 pub const CARRIER_STDIO: &str = "stdio";
 
 /// The ONE path this protocol is served at. Fixed, not operator-configurable: a configured address
+/// naming any other path is refused at validation (CG-17), and the validation reads this constant.
 pub const DEFAULT_MOUNT: &str = "/mcp";
 
 /// The discovery document for the default mount.

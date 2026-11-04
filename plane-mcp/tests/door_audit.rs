@@ -112,9 +112,11 @@ impl Drop for ClockFails {
     }
 }
 
-/// How far the host's WALL clock has been set back, in nanoseconds (an operator correcting it, or a
+/// How far the host's WALL clock has been set back, in nanoseconds (an operator correcting
+/// it, or a tampered clock): the monotonic clock never moves back.
 static WALL_SET_BACK_NS: AtomicU64 = AtomicU64::new(0);
-/// While set, every upstream's answer to `tools/list` is HELD (its read pends): a fetch stays in
+/// While set, every upstream's answer to `tools/list` is HELD (its read pends): a fetch
+/// stays in flight until the test releases it.
 static HOLD_LISTS: AtomicBool = AtomicBool::new(false);
 
 /// The tool lists held for as long as it is.
@@ -189,7 +191,9 @@ fn book() -> MutexGuard<'static, Option<Book>> {
     BOOK.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// A publish CAUGHT HALF WAY: the first item sighted at a digest other than its approved one tells
+/// A publish CAUGHT HALF WAY: the first item sighted at a digest other than its approved
+/// one tells the first channel once it has landed in the book, and the sighting returns
+/// only when the second channel releases it.
 type Halt = (std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>);
 static HALT: Mutex<Option<Halt>> = Mutex::new(None);
 
@@ -203,7 +207,8 @@ fn abi_text(s: AbiStr) -> Option<String> {
     (!text.is_empty()).then(|| text.to_string())
 }
 
-/// The kernel's Approve: an item serves at its approved digest, judged at the digest the plane
+/// The kernel's Approve: an item serves at its approved digest, judged at the digest the
+/// plane states, else at the item's last sighting in the book.
 extern "C" fn serves(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
     // SAFETY: the SDK hands a `TrustServesIn` over its own strings, live for the call.
     let i = unsafe { input.cast::<TrustServesIn>().read() };
@@ -407,7 +412,8 @@ fn sse_event(name: &str, data: &str) -> Vec<u8> {
     format!("event: {name}\ndata: {data}\n\n").into_bytes()
 }
 
-/// What the legacy upstream answers a message POSTed in its session, on the stream: `None` for a
+/// What the legacy upstream answers a message POSTed in its session, on the stream: `None`
+/// for a notification.
 fn legacy_answer(body: &Value) -> Option<Vec<u8>> {
     let id = body.get("id").cloned()?;
     let method = body.get("method").and_then(Value::as_str).unwrap_or("");
@@ -439,7 +445,10 @@ fn legacy_answer(body: &Value) -> Option<Vec<u8>> {
     ))
 }
 
-/// THE LEGACY UPSTREAM, at the end of a request on wire `id`: a `GET` of the endpoint opens an
+/// THE LEGACY UPSTREAM, at the end of a request on wire `id`: a `GET` of the endpoint opens
+/// an event stream naming its message address; a POST to that address is `202` and its
+/// answer goes on the stream (a `tools/call`'s held back while the test holds them); any
+/// other POST is `405`.
 fn legacy_request(ups: &mut Upstreams, id: u64) {
     let wire = ups.open.get_mut(&id).expect("the wire");
     if wire.method == "GET" {
@@ -510,7 +519,8 @@ fn on_stream(session: &str, f: impl FnOnce(&mut Sse)) {
 /// The upstream that is down: every request is answered `503`.
 const DOWN_URL: &str = "https://up.example/down";
 
-/// An upstream that answers every request with a `302` to another origin, carrying a body that is
+/// An upstream that answers every request with a `302` to another origin, carrying a body
+/// that is otherwise a well-formed tool list.
 const REDIRECT_URL: &str = "https://up.example/moved";
 
 /// Where the redirecting upstream points.
@@ -883,7 +893,9 @@ struct Door {
     retirement: std::cell::RefCell<completion_retirement_host::Host>,
 }
 
-/// The host's actual line-carrier IDs, scoped to the live fixture instance. These tests script
+/// The host's actual line-carrier IDs, scoped to the live fixture instance. These tests
+/// script no carrier-close operation; refusing an MCP message does not close its transport
+/// session.
 static CARRIER_SESSIONS: Mutex<std::collections::BTreeMap<usize, std::collections::BTreeSet<u64>>> =
     Mutex::new(std::collections::BTreeMap::new());
 
@@ -1052,7 +1064,8 @@ impl Door {
         self.drive();
     }
 
-    /// `unit`'s piece re-called (as the kernel does when the door wakes its ticket) while it pends,
+    /// `unit`'s piece re-called (as the kernel does when the door wakes its ticket)
+    /// while it pends, the driver turning between: what it came to.
     fn pump(&self, unit: u64, given: &Given<'_>) -> Answered {
         for _ in 0..32 {
             let got = self.piece(unit, given);
@@ -1113,7 +1126,9 @@ impl Door {
         }
     }
 
-    /// One piece of `unit`, re-called while the door says `more`: the outcome, the status, the
+    /// One piece of `unit`, re-called while the door says `more`: the outcome, the
+    /// status, the head fields, the bytes, whether the bytes went to the far end, and
+    /// the request line.
     fn piece(&self, unit: u64, given: &Given<'_>) -> Answered {
         let ticket = Ticket {
             slot: u32::try_from(unit).unwrap(),
@@ -1341,7 +1356,8 @@ fn seen() -> Vec<Seen> {
         .unwrap_or_default()
 }
 
-/// A `tools/call` of the legacy registration's `read_file`, asking for `path`, under JSON-RPC id
+/// A `tools/call` of the legacy registration's `read_file`, asking for `path`, under
+/// JSON-RPC id `id`.
 fn legacy_call(id: u64, path: &str) -> (Vec<u8>, [(&'static str, &'static str); 3]) {
     let body = json!({
         "jsonrpc": "2.0",
@@ -1367,7 +1383,8 @@ fn legacy_call(id: u64, path: &str) -> (Vec<u8>, [(&'static str, &'static str); 
 /// The walk's answer to a relayed call's stateless first hop, as the legacy server gives it.
 const REFUSED: &[u8] = b"Method Not Allowed";
 
-/// `caller`'s call `body` relayed on `unit`: admitted, verified against the legacy server (over
+/// `caller`'s call `body` relayed on `unit`: admitted, verified against the legacy server
+/// (over its held stream), and its stateless first hop handed to the walk.
 fn relayed(d: &Door, unit: u64, caller: &str, body: &[u8], fields: &[(&str, &str)]) {
     assert_eq!(
         d.arrive(unit, "POST", "/mcp", body, fields).outcome,
@@ -1383,7 +1400,8 @@ fn relayed(d: &Door, unit: u64, caller: &str, body: &[u8], fields: &[(&str, &str
     );
 }
 
-/// The walk refused the stateless hop (the server speaks only `2024-11-05`): the call goes to the
+/// The walk refused the stateless hop (the server speaks only `2024-11-05`): the call goes
+/// to the held stream.
 fn walk_refused<'a>(caller: &'a str) -> Given<'a> {
     Given::far(caller, 405, Vec::new(), REFUSED)
 }
@@ -1408,7 +1426,9 @@ struct Served {
 }
 
 impl Door {
-    /// One entry of the trust verb `verb` (its index in the admin routes) on server `name`, on
+    /// One entry of the trust verb `verb` (its index in the admin routes) on server
+    /// `name`, on `unit`'s ticket; `resume` = the kernel's RESUME of a call that
+    /// answered PENDING.
     fn serve_once(&self, unit: u64, verb: u32, name: &str, resume: bool) -> Served {
         let ticket = Ticket {
             slot: u32::try_from(unit).unwrap(),
@@ -1450,7 +1470,8 @@ impl Door {
         }
     }
 
-    /// The operator's `connect` of server `name`, resumed (the driver turning between) until it
+    /// The operator's `connect` of server `name`, resumed (the driver turning between)
+    /// until it answers.
     fn connect(&self, unit: u64, name: &str) -> Served {
         let mut got = self.serve_once(unit, 0, name, false);
         for _ in 0..32 {
@@ -1535,7 +1556,10 @@ fn call_st(d: &Door, unit: u64) {
     d.piece(unit, &Given::caller(ALICE, ST_CALL));
 }
 
-/// RED P-M4: WHILE THE HOST'S CLOCK READ FAILS, A CACHED TOOL LIST IS STALE. A call within
+/// WHILE THE HOST'S CLOCK READ FAILS, A CACHED TOOL LIST IS STALE. A call within
+/// `verify_ttl` of the last fetch reuses it; once the clock cannot be read, every call
+/// fetches the list again (the failure is never read as the epoch, at which every list
+/// looks fresh), and what such a fetch landed is not stamped.
 #[test]
 fn a_failed_clock_read_fetches_the_tool_list_again() {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1600,6 +1624,7 @@ fn a_clock_that_went_backwards_fetches_the_tool_list_again() {
 }
 
 /// The stateless upstream's answer to a relayed call on its event stream, with its own
+/// `notifications/tools/list_changed` beside the result.
 const LIST_CHANGED_ANSWER: &[u8] = b"event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\"}\n\nevent: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{\"content\":[],\"resultType\":\"complete\"}}\n\n";
 
 /// `unit`'s relayed call answered on the event stream, with a `list_changed` beside it.
@@ -1616,7 +1641,11 @@ fn answered_with_list_changed(d: &Door, unit: u64) {
     assert_eq!(answered.status, 200, "{}", answered.text());
 }
 
-/// RED W10 (trust.md:93: "an accepted, rate-limited notification marks the server's snapshot
+/// RED W10 (trust.md:93: "an accepted, rate-limited notification marks the server's
+/// snapshot stale so the next call re-verifies"): an upstream's
+/// `notifications/tools/list_changed` heard on the HTTP event stream beside a relayed
+/// call's answer marks its list stale, so the next call fetches it again within
+/// `verify_ttl`; its body is never read.
 #[test]
 fn a_list_changed_on_the_http_stream_marks_the_list_stale() {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1645,11 +1674,14 @@ fn a_list_changed_on_the_http_stream_marks_the_list_stale() {
 }
 
 /// The section with the stateless registration strict-live (`verify_ttl: 0s`): every call
+/// re-verifies, and a burst still shares one fetch.
 const STRICT_SECTION: &str = r#"{
     "st": {"url": "https://up.example/st", "pin": {"mechanism": "unpinned"}, "verify_ttl": "0s", "tools_allow": {"read_file": {}}}
 }"#;
 
-/// RED W11 (website `mcp.md:147,466` and trust.md:140: concurrent callers share one fetch; `0`
+/// RED W11 (website `mcp.md:147,466` and trust.md:140: concurrent callers share one fetch;
+/// `0` still coalesces bursts): two calls that find the same server stale while ITS FETCH
+/// IS IN FLIGHT share that one fetch.
 #[test]
 fn concurrent_mcp_callers_share_one_list_fetch() {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1792,7 +1824,8 @@ fn view_of(served: &Served) -> (Value, Value) {
     (view["failure"].clone(), view["observed_tools"].clone())
 }
 
-/// RED A-H1 (a): THE OPERATOR'S `connect` REACHES A SERVER THAT REQUIRES A SESSION, as
+/// THE OPERATOR'S `connect` REACHES A SERVER THAT REQUIRES A SESSION, as
+/// verify-on-call does: negotiated, its list seen, no failure recorded.
 #[test]
 fn connect_reaches_a_server_that_requires_a_session() {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1807,7 +1840,9 @@ fn connect_reaches_a_server_that_requires_a_session() {
     );
 }
 
-/// RED A-H1 (b): THE OPERATOR'S `connect` REACHES A SERVER THAT SPEAKS ONLY `2024-11-05`, over the
+/// THE OPERATOR'S `connect` REACHES A SERVER THAT SPEAKS ONLY `2024-11-05`,
+/// over the held event stream, and a call within `verify_ttl` of it is relayed, never
+/// answered "not sent".
 #[test]
 fn connect_reaches_a_legacy_only_server_and_its_calls_go_on() {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1841,7 +1876,9 @@ const DN_FIELDS: &[(&str, &str)] = &[
     ("mcp-name", "dn_read_file"),
 ];
 
-/// RED A-H1 (c): A `connect` THAT FAILED STAMPS NOTHING: the next call to that server fetches its
+/// A `connect` THAT FAILED STAMPS NOTHING: the next call to that server
+/// fetches its list again rather than being answered off the operator's failed refresh for
+/// `verify_ttl`.
 #[test]
 fn a_failed_connect_never_holds_back_the_next_calls_fetch() {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1869,7 +1906,10 @@ const REDIRECT_SECTION: &str = r#"{
     "rd": {"url": "https://up.example/moved", "pin": {"mechanism": "unpinned"}, "verify_ttl": "1h", "tools_allow": {"read_file": {}}}
 }"#;
 
-/// RED W7 (security.md:171,177,306,308: a redirect is a failure, never followed): an upstream that
+/// RED W7 (security.md:171,177,306,308: a redirect is a failure, never followed): an
+/// upstream that answers the operator's `connect` with a `302` is REFUSED, whatever body
+/// rides it: nothing is sighted from it (no tool observed, the failure names the redirect),
+/// and the location it points at is never contacted.
 #[test]
 fn a_302_on_connect_is_refused() {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1903,7 +1943,10 @@ const FILLER_FIELDS: &[(&str, &str)] = &[
     ("mcp-method", "tools/list"),
 ];
 
-/// RED A-M3: A LINE THE UNIT CAP REFUSES HAS MOVED NOTHING ON ITS CARRIER SESSION. A session's
+/// A LINE THE UNIT CAP REFUSES HAS MOVED NOTHING ON ITS CARRIER SESSION. A
+/// session's `initialize` keeps its revision, so its later plain lines are raised and
+/// served; an `initialize` refused at the cap keeps nothing, so a later plain line on that
+/// session is refused as it is on a session that never initialized.
 #[test]
 fn a_line_refused_at_the_unit_cap_moves_nothing_on_its_session() {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1955,13 +1998,20 @@ fn a_line_refused_at_the_unit_cap_moves_nothing_on_its_session() {
     );
 }
 
-/// The stateless member's `notifications/resources/updated` for the readme, as the member spells
+/// The stateless member's `notifications/resources/updated` for the readme, as the member
+/// spells it: members out of the usual order and a number in an unusual spelling, so bytes
+/// handed on unread could be told from bytes re-encoded.
 const MEMBER_UPDATE: &str = r#"{"params":{"uri":"file:///readme","revision":1.50E+1},"method":"notifications/resources/updated","jsonrpc":"2.0"}"#;
 
 /// A `subscriptions/listen` line of the readme.
 const LINE_LISTEN: &[u8] = br#"{"jsonrpc":"2.0","id":5,"method":"subscriptions/listen","params":{"notifications":{"resourceSubscriptions":["file:///readme"]},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#;
 
-/// A MEMBER'S RESOURCE UPDATE REACHES A LINE SUBSCRIBER EXACTLY ONCE, as predev relayed it on the
+/// A MEMBER'S RESOURCE UPDATE REACHES A LINE SUBSCRIBER EXACTLY ONCE, as predev relayed it
+/// on the line carrier (gh/predev crates/busbar-plane-mcp/src/door_line.rs: the tick steps
+/// the kept subscription and emits its frames as lines on the carrier session; the relay is
+/// subscribe.rs l.328-345 and `notification` l.249-256): one line emitted on the
+/// subscriber's carrier session, predev's frame byte for byte (re-encoded under the
+/// subscription's id, not the member's bytes), and no further tick emits it again.
 #[test]
 fn a_members_update_reaches_a_line_subscriber_exactly_once() {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
@@ -2093,7 +2143,9 @@ fn a_kernel_refusal_with_no_unit_answers_the_baseline_json_rpc_bytes() {
 }
 
 impl Door {
-    /// The host's own cancel of `unit` (deadline, reload, shutdown), naming it as `arrive` keyed it,
+    /// The host's own cancel of `unit` (deadline, reload, shutdown), naming it as
+    /// `arrive` keyed it, on its ticket: the outcome and the disposition the door
+    /// answered.
     fn cancel(&self, unit: u64) -> (Outcome, u32) {
         let ticket = Ticket {
             slot: u32::try_from(unit).unwrap(),
@@ -2134,7 +2186,10 @@ impl Door {
     }
 }
 
-/// RED: A UNIT CANCELLED BEFORE ITS FIRST PIECE IS FREED. `arrive` keeps a unit with no ticket
+/// A UNIT CANCELLED BEFORE ITS FIRST PIECE IS FREED. `arrive` keeps a unit with no
+/// ticket until a piece reaches it; the host's cancel names the unit
+/// (`PlaneCancelIn::unit`), so a unit cut between its arrival and its first piece leaves
+/// nothing behind.
 #[test]
 fn a_unit_cancelled_before_its_first_piece_is_freed() {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
@@ -2164,7 +2219,10 @@ fn a_unit_cancelled_before_its_first_piece_is_freed() {
     );
 }
 
-/// A CANCEL SAYS HOW FAR THE UNIT GOT (owner billing rule R21: the ledger records what the dialect
+/// A CANCEL SAYS HOW FAR THE UNIT GOT (owner billing rule R21: the ledger records what the
+/// dialect did): cut before the far end answered it is ABORTED (billed nothing); cut after
+/// the far end began its answer it is PARTIAL, so the units it reported bill when its
+/// answer was streamed, as the llm and decisions planes answer.
 #[test]
 fn a_cancel_after_the_far_end_answered_is_partial() {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
@@ -2208,10 +2266,12 @@ fn a_cancel_after_the_far_end_answered_is_partial() {
     );
 }
 
-/// The credential the caller authenticated to busbar with (its virtual key, or a busbar-audience
+/// The credential the caller authenticated to busbar with (its virtual key, or a
+/// busbar-audience token), as it rides the caller's request head.
 const CALLER_SECRET: &str = "bb-vk-callers-own-busbar-key-5e1d7c";
 
-/// The `st` registration (the stateless upstream), with `extra` merged into it, inside a section
+/// The `st` registration (the stateless upstream), with `extra` merged into it, inside a
+/// section with `default` merged in at the section level.
 fn st_section(default: Value, extra: Value) -> String {
     let mut st = json!({
         "url": STATELESS_URL,

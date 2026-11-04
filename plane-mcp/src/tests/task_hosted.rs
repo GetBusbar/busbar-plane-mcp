@@ -88,3 +88,14 @@ fn equal_clock_host_progress_is_read_when_no_update_was_accepted() {
     assert_eq!(local.status(), Status::InputRequired);
     assert_eq!(local.detailed()["inputRequests"], json!({"one":{}}));
 }
+
+#[test]
+fn hosted_view_cannot_change_an_observed_terminal_status() {
+    let mut local = Task::new("task", "alice", 7, "digest", 100);
+    local.cancel(101);
+    let mut host = local.clone();
+    host.status = Status::Completed;
+    host.updated_ms = 102;
+    local.hosted(host);
+    assert_eq!(local.status(), Status::Cancelled);
+}

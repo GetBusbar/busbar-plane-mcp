@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! $ THE DOOR'S MONEY ANSWERS: what a unit reports beside the answer its caller is written. The
+//! $ THE DOOR'S MONEY ANSWERS: what a unit reports beside the answer its caller is written.
+//! The plane reports its units and whether a fee unit was incurred; the kernel writes them
+//! (the design's money section, "The plane reports; the kernel writes").
 
 use serde_json::{json, Value};
 
@@ -13,8 +15,8 @@ const SECTION: &str = r#"{"fs": {"url": "https://mcp.example/fs", "pin": {"mecha
 
 /// `fs_read_file`, admitted under the kernel's trust verdict `trust`.
 fn admission(trust: crate::call::Trust) -> Admission {
-    let section =
-        crate::statement::read_tools_section(SECTION.as_bytes()).expect("the section reads");
+    let section = crate::statement::test_support::read_tools_section(SECTION.as_bytes())
+        .expect("the section reads");
     let catalogue = Catalogue::build(1, &section);
     let params = json!({ "name": "fs_read_file", "arguments": {}, "_meta": {} });
     crate::call::admit_trusted(
@@ -38,7 +40,8 @@ fn admitted() -> AdmittedCall {
     }
 }
 
-/// `fs_read_file`, whose server the door's live tool-list check could not reach: its answer and its
+/// `fs_read_file`, whose server the door's live tool-list check could not reach: its answer
+/// and its call-log line.
 fn unreached() -> (Vec<u8>, crate::call::CallLine) {
     match admission(crate::call::Trust::Unreached("down".to_string())) {
         Admission::Unreached(body, line) => (body, line),
@@ -51,7 +54,8 @@ fn units(answer: &Pending) -> Vec<(u32, u64)> {
     answer.units.iter().map(|u| (u.class, u.amount)).collect()
 }
 
-/// The call log's one line for `fs_read_file`, as the door writes it under scope `k`, generation 1,
+/// The call log's one line for `fs_read_file`, as the door writes it under scope `k`,
+/// generation 1, at 7.
 fn logged(outcome: &str, reason: &str) -> Vec<(u32, Vec<u8>, Vec<u8>)> {
     vec![(
         statement::RECORD_CALL,
@@ -68,7 +72,9 @@ fn tool_error(answer: &Pending) {
     assert_eq!(body["result"]["isError"], json!(true), "{body}");
 }
 
-/// $ A CALL THAT NEVER LEFT ITS QUEUE EARNS NO FEE UNIT AND IS NOT LOGGED DISPATCHED
+/// $ A CALL THAT NEVER LEFT ITS QUEUE EARNS NO FEE UNIT AND IS NOT LOGGED DISPATCHED A call
+/// queued behind another call on its stdio member's child, whose deadline passed before its
+/// turn came, was never sent.
 #[test]
 fn a_call_that_never_left_its_queue_earns_no_fee_unit_and_is_not_logged_dispatched() {
     let crate::call::Settled::Answer { status, body, line } =
@@ -98,7 +104,8 @@ fn a_call_that_never_left_its_queue_earns_no_fee_unit_and_is_not_logged_dispatch
     );
 }
 
-/// The twin of the queued call: a call that WAS sent and whose upstream then failed keeps its fee
+/// The twin of the queued call: a call that WAS sent and whose upstream then failed keeps
+/// its fee unit and its `dispatched` line.
 #[test]
 fn a_call_that_went_out_and_failed_keeps_its_fee_unit_and_its_dispatched_line() {
     let crate::call::Settled::Answer { status, body, line } =
@@ -123,7 +130,8 @@ fn a_call_that_went_out_and_failed_keeps_its_fee_unit_and_its_dispatched_line() 
     );
 }
 
-/// $ A CALL WHOSE SERVER THE TOOL-LIST CHECK COULD NOT REACH EARNS NO FEE UNIT. The
+/// $ A CALL WHOSE SERVER THE TOOL-LIST CHECK COULD NOT REACH EARNS NO FEE UNIT. The door's
+/// live re-fetch of the server's tool list failed, so the call never left.
 #[test]
 fn a_call_whose_server_the_tool_list_check_could_not_reach_earns_no_fee_unit() {
     let (body, line) = unreached();
@@ -136,7 +144,8 @@ fn a_call_whose_server_the_tool_list_check_could_not_reach_earns_no_fee_unit() {
     );
 }
 
-/// The twin of the unreached call: its call-log line stays what it was, `refused` under its fixed
+/// The twin of the unreached call: its call-log line stays what it was, `refused` under its
+/// fixed reason `upstream_failed`, audited rejected.
 #[test]
 fn a_call_whose_server_the_tool_list_check_could_not_reach_stays_logged_refused() {
     let (body, line) = unreached();

@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! Existing door API regressions for local repeated-placeholder answers. The allocation witness
+//! Existing door API regressions for local repeated-placeholder answers. The allocation
+//! witness observes only each ABI crossing, never the test's setup or its expected-output
+//! iterator.
 
 use super::*;
 use std::alloc::{GlobalAlloc, Layout, System};

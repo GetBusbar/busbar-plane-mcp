@@ -186,7 +186,8 @@ fn a_jsonrpc_error_is_not_reported_as_a_result() {
     );
 }
 
-/// An error object whose `code` is missing or not an integer is not a JSON-RPC error. It reads as
+/// An error object whose `code` is missing or not an integer is not a JSON-RPC error. It
+/// reads as malformed, and no caller is ever handed a `0` the upstream never sent.
 #[test]
 fn an_error_without_an_integer_code_is_malformed_not_code_zero() {
     for body in [
@@ -228,7 +229,8 @@ fn every_malformed_shape_is_refused_rather_than_guessed_at() {
     }
 }
 
-/// M3-17: `progressToken` is `string | number` and optional in every revision's schema; `null` is
+/// M3-17: `progressToken` is `string | number` and optional in every revision's schema;
+/// `null` is not a value it may take.
 #[test]
 fn a_call_that_asks_no_progress_carries_no_progress_token_member() {
     let call = |progress| {
@@ -251,4 +253,23 @@ fn a_call_that_asks_no_progress_carries_no_progress_token_member() {
         "no progress asked, no token member: {quiet}"
     );
     assert_eq!(call(true)["params"]["_meta"]["progressToken"], "busbar-7");
+}
+
+#[test]
+fn audit_continuation_state_without_responses_is_preserved() {
+    let key = crate::identity::ToolKey::new(crate::identity::ServerId::new("s").unwrap(), "echo")
+        .unwrap();
+    let state = serde_json::json!({"requestState":"opaque"});
+    let request = super::tools_call_id(
+        "https://up.test/mcp",
+        &key,
+        &serde_json::json!({}),
+        &serde_json::json!(1),
+        None,
+        super::AdvertisedCaps::default(),
+        Some(&state),
+    );
+    let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+    assert_eq!(body["params"]["requestState"], "opaque");
+    assert!(body["params"].get("inputResponses").is_none());
 }

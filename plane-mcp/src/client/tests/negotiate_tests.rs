@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The negotiator driven against FAKE upstreams, one per revision: the fake hop the adapter
+//! contract describes, answering as each revision's server would.
 
 use super::*;
 use crate::client::jsonrpc::envelope;
@@ -173,7 +174,9 @@ fn an_offer_this_plane_cannot_carry_is_a_disconnect() {
     assert_eq!(fin, Action::Fail(Refusal::OfferedUnsupported));
 }
 
-/// An upstream refusing the stateless request and `initialize` is handed to the `2024-11-05`
+/// An upstream refusing the stateless request and `initialize` is handed to the
+/// `2024-11-05` event stream, which the driver carries (`door_legacy`); one remembered as
+/// `2024-11-05` goes there straight away.
 #[test]
 fn an_event_stream_upstream_is_handed_to_the_stream() {
     let mut n = Negotiator::new(call(), None, "1.6.0");
@@ -221,7 +224,11 @@ fn a_stateless_request_keeps_its_id() {
     assert_eq!(n.sent_id(), None);
 }
 
-/// RED: a STATELESS-MODE server that answers the newest revision's request with the specification's
+/// a STATELESS-MODE server that answers the newest revision's request with the
+/// specification's `400` (an error naming neither the session nor `-32022`) is not taken
+/// for a stateless upstream: the `400` never reaches the caller, nothing is remembered from
+/// it, and the older revisions are tried; the server's `2025-06-18` session then carries
+/// the call.
 #[test]
 fn red_a_stateless_400_moves_the_ladder_and_is_never_remembered() {
     let mut n = Negotiator::new(call(), None, "1.6.0");
@@ -255,4 +262,24 @@ fn red_a_stateless_400_moves_the_ladder_and_is_never_remembered() {
     let fin = n.on_answer(answer(200, result(json!(5), json!({"content":[]}))));
     assert!(matches!(fin, Action::Finish(ref a) if a.status == 200));
     assert_eq!(n.remembered().unwrap().revision, Revision::R2025_06_18);
+}
+
+#[test]
+fn audit_terminal_negotiation_never_opens_stream_on_late_answer() {
+    let request = super::super::jsonrpc::tools_list("https://up.test/mcp", 1, None);
+    let mut negotiation = Negotiator::new(request, None, "test");
+    negotiation.start();
+    let answer = HopAnswer {
+        status: 200,
+        fields: vec![],
+        body: b"{}".to_vec(),
+    };
+    assert!(matches!(
+        negotiation.on_answer(Some(answer.clone())),
+        Action::Finish(_)
+    ));
+    assert!(matches!(
+        negotiation.on_answer(Some(answer)),
+        Action::Fail(_)
+    ));
 }

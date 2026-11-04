@@ -53,7 +53,9 @@ fn restate(parts: DoorParts) {
 
 #[test]
 fn incompatible_abi_layout_and_statement_metadata_are_refused() {
-    let _lock = METADATA.lock().unwrap();
+    let _lock = METADATA
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let d = Dispatcher::new(DispatchConfig::default());
     let honest = rendering_of(busbar_plane_mcp::door).unwrap();
     for by in [Door::Linked, Door::Dropped] {
@@ -214,7 +216,9 @@ fn the_actual_mcp_serving_door_requires_a_connection_table_through_both_origins(
 fn a_mcp_plane_with_another_answer_layout_is_refused() {
     use busbar_contract::abi::mechanism::door::KindTailHead;
     use busbar_contract::abi::plane::{PlaneTail, ANSWER_LAYOUT};
-    let _lock = METADATA.lock().unwrap();
+    let _lock = METADATA
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let real = real();
     let st = unsafe { real.statement.read_unaligned() };
     let tail = unsafe { st.kind_tail.cast::<PlaneTail>().read_unaligned() };
@@ -277,7 +281,9 @@ fn failing_mcp_readiness_is_not_retried_and_preserves_its_exact_error() {
     use busbar_contract::abi::mechanism::call::{Blob, Outcome};
     use busbar_contract::abi::plane::{PlaneOpenIn, PlaneOpenOut};
     use busbar_plugin_loader::dispatch::{in_head, out_head, Frame};
-    let _lock = METADATA.lock().unwrap();
+    let _lock = METADATA
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     READY_CALLS.store(0, Ordering::SeqCst);
     restate(DoorParts {
         size: std::mem::size_of::<AbiDoor>() as u32,

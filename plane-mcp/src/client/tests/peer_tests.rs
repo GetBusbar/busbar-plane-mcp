@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! WHAT A CHILD SENDS BUSBAR — classification, the deny-by-default gate on the three authority
+//! WHAT A CHILD SENDS BUSBAR — classification, the deny-by-default gate on the three
+//! authority asks, and the two facts that stop a well-behaved child from desynchronising
+//! the stream.
 
 use super::super::jsonrpc::ServerAsk;
 use super::super::peer::{
@@ -41,7 +43,8 @@ fn a_notification_method_is_a_notification_even_with_a_null_id() {
     );
 }
 
-/// THE HANG THIS MODULE USED TO PRODUCE: A PRESENT-BUT-NULL `id` ON A REQUEST METHOD MUST STILL BE
+/// THE HANG THIS MODULE USED TO PRODUCE: A PRESENT-BUT-NULL `id` ON A REQUEST METHOD MUST
+/// STILL BE ANSWERED.
 #[test]
 fn a_present_but_null_id_on_a_request_method_is_still_a_request() {
     assert_eq!(
@@ -144,7 +147,10 @@ fn the_three_authority_asks_are_denied_by_default_and_name_their_grant() {
     }
 }
 
-/// LAW 11: A GRANTED ASK IS THE CALLER'S, AND BUSBAR WRITES NOTHING IN ITS PLACE. The grant is a
+/// LAW 11: A GRANTED ASK IS THE CALLER'S, AND BUSBAR WRITES NOTHING IN ITS PLACE. The grant
+/// is a relay permission: held, the ask is relayed to busbar's caller and the child gets no
+/// reply from busbar at all (the caller's answer is written under the child's id); not
+/// held, the child is refused (`ask_ungranted`, the operator's policy).
 #[test]
 fn a_granted_ask_is_relayed_and_never_answered_by_busbar() {
     let all = ServerRequestGrants {
@@ -181,7 +187,8 @@ fn a_granted_ask_is_relayed_and_never_answered_by_busbar() {
     }
 }
 
-/// ONE GRANT DOES NOT OPEN THE OTHER TWO. The three are independent authorities and a table that
+/// ONE GRANT DOES NOT OPEN THE OTHER TWO. The three are independent authorities and a table
+/// that leaked between them would let `roots: true` buy an LLM completion.
 #[test]
 fn each_grant_opens_only_its_own_ask() {
     let roots_only = ServerRequestGrants {

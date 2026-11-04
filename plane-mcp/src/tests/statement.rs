@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The door's declarations: the tail the loader judges, the trust keys it states against the
+//! grammar's own table, the settings reader and each generation's snapshot.
 
 use busbar_contract::abi::mechanism::call::AbiStr;
 use busbar_contract::abi::plane::check::check_tail;
@@ -10,6 +11,7 @@ use busbar_contract::abi::plane::{
     TRUST_REVERIFY_TTL,
 };
 
+use super::test_support::read_tools_section;
 use super::*;
 
 /// A good section: one fronted server.
@@ -28,6 +30,7 @@ const PLANE_KINDS: [&str; 4] = [
 ];
 
 /// A tail string read back through the `&'static str` it was built from: the tail's strings are
+/// constants of this crate, so a string this test knows is found by address and length.
 fn text(a: AbiStr) -> String {
     if a.is_absent() {
         return String::new();
@@ -64,6 +67,7 @@ fn the_tail_is_one_the_loader_accepts() {
 }
 
 /// The tail's trust keys, in judgement order, and its pin mechanisms are the grammar's own: every
+/// mechanism token parses, and the three roots are exactly the mechanisms that are not `unpinned`.
 #[test]
 fn the_tails_trust_keys_are_the_grammars() {
     let keys: Vec<(String, u32, String)> = TRUST_KEYS
@@ -181,6 +185,7 @@ fn a_good_section_reads_and_a_bad_one_is_refused_in_the_grammars_words() {
 }
 
 /// With no public base there is no audience and nothing is claimed; with one, the endpoint and its
+/// metadata document are absolute and every route is claimed, the discovery document open.
 #[test]
 fn a_generation_claims_its_routes_only_with_a_public_base() {
     let none = snapshot_spec_with(None, None);
@@ -231,12 +236,14 @@ fn the_claims_are_stated_under_the_endpoint_block_else_the_public_base() {
 }
 
 /// The Statement's version is the crate's (the plane reads no build environment in `src/`; a test
+/// may).
 #[test]
 fn the_statement_version_is_the_crates() {
     assert_eq!(crate::plane_door::VERSION, env!("CARGO_PKG_VERSION"));
 }
 
 /// The tail states one operation class per method row's class, in their order, and each row's
+/// class is found at its own index.
 #[test]
 fn the_tail_states_every_operation_class() {
     assert_eq!(OP_CLASS_TABLE.len(), crate::tool_ops::OP_CLASSES.len());
@@ -252,6 +259,7 @@ fn the_tail_states_every_operation_class() {
 }
 
 /// THE DNS-REBINDING ALLOWLIST is the `mcp:` block's `allowed_origins` (none without a block), and
+/// the refusal is the served engine's words: an OAuth-style `invalid_origin` object.
 #[test]
 fn the_admitted_origins_are_the_blocks_and_the_refusal_is_the_served_words() {
     assert_eq!(allowed_origins(b""), Ok(Vec::new()));
@@ -313,6 +321,8 @@ fn the_admin_openapi_blob_states_every_body_its_verbs_name() {
 }
 
 /// `validate` reads the blob stage 3g deals a plane (`{tools: <section>, mcp: <endpoint>}`): the
+/// `tools:` section inside it is judged; a blob that writes no `tools:` is the empty section; the
+/// endpoint block beside it is judged as `open` judges it.
 #[test]
 fn validate_reads_the_dealt_blob_at_its_tools_section() {
     use crate::statement::read_dealt_tools;
@@ -349,6 +359,9 @@ fn the_task_run_route_is_closed_and_exact() {
 }
 
 /// THE CALL LOG CANNOT BE REWRITTEN: the call kind is the one record chain the door declares, so
+/// the host hash-chains every call record (its prelude length-prefixed, the scope in the digest)
+/// and a record whose middle is replaced breaks the chain. This is what production declares; no
+/// operation table of the plane's own stands in for it.
 #[test]
 fn the_call_log_is_the_one_chain_the_host_keeps() {
     assert_eq!(RECORD_CHAINS.len(), 1);
@@ -360,7 +373,12 @@ fn the_call_log_is_the_one_chain_the_host_keeps() {
     assert_eq!(text(kind), crate::tool_records::KIND_CALL);
 }
 
-/// B2: A SETTINGS REFUSAL NAMES NO POSITION IN THE HOST-BUILT BLOB. The plane reads its section
+/// A SETTINGS REFUSAL NAMES NO POSITION IN THE HOST-BUILT BLOB. The plane reads its section
+/// from JSON the host built, never from text the operator wrote, so serde's words are read from a
+/// value (as the SDK's `settings_as` reads them) and name no `line`/`column`: core's refusal names
+/// the operator's own position after them. A `tools:` written as a list or a scalar is refused by
+/// serde_json's own reader, which is where a position was named: at validate (the dealt blob), and
+/// at open and refresh (the section and the pools beside it).
 #[test]
 fn a_settings_refusal_names_no_position_in_the_host_built_blob() {
     for dealt in [&br#"{"tools":[1]}"#[..], br#"{"tools":"x"}"#] {
@@ -385,7 +403,9 @@ fn a_settings_refusal_names_no_position_in_the_host_built_blob() {
     assert!(!refused.contains(" at line "), "{refused}");
 }
 
-/// G6: VALIDATE JUDGES A DEALT `mcp:` BLOCK AS `open` JUDGES IT, so a block `open` would refuse
+/// VALIDATE JUDGES A DEALT `mcp:` BLOCK AS `open` JUDGES IT, so a block `open` would refuse
+/// (an endpoint at another path, no authorization server, an unknown key) is refused at validate
+/// first, in the block's own words, and never answers READY there.
 #[test]
 fn validate_judges_a_dealt_endpoint_block_as_open_judges_it() {
     use crate::statement::{judge_endpoint_block, read_dealt_tools};

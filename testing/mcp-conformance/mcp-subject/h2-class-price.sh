@@ -106,13 +106,28 @@ h2_int_is "$key_spend" -eq 1 || { failures=$((failures+1)); detail="${detail}the
 # non-numeric -- is a failure (item 499).
 tc_count="$(h2_meter_row_class "probe_ping" "mcp" tool_calls count)"
 by_count="$(h2_meter_row_class "probe_ping" "mcp" bytes count)"
-if ! h2_int_is "$tc_count" -gt 0; then
+if ! h2_int_is "$tc_count" -eq 1; then
   failures=$((failures+1))
-  detail="${detail}(2) the served call reported classes.tool_calls.count=${tc_count} (want > 0: one call is one tool_call); "
+  detail="${detail}(2) the served call reported classes.tool_calls.count=${tc_count} (want exactly 1: one call is one tool_call); "
 fi
-if ! h2_int_is "$by_count" -gt 0; then
+expected_bytes="$(python3 - "$H2_EGRESS_DIR" <<'PY_BYTES'
+import json, pathlib, sys
+calls = []
+for path in pathlib.Path(sys.argv[1]).glob('*.json'):
+    request = json.loads(path.read_text())['body']
+    if isinstance(request, str):
+        request = json.loads(request)
+    if request.get('method') == 'tools/call' and request.get('params', {}).get('arguments', {}).get('label') == 'price':
+        calls.append(request)
+if len(calls) != 1:
+    raise SystemExit('price rig expected exactly one captured upstream call')
+reply = {'jsonrpc': '2.0', 'id': calls[0]['id'], 'result': {'resultType': 'complete', 'content': [{'type': 'text', 'text': 'ping: price'}], 'isError': False}}
+print(len(json.dumps(reply, separators=(',', ':'), ensure_ascii=False).encode('utf-8')))
+PY_BYTES
+)"
+if ! h2_int_is "$by_count" -eq "$expected_bytes"; then
   failures=$((failures+1))
-  detail="${detail}(2) the served call reported classes.bytes.count=${by_count} (want > 0: the upstream answered with a document); "
+  detail="${detail}(2) the served call reported classes.bytes.count=${by_count} (want ${expected_bytes}: independently encoded mock response); "
 fi
 
 # ── (3) THE PRICE MUST BE THE PRODUCT ─────────────────────────────────────────────────────────────

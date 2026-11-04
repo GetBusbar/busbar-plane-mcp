@@ -35,7 +35,9 @@ fn linked(d: &Dispatcher) -> Plugin<Plane> {
     .expect("the linked door loads")
 }
 
-/// RED on a plane whose far-end pins are not peer-key pins: the host would seal no pin, and an
+/// RED on a plane whose far-end pins are not peer-key pins: the host would seal no pin, and
+/// an operator's `cert_spki` or `mtls` key would be parsed and never compared with the far
+/// end's.
 #[test]
 fn tls_roots_pin_peer_keys_and_local_program_has_its_own_launch_root() {
     let d = Dispatcher::new(DispatchConfig::default());
@@ -81,6 +83,7 @@ fn tls_roots_pin_peer_keys_and_local_program_has_its_own_launch_root() {
 }
 
 /// RED on a plane whose http need names no `trust_from`: an `mtls` registration's client
+/// certificate would never be resolved or presented.
 #[test]
 fn the_http_member_need_names_structured_tls_and_legacy_identity_secret_references() {
     let d = Dispatcher::new(DispatchConfig::default());

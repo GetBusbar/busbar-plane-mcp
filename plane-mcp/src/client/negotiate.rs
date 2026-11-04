@@ -2,8 +2,10 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! ONE UPSTREAM CALL, NEGOTIATED: the client ladder as a sans-I/O state machine. [`Negotiator`]
-
-#![cfg_attr(not(test), allow(dead_code))]
+//! carries one stateless request and says, one [`Action`] at a time, what to put on the wire: the
+//! request itself; on a refusal `initialize`, `notifications/initialized` and the request lowered
+//! into the revision the upstream chose; on a refusal of `initialize`, [`Action::OpenStream`] (the
+//! driver carries the call over the `2024-11-05` event stream, `door_legacy`).
 
 use serde_json::Value;
 
@@ -42,8 +44,8 @@ impl HopAnswer {
 /// Why a negotiated call stopped without an answer to hand back.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Refusal {
-    /// The upstream could not be reached, or answered 5xx, on a step whose failure says nothing
-    /// about its revision. The last answer, if any, is carried.
+    /// A transport failure, server error, refused initialization acknowledgement, or late answer
+    /// stopped the exchange. The last answer, if any, is carried; none implies a revision fallback.
     Unreachable(Option<HopAnswer>),
     /// The upstream's `initialize` answer named a revision this plane cannot carry; the spec's rule
     /// is to disconnect.
@@ -75,7 +77,6 @@ enum Phase {
         session: Option<String>,
     },
     InSession {
-        revision: Revision,
         session: Option<String>,
     },
     Done,
@@ -99,15 +100,20 @@ pub struct Negotiator {
 
 impl Negotiator {
     /// Carries `original` (a stateless request) to its upstream, starting from what busbar
+    /// `remembered` about that upstream. `client_version` names busbar in `initialize`.
     #[must_use]
     pub fn new(
         original: OutboundRequest,
         remembered: Option<Remembered>,
         client_version: &str,
     ) -> Self {
-        let original_id = serde_json::from_slice::<Value>(&original.body)
+        #[derive(serde::Deserialize)]
+        struct EnvelopeId {
+            id: Option<Value>,
+        }
+        let original_id = serde_json::from_slice::<EnvelopeId>(&original.body)
             .ok()
-            .and_then(|v| v.get("id").cloned())
+            .and_then(|v| v.id)
             .filter(|v| !v.is_null());
         Self {
             original,
@@ -122,6 +128,7 @@ impl Negotiator {
     }
 
     /// The id a request lowered into the remembered session carries: that session's next id
+    /// (`UpstreamTable::next_id`), never the stateless round's. `None`: the original's id.
     #[must_use]
     pub fn with_session_id(mut self, id: Option<u64>) -> Self {
         self.session_id = id;
@@ -135,12 +142,14 @@ impl Negotiator {
     }
 
     /// The id the request this negotiation sent in a session carried, when it is not the
+    /// original's: the id its answer is correlated by.
     #[must_use]
     pub fn sent_id(&self) -> Option<u64> {
         self.sent_id
     }
 
     /// What to keep for the next call to this upstream: the negotiated revision and, on a
+    /// session revision, its session. `None` means forget (nothing was learnt, or it was lost).
     #[must_use]
     pub fn remembered(&self) -> Option<Remembered> {
         self.remembered.clone()
@@ -165,7 +174,7 @@ impl Negotiator {
         let (original, url) = (&self.original, &self.original.url);
         let request = lower_request(original, url, revision, session.as_deref(), id);
         self.sent_id = id;
-        self.send(Phase::InSession { revision, session }, request)
+        self.send(Phase::InSession { session }, request)
     }
 
     fn initialize(&mut self) -> Action {
@@ -248,7 +257,7 @@ impl Negotiator {
                 });
                 self.in_session(revision, session)
             }
-            Phase::InSession { session, .. } => {
+            Phase::InSession { session } => {
                 if answer.status == 404 && session.is_some() && !self.reinitialized {
                     self.reinitialized = true;
                     self.remembered = None;
@@ -256,7 +265,7 @@ impl Negotiator {
                 }
                 self.finish(answer)
             }
-            Phase::Done => Action::OpenStream,
+            Phase::Done => Action::Fail(Refusal::Unreachable(None)),
         }
     }
 }

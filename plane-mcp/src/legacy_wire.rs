@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Actual legacy stream/driver implementation, shared by production and its private-state tests.
+// Copyright (C) 2026 Busbar Inc and contributors
 use std::collections::{BTreeMap, VecDeque};
 use std::task::Poll;
 
@@ -22,6 +22,7 @@ use crate::client::peer::{NotificationEffect, ServerMessage, ServerNotification}
 use crate::revision::Revision;
 
 /// The words every call waiting on a held stream fails with when the stream drops before its
+/// answer arrives.
 pub const STREAM_CLOSED: &str =
     "the MCP server's 2024-11-05 event stream closed before it answered this call";
 
@@ -29,6 +30,8 @@ pub const STREAM_CLOSED: &str =
 pub const ACTION_REPLY_DROPPED: &str = "mcp_upstream.reply";
 
 /// The most rejected `mcp_upstream.reply` rows one answer carries: replies dropped past it are
+/// counted no further, so an upstream that floods replies no call waits for grows neither the count
+/// nor the caller's answer.
 pub const MAX_DROPPED_AUDITED: u32 = 4;
 
 /// The most calls one held stream waits answers for at once.
@@ -52,7 +55,7 @@ const READ_CHUNK: usize = 1 << 16;
 /// The handle seq the instance's stream services are numbered from on the driver ticket.
 const LINK_SEQ: u32 = 1 << 27;
 
-/// The existing legacy handle namespace. Confirmed retirement recycles its slots.
+/// The legacy handle namespace. Confirmed retirement recycles its slots.
 const CYCLE_SPAN: u32 = 1 << 26;
 
 #[derive(Debug, Default)]
@@ -217,6 +220,7 @@ pub(super) struct Link {
     end_piece: Box<RequestPiece>,
     body_piece: Box<RequestPiece>,
     /// The head fields every POST of the link carries (the credential and the rest, lowered into
+    /// the revision: no stateless mirror).
     fields: Vec<(String, String)>,
     /// The connector's stream, once established.
     stream: Option<u64>,
@@ -224,6 +228,7 @@ pub(super) struct Link {
     /// Why the stream is gone, once it is.
     dead: Option<String>,
     /// Connector streams this key's earlier (dead) links held, still to close: a dropped stream
+    /// is let go at the connector, never left open behind a new one.
     stale: Vec<u64>,
     reader: EventReader,
     /// The message address, once the stream named an acceptable one.
@@ -232,11 +237,14 @@ pub(super) struct Link {
     /// The ticket of the call running `initialize`, while one is.
     init_by: Option<Ticket>,
     /// Answers read, by their id's JSON text, with the ticket of the call they are for, until it
+    /// takes them.
     answers: BTreeMap<String, (Ticket, Vec<u8>)>,
     /// The ticket of the call waiting for each id (at most [`MAX_WAITING`]).
     waiters: BTreeMap<String, Ticket>,
     /// Calls waiting for the link to be usable (its address named, its `initialize` done).
     parked: Vec<Ticket>,
+    /// Woken calls that still need to consume this link's terminal cause.
+    failed: Vec<Ticket>,
     /// The next id a call on this stream carries.
     next_id: u64,
     /// Replies no call waited for, dropped, not yet audited (at most [`MAX_DROPPED_AUDITED`]).
@@ -301,6 +309,7 @@ impl Link {
             answers: BTreeMap::new(),
             waiters: BTreeMap::new(),
             parked: Vec::new(),
+            failed: Vec::new(),
             next_id: 1,
             dropped: 0,
             outbox: VecDeque::new(),
@@ -335,6 +344,7 @@ impl Link {
     }
 
     /// Registers the call on `ticket` as waiting for `id`: `false` when the link already waits on
+    /// [`MAX_WAITING`] calls.
     fn wait(&mut self, id: u64, ticket: Ticket) -> bool {
         if self.waiters.len() >= MAX_WAITING {
             return false;
@@ -345,10 +355,14 @@ impl Link {
 
     /// The stream is gone: every waiting call is woken to read why.
     fn die(&mut self, why: &str, woken: &mut Vec<Ticket>) {
-        if self.dead.is_none() {
-            self.dead = Some(why.to_string());
+        if self.dead.is_some() {
+            return;
         }
-        woken.extend(std::mem::take(&mut self.waiters).into_values());
+        self.dead = Some(why.to_string());
+        self.failed
+            .extend(std::mem::take(&mut self.waiters).into_values());
+        self.failed.append(&mut self.parked);
+        woken.extend(self.failed.iter().copied());
         self.answers.remove(&INITIALIZE_ID.to_string());
         self.init_by = None;
         woken.append(&mut self.parked);
@@ -390,7 +404,11 @@ impl Link {
                 continue;
             }
             let Ok(v) = serde_json::from_str::<Value>(&event.data) else {
-                continue;
+                self.die(
+                    "the MCP server sent malformed JSON on its 2024-11-05 event stream",
+                    woken,
+                );
+                break;
             };
             if v.get("method").is_some() {
                 self.peer_message(&v, event.data.len(), grants, woken, announced);
@@ -412,6 +430,8 @@ impl Link {
     }
 
     /// One message of the server's own, routed as the other rungs route it (busbar answers
+    /// only the protocol's housekeeping, and an ask it cannot carry to the caller is refused, never
+    /// answered for the caller).
     fn peer_message(
         &mut self,
         v: &Value,
@@ -487,6 +507,11 @@ impl Link {
             if self.outbox.len() < MAX_OUTBOX {
                 self.outbox
                     .push_back(serde_json::to_vec(&reply).unwrap_or_default());
+            } else {
+                self.die(
+                    "the MCP server exceeded the legacy reply queue limit",
+                    woken,
+                );
             }
 
             woken.extend(self.waiters.values().next().copied());
@@ -503,7 +528,7 @@ impl Link {
         let max = busbar_contract::abi::sdk::exchange::REPLY_MAX;
         if used.saturating_add(bytes) > max {
             self.die(
-                &format!("the MCP server's retained 2024-11-05 notifications exceeded busbar's existing {max}-byte reply limit"),
+                &format!("the MCP server's retained 2024-11-05 notifications exceeded busbar's {max}-byte reply limit"),
                 woken,
             );
             false
@@ -513,6 +538,8 @@ impl Link {
     }
 
     /// DRIVES the link on the driver ticket, its services numbered on from `issued` (the
+    /// instance's one counter for this tick cycle): an idle stream let go, the replies it owes
+    /// POSTed, and the stream dialled, its `GET` written, and its reply read until it pends or ends.
     fn drive(
         &mut self,
         (host, driver, now): (&Host, Ticket, u64),
@@ -526,15 +553,16 @@ impl Link {
         } else if now.saturating_sub(self.last_used) > IDLE_NS {
             self.die(IDLE, woken);
         }
-        self.post_replies(host, driver, issued);
+        self.post_replies(host, driver, issued, woken);
         self.read_stream((host, driver), issued, grants, woken, announced);
-        self.post_replies(host, driver, issued);
+        self.post_replies(host, driver, issued, woken);
         if self.dead.is_some() && !self.retiring() && self.answers.is_empty() {
             woken.append(&mut self.parked);
         }
     }
 
     /// Reserve the current operation's handle before invoking the host. A pending service owns
+    /// it across links and ticks; a completed service clears it before starting its next step.
     fn next<'h>(
         host: &'h Host,
         driver: Ticket,
@@ -702,8 +730,9 @@ impl Link {
                                     }
                                 }
                                 REPLY_BODY => {
-                                    let chunk = self.buf[..got.len].to_vec();
-                                    self.events(&chunk, grants, woken, announced);
+                                    let buffer = std::mem::take(&mut self.buf);
+                                    self.events(&buffer[..got.len], grants, woken, announced);
+                                    self.buf = buffer;
                                 }
                                 _ => self.die(STREAM_CLOSED, woken),
                             }
@@ -719,7 +748,14 @@ impl Link {
     }
 
     /// THE REPLIES the link owes the server, POSTed one after another to the message address on the
-    fn post_replies(&mut self, host: &Host, driver: Ticket, issued: &mut Driver) {
+    /// driver ticket, each service numbered on from `issued`; a dead stream owes nothing more.
+    fn post_replies(
+        &mut self,
+        host: &Host,
+        driver: Ticket,
+        issued: &mut Driver,
+        woken: &mut Vec<Ticket>,
+    ) {
         if self.dead.is_some() {
             self.outbox.clear();
             if let Some(r) = self.replying.as_mut() {
@@ -779,6 +815,9 @@ impl Link {
             self.replying = None;
             return;
         }
+        if self.outbox.is_empty() && self.replying.is_none() {
+            return;
+        }
         let Some(address) = self.address.clone() else {
             return;
         };
@@ -804,6 +843,7 @@ impl Link {
             };
             let stream = r.stream.unwrap_or_default();
 
+            let mut failed = false;
             let done = match r.step {
                 ReplyStep::Establish => match c.establish_as(
                     crate::statement::NEED_UPSTREAM,
@@ -817,17 +857,26 @@ impl Link {
                         r.stream = Some(s);
                         ReplyStep::Head
                     }
-                    Poll::Ready(Err(_)) => ReplyStep::Close,
+                    Poll::Ready(Err(_)) => {
+                        failed = true;
+                        ReplyStep::Close
+                    }
                 },
                 ReplyStep::Head => match c.write_request(stream, &r.head_piece, &r.head) {
                     Poll::Pending => return,
                     Poll::Ready(Ok(_)) => ReplyStep::Body,
-                    Poll::Ready(Err(_)) => ReplyStep::Close,
+                    Poll::Ready(Err(_)) => {
+                        failed = true;
+                        ReplyStep::Close
+                    }
                 },
                 ReplyStep::Body => {
                     match c.write_request(stream, &self.body_piece, &r.body[r.sent..]) {
                         Poll::Pending => return,
-                        Poll::Ready(Ok(0) | Err(_)) => ReplyStep::Close,
+                        Poll::Ready(Ok(0) | Err(_)) => {
+                            failed = true;
+                            ReplyStep::Close
+                        }
                         Poll::Ready(Ok(n)) => {
                             r.sent = r.sent.saturating_add(n);
                             ReplyStep::Body
@@ -837,22 +886,25 @@ impl Link {
                 ReplyStep::End => match c.write_request(stream, &self.end_piece, &[]) {
                     Poll::Pending => return,
                     Poll::Ready(Ok(_)) => ReplyStep::Read,
-                    Poll::Ready(Err(_)) => ReplyStep::Close,
+                    Poll::Ready(Err(_)) => {
+                        failed = true;
+                        ReplyStep::Close
+                    }
                 },
                 ReplyStep::Read => match c.read_reply(stream, &mut r.buf, &mut r.slot) {
                     Poll::Pending => return,
 
-                    Poll::Ready(Ok(got))
-                        if got.piece.kind == REPLY_HEAD
-                            && (got.piece.code >= 200 || got.piece.code == 101) =>
-                    {
+                    Poll::Ready(Ok(got)) => match reply_step(&got.piece) {
+                        Some(next) => next,
+                        None => {
+                            failed = true;
+                            ReplyStep::Close
+                        }
+                    },
+                    Poll::Ready(Err(_)) => {
+                        failed = true;
                         ReplyStep::Close
                     }
-                    Poll::Ready(Ok(got)) if matches!(got.piece.kind, REPLY_END | REPLY_ACK) => {
-                        ReplyStep::Close
-                    }
-                    Poll::Ready(Ok(_)) => ReplyStep::Read,
-                    Poll::Ready(Err(_)) => ReplyStep::Close,
                 },
                 ReplyStep::Close => {
                     if r.stream.is_some() && c.close(stream).is_pending() {
@@ -865,6 +917,13 @@ impl Link {
             };
             issued.consumed(&mut r.handle);
             r.step = done;
+            if failed {
+                self.die(
+                    "the MCP server failed to accept a legacy server-request reply POST",
+                    woken,
+                );
+                return;
+            }
         }
     }
 
@@ -925,4 +984,15 @@ const fn span(offset: usize, len: usize) -> FrameSpan {
 fn spanned(buf: &[u8], span: FrameSpan) -> &[u8] {
     let (at, len) = (span.offset as usize, span.len as usize);
     buf.get(at..at.saturating_add(len)).unwrap_or(&[])
+}
+
+/// A reply POST is delivered only after a successful final HTTP head.
+fn reply_step(piece: &ReplyPiece) -> Option<ReplyStep> {
+    if piece.kind == REPLY_HEAD && (piece.code >= 200 || piece.code == 101) {
+        (200..300).contains(&piece.code).then_some(ReplyStep::Close)
+    } else if matches!(piece.kind, REPLY_END | REPLY_ACK) {
+        None
+    } else {
+        Some(ReplyStep::Read)
+    }
 }

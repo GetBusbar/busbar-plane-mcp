@@ -412,6 +412,7 @@ impl busbar_contract::services::HostServices for McpServices {
         Ran::Now(self.sighting(name, None, digest))
     }
     /// The kernel's Approve as this section's approvals seed it: `read_file` approved at its
+    /// digest, `draft` allowed and pending (ARCHITECT Q3: the door renders the verdict).
     fn trust_serves(
         &self,
         _: &Caller,
@@ -762,7 +763,7 @@ impl Carried {
             let (from, len) = (s.offset as usize, s.len as usize);
             piece.arena.get(from..from.checked_add(len)?)
         };
-        for r in &piece.records[..(o.records_written as usize).min(CAP)] {
+        for r in &piece.records[..(o.records_written as usize)] {
             if let (RECORD_PUT, Some(key), Some(value)) = (r.op, bytes(r.key), bytes(r.value)) {
                 h.keep(r.kind, key, value);
             }
@@ -854,21 +855,21 @@ impl Piece {
     }
 
     fn fields(&self, o: &OnPieceOut) -> Vec<String> {
-        self.fields[..(o.fields_written as usize).min(CAP)]
+        self.fields[..(o.fields_written as usize)]
             .iter()
             .map(|f| format!("{}={}", at(&self.arena, f.name), at(&self.arena, f.value)))
             .collect()
     }
 
     fn units(&self, o: &OnPieceOut) -> Vec<String> {
-        self.units[..(o.units_written as usize).min(CAP)]
+        self.units[..(o.units_written as usize)]
             .iter()
             .map(|u| format!("{}:{}:{}", u.class, u.amount, u.source == UNITS_REPORTED))
             .collect()
     }
 
     fn emitted(&self, o: &OnPieceOut) -> String {
-        let n = usize::try_from(o.emitted).map_or(self.reply.len(), |n| n.min(self.reply.len()));
+        let n = usize::try_from(o.emitted).expect("emitted byte count fits usize");
         String::from_utf8_lossy(&self.reply[..n]).into_owned()
     }
 
@@ -1598,16 +1599,14 @@ fn actual_mcp_cases(dropped: bool) -> BTreeMap<String, String> {
                 (f.input.fields_buf, f.input.fields_cap) = (fields.as_mut_ptr(), fields.len());
                 (f.input.arena_buf, f.input.arena_cap) = (arena.as_mut_ptr(), arena.len());
                 let c = p.call(slot::REFUSAL, &mut f);
-                let written: Vec<String> = fields[..(f.out.fields_written as usize).min(2)]
+                let written: Vec<String> = fields[..(f.out.fields_written as usize)]
                     .iter()
                     .map(|x| format!("{}={}", at(&arena, x.name), at(&arena, x.value)))
                     .collect();
                 format!(
                     "{} reply={} fields={written:?} status={}",
                     called(&c),
-                    String::from_utf8_lossy(
-                        &reply[..(f.out.reply_written as usize).min(reply.len())]
-                    ),
+                    String::from_utf8_lossy(&reply[..(f.out.reply_written as usize)]),
                     f.out.status
                 )
             }
@@ -1741,19 +1740,16 @@ fn actual_mcp_cases(dropped: bool) -> BTreeMap<String, String> {
             assert!(!answer.starts_with("Fault "), "{label}: {answer}");
         }
     }
-    let request_unit = k["request_unit"].as_bool() != Some(false);
-    let units: &[&str] = if request_unit {
-        &[
-            "attempt",
-            "body",
-            "far_end",
-            "narrow attempt",
-            "narrow far_end",
-            "short attempt",
-        ]
-    } else {
-        &[]
-    };
+    let request_unit = !k["request_unit"].is_null();
+    assert!(!request_unit, "request-unit variants need explicit cases");
+    let units = [
+        "attempt",
+        "body",
+        "far_end",
+        "narrow attempt",
+        "narrow far_end",
+        "short attempt",
+    ];
     for label in units {
         assert!(at(label).starts_with("Ready "), "{label}: {}", at(label));
     }
@@ -1928,20 +1924,7 @@ fn actual_mcp_cases(dropped: bool) -> BTreeMap<String, String> {
                 && short.ends_with(&units),
             "a short answer, re-called once with room: {short}"
         );
-
-        if k["empty"].is_object() {
-            let want = str_of(&k["empty"]["outcome"], "empty.outcome");
-            assert!(
-                at("empty").starts_with(&format!("{want} ")),
-                "empty: {}",
-                at("empty")
-            );
-        }
     }
-    assert!(
-        k["sessions"].is_null(),
-        "new MCP sessions need explicit ordinary test cases"
-    );
     if let Some(reply) = k["refusal"]["reply"].as_str() {
         assert!(
             at("refusal").contains(&format!(" reply={reply} ")),

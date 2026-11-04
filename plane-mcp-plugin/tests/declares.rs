@@ -3,9 +3,8 @@
 
 //! Checks that the Statement and release recipe use the same declares document.
 
-/// The declaration the release signs: the `declares:` of this plugin's entry in busbar's
+/// The declaration the release signs, as named by this plugin's entry in busbar's plugins.yaml.
 fn signed() -> (String, Vec<u8>) {
-    const NAMED: &str = "plane-mcp/declares.json";
     let root = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
     let yaml = std::env::var("BUSBAR_PLUGINS_YAML")
         .unwrap_or_else(|_| format!("{root}/../busbar/plugins.yaml"));
@@ -21,7 +20,7 @@ fn signed() -> (String, Vec<u8>) {
             .find_map(|l| l.trim().strip_prefix("declares:"))
             .map(|v| v.trim().trim_matches('"').to_string())
             .expect("the entry names its declares file"),
-        Err(_) => NAMED.to_string(),
+        Err(error) => panic!("release recipe must be readable; set BUSBAR_PLUGINS_YAML: {error}"),
     };
     let bytes = std::fs::read(format!("{root}/{named}")).expect("the signed declaration reads");
     (named, bytes)
@@ -56,6 +55,7 @@ fn the_statement_states_the_whole_declares_document() {
 }
 
 #[test]
+#[ignore = "requires the release repository; set BUSBAR_PLUGINS_YAML and run with --ignored"]
 fn the_signed_declaration_is_the_one_the_door_states() {
     let (named, signed) = signed();
     assert_eq!(
@@ -70,9 +70,9 @@ fn the_signed_declaration_is_the_one_the_door_states() {
 }
 
 #[test]
-fn the_signed_declaration_states_the_breaker_and_the_diagnostics_and_no_contract_abi_range() {
-    let (_, signed) = signed();
-    let doc: serde_json::Value = serde_json::from_slice(&signed).expect("the declaration is JSON");
+fn the_local_declaration_states_the_breaker_and_the_diagnostics_and_no_contract_abi_range() {
+    let signed = include_bytes!("../../plane-mcp/declares.json");
+    let doc: serde_json::Value = serde_json::from_slice(signed).expect("the declaration is JSON");
     assert!(
         doc.get("contract_abi").is_none(),
         "the signed declaration states a contract_abi range; a plugin declares its kind's ABI \

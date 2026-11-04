@@ -1,7 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE `tools:` GRAMMAR'S TYPED READING — the half of the composition root's registry-row battery
+//! THE `tools:` GRAMMAR'S TYPED READING — the half of the composition root's registry-row
+//! battery (`crates/busbar/src/root/tests/linked_tools.rs`) that needs the plane's own
+//! types: what the section's custom `Deserialize` reads a document INTO (the values, the
+//! pin mechanisms and their root-ness, the deny-by-default grants, the ask lists), the
+//! published-name invariant (`validate_published_names`, read off the built `Catalogue`)
+//! and the Statement facts the root side reads the plane's words from.
 
 use busbar_contract::abi::mechanism::call::AbiStr;
 use busbar_contract::abi::mechanism::door::{SECTION_DECLARING, SECTION_SELECTS};
@@ -11,25 +16,29 @@ use super::{namespaced, validate_published_names, ToolsCfg, SECTION, SUBJECT_NOU
 use crate::client::jsonrpc::ServerAsk;
 
 /// The section read by the grammar alone, as the door reads its settings (no rule spanning
+/// registrations): what one server's well-formedness is judged by.
 fn grammar(section: Value) -> Result<ToolsCfg, String> {
     serde_json::from_value::<ToolsCfg>(section).map_err(|e| e.to_string())
 }
 
 /// The door's own `validate` over the whole section (what boot runs through the folded row).
 fn door_validate(section: &Value) -> Result<ToolsCfg, String> {
-    crate::statement::read_tools_section(
+    crate::statement::test_support::read_tools_section(
         &serde_json::to_vec(section).expect("a section serialises"),
     )
 }
 
-/// An ABSOLUTE program path AS THIS PLATFORM SPELLS ONE (the check is `Path::is_absolute`; see the
+/// An ABSOLUTE program path AS THIS PLATFORM SPELLS ONE (the check is `Path::is_absolute`;
+/// see the root battery's `ABS_PROGRAM` for why a hardcoded unix spelling would pass on the
+/// wrong assertion on Windows).
 const ABS_PROGRAM: &str = if cfg!(windows) {
     r"C:\Windows\System32\cmd.exe"
 } else {
     "/bin/true"
 };
 
-/// THE LOCKED SECTION SHAPE, verbatim: the section knobs, the object pin, the `tools_allow` MAP,
+/// THE LOCKED SECTION SHAPE, verbatim: the section knobs, the object pin, the `tools_allow`
+/// MAP, the per-server credential mode and the bare-name hook attach.
 fn locked_example() -> Value {
     json!({
         "hooks": ["tool-sanitizer"],
@@ -68,7 +77,9 @@ fn the_locked_section_shape_parses_into_the_values_it_declares() {
     door_validate(&locked_example()).expect("the door's validate accepts it");
 }
 
-/// THE SEPARATOR RULE, the grammar's half: a server id carrying the separator is refused and a tool
+/// THE SEPARATOR RULE, the grammar's half: a server id carrying the separator is refused
+/// and a tool name carrying it is not, and the arithmetic that makes the server-id rule
+/// necessary.
 #[test]
 fn the_namespace_separator_is_refused_in_a_server_id_and_allowed_in_a_tool_name() {
     let err = grammar(json!({
@@ -98,7 +109,8 @@ fn the_namespace_separator_is_refused_in_a_server_id_and_allowed_in_a_tool_name(
     );
 }
 
-/// DENY-BY-DEFAULT is the `Default` impl, not a rule written down somewhere else and remembered at
+/// DENY-BY-DEFAULT is the `Default` impl, not a rule written down somewhere else and
+/// remembered at each call site.
 #[test]
 fn server_initiated_grants_default_to_denied() {
     let cfg = grammar(json!({ "s": { "url": "https://x/", "pin": { "mechanism": "unpinned" } } }))
@@ -202,7 +214,8 @@ fn sampling_bounds_grammar_defaults_round_trips_and_refuses() {
         .expect("positive caps are accepted");
 }
 
-/// BOTH TRANSPORTS BOOT, the typed half: a stdio registration carries its command and arguments and
+/// BOTH TRANSPORTS BOOT, the typed half: a stdio registration carries its command and
+/// arguments and no url (the root battery asserts boot accepts both).
 #[test]
 fn both_transports_are_accepted_at_parse() {
     grammar(json!({
@@ -231,7 +244,10 @@ fn both_transports_are_accepted_at_parse() {
     );
 }
 
-/// Every name the catalogue would PUBLISH for `cfg`, sorted — read off the built snapshot (the
+/// Every name the catalogue would PUBLISH for `cfg`, sorted — read off the built snapshot
+/// (the plane's own catalogue, the one its door serves `tools/list` from) rather than
+/// recomputed from the config, so a test cannot agree with a formula the catalogue no
+/// longer uses.
 fn published_names(cfg: &ToolsCfg) -> Vec<String> {
     let cat = crate::catalogue::Catalogue::build(1, cfg);
     let mut names: Vec<String> = cat
@@ -243,7 +259,9 @@ fn published_names(cfg: &ToolsCfg) -> Vec<String> {
     names
 }
 
-/// THE DEFAULT IS UNCHANGED, and this is the test that has to keep passing forever: a config that
+/// THE DEFAULT IS UNCHANGED, and this is the test that has to keep passing forever: a
+/// config that writes no `publish_as:` publishes exactly what it published before the field
+/// existed.
 #[test]
 fn absent_publish_as_publishes_the_namespaced_default_byte_for_byte() {
     let cfg = grammar(locked_example()).expect("the locked example must parse");
@@ -260,7 +278,8 @@ fn absent_publish_as_publishes_the_namespaced_default_byte_for_byte() {
     );
 }
 
-/// The override is READ, and it is the name the CATALOGUE publishes — which is the same string
+/// The override is READ, and it is the name the CATALOGUE publishes — which is the same
+/// string `tools/call` dispatches on and an `mcp_tool:` grant names.
 #[test]
 fn publish_as_is_the_published_name_and_the_namespaced_default_is_then_gone() {
     let cfg = grammar(json!({
@@ -437,7 +456,8 @@ fn two_publish_as_overrides_that_collide_refuse_the_config() {
     );
 }
 
-/// RED 2 — THE SUBTLE CASE, and the reason the check is against the WHOLE PUBLISHED SET rather than
+/// RED 2 — THE SUBTLE CASE, and the reason the check is against the WHOLE PUBLISHED SET
+/// rather than override-against-override.
 #[test]
 fn an_override_colliding_with_a_namespaced_default_refuses_the_config() {
     let section = json!({
@@ -473,7 +493,8 @@ fn an_override_colliding_with_a_namespaced_default_refuses_the_config() {
     );
 }
 
-/// The same collision in the OTHER declaration order. Config order must not decide whether a
+/// The same collision in the OTHER declaration order. Config order must not decide whether
+/// a config boots: an operator who reorders two server blocks has changed nothing.
 #[test]
 fn the_default_versus_override_collision_is_refused_in_either_declaration_order() {
     let section = json!({
@@ -498,7 +519,8 @@ fn the_default_versus_override_collision_is_refused_in_either_declaration_order(
     );
 }
 
-/// An override that spells the namespaced default is NOT a collision — it publishes the same one
+/// An override that spells the namespaced default is NOT a collision — it publishes the
+/// same one name the default would have.
 #[test]
 fn an_override_equal_to_its_own_namespaced_default_is_not_a_collision() {
     let cfg = grammar(json!({
@@ -513,7 +535,8 @@ fn an_override_equal_to_its_own_namespaced_default_is_not_a_collision() {
     assert_eq!(published_names(&cfg), vec!["foo_bar".to_string()]);
 }
 
-/// The three legal ask methods parse into a three-entry round, read as written: the rule refuses
+/// The three legal ask methods parse into a three-entry round, read as written: the rule
+/// refuses typos, not asks (the refusals themselves are the root battery's, at boot).
 #[test]
 fn every_ask_list_is_validated_and_the_three_legal_methods_still_parse() {
     let cfg = grammar(json!({
@@ -541,12 +564,18 @@ fn every_ask_list_is_validated_and_the_three_legal_methods_still_parse() {
     );
 }
 
-/// Whether `stated` is the tail string built from `word` (the tail's strings are constants of this
+/// Whether `stated` is the tail string built from `word` (the tail's strings are constants
+/// of this crate, so a word is found by address and length, as `tests/statement.rs` reads
+/// them).
 fn spells(stated: AbiStr, word: &str) -> bool {
     stated.ptr() == word.as_ptr() && stated.len() == word.len()
 }
 
-/// THE WORDS THE ROOT BATTERY READS OFF THE STATEMENT ARE THE GRAMMAR'S: the declaring section is
+/// THE WORDS THE ROOT BATTERY READS OFF THE STATEMENT ARE THE GRAMMAR'S: the declaring
+/// section is `SECTION`, the owned one the endpoint block (which selects the plane), the
+/// subject noun `SUBJECT_NOUN`; and the endpoint's fixed mount and its RFC 9728 document
+/// are spelled from the endpoint block's name (so the root may build them from the section
+/// the Statement owns).
 #[test]
 fn the_statement_names_the_grammars_section_noun_and_endpoint() {
     let sections = crate::statement::SECTIONS;
@@ -612,7 +641,10 @@ fn a_servers_timeout_bounds_the_doors_own_fetches_and_the_kernel_owns_its_judgem
     );
 }
 
-/// EVERY CAPABILITY'S PUBLISHED NAME IS IN THE ONE SET. A prompt, a resource and a template are
+/// EVERY CAPABILITY'S PUBLISHED NAME IS IN THE ONE SET. A prompt, a resource and a template
+/// are published under `{server}_{name}` and admitted by an `mcp_tool:` grant on that name,
+/// exactly as a tool is: a tool published as `bar_greet` on `foo` and the prompt `greet` on
+/// `bar` would make one `mcp_tool: bar_greet` grant admit both.
 #[test]
 fn a_tool_override_colliding_with_another_servers_prompt_refuses_the_config() {
     let section = json!({
@@ -647,6 +679,7 @@ fn a_tool_override_colliding_with_another_servers_prompt_refuses_the_config() {
 }
 
 /// The same set holds resources and resource templates: a tool override shadowing another
+/// server's resource URI, or its template, is refused in turn.
 #[test]
 fn a_tool_override_colliding_with_a_resource_or_a_template_refuses_the_config() {
     for (family, key, published) in [
@@ -694,7 +727,8 @@ fn distinct_capability_names_across_families_still_validate() {
     validate_published_names(&cfg).expect("four names, four capabilities");
 }
 
-/// `mtls` NEEDS A CLIENT IDENTITY: a registration that says its server is behind mutual TLS and
+/// `mtls` NEEDS A CLIENT IDENTITY: a registration that says its server is behind mutual TLS
+/// and names nothing to present is refused at boot, not at the server's handshake.
 #[test]
 fn mtls_without_a_client_identity_is_refused_and_with_one_reads() {
     let identity = json!({
@@ -733,7 +767,8 @@ fn mtls_without_a_client_identity_is_refused_and_with_one_reads() {
     .expect("an identity beside a cert_spki pin reads");
 }
 
-/// A client certificate is a TLS-handshake object: refused where there is no handshake, on an
+/// A client certificate is a TLS-handshake object: refused where there is no handshake, on
+/// an `http://` url and on `transport: stdio`.
 #[test]
 fn a_client_identity_with_no_handshake_to_present_it_in_is_refused() {
     let identity = json!({ "cert": { "env": "C" }, "key": { "env": "K" } });
@@ -829,10 +864,12 @@ fn member_tls_is_refused_without_a_secured_network_handshake() {
     }
 }
 
-/// THE CANARY a credential-echo test plants: bytes that may appear in a config and must appear in
+/// THE CANARY a credential-echo test plants: bytes that may appear in a config and must
+/// appear in no refusal, error or `Debug` rendering of it.
 const CANARY: &str = "CANARY-plane-mcp-echo-7f3a91";
 
-/// One registration read straight into its typed definition, then judged by [`validate_server`],
+/// One registration read straight into its typed definition, then judged by
+/// [`validate_server`], the function boot and the admin write path both call.
 fn refusal_of(extra: Value) -> String {
     let mut s = json!({
         "pin": { "mechanism": "cert_spki", "key": "sha256/PIN==" },
@@ -845,7 +882,9 @@ fn refusal_of(extra: Value) -> String {
     super::validate_server("canary", &def).expect_err("the registration is refused")
 }
 
-/// A `url:` refused for its scheme names the URL it refused, WITHOUT the userinfo an operator put
+/// A `url:` refused for its scheme names the URL it refused, WITHOUT the userinfo an
+/// operator put in it: the refusal reaches stderr and the read-only admin validate
+/// endpoint, so a password in the URL would be handed to anyone who can read either.
 #[test]
 fn a_refused_url_does_not_echo_its_userinfo() {
     let err = refusal_of(json!({ "url": format!("ftp://user:{CANARY}@tools.internal/mcp") }));
@@ -858,9 +897,7 @@ fn a_refused_url_does_not_echo_its_userinfo() {
         "the refusal echoes the userinfo: {err}"
     );
     assert!(
-        err.contains(
-            "`url:` must be an http:// or https:// endpoint, got `ftp://***@tools.internal/mcp`"
-        ),
+        err.contains("`url:` must be an http:// or https:// endpoint, got `<redacted URL>`"),
         "the refusal keeps its words and the rest of the URL: {err}"
     );
 }
@@ -880,35 +917,31 @@ fn a_refused_token_url_does_not_echo_its_userinfo() {
         "the refusal echoes the credential: {err}"
     );
     assert!(
-        err.contains("Got `http://***@auth.example.com/token`."),
+        err.contains("Got `<redacted URL>`."),
         "the refusal keeps its words and the rest of the URL: {err}"
     );
 }
 
-/// A URL with no userinfo is echoed byte for byte: masking removes credential bytes and nothing
+/// A URL with no userinfo is echoed byte for byte: masking removes credential bytes and
+/// nothing else, so every refusal that never carried a credential reads exactly as it did.
 #[test]
 fn a_refused_url_without_userinfo_is_echoed_verbatim() {
-    let err = refusal_of(json!({ "url": "ftp://tools.internal/a@b?c=d@e" }));
-    assert!(
-        err.ends_with(
-            "`url:` must be an http:// or https:// endpoint, got `ftp://tools.internal/a@b?c=d@e`"
-        ),
-        "{err}"
-    );
-    for (raw, shown) in [
-        ("https://h/p", "https://h/p"),
-        ("u:p@h/x", "***@h/x"),
-        ("https://u@h", "https://***@h"),
-        ("https://a@b@h:1/x?q#f", "https://***@h:1/x?q#f"),
-        ("x/y?r=https://u:p@h", "x/y?r=https://u:p@h"),
-        ("u:p@h?r=https://x", "***@h?r=https://x"),
-        ("", ""),
+    assert_eq!(super::url_for_display("https://h/p"), "https://h/p");
+    for raw in [
+        "https:/u:secret@h",
+        "ftp://u:sec/ret@host",
+        "ftp://u:sec?ret@host",
+        "ftp://u:sec#ret@host",
+        "ftp://u:sec\\ret@host",
+        "u:p@h/x",
     ] {
-        assert_eq!(super::url_for_display(raw), shown, "{raw}");
+        assert_eq!(super::url_for_display(raw), "<redacted URL>");
     }
 }
 
-/// A stdio child's `env:` literal is not printed by `Debug`: a value an operator pasted there may
+/// A stdio child's `env:` literal is not printed by `Debug`: a value an operator pasted
+/// there may be the credential the secret-reference arm exists to keep out of the config,
+/// and `Debug` is what a log line or a panic message renders.
 #[test]
 fn a_child_env_literal_is_not_printed_by_debug() {
     let plain = super::ChildEnvValue::Plain(
@@ -920,6 +953,8 @@ fn a_child_env_literal_is_not_printed_by_debug() {
 }
 
 /// A stdio child's `env:` literal is sealed as it is read (CHIP-DESIGN v4.1 change 12): the
+/// registration holds it as a `Cred`, so neither writing the registration back nor its
+/// `Debug` spells it, and the same literal read twice is still the same registration.
 #[test]
 fn a_child_env_literal_is_sealed_at_parse_and_never_written_back() {
     let section = json!({
@@ -942,6 +977,7 @@ fn a_child_env_literal_is_sealed_at_parse_and_never_written_back() {
 }
 
 /// One network registration `fs`, stating the RFC 8693 exchange (`token_exchange:` with its
+/// `aud:`) when `exchanged`.
 fn registration(exchanged: bool) -> Value {
     let mut fs = json!({
         "url": "https://tools.internal/fs",
@@ -958,7 +994,8 @@ fn registration(exchanged: bool) -> Value {
     fs
 }
 
-/// The sentence every refusal of a forwarded caller credential carries: what it would forward and
+/// The sentence every refusal of a forwarded caller credential carries: what it would
+/// forward and the two modes that forward nothing of the caller's.
 fn assert_explained(err: &str, server: &str) {
     for word in [
         format!("`tools.{server}`"),
@@ -971,6 +1008,9 @@ fn assert_explained(err: &str, server: &str) {
 }
 
 /// THE SECTION DEFAULT NEVER SILENTLY OVERRIDES AN EXCHANGE (website `mcp.md:501-505`): a
+/// section-level `upstream_credentials: passthrough` beside a registration that states
+/// `token_exchange:` used to validate, and the registration was then bound to passthrough
+/// with its exchange dropped.
 #[test]
 fn a_section_passthrough_default_refuses_a_token_exchange_registration() {
     let section = json!({ "upstream_credentials": "passthrough", "fs": registration(true) });
@@ -994,7 +1034,9 @@ fn a_section_passthrough_default_refuses_a_token_exchange_registration() {
         .expect("an exchange under the `own` default is accepted");
 }
 
-/// A REGISTRATION'S OWN `passthrough` IS REFUSED, alone or beside its own `token_exchange:`, naming
+/// A REGISTRATION'S OWN `passthrough` IS REFUSED, alone or beside its own
+/// `token_exchange:`, naming the registration and the alternatives: it would present the
+/// caller's busbar credential to that server.
 #[test]
 fn a_registrations_own_passthrough_is_refused_alone_and_beside_an_exchange() {
     for exchanged in [false, true] {
@@ -1094,4 +1136,49 @@ fn a_uri_template_rejects_unmatched_closing_braces_in_every_literal_segment() {
         door_validate(&section).expect_err("stray closing brace");
     }
     door_validate(&json!({"fs": {"url": "https://mcp.example/rpc", "pin": {"mechanism": "unpinned"}, "resource_templates_allow": {"file:///{name}": {"text": "Hello {name}"}}}})).expect("balanced template");
+}
+
+#[test]
+fn audit_invalid_uri_templates_and_resource_indicators_are_refused() {
+    for template in [
+        "file:///{.ext}",
+        "file:///{a.}",
+        "file:///{a..b}",
+        "file:///{a}{b}",
+    ] {
+        assert!(
+            super::validate_uri_template("test", template).is_err(),
+            "{template}"
+        );
+    }
+    assert!(super::validate_uri_template("test", "file:///{a.b}/{c}").is_ok());
+    for aud in ["https://", "http://", "https://example.com/mcp#frag"] {
+        assert!(door_validate(&json!({"s":{"url":"https://example.com/mcp", "aud":aud}})).is_err());
+    }
+    assert!(
+        door_validate(&json!({"s":{"url":"https://example.com/mcp", "timeout":"nonsense"}}))
+            .is_err()
+    );
+}
+
+#[test]
+fn audit_prompt_content_refuses_unknown_keys() {
+    assert!(grammar(
+        json!({"s":{"url":"https://example.com/mcp", "prompts_allow":{"p":{
+            "messages":[{"content":{"type":"text", "text":"hello", "typo":true}}]
+        }}}})
+    )
+    .is_err());
+}
+
+#[test]
+fn pinned_schema_rejects_invalid_header_annotations_at_configuration_time() {
+    for annotation in [serde_json::json!(true), serde_json::json!("bad name")] {
+        let section = serde_json::json!({"s":{"url":"https://example.com/mcp","pin":{"mechanism":"unpinned"},
+            "tools_allow":{"t":{"input_schema":{"properties":{"target":{"x-mcp-header":annotation}}}}}}});
+        assert!(
+            crate::statement::test_support::read_tools_section(section.to_string().as_bytes())
+                .is_err()
+        );
+    }
 }

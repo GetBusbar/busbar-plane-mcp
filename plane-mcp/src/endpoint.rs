@@ -2,14 +2,17 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE `mcp:` ENDPOINT BLOCK: its grammar ([`McpCfg`]), its boot refusals ([`McpCfgError`]) and the
-
-#![cfg_attr(not(test), allow(dead_code))]
+//! validated resource ([`McpResource`]) the composition root lowers it to at boot.
 
 use serde::{Deserialize, Serialize};
 
-/// The top-level `mcp:` config block. Its mere PRESENCE mounts the MCP plane; its absence means the
-/// deployment carries no MCP surface at all — no ingress, no metadata document, nothing added to the
-/// route table. A gateway that is not an MCP server should not answer as one.
+use crate::{codec::protected_resource_metadata_path, tool_claims::DEFAULT_MOUNT};
+
+/// The top-level `mcp:` config block. Its PRESENCE mounts the MCP plane under the resource it names.
+/// Without it, the endpoint is mounted only when a `tools:` section selects the plane and the
+/// deployment has a public URL (`statement::admitted_endpoint`), under that URL; with
+/// neither, the deployment carries no MCP surface at all — no ingress, no metadata document, nothing
+/// added to the route table. A gateway that is not an MCP server should not answer as one.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct McpCfg {
@@ -37,11 +40,14 @@ pub struct McpCfg {
     pub scopes_supported: Vec<String>,
     /// Browser origins accepted on the MCP ingress, for the `2026-07-28` `Origin` MUST.
     ///
-    /// EMPTY IS THE DEFAULT AND IT MEANS "no browser origin is accepted", which is the safe posture
-    /// for a server whose clients are agents rather than pages: a request carrying NO `Origin` (every
-    /// non-browser client) is unaffected, and a request carrying one is refused unless the operator
-    /// listed it. The threat is DNS rebinding — a page on an attacker's origin resolving a name to
-    /// busbar's loopback address and driving the tool plane with the user's ambient credentials.
+    /// EMPTY IS THE DEFAULT AND IT MEANS "no browser origin beyond loopback is accepted", which is the
+    /// safe posture for a server whose clients are agents rather than pages: a request carrying NO
+    /// `Origin` (every non-browser client) is unaffected, a loopback origin (`localhost`,
+    /// `127.0.0.1`, `[::1]`, any port) is always admitted
+    /// ([`busbar_contract::jsonrpc::origin_admitted`]), and a request carrying any other origin is
+    /// refused unless the operator listed it. The threat is DNS rebinding — a page on an attacker's
+    /// origin resolving a name to busbar's loopback address and driving the tool plane with the
+    /// user's ambient credentials.
     #[serde(default)]
     pub allowed_origins: Vec<String>,
 }
@@ -93,6 +99,10 @@ pub enum McpCfgError {
     NoAuthorizationServers,
     /// An `authorization_servers` entry was not an absolute `http`/`https` URI.
     AuthorizationServerNotAbsolute(String),
+    /// An `authorization_servers` entry carried a query or a fragment. RFC 8414 section 2 defines an
+    /// issuer identifier as a URL with neither, and a client builds the issuer's metadata URL from
+    /// it and compares the returned `issuer` to it for equality.
+    AuthorizationServerHasQueryOrFragment(String),
 }
 
 impl std::fmt::Display for McpCfgError {
@@ -140,15 +150,19 @@ impl std::fmt::Display for McpCfgError {
                 "mcp.authorization_servers entry `{v}` is not an absolute http(s) URI. An issuer \
                  identifier is an absolute URL. Example: `https://login.example.com`"
             ),
+            McpCfgError::AuthorizationServerHasQueryOrFragment(v) => write!(
+                f,
+                "mcp.authorization_servers entry `{v}` carries a query or fragment. An issuer \
+                 identifier (RFC 8414) carries neither: drop everything from the first `?` or `#`. \
+                 Example: `https://login.example.com`"
+            ),
         }
     }
 }
 
-/// The RFC 9728 section 3.1 well-known prefix. The resource's own path is appended AFTER this, per the
-use crate::{codec::protected_resource_metadata_path, tool_claims::DEFAULT_MOUNT};
-
 impl McpResource {
     /// Validate and derive. Every refusal is fail-closed at BOOT rather than at first request: an
+    /// operator finds out from a process that will not start, not from an agent that cannot connect.
     pub fn from_cfg(cfg: &McpCfg) -> Result<Self, McpCfgError> {
         let uri = cfg.canonical_uri.trim();
         if uri.is_empty() {
@@ -164,7 +178,7 @@ impl McpResource {
             return Err(McpCfgError::CanonicalUriHasNoPath(uri.to_string()));
         }
 
-        if mount_path != DEFAULT_MOUNT {
+        if mount_path != DEFAULT_MOUNT || path != mount_path {
             return Err(McpCfgError::CanonicalUriPathNotClaimed {
                 uri: uri.to_string(),
                 path: mount_path,
@@ -174,8 +188,13 @@ impl McpResource {
             return Err(McpCfgError::NoAuthorizationServers);
         }
         for issuer in &cfg.authorization_servers {
-            if split_absolute(issuer.trim()).is_none() {
+            let Some((_, path)) = split_absolute(issuer.trim()) else {
                 return Err(McpCfgError::AuthorizationServerNotAbsolute(issuer.clone()));
+            };
+            if path.contains('?') || path.contains('#') {
+                return Err(McpCfgError::AuthorizationServerHasQueryOrFragment(
+                    issuer.clone(),
+                ));
             }
         }
         Ok(Self {
@@ -212,7 +231,22 @@ impl McpResource {
 }
 
 /// Split an absolute `http(s)` URI into `(origin, path)`, or `None` when it is not one.
+///
+/// Hand-written rather than pulled from a URL crate on purpose: what is needed is a STRICT
+/// recogniser for one shape, and a permissive general-purpose parser is the wrong tool for a value
+/// whose whole job is to be compared for exact equality. A lenient parse that accepts and normalises
+/// `HTTPS://Host:443/mcp` would hand back a string that no longer equals the `aud` the IdP minted.
+/// So: recognise, do not normalise.
 fn split_absolute(uri: &str) -> Option<(&str, &str)> {
+    let parsed = url::Url::parse(uri).ok()?;
+    if parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || uri.chars().any(|c| c.is_whitespace() || c.is_control())
+        || uri.contains('\\')
+    {
+        return None;
+    }
     let rest = uri
         .strip_prefix("https://")
         .or_else(|| uri.strip_prefix("http://"))?;
@@ -227,6 +261,8 @@ fn split_absolute(uri: &str) -> Option<(&str, &str)> {
 }
 
 /// `/mcp/` -> `/mcp`, `` -> ``, `/` -> ``. The same normalisation
+/// core's plane dispatch applies to its mount path, so the derived mount and the dispatch mount are
+/// the same string by construction rather than by two functions agreeing.
 fn normalise_path(path: &str) -> String {
     let trimmed = path.trim_matches('/');
     if trimmed.is_empty() {
@@ -238,3 +274,7 @@ fn normalise_path(path: &str) -> String {
 #[cfg(test)]
 #[path = "tests/endpoint.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/endpoint_audit.rs"]
+mod endpoint_audit;

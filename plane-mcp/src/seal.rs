@@ -2,6 +2,15 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE SEALED `requestState`: busbar's own ask state, minted and opened by the door over the host's
+//! `sign`. The payload is the [`AskState`] as JSON; the seal is the host's
+//! signature of it under the door's declared signing domain, a subkey derived from the deployment's
+//! fleet-shared signing key, so a state minted on one node opens on every node of the deployment.
+//!
+//! The signature is deterministic (Ed25519), so opening re-signs the payload and compares the two in
+//! constant time: the plugin never holds key material and the host needs no second verb.
+//!
+//! The form is `base64url(payload) "." base64url(signature)`, unpadded and strict: a decoder that
+//! tolerated trailing bytes would accept a tampered value whose prefix still verifies.
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
@@ -27,6 +36,11 @@ pub fn seal_state(
 }
 
 /// The state `blob` seals, its signature re-made by `sign` and compared in constant time.
+///
+/// # Errors
+///
+/// [`Rejected::Malformed`] when it is not this form or its payload is not a state;
+/// [`Rejected::BadSignature`] when the seal does not verify (or cannot be re-made).
 pub fn unseal_state(
     blob: &str,
     sign: &mut dyn FnMut(&[u8]) -> Option<Vec<u8>>,
@@ -34,6 +48,9 @@ pub fn unseal_state(
     let (payload, signature) = blob.split_once('.').ok_or(Rejected::Malformed)?;
     let payload = strict(payload).ok_or(Rejected::Malformed)?;
     let presented = strict(signature).ok_or(Rejected::Malformed)?;
+    if presented.len() != SIGNATURE_LEN {
+        return Err(Rejected::BadSignature);
+    }
     let made = sign(&payload).ok_or(Rejected::BadSignature)?;
     if presented.len() != SIGNATURE_LEN || !constant_time_eq(&presented, &made) {
         return Err(Rejected::BadSignature);
@@ -42,13 +59,18 @@ pub fn unseal_state(
 }
 
 /// THE PLANE'S SEAL OVER `data`: the host's signature of it, `base64url`, unpadded; `None` when it
+/// cannot be signed. What `data` is says what the seal binds (a task's resume, `door_tasks`).
 pub fn seal_bytes(data: &[u8], sign: &mut dyn FnMut(&[u8]) -> Option<Vec<u8>>) -> Option<String> {
     Some(URL_SAFE_NO_PAD.encode(sign(data).filter(|signature| signature.len() == SIGNATURE_LEN)?))
 }
 
 /// Whether `presented` is the seal over `data` ([`seal_bytes`]): the signature re-made by `sign` and
+/// compared in constant time.
 pub fn opens(data: &[u8], presented: &str, sign: &mut dyn FnMut(&[u8]) -> Option<Vec<u8>>) -> bool {
-    let (Some(presented), Some(made)) = (strict(presented), sign(data)) else {
+    let Some(presented) = strict(presented).filter(|s| s.len() == SIGNATURE_LEN) else {
+        return false;
+    };
+    let Some(made) = sign(data) else {
         return false;
     };
     presented.len() == SIGNATURE_LEN && constant_time_eq(&presented, &made)

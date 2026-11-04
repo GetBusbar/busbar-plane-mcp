@@ -224,7 +224,8 @@ fn sse_event(name: &str, data: &str) -> Vec<u8> {
     format!("event: {name}\ndata: {data}\n\n").into_bytes()
 }
 
-/// What the legacy upstream answers a message POSTed in its session, on the stream: `None` for a
+/// What the legacy upstream answers a message POSTed in its session, on the stream: `None` for
+/// a notification.
 fn legacy_answer(body: &Value) -> Option<Vec<u8>> {
     let id = body.get("id").cloned()?;
     let method = body.get("method").and_then(Value::as_str).unwrap_or("");
@@ -253,6 +254,9 @@ fn legacy_answer(body: &Value) -> Option<Vec<u8>> {
 }
 
 /// THE LEGACY UPSTREAM, at the end of a request on wire `id`: a `GET` of the endpoint opens an
+/// event stream naming its message address; a POST to that address is `202` and its answer goes
+/// on the stream (a `tools/call`'s held back while the test holds them); any other POST is
+/// `405`.
 fn legacy_request(ups: &mut Upstreams, id: u64) {
     let wire = ups.open.get_mut(&id).expect("the wire");
     if wire.method == "GET" {
@@ -392,14 +396,17 @@ struct Kept {
     read: Option<(ReplyPiece, Vec<u8>)>,
 }
 
-/// THE DRIVER TICKET'S KEPT ANSWERS, by the handle's issue order: a handle that answered (anything
+/// THE DRIVER TICKET'S KEPT ANSWERS, by the handle's issue order: a handle that answered
+/// (anything but PENDING) answers the same again until the next tick starts, and the service is
+/// not made a second time, whatever service the re-issue asks for (the host checks no op).
 static KEPT: Mutex<BTreeMap<u32, Kept>> = Mutex::new(BTreeMap::new());
 
 fn kept_answers() -> MutexGuard<'static, BTreeMap<u32, Kept>> {
     KEPT.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// `run` once per driver-ticket handle, as the host's replay rule runs a service; `read` names a
+/// `run` once per driver-ticket handle, as the host's replay rule runs a service; `read` names
+/// a read's buffer and descriptor slot, which a replay writes again.
 fn kept(
     handle: CompletionHandle,
     out: *mut ServiceOut,
@@ -894,7 +901,9 @@ impl Door {
         self.drive();
     }
 
-    /// `unit`'s piece re-called while it pends, the driver woken between WITHOUT a tick (one tick
+    /// `unit`'s piece re-called while it pends, the driver woken between WITHOUT a tick (one
+    /// tick cycle throughout, as a driver woken by its streams' readiness runs): what it came
+    /// to.
     fn steady(&self, unit: u64, given: &Given<'_>) -> Answered {
         let mut got = Answered::default();
         for _ in 0..32 {
@@ -955,7 +964,8 @@ impl Door {
         assert_eq!(ret.outcome(), Outcome::Ready);
     }
 
-    /// `unit`'s piece re-called (as the kernel does when the door wakes its ticket) while it pends,
+    /// `unit`'s piece re-called (as the kernel does when the door wakes its ticket) while it
+    /// pends, the driver turning between: what it came to.
     fn pump(&self, unit: u64, given: &Given<'_>) -> Answered {
         for _ in 0..32 {
             let got = self.piece(unit, given);
@@ -1011,6 +1021,7 @@ impl Door {
     }
 
     /// One piece of `unit`, re-called while the door says `more`: the outcome, the status, the
+    /// head fields, the bytes, whether the bytes went to the far end, and the request line.
     fn piece(&self, unit: u64, given: &Given<'_>) -> Answered {
         self.piece_with_resume(unit, given, false)
     }
@@ -1265,7 +1276,9 @@ fn listed(d: &Door, unit: u64, session: &str, caller: &str) -> Answered {
     d.piece(unit, &Given::caller(caller, LIST_2025))
 }
 
-/// A `2025-06-18` client: `initialize` answers the revision it asked for and names a session of 128
+/// A `2025-06-18` client: `initialize` answers the revision it asked for and names a session of
+/// 128 bits in `Mcp-Session-Id`; a request in that session is served, its answer in the session
+/// revision's shape (no stateless-only members).
 #[test]
 fn a_2025_initialize_opens_a_session_that_serves_its_requests() {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1308,7 +1321,8 @@ fn a_2025_initialize_opens_a_session_that_serves_its_requests() {
     );
 }
 
-/// A session is bound to the owner that opened it: another caller presenting its id is told it is
+/// A session is bound to the owner that opened it: another caller presenting its id is told it
+/// is unknown (`404`), on POST and on DELETE alike, and the owner's DELETE ends it.
 #[test]
 fn a_session_presented_by_another_owner_is_unknown() {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1341,7 +1355,9 @@ fn a_session_presented_by_another_owner_is_unknown() {
     assert_eq!(listed(&d, 17, &session, ALICE).status, 404, "ended");
 }
 
-/// A GET that names no session and no revision is the `2024-11-05` client's: its stream opens with
+/// A GET that names no session and no revision is the `2024-11-05` client's: its stream opens
+/// with the `endpoint` event naming the message address; a message POSTed there is accepted
+/// (`202`) and answered on the stream.
 #[test]
 fn a_sessionless_get_is_the_legacy_stream_or_405() {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1440,6 +1456,8 @@ fn seen() -> Vec<Seen> {
 }
 
 /// An upstream that refuses the stateless revision and requires `initialize` is reached by
+/// negotiation: busbar opens a session with it, and the relayed call is answered from inside
+/// it.
 #[test]
 fn an_upstream_that_requires_a_session_is_reached_by_negotiation() {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1525,7 +1543,8 @@ fn an_upstream_that_requires_a_session_is_reached_by_negotiation() {
     assert_eq!(body["result"]["content"][0]["text"], json!("in-session"));
 }
 
-/// An upstream that speaks the stateless revision sees exactly the request the dialect's builder
+/// An upstream that speaks the stateless revision sees exactly the request the dialect's
+/// builder writes, with no handshake ahead of it.
 #[test]
 fn a_stateless_upstream_sees_the_stateless_request_unchanged() {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1589,6 +1608,8 @@ fn a_stateless_upstream_sees_the_stateless_request_unchanged() {
 }
 
 /// A `2025-06-18` session that subscribes to a declared resource hears the announcing server's
+/// `notifications/resources/updated` on its GET stream: here the upstream announces it on the
+/// event stream it answers a relayed call with.
 #[test]
 fn a_session_subscription_hears_the_upstreams_resource_update() {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1653,7 +1674,8 @@ fn a_session_subscription_hears_the_upstreams_resource_update() {
     );
 }
 
-/// A `tools/call` of the legacy registration's `read_file`, asking for `path`, under JSON-RPC id
+/// A `tools/call` of the legacy registration's `read_file`, asking for `path`, under JSON-RPC
+/// id `id`.
 fn legacy_call(id: u64, path: &str) -> (Vec<u8>, [(&'static str, &'static str); 3]) {
     let body = json!({
         "jsonrpc": "2.0",
@@ -1680,6 +1702,7 @@ fn legacy_call(id: u64, path: &str) -> (Vec<u8>, [(&'static str, &'static str); 
 const REFUSED: &[u8] = b"Method Not Allowed";
 
 /// `caller`'s call `body` relayed on `unit`: admitted, verified against the legacy server (over
+/// its held stream), and its stateless first hop handed to the walk.
 fn relayed(d: &Door, unit: u64, caller: &str, body: &[u8], fields: &[(&str, &str)]) {
     assert_eq!(
         d.arrive(unit, "POST", "/mcp", body, fields).outcome,
@@ -1695,12 +1718,14 @@ fn relayed(d: &Door, unit: u64, caller: &str, body: &[u8], fields: &[(&str, &str
     );
 }
 
-/// The walk refused the stateless hop (the server speaks only `2024-11-05`): the call goes to the
+/// The walk refused the stateless hop (the server speaks only `2024-11-05`): the call goes to
+/// the held stream.
 fn walk_refused<'a>(caller: &'a str) -> Given<'a> {
     Given::far(caller, 405, Vec::new(), REFUSED)
 }
 
-/// The `tools/call` POSTs the legacy server received, by the session they were POSTed in and the
+/// The `tools/call` POSTs the legacy server received, by the session they were POSTed in and
+/// the path they asked for.
 fn legacy_calls() -> Vec<(String, String)> {
     seen()
         .into_iter()
@@ -1728,7 +1753,8 @@ fn legacy_text(answered: &Answered) -> (Value, String) {
     (body["id"].clone(), text)
 }
 
-/// A REGISTERED SERVER THAT SPEAKS ONLY `2024-11-05` IS REACHED END TO END: busbar opens its event
+/// A REGISTERED SERVER THAT SPEAKS ONLY `2024-11-05` IS REACHED END TO END: busbar opens its
+/// event stream, `initialize`s on it, and POSTs each call to the message address it names.
 #[test]
 fn a_legacy_only_server_is_reached_and_its_answers_reach_their_callers() {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1927,6 +1953,8 @@ fn two_callers_of_one_legacy_member_never_share_a_stream() {
 }
 
 /// A NOTIFICATION ON THE HELD LINK FINISHES ON ITS POST: the `2024-11-05` server answers a
+/// notification's POST `202` and never sends anything for it on the stream, so busbar POSTs it
+/// with no id and goes on at once.
 #[test]
 fn a_notification_on_the_held_link_finishes_on_its_post() {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1965,7 +1993,7 @@ fn a_notification_on_the_held_link_finishes_on_its_post() {
 /// The largest integer a JavaScript peer reads back exactly (`Number.MAX_SAFE_INTEGER`).
 const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
 
-/// RED B-H1: TWO LEGACY LINKS NEVER READ EACH OTHER'S STREAM. Bob's link reads its stream in a tick
+/// Two legacy links never read each other's stream, including after a background tick.
 #[test]
 fn two_legacy_links_never_read_each_others_stream() {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
@@ -2016,7 +2044,7 @@ fn two_legacy_links_never_read_each_others_stream() {
     );
 }
 
-/// RED B-H2: THE `initialize` ID ROUND-TRIPS A JAVASCRIPT SERVER: on the held stream and on a session
+/// The initialize ID round-trips exactly through a JavaScript server.
 #[test]
 fn busbars_own_initialize_id_round_trips_a_javascript_server() {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
@@ -2050,7 +2078,7 @@ fn busbars_own_initialize_id_round_trips_a_javascript_server() {
     }
 }
 
-/// RED B-H3: A CANCELLED INITIALIZING CALL NEVER WEDGES THE STREAM: the call running the stream's
+/// Cancelling an initializing call leaves its stream available to subsequent calls.
 #[test]
 pub(crate) fn a_cancelled_legacy_initialize_never_wedges_the_stream() {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
@@ -2094,7 +2122,7 @@ pub(crate) fn a_cancelled_legacy_initialize_never_wedges_the_stream() {
     );
 }
 
-/// RED B-H4: A LEGACY SERVER'S OWN REQUESTS ARE ANSWERED, never left hanging: `ping` gets its empty
+/// Legacy server requests receive answers, including an empty result for ping.
 #[test]
 fn a_legacy_servers_own_requests_are_answered_on_its_message_address() {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
@@ -2160,7 +2188,7 @@ fn a_legacy_servers_own_requests_are_answered_on_its_message_address() {
     );
 }
 
-/// RED B-H5: A FLOOD OF REPLIES NO CALL WAITS FOR is audited in a small bounded number of rows on
+/// Unsolicited replies produce a bounded number of audit rows.
 #[test]
 fn a_flood_of_unawaited_legacy_replies_is_audited_in_bounded_rows() {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
@@ -2198,7 +2226,7 @@ fn a_flood_of_unawaited_legacy_replies_is_audited_in_bounded_rows() {
     );
 }
 
-/// RED B-M6: AN IDLE HELD STREAM IS LET GO: once no call has used it for the idle bound, its
+/// Held streams are released after the idle timeout.
 #[test]
 fn an_idle_legacy_stream_is_let_go() {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
@@ -2223,7 +2251,7 @@ fn an_idle_legacy_stream_is_let_go() {
     );
 }
 
-/// RED B-M7: ONE OWNER HOLDS A BOUNDED NUMBER OF SESSION STREAMS: past the quota the next GET is
+/// An owner cannot open more session streams than its quota.
 #[test]
 fn one_owner_holds_a_bounded_number_of_session_streams() {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
@@ -2261,7 +2289,7 @@ fn one_owner_holds_a_bounded_number_of_session_streams() {
     );
 }
 
-/// RED P-M5: AN UPSTREAM'S OWN ERROR IS HANDED ON, NOT RENEGOTIATED: a stateless upstream not yet
+/// Upstream JSON-RPC errors pass through without triggering renegotiation.
 #[test]
 fn an_upstreams_own_error_is_handed_on_not_renegotiated() {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
@@ -2298,7 +2326,7 @@ fn an_upstreams_own_error_is_handed_on_not_renegotiated() {
     );
 }
 
-/// RED P-M10: A `subscriptions/listen` THAT ASKED FOR A RESOURCE HEARS ITS UPDATE: the announcing
+/// A resource listener receives updates for its subscribed resource.
 #[test]
 fn a_listen_subscription_hears_the_upstreams_resource_update() {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
@@ -2339,7 +2367,7 @@ fn a_listen_subscription_hears_the_upstreams_resource_update() {
     );
 }
 
-/// RED B-L12: THE LEGACY GET CARRIES NO STATELESS MIRROR HEADERS: the stream's `GET` names no
+/// Legacy stream GET requests carry no stateless mirror headers.
 #[test]
 fn the_legacy_get_carries_no_stateless_mirror_headers() {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
@@ -2360,7 +2388,7 @@ fn the_legacy_get_carries_no_stateless_mirror_headers() {
     }
 }
 
-/// RED: A SESSION REVISION'S ANSWER IS THE UPSTREAM'S OWN BYTES: a `tools/call` in a `2025-06-18`
+/// A SESSION REVISION'S ANSWER IS THE UPSTREAM'S OWN BYTES: a `tools/call` in a `2025-06-18`
 #[test]
 fn a_session_answer_is_relayed_byte_for_byte() {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
@@ -2397,7 +2425,7 @@ fn a_session_answer_is_relayed_byte_for_byte() {
     );
 }
 
-/// RED: A `2024-11-05` UPSTREAM'S ANSWER IS ITS OWN BYTES even when its log records ride ahead of
+/// A legacy answer retains its original bytes when preceded by log records.
 #[test]
 fn a_legacy_answer_with_frames_is_relayed_byte_for_byte() {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
@@ -2461,7 +2489,7 @@ fn progress_call(name: &str) -> Vec<u8> {
     .unwrap()
 }
 
-/// RED: TWO CALLS IN FLIGHT NEVER SHARE A PROGRESS TOKEN: two first-round calls to a stateless
+/// Concurrent calls use distinct upstream progress tokens.
 #[test]
 fn calls_in_flight_never_share_a_progress_token() {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
@@ -2511,7 +2539,7 @@ fn calls_in_flight_never_share_a_progress_token() {
     assert!(!tokens.contains(&sent["params"]["_meta"]["progressToken"]));
 }
 
-/// RED: A HELD STREAM IS NEVER ENDED TO MAKE ROOM: past the streams one session keeps, the next GET
+/// A stream limit refuses the next GET without evicting an existing stream.
 #[test]
 fn a_held_stream_is_never_ended_for_another() {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
@@ -2568,7 +2596,7 @@ fn legacy_stream(d: &Door, unit: u64, caller: &str) -> String {
         .to_string()
 }
 
-/// RED: A `2024-11-05` SESSION ENDS WITH ITS STREAM: once the caller's stream ended (or its op was
+/// A legacy session ends when its caller stream ends or is cancelled.
 #[test]
 fn a_legacy_session_ends_with_its_stream() {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
@@ -2715,7 +2743,10 @@ fn session_post(d: &Door, unit: u64, session: &str, caller: &str, body: &[u8]) -
     d.piece(unit, &Given::caller(caller, body))
 }
 
-/// predev's acknowledgement of a session's `resources/subscribe` or `resources/unsubscribe` with
+/// predev's acknowledgement of a session's `resources/subscribe` or `resources/unsubscribe`
+/// with JSON-RPC id `id`: `ok(json!({}))` (gh/predev
+/// crates/busbar-plane-mcp/src/door_sessions.rs l.664-665, l.712 and l.729), whose envelope is
+/// `line::result` (line.rs l.50-51).
 fn predev_session_ack(id: u64) -> Vec<u8> {
     serde_json::to_vec(&json!({ "jsonrpc": "2.0", "id": id, "result": {} })).unwrap()
 }
@@ -2735,7 +2766,7 @@ fn subscription_frames() -> Vec<(String, String)> {
         .collect()
 }
 
-/// RED: A SESSION'S SUBSCRIPTION IS RECORDED, NEVER SENT UPSTREAM, as predev held it
+/// Session subscriptions are recorded locally without forwarding them upstream.
 #[test]
 fn a_session_subscription_sends_its_member_nothing() {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
@@ -2776,7 +2807,7 @@ fn a_session_subscription_sends_its_member_nothing() {
     );
 }
 
-/// RED: A `subscriptions/listen` OF A RESOURCE IS ACKNOWLEDGED AT ONCE AND SENDS NOTHING UPSTREAM,
+/// A resource listener is acknowledged immediately without an upstream request.
 #[test]
 fn a_listen_subscription_sends_its_member_nothing() {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
@@ -2822,7 +2853,11 @@ const STDIO_SECTION: &str = r#"{
     "io": {"transport": "stdio", "command": "/usr/bin/true", "pin": {"mechanism": "unpinned"}, "tools_allow": {"read_file": {}}, "resources_allow": {"file:///notes": {"name": "notes", "text": "hi"}}}
 }"#;
 
-/// A STDIO MEMBER'S RESOURCE SUBSCRIPTION IS ACKNOWLEDGED AND SENDS THE CHILD NOTHING, as predev
+/// A STDIO MEMBER'S RESOURCE SUBSCRIPTION IS ACKNOWLEDGED AND SENDS THE CHILD NOTHING, as
+/// predev held it (gh/predev crates/busbar-plane-mcp/src/door_sessions.rs l.687-731, the same
+/// for every transport; the child's own `notifications/resources/updated`, heard beside a
+/// relayed exchange, reaches the watchers, door_program.rs l.308-310 and tool_program.rs
+/// l.378-381).
 #[test]
 fn a_stdio_members_resource_subscription_is_acknowledged() {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
@@ -2855,7 +2890,9 @@ fn a_stdio_members_resource_subscription_is_acknowledged() {
     );
 }
 
-/// The stateless member's `notifications/resources/updated` for the readme, as the member spells
+/// The stateless member's `notifications/resources/updated` for the readme, as the member
+/// spells it: members out of the usual order and a number in an unusual spelling, so bytes
+/// handed on unread could be told from bytes re-encoded.
 const MEMBER_UPDATE: &str = r#"{"params":{"uri":"file:///readme","revision":1.50E+1},"method":"notifications/resources/updated","jsonrpc":"2.0"}"#;
 
 /// The relayed call's far answer: the member's update, then the call's own answer.
@@ -2867,6 +2904,9 @@ fn far_with_update() -> Vec<u8> {
 }
 
 /// predev's relay of a member's update of `uri` to the subscription opened under id `id`: a
+/// notification of the subscription's own, `{"uri"}` tagged with its subscription id (gh/predev
+/// crates/busbar-plane-mcp/src/subscribe.rs l.328-345 and `notification` l.249-256), never the
+/// member's bytes: the member's other params and its spelling are not handed on.
 fn predev_relayed_update(uri: &str, id: u64) -> Value {
     json!({
         "jsonrpc": "2.0",
@@ -2878,7 +2918,11 @@ fn predev_relayed_update(uri: &str, id: u64) -> Value {
     })
 }
 
-/// A MEMBER'S RESOURCE UPDATE REACHES AN HTTP LISTEN SUBSCRIBER EXACTLY ONCE, as predev relayed it
+/// A MEMBER'S RESOURCE UPDATE REACHES AN HTTP LISTEN SUBSCRIBER EXACTLY ONCE, as predev relayed
+/// it (gh/predev crates/busbar-plane-mcp/src/subscribe.rs l.328-345; door_listen.rs l.256-290
+/// frames it as one `message` event, framing.rs l.197-212): the collection after the member
+/// announced it carries predev's frame byte for byte (re-encoded under the subscription's id,
+/// not the member's bytes), and no further tick or collection delivers it again.
 #[test]
 fn a_members_update_reaches_a_listen_subscriber_exactly_once() {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);

@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! The subscriptions kept on a carrier session (the stdio line carrier): bounded per caller as on
+//! The subscriptions kept on a carrier session (the stdio line carrier): bounded per caller
+//! as on the HTTP carrier, and stepped under a standing and grants its caller's own units
+//! re-ask, never the ones captured at open.
 
 use serde_json::json;
 
@@ -19,7 +21,7 @@ const SECTION: &[u8] = br#"{
 fn catalogue() -> Catalogue {
     Catalogue::build(
         1,
-        &crate::statement::read_tools_section(SECTION).expect("the section reads"),
+        &crate::statement::test_support::read_tools_section(SECTION).expect("the section reads"),
     )
 }
 
@@ -49,7 +51,10 @@ fn reconfirmed(kept: &mut LineListen, standing: Standing, now_ns: u64) {
     kept.confirmed_ns = now_ns;
 }
 
-/// A LINE SUBSCRIPTION NO UNIT OF ITS CALLER RE-CONFIRMED ENDS. The kernel answers a caller's
+/// A LINE SUBSCRIPTION NO UNIT OF ITS CALLER RE-CONFIRMED ENDS. The kernel answers a
+/// caller's standing and grants only on a unit in flight, and a line carrier's subscription
+/// outlives the unit that opened it, so its caller's own lines (each a unit, the answer to
+/// busbar's `ping` among them) are where they are re-asked.
 #[test]
 fn a_line_subscription_its_caller_never_reconfirms_ends_on_its_frame() {
     let cat = catalogue();
@@ -68,7 +73,8 @@ fn a_line_subscription_its_caller_never_reconfirms_ends_on_its_frame() {
     );
 }
 
-/// ONE CALLER HOLDS AT MOST THE HTTP CARRIER'S COUNT OF LINE SUBSCRIPTIONS: the next is refused,
+/// ONE CALLER HOLDS AT MOST THE HTTP CARRIER'S COUNT OF LINE SUBSCRIPTIONS: the next is
+/// refused, another caller is not.
 #[test]
 fn one_caller_holds_at_most_the_http_carriers_count_of_line_subscriptions() {
     let per_owner = crate::plane_door::door_listen::MAX_LISTENS_PER_OWNER;
@@ -86,7 +92,9 @@ fn one_caller_holds_at_most_the_http_carriers_count_of_line_subscriptions() {
     );
 }
 
-/// A UNIT OF ITS CALLER RE-ASKS: a re-confirmed subscription goes on past the window, one whose
+/// A UNIT OF ITS CALLER RE-ASKS: a re-confirmed subscription goes on past the window, one
+/// whose caller's unit found it lapsed ends on its next frame, and busbar asks a quiet
+/// caller a `ping` once the window to re-ask is due.
 #[test]
 fn a_unit_of_its_caller_reasks_the_standing_its_frames_are_stepped_under() {
     let cat = catalogue();
@@ -185,9 +193,7 @@ fn host_check_unit() -> CallUnit {
 fn an_unavailable_host_does_not_claim_the_callers_identity_was_revoked() {
     let plane = McpDoor::default();
     let result = door_listen::standing(&plane, Ticket::NONE, "caller", &mut host_check_unit());
-    if let Standing::Lapsed { reason, .. } = result {
-        assert_ne!(reason, busbar_contract::vocab::REASON_IDENTITY_NOT_LIVE);
-    }
+    assert!(matches!(result, Standing::Unavailable));
 }
 
 #[test]
@@ -224,3 +230,56 @@ fn an_old_opening_ticket_cannot_remove_a_reused_units_provisional_subscription()
 
 #[path = "reported_line.rs"]
 mod reported;
+
+fn audit_live() -> LiveAsk {
+    LiveAsk::of(json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{}}), b"{}".to_vec(),
+        &json!({"inputRequests":{"a":{"method":"roots/list"},"b":{"method":"roots/list"}},"requestState":"sealed"}), 0).unwrap()
+}
+
+#[test]
+fn live_admission_checks_quota_in_the_insertion_lock() {
+    let plane = McpDoor::default();
+    for n in 0..MAX_LIVE_ASKS_PER_SESSION as u64 {
+        assert!(admit_live(&plane, 1, n, audit_live()));
+    }
+    assert!(!admit_live(&plane, 1, 99, audit_live()));
+    assert!(admit_live(&plane, 2, 99, audit_live()));
+}
+
+#[test]
+fn a_cancelled_next_ask_still_expires_and_failed_fallback_is_retried() {
+    let plane = McpDoor::default();
+    let mut live = audit_live();
+    live.arm(1);
+    live.issue(7).unwrap();
+    plane.live_asks.insert((1, 7), live);
+    let reply = serde_json::to_vec(&json!({"jsonrpc":"2.0","id":"busbar:7","result":{}})).unwrap();
+    let arrival = arrive(&plane, 1, &reply);
+    assert!(arrival.unit.next_ask.is_some());
+    let mut seq = 0;
+    lapse_asks(&plane, Ticket::NONE, line::ASK_TIMEOUT_NS + 2, &mut seq);
+    assert_eq!(
+        plane.live_asks.with_all(|m| m.len()),
+        1,
+        "failed emit retains a bounded retry"
+    );
+    lapse_asks(&plane, Ticket::NONE, line::ASK_TIMEOUT_NS + 3, &mut seq);
+    lapse_asks(&plane, Ticket::NONE, line::ASK_TIMEOUT_NS + 4, &mut seq);
+    assert!(
+        plane.live_asks.is_empty(),
+        "a closed carrier cannot retain work forever"
+    );
+}
+
+#[test]
+fn an_older_permission_snapshot_cannot_restore_revoked_standing() {
+    let mut listen = opened("caller", 1);
+    let revoked = Standing::Lapsed {
+        message: "revoked".into(),
+        reason: "revoked".into(),
+    };
+    listen.confirm(3, &BTreeMap::new(), &BTreeSet::new(), &revoked);
+    listen.confirm(2, &BTreeMap::new(), &BTreeSet::new(), &Standing::Live);
+    assert_eq!(listen.confirmed_ns, 3);
+    assert_eq!(listen.standing, revoked);
+}

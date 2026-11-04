@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE FACTS THE DOOR-ONLY SUITES SPELL, PINNED TO THE CRATE'S OWN; and the pure checks that moved
+//! THE FACTS THE DOOR-ONLY SUITES SPELL, PINNED TO THE CRATE'S OWN; and the pure checks
+//! that moved in from those suites.
 
 use serde_json::{json, Value};
 
@@ -62,10 +63,13 @@ fn the_door_driven_tests_restate_the_doors_own_constants() {
 }
 
 /// The door witness's expectations of the plane's own functions (`plane-mcp-plugin/tests/
+/// both_ways.rs`, which reaches only `door`): the catalogue's answer for its section, the
+/// endpoint under its public base URL, the size of its relayed call's projection, and the
+/// call record's framing.
 #[test]
 fn the_door_witness_restates_what_the_planes_functions_answer() {
-    let section =
-        statement::read_tools_section(stated::WITNESS_SECTION).expect("the section reads");
+    let section = statement::test_support::read_tools_section(stated::WITNESS_SECTION)
+        .expect("the section reads");
     let catalogue = crate::catalogue::Catalogue::build(1, &section);
     assert_eq!(
         catalogue.tools_list(&json!(9), &|_: &str, _: &str| false, |_| false),
@@ -158,23 +162,27 @@ fn the_suites_task_rows_are_the_planes() {
     );
 }
 
-/// RED P-M11: A SERVER ID OR A `tools_allow` NAME THE ROUTING KEY CANNOT SPELL IS REFUSED AT
+/// A SERVER ID OR A `tools_allow` NAME THE ROUTING KEY CANNOT SPELL IS REFUSED
+/// AT VALIDATE, in words naming it; never accepted and then silently undispatchable.
 #[test]
 fn a_name_the_routing_key_cannot_spell_is_refused_at_validate() {
     let tool = br#"{"st": {"url": "https://up.example/st", "pin": {"mechanism": "unpinned"}, "tools_allow": {"read file": {}}}}"#;
-    let refused = crate::statement::read_tools_section(tool).expect_err("a tool name with a space");
+    let refused = crate::statement::test_support::read_tools_section(tool)
+        .expect_err("a tool name with a space");
     assert!(
         refused.contains("`tools.st`") && refused.contains("read file"),
         "{refused}"
     );
     let server = br#"{"s+t": {"url": "https://up.example/st", "pin": {"mechanism": "unpinned"}, "tools_allow": {"read_file": {}}}}"#;
-    let refused = crate::statement::read_tools_section(server).expect_err("a server id with a `+`");
+    let refused = crate::statement::test_support::read_tools_section(server)
+        .expect_err("a server id with a `+`");
     assert!(refused.contains("s+t"), "{refused}");
     let fine = br#"{"st": {"url": "https://up.example/st", "pin": {"mechanism": "unpinned"}, "tools_allow": {"read_file.v2-x": {}}}}"#;
-    assert!(crate::statement::read_tools_section(fine).is_ok());
+    assert!(crate::statement::test_support::read_tools_section(fine).is_ok());
 }
 
-/// The `data` of the stream's last event, its `data:` lines joined back with `\n` as a client
+/// The `data` of the stream's last event, its `data:` lines joined back with `\n` as a
+/// client joins them.
 fn last_data(bytes: &[u8]) -> String {
     let text = String::from_utf8(bytes.to_vec()).expect("an event stream is text");
     let last = text
@@ -188,7 +196,9 @@ fn last_data(bytes: &[u8]) -> String {
         .join("\n")
 }
 
-/// RED A-M2: THE STREAM CARRIES THE ANSWER'S OWN BYTES (Law 11): its members in the upstream's
+/// THE STREAM CARRIES THE ANSWER'S OWN BYTES (Law 11): its members in the
+/// upstream's order, its numbers as the upstream spelled them (an integer past 64 bits, a
+/// float's exponent), and its line breaks as `data:` lines a client joins back.
 #[test]
 fn the_stream_carries_the_answers_own_bytes() {
     let body = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
@@ -218,7 +228,10 @@ fn elicitation(key: &str) -> crate::ask::CallerAsk {
     )
 }
 
-/// C-H1 [HIGH]: `tasks/update` keeps only the answers the task's current round asked for. A key
+/// C-H1 [HIGH]: `tasks/update` keeps only the answers the task's current round asked for. A
+/// key the round did not ask is ignored (SEP-2663: keys the task is not waiting on are not
+/// refused), so an update cannot smuggle a tool argument into the call the task runs
+/// (call.rs, the synchronous rule: "an answer may only supply what was asked for").
 #[test]
 fn an_update_keeps_only_the_keys_the_round_asked() {
     let mut t = crate::tool_tasks::Task::new("0123456789abcdef0123456789abcdef", "k", 7, "d1", 1);
@@ -243,7 +256,9 @@ fn an_update_keeps_only_the_keys_the_round_asked() {
     assert!(idle.answers().is_empty(), "{:?}", idle.answers());
 }
 
-/// C-H1 [HIGH]: the answers never rewrite an argument the call was admitted with: the hooks and the
+/// C-H1 [HIGH]: the answers never rewrite an argument the call was admitted with: the hooks
+/// and the argument guard judged the admitted arguments, and those are the arguments that
+/// go out.
 #[test]
 fn an_answer_never_rewrites_an_admitted_argument() {
     let answers: serde_json::Map<String, Value> =
@@ -257,9 +272,12 @@ fn an_answer_never_rewrites_an_admitted_argument() {
 }
 
 /// THE RELAYED-CALL SCRIPT'S EXPECTATIONS ARE THE PLANE'S BUILDERS' (the plugin crate's
+/// `tests/relayed_call.rs`, which reaches only `door`): the request bound for the member is
+/// `call::outbound`'s, and each settled answer is `call::settle_call_as`'s.
 #[test]
 fn the_relayed_call_script_restates_what_the_planes_builders_answer() {
-    let section = statement::read_tools_section(stated::RELAY_SECTION).expect("the section reads");
+    let section = statement::test_support::read_tools_section(stated::RELAY_SECTION)
+        .expect("the section reads");
     let catalogue = crate::catalogue::Catalogue::build(1, &section);
     let params =
         serde_json::from_slice::<Value>(stated::RELAY_CALL).expect("a document")["params"].clone();

@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The relayed call, pure: admission in the engine's order and words, the request the client
+//! dialect builds, and the far end's answer settled.
 
 use serde_json::{json, Value};
 
@@ -53,6 +54,7 @@ fn judge_continuation(
 }
 
 /// One server: an approved tool whose `path` argument is mirrored in `Mcp-Param-Path`, a tool
+/// awaiting approval, a tool that must be answered as a task, and a tool that asks its caller.
 const SECTION: &str = r#"{"fs": {"url": "https://mcp.example/fs", "pin": {"mechanism": "unpinned"},
   "grants": {"roots": true},
   "tools_allow": {
@@ -63,7 +65,8 @@ const SECTION: &str = r#"{"fs": {"url": "https://mcp.example/fs", "pin": {"mecha
   }}}"#;
 
 fn section() -> crate::tools_config::ToolsCfg {
-    crate::statement::read_tools_section(SECTION.as_bytes()).expect("the section reads")
+    crate::statement::test_support::read_tools_section(SECTION.as_bytes())
+        .expect("the section reads")
 }
 
 fn catalogue() -> Catalogue {
@@ -130,6 +133,9 @@ fn a_call_with_no_name_is_malformed_and_logged_with_no_tool() {
 }
 
 /// RED W11 (website `mcp.md:161,432`: the audit records every check, refusals included): a name
+/// past the ceiling is refused, AND the refusal is logged and audited (rejected), under a BOUNDED
+/// rendering of the name (a prefix and its byte length, which no real tool name can spell), never
+/// the name verbatim.
 #[test]
 fn an_oversized_name_refusal_is_audited_under_a_bounded_name() {
     let long = "x".repeat(MAX_TOOL_NAME_BYTES + 1);
@@ -267,6 +273,7 @@ fn the_kernels_trust_verdict_is_rendered_and_never_judged_here() {
 }
 
 /// The verdict is asked only of a tool the caller is granted: an ungranted call is not found before
+/// the kernel is asked anything.
 #[test]
 fn the_verdict_is_asked_only_after_the_grants() {
     let (r, _) = refused(admit_trusted(
@@ -391,7 +398,7 @@ fn an_answer_binds_only_what_was_asked_and_never_a_sent_argument() {
     assert!(r.message.starts_with("the answer named `amount`"));
     assert_eq!(line.expect("logged").reason, REASON_ANSWER_UNDECLARED);
     let rewritten = json!({ "name": "fs_confirm", "arguments": { "ok": false }, "inputResponses": { "ok": true }, "_meta": {} });
-    refused(admit_call(
+    let (refusal, line) = refused(admit_call(
         &cat,
         &json!(1),
         Some(&rewritten),
@@ -399,6 +406,9 @@ fn an_answer_binds_only_what_was_asked_and_never_a_sent_argument() {
         &everyone,
         &mut answering(&rewritten),
     ));
+    assert_eq!(refusal.status, 404);
+    assert_eq!(line.unwrap().reason, REASON_ANSWER_UNDECLARED);
+    assert!(refusal.message.starts_with("the answer named `ok`"));
 }
 
 /// `fs_read_file` admitted with `arguments`, then judged by `judge` ([`judge_arguments`]).
@@ -460,6 +470,7 @@ fn the_hosts_verdict_decides_an_argument_url() {
 }
 
 /// A host that gives no verdict (it serves no `dest.judge`, or the judgement failed) refuses the
+/// value rather than admitting it unjudged; arguments naming no host never ask it.
 #[test]
 fn a_host_that_gives_no_verdict_refuses_the_argument() {
     let (r, _) = refused(judged(
@@ -559,6 +570,7 @@ fn settle_far(far: &str) -> Settled {
 }
 
 /// A result with no `resultType` gets the dialect's `complete` ahead of the upstream's own members,
+/// which follow as they came; an empty result is the stamp alone.
 #[test]
 fn a_result_is_stamped_and_dispatched() {
     let settled = settle_far(
@@ -702,6 +714,8 @@ fn an_ungranted_ask_is_refused_and_never_forwarded() {
 }
 
 /// LAW 11 (U16): a granted roots ask is RELAYED to the caller, its result as it came; busbar
+/// answers none of it. RED arm: a satisfier answering from the operator's roots would settle a
+/// next round (an answer busbar wrote) instead of handing the upstream's result back.
 #[test]
 fn a_granted_roots_ask_is_relayed_to_the_caller_as_it_came() {
     let far = r#"{"jsonrpc":"2.0","id":0,"result":{"resultType":"input_required","inputRequests":{"r":{"method":"roots/list"}},"requestState":"s"}}"#;
@@ -727,6 +741,8 @@ fn a_granted_roots_ask_is_relayed_to_the_caller_as_it_came() {
 }
 
 /// LAW 11 (BUSBAR-1.6.0 lines 2127-2132, the relay-only ruling at 418-422): a granted SAMPLING ask
+/// is relayed to the caller exactly as the upstream sent it. busbar runs no completion for it on any
+/// plane; the caller answers it. A pin: predev already relays on this path, and this holds it there.
 #[test]
 fn a_granted_sampling_ask_is_relayed_to_the_caller_unchanged() {
     let section = section();
@@ -752,6 +768,8 @@ fn a_granted_sampling_ask_is_relayed_to_the_caller_unchanged() {
 }
 
 /// LAW 11 (finding 20): what the caller reads about an upstream's ask says what the code does — the
+/// ask is RELAYED to the caller, or not relayed under the operator's policy. It never says busbar
+/// satisfies an ask, or that an ask terminates at busbar.
 #[test]
 fn an_ask_refusal_tells_the_caller_the_ask_is_relayed_never_satisfied() {
     let ungranted = settle_far(
@@ -777,6 +795,7 @@ fn an_ask_refusal_tells_the_caller_the_ask_is_relayed_never_satisfied() {
 }
 
 /// An ask mixing a granted kind with an ungranted one is refused naming the ungranted one: the
+/// most privileged kind alone does not decide a map whose lesser entries are ungranted.
 #[test]
 fn an_ask_mixing_an_ungranted_kind_is_refused() {
     let (status, body, _) = answer_of(settle_far(
@@ -839,6 +858,8 @@ fn a_tasks_verb_is_gated_then_names_no_task_of_this_callers() {
 }
 
 /// THE INVOKE REWRITE CONTRACT, as the served engine applied a `prompt: rw` hook's reply to a
+/// call's arguments: an object `content`, a JSON-string `content` that parses to an object, or a
+/// role-less entry itself; the last usable entry wins; nothing usable is not applied.
 #[test]
 fn a_rewrite_replaces_the_arguments_by_the_invoke_contract() {
     let body = br#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"fs_read","arguments":{"path":"/secret"},"_meta":{"k":"v"}}}"#;
@@ -900,6 +921,7 @@ fn a_rewrite_replaces_the_arguments_by_the_invoke_contract() {
 }
 
 /// THE AUDIT ROW OF BUSBAR'S OWN ASK (SEAM-L(k)): an ask of the caller is `mcp.caller_ask` applied on
+/// the tool; a task created is the call applied; a task that could not start is rejected.
 #[test]
 fn an_ask_of_the_caller_and_a_task_are_audited_in_the_engines_words() {
     let mut ask = |_: &ToolEntry, _: &Value| crate::ask::AskDecision::Ask {
@@ -1075,6 +1097,7 @@ fn sampling_temperature_outside_the_range_is_refused_at_the_edges_relays() {
 }
 
 /// The defaults apply when `sampling_bounds` is not written at all: 64 messages, 65536 prompt bytes,
+/// 8 stop sequences of 64 bytes, temperature 0.0..=2.0.
 #[test]
 fn sampling_bounds_default_when_the_keys_are_omitted() {
     let def = sampling_def(|_| {});
@@ -1127,6 +1150,7 @@ fn sampling_bounds_default_when_the_keys_are_omitted() {
 }
 
 /// The bound is read where there is no definition too (the defaults), and a roots ask is never
+/// measured.
 #[test]
 fn sampling_bounds_measure_only_sampling_asks() {
     let roots = r#"{"jsonrpc":"2.0","id":0,"result":{"resultType":"input_required","inputRequests":{"r":{"method":"roots/list","params":{"messages":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65]}}}}}"#;
@@ -1225,9 +1249,12 @@ fn asked_state(a: Admission) -> String {
 }
 
 /// C-M6: an exchange of two rounds goes out with BOTH rounds' answers. The caller's retry answers
+/// the round it was asked (MRTR: `inputResponses` answers the `inputRequests` of the result it
+/// retries), so the earlier round's answers ride in the sealed state, not in the caller's memory.
 #[test]
 fn a_two_round_exchange_goes_out_with_every_rounds_answers() {
-    let section = crate::statement::read_tools_section(TWO_ROUNDS.as_bytes()).expect("reads");
+    let section =
+        crate::statement::test_support::read_tools_section(TWO_ROUNDS.as_bytes()).expect("reads");
     let cat = Catalogue::build(1, &section);
     let mut seal = Plain::default();
     let first = json!({ "name": "fs_pay", "arguments": { "amount": 5 }, "_meta": {} });
@@ -1252,6 +1279,8 @@ fn a_two_round_exchange_goes_out_with_every_rounds_answers() {
 }
 
 /// C-M5: the retry of an upstream's ask relayed to the caller goes out as the first call did (the
+/// caller's arguments with busbar's own answers merged), plus the upstream's answers in the
+/// continuation. The relayed state carries busbar's own answers sealed (`a`).
 #[test]
 fn a_relayed_asks_retry_goes_out_with_busbars_own_answers_merged_again() {
     let leg: crate::ask::UpstreamLeg = serde_json::from_value(json!({
@@ -1311,6 +1340,7 @@ fn sampling_max_prompt_bytes_counts_every_content_part() {
         matches!(settled, Settled::Answer { .. }),
         "an image beside a text part must be measured, got {settled:?}"
     );
+    assert_bound_refused(settled, "max_prompt_bytes", "64");
 
     let small = json!({ "messages": [{ "role": "user", "content":
         { "type": "image", "data": "xx", "mimeType": "image/png" } }] });
@@ -1318,6 +1348,7 @@ fn sampling_max_prompt_bytes_counts_every_content_part() {
 }
 
 /// C-M5, the sealing half: the relayed state's leg carries busbar's own answers the call went out
+/// with ([`own_answers`]), and its retry goes out with the first call's arguments exactly.
 #[test]
 fn the_relayed_leg_seals_the_answers_the_first_call_went_out_with() {
     let cat = catalogue();
@@ -1367,6 +1398,10 @@ fn the_relayed_leg_seals_the_answers_the_first_call_went_out_with() {
 }
 
 /// RED W10 (website `mcp.md:141-144`: an unknown and an ungranted tool give "the same words"): the
+/// two answers are BYTE-IDENTICAL on the wire, status, message and `data` alike, whether the plane
+/// refuses the ungranted call itself or renders the kernel's grant denial ([`not_granted`]): a
+/// caller probing names learns only that there is nothing there for it. The per-call log keeps
+/// the two apart (`unknown_tool`, `not_granted`), where the operator reads them.
 #[test]
 fn an_unknown_and_an_ungranted_tool_are_byte_identical_on_the_wire() {
     let id = json!(7);
@@ -1403,6 +1438,8 @@ fn an_unknown_and_an_ungranted_tool_are_byte_identical_on_the_wire() {
 }
 
 /// RED W7 (security.md: a redirect is a failure, never followed): a relayed call's far end that
+/// answers `302` is an upstream failure, whatever well-formed result rides it: the result is never
+/// served to the caller.
 #[test]
 fn a_302_from_the_upstream_is_a_failure_not_a_result() {
     let section = section();
@@ -1431,8 +1468,9 @@ fn a_302_from_the_upstream_is_a_failure_not_a_result() {
 fn entry_with_schema(schema: &Value) -> ToolEntry {
     let section = json!({"s": {"url": "https://mcp.example/s", "pin": {"mechanism": "unpinned"},
         "tools_allow": {"t": {"schema_hash": "sha256:aa", "input_schema": schema}}}});
-    let section = crate::statement::read_tools_section(section.to_string().as_bytes())
-        .expect("the section reads");
+    let section =
+        crate::statement::test_support::read_tools_section(section.to_string().as_bytes())
+            .expect("the section reads");
     Catalogue::build(1, &section)
         .tool("s_t")
         .expect("approved")
@@ -1440,6 +1478,8 @@ fn entry_with_schema(schema: &Value) -> ToolEntry {
 }
 
 /// M1-7: an `x-mcp-header` may annotate an integer or a boolean. The body's value is rendered as
+/// the header carries it (a decimal integer, `true`/`false`), so a header that mirrors it agrees,
+/// one that does not disagrees, and a body that sets it with no header is refused.
 #[test]
 fn an_integer_or_boolean_annotated_argument_is_compared_as_the_header_renders_it() {
     let entry = entry_with_schema(&json!({"type": "object", "properties": {
@@ -1472,6 +1512,7 @@ fn an_integer_or_boolean_annotated_argument_is_compared_as_the_header_renders_it
 }
 
 /// M1-8: an annotation on a nested property, reached through a chain of `properties`, is validated
+/// against the argument at that path.
 #[test]
 fn a_nested_annotated_argument_is_compared_with_its_header() {
     let entry = entry_with_schema(&json!({"type": "object", "properties": {
@@ -1490,6 +1531,7 @@ fn a_nested_annotated_argument_is_compared_with_its_header() {
 }
 
 /// M1-9: the relayed request mirrors every annotated argument into its `Mcp-Param-*` header, as a
+/// conforming client must, or a server that checks the mirror refuses it.
 #[test]
 fn the_relayed_request_mirrors_its_annotated_arguments() {
     let section = section();
@@ -1504,6 +1546,7 @@ fn the_relayed_request_mirrors_its_annotated_arguments() {
 }
 
 /// M1-11: THE EVENT-STREAM LINE RULE, as `client::compat::EventReader` reads it (B5): CRLF, a lone
+/// LF and a lone CR each end a line, so a body framed with bare CRs reads as the same events.
 #[test]
 fn an_answer_framed_with_bare_crs_reads_as_its_events() {
     let raw = b"event: message\rdata: {\"a\":1}\r\rdata: {\"b\":\rdata: 2}\r\r";
@@ -1516,6 +1559,7 @@ fn an_answer_framed_with_bare_crs_reads_as_its_events() {
 }
 
 /// M1-13: a progress notification whose JSON is split over several `data:` lines is one event,
+/// read as `last_sse_data` reads one.
 #[test]
 fn a_progress_frame_split_over_data_lines_is_one_frame() {
     let raw = b"data: {\"jsonrpc\":\"2.0\",\ndata: \"method\":\"notifications/progress\",\ndata: \"params\":{\"progressToken\":\"busbar-0\",\"progress\":1}}\n\n";
@@ -1523,6 +1567,8 @@ fn a_progress_frame_split_over_data_lines_is_one_frame() {
 }
 
 /// M1-14: an ask the bounds cannot read is not relayed past them. An `inputRequests` that is not
+/// an object of requests, and a request whose method is none of the asks this plane knows, are
+/// refused rather than relayed whole under the sampling grant.
 #[test]
 fn an_ask_the_sampling_bounds_cannot_read_is_refused_not_relayed() {
     let def = sampling_def(|_| {});
@@ -1546,14 +1592,23 @@ fn an_ask_the_sampling_bounds_cannot_read_is_refused_not_relayed() {
             false,
             0,
         );
-        assert!(
-            !matches!(settled, Settled::Relay { .. }),
-            "`{requests}` must not be relayed: {settled:?}"
-        );
+        let (status, body, line) = answer_of(settled);
+        assert_eq!(status, 403);
+        assert_eq!(line.reason, "ask_malformed");
+        let expected = if requests.is_array() {
+            "inputRequests is not an object"
+        } else {
+            "unrecognized method"
+        };
+        assert!(body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains(expected));
     }
 }
 
 /// M1-16: a temperature that is not a number is refused for that, never by naming a bound the
+/// operator would then adjust in vain.
 #[test]
 fn a_temperature_that_is_not_a_number_is_refused_naming_that() {
     let def = sampling_def(|_| {});
@@ -1568,3 +1623,64 @@ fn a_temperature_that_is_not_a_number_is_refused_naming_that() {
 
 #[path = "reported_calls.rs"]
 mod reported;
+
+#[test]
+fn incomplete_sse_events_are_discarded_and_bare_data_is_a_field() {
+    assert!(event_stream_data("data: unfinished\n").is_empty());
+    assert_eq!(
+        event_stream_data("data: one\ndata\ndata: two\n\n"),
+        vec!["one\n\ntwo"]
+    );
+    assert_eq!(
+        event_stream_data("data: complete\n\ndata: partial"),
+        vec!["complete"]
+    );
+}
+
+#[test]
+fn relayed_input_responses_are_destination_judged() {
+    let mut call = admitted();
+    call.relay = Some(Box::new(RelayedRetry {
+        member: call.entry.server.clone(),
+        round: 1,
+        child: None,
+        continuation: json!({"inputResponses":{"answer":"http://169.254.169.254/"}}),
+    }));
+    let mut seen = false;
+    let checked = judge_arguments(Admission::Go(call), &mut |_, host| {
+        if host == "169.254.169.254" {
+            seen = true;
+            Some(busbar_contract::abi::host::service::DEST_METADATA)
+        } else {
+            Some(busbar_contract::abi::host::service::DEST_ALLOWED)
+        }
+    });
+    let (refusal, line) = refused(checked);
+    assert!(seen);
+    assert_eq!(refusal.status, 403);
+    assert_eq!(line.unwrap().reason, REASON_TOOL_ARGUMENT_REFUSED);
+}
+
+#[test]
+fn unknown_tool_uses_invalid_params_without_disclosing_existence() {
+    let refusal = not_granted(&json!(1), "missing");
+    let body: Value = serde_json::from_slice(&refusal.body()).unwrap();
+    assert_eq!(body["error"]["code"], CODE_INVALID_PARAMS);
+}
+
+#[test]
+fn completed_result_with_an_ask_keeps_the_executed_audit_outcome() {
+    let value = json!({"resultType":"complete", "inputRequests":{}});
+    let (_, _, line) = answer_of(completed(&admitted(), &value, b"{}"));
+    assert_eq!(line.outcome, vocab::OUTCOME_DISPATCHED);
+    assert!(line.audit.unwrap().applied);
+}
+
+#[test]
+fn a_malformed_final_rewrite_does_not_fall_back_to_an_earlier_object() {
+    let mut request = json!({"method":"tools/call","params":{"arguments":{"original":true}}});
+    let original = request.clone();
+    let rewrite = br#"{"messages":[{"content":{"allowed":true}},{"content":"invalid JSON"}]}"#;
+    assert_eq!(rewritten(&mut request, rewrite), None);
+    assert_eq!(request, original);
+}

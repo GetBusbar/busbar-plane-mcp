@@ -25,7 +25,7 @@ const SECTION: &[u8] = br#"{
 fn catalogue() -> Catalogue {
     Catalogue::build(
         1,
-        &crate::statement::read_tools_section(SECTION).expect("the section reads"),
+        &crate::statement::test_support::read_tools_section(SECTION).expect("the section reads"),
     )
 }
 
@@ -96,7 +96,7 @@ fn discover_counts_what_the_caller_reaches_and_names_the_revisions() {
     assert_eq!(v["result"]["servers"], json!(["fs"]));
     assert_eq!(
         v["result"]["counts"],
-        json!({"tools": 1, "prompts": 2, "resources": 1})
+        json!({"tools": 1, "prompts": 2, "resources": 1, "resourceTemplates": 0})
     );
     assert_eq!(v["result"]["registryEmpty"], false);
     assert_eq!(v["result"]["resultType"], "complete");
@@ -117,7 +117,7 @@ fn discover_counts_what_the_caller_reaches_and_names_the_revisions() {
 
 #[test]
 fn discover_hides_the_same_quarantined_tools_as_tools_list() {
-    let cfg = crate::statement::read_tools_section(
+    let cfg = crate::statement::test_support::read_tools_section(
         br#"{"only":{"url":"https://mcp.example","pin":{"mechanism":"unpinned"},"tools_allow":{"hidden":{}}}}"#,
     )
     .unwrap();
@@ -140,7 +140,7 @@ fn discovery_carries_namespaced_server_info_metadata() {
 
 #[test]
 fn resources_without_display_names_still_render_protocol_names() {
-    let cfg = crate::statement::read_tools_section(br#"{"only":{"url":"https://mcp.example","pin":{"mechanism":"unpinned"},"resources_allow":{"file:///readme":{"text":"x"}},"resource_templates_allow":{"file:///{id}":{"text":"{id}"}}}}"#).unwrap();
+    let cfg = crate::statement::test_support::read_tools_section(br#"{"only":{"url":"https://mcp.example","pin":{"mechanism":"unpinned"},"resources_allow":{"file:///readme":{"text":"x"}},"resource_templates_allow":{"file:///{id}":{"text":"{id}"}}}}"#).unwrap();
     let cat = Catalogue::build(1, &cfg);
     let resources: Value =
         serde_json::from_slice(&cat.resources_list(&json!(1), &everyone)).unwrap();
@@ -200,6 +200,7 @@ fn a_notice_is_acknowledged_and_a_refusal_answered() {
     assert_eq!(body(&a)["error"]["code"], -32700);
 }
 /// M3-5: a tool the kernel's verdict hides is gone from `server/discover`'s count as it is from
+/// `tools/list`: the two answers agree on what this caller reaches.
 #[test]
 fn discover_counts_no_tool_the_verdict_hides() {
     let hide_all = |_: &crate::catalogue::ToolEntry| true;
@@ -214,6 +215,7 @@ fn discover_counts_no_tool_the_verdict_hides() {
 }
 
 /// M3-6: the server's identity rides where the schema carries it on every result,
+/// `_meta["io.modelcontextprotocol/serverInfo"]`.
 #[test]
 fn discover_carries_server_info_in_meta() {
     let v = body(&run("server/discover", json!({})));
@@ -225,4 +227,18 @@ fn discover_carries_server_info_in_meta() {
         v["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["version"],
         crate::plane_door::VERSION
     );
+}
+
+#[test]
+fn discovery_includes_a_server_that_only_publishes_resource_templates() {
+    let section = br#"{"docs":{"url":"https://docs.example/mcp","pin":{"mechanism":"unpinned"},"resource_templates_allow":{"docs://{id}":{"text":"{id}"}}}}"#;
+    let catalogue = Catalogue::build(
+        1,
+        &crate::statement::test_support::read_tools_section(section).unwrap(),
+    );
+    let bytes = discover_visible(&catalogue, &json!(1), &everyone, |_| false);
+    let value: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(value["result"]["servers"], json!(["docs"]));
+    assert_eq!(value["result"]["counts"]["resourceTemplates"], 1);
+    assert_eq!(value["result"]["registryEmpty"], false);
 }

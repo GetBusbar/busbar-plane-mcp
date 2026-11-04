@@ -2,6 +2,12 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE ARGUMENT-SIDE SSRF GUARD: a metadata endpoint planted in a NESTED tool argument is refused,
+//! a legitimate external URL in the SAME field still passes, and the walk is proven to have visited
+//! a non-zero number of fields.
+//!
+//! That last one is not decoration. A walker that finds nothing refuses nothing and passes every
+//! refusal test it is given, so every test here that asserts a refusal also asserts the walk
+//! reached the field, and one test pins the visited counts exactly.
 
 use super::{guard, ArgRefusal, ArgWhy};
 use busbar_contract::abi::host::service::{
@@ -62,6 +68,9 @@ fn schema_exhaustion_also_refuses_empty_values_and_a_shallow_public_host_is_judg
 }
 
 /// A STAND-IN HOST'S `dest.judge`, over the contract's address predicates: what the walk is judged
+/// by in these tests. `refuse_private` is `DEST_REFUSE_PRIVATE` (a registration with no private
+/// reach). The deployment's real judge answering a served call is proven in the root crate
+/// (`root::tests::door_steps`).
 fn judge(refuse_private: bool) -> impl FnMut(&str) -> Option<u64> {
     move |dest: &str| {
         let host = dest
@@ -91,6 +100,7 @@ fn private_ok() -> impl FnMut(&str) -> Option<u64> {
 }
 
 /// A schema whose `uri` field sits two levels down inside nested objects — the shape a real
+/// webhook-taking tool has, and the shape a flat walk misses.
 fn nested_uri_schema() -> Value {
     json!({
         "type": "object",
@@ -111,6 +121,8 @@ fn nested_uri_args(url: &str) -> Value {
 }
 
 /// THE HEADLINE CASE. A model that has just read a hostile tool description puts the instance
+/// metadata endpoint into a NESTED argument of a tool whose pinned schema declares that field a
+/// `uri`. It is refused, at the exact field, naming the reason.
 #[test]
 fn a_metadata_endpoint_in_a_nested_uri_argument_is_refused() {
     let args = nested_uri_args("http://169.254.169.254/latest/meta-data/iam/security-credentials/");
@@ -131,6 +143,8 @@ fn a_metadata_endpoint_in_a_nested_uri_argument_is_refused() {
 }
 
 /// THE CONTROL. A guard with no control is a closed door, and a closed door breaks every real tool.
+/// The SAME field, the SAME schema, a legitimate external URL: it passes, and the walk reports that
+/// it did in fact judge it.
 #[test]
 fn a_legitimate_external_url_in_the_same_field_still_passes() {
     let args = nested_uri_args("https://hooks.example.com/services/T000/B000/xyz");
@@ -145,6 +159,9 @@ fn a_legitimate_external_url_in_the_same_field_still_passes() {
 }
 
 /// THE FLOOR, pinned exactly rather than as an inequality. Nested object, array of strings, a field
+/// four levels deep and a bare-host field are all in one document, and the counts say which of them
+/// the walk reached. Five is the number of URL-ish fields the document declares; if the walk ever
+/// reports fewer, it stopped following one of those four shapes.
 #[test]
 fn the_walk_visits_every_declared_url_field_and_says_how_many() {
     let schema = json!({
@@ -180,10 +197,10 @@ fn the_walk_visits_every_declared_url_field_and_says_how_many() {
     );
     assert_eq!(scan.undeclared_judged, 0, "the note is prose, not a URL");
     assert_eq!(scan.strings_seen, 6);
-    assert!(scan.declared_judged + scan.undeclared_judged >= 5);
 }
 
 /// Each element of an array of URLs is judged on its own, so a hostile entry cannot hide behind
+/// admissible siblings.
 #[test]
 fn one_hostile_entry_in_an_array_of_urls_refuses_the_whole_call() {
     let schema = json!({
@@ -209,6 +226,7 @@ fn one_hostile_entry_in_an_array_of_urls_refuses_the_whole_call() {
 }
 
 /// A URL-ish field FOUR levels below the argument root, inside an array inside an object inside an
+/// object, is still reached.
 #[test]
 fn a_url_field_several_levels_deep_is_still_reached() {
     let schema = json!({
@@ -234,6 +252,7 @@ fn a_url_field_several_levels_deep_is_still_reached() {
 }
 
 /// EVERY ENCODING THE TRANSPORT GUARD ALREADY HANDLES, handled here too: the alternate IPv4 forms,
+/// IPv4-mapped IPv6, the `localhost` family, and the metadata DNS names.
 #[test]
 fn the_encodings_the_transport_guard_handles_are_refused_in_arguments_too() {
     let metadata = [
@@ -313,6 +332,8 @@ fn the_encodings_the_transport_guard_handles_are_refused_in_arguments_too() {
 }
 
 /// A metadata refusal is unconditional; an internal one is the operator's to opt into. That is the
+/// same split `super::ssrf` draws, and it has to be the same one — an operator saying "this server
+/// is on our internal network" has said nothing about the credential-vending endpoint.
 #[test]
 fn allow_private_admits_internal_hosts_and_never_admits_metadata() {
     assert!(matches!(
@@ -366,6 +387,7 @@ fn allow_private_admits_internal_hosts_and_never_admits_metadata() {
 }
 
 /// A declared absolute-URL field accepts `http(s)` and nothing else. Other schemes are refused by
+/// absence rather than by a blocklist somebody has to keep up with.
 #[test]
 fn a_declared_uri_field_takes_no_scheme_but_http_and_https() {
     let banned = [
@@ -389,6 +411,7 @@ fn a_declared_uri_field_takes_no_scheme_but_http_and_https() {
 }
 
 /// The bare-host formats are judged as hosts rather than as URLs, so a `hostname` / `ipv4` / `ipv6`
+/// field cannot smuggle a loopback or metadata target past a URL-shaped check.
 #[test]
 fn bare_host_formats_are_judged_as_hosts() {
     let schema = json!({
@@ -407,10 +430,12 @@ fn bare_host_formats_are_judged_as_hosts() {
         ("v6", "::1"),
     ] {
         let args = json!({ field: value });
-        assert!(
-            guard(&schema, &args, public()).is_err(),
-            "`{value}` in `{field}` must be refused"
-        );
+        let refusal = guard(&schema, &args, public()).unwrap_err();
+        assert_eq!(refusal.pointer, format!("/{field}"));
+        assert!(matches!(
+            refusal.why,
+            ArgWhy::CloudMetadata(_) | ArgWhy::InternalHost(_)
+        ));
     }
 
     let ok = json!({"host": "api.example.com", "idn": "api.example.com",
@@ -420,6 +445,12 @@ fn bare_host_formats_are_judged_as_hosts() {
 }
 
 /// S4: a `hostname`/`ipv4`/`ipv6`-declared field that actually carries a FULL URL — a caller smuggling
+/// a scheme and path past a check that (before S4) read the whole string as an opaque host and never
+/// stripped either. `judge_host` alone reads `https://169.254.169.254/x` as one weird hostname string
+/// that matches none of the metadata/private/obfuscated literal comparisons, so the address sails
+/// through untouched. The embedded `://` must route the value through the same absolute-URL judgement
+/// (scheme allowlist + host judgement on the REAL host) the `Reference` arm already gives a
+/// scheme-relative value.
 #[test]
 fn a_url_smuggled_into_a_bare_host_field_is_judged_on_its_real_host() {
     let schema = json!({
@@ -463,18 +494,34 @@ fn a_url_smuggled_into_a_bare_host_field_is_judged_on_its_real_host() {
 }
 
 /// The NAT64/RFC 6052 form of the same smuggle: `http://[64:ff9b::a9fe:a9fe]/...` is the DNS64
+/// synthesis of the IMDS target `169.254.169.254`, and it is REFUSED.
+///
+/// This test was written asserting `is_ok()` — a deliberate canary pinning the then-current
+/// behavior, because `host_is_private_or_loopback`/`ssrf_blocked_host` unwrapped an embedded IPv4
+/// with `Ipv6Addr::to_ipv4()` rather than the NAT64-aware `embedded_ipv4` their sibling predicates
+/// already used, so this literal was NOT caught. Its own note said to flip it to `is_err()` the day
+/// someone wired the NAT64-aware unwrap into the string-based host predicates.
+///
+/// That happened: the host-string guards now call `embedded_ipv4`, so a NAT64 spelling of an
+/// internal target is judged exactly like the bare form. The canary did its job and is now the
+/// assertion it was always waiting to become — and it matters most HERE, because this crate's
+/// caller is an LLM tool-call argument, the classic injection vector.
 #[test]
 fn a_nat64_smuggled_host_is_refused() {
-    let schema = json!({
-        "type": "object",
-        "properties": { "host": {"type": "string", "format": "hostname"} }
-    });
-    let args = json!({"host": "http://[64:ff9b::a9fe:a9fe]/latest/meta-data/"});
-    guard(&schema, &args, public())
-        .expect_err("the NAT64 spelling of the IMDS target reaches the same address as the bare form and must be refused");
+    let schema = json!({"properties":{"host":{"format":"uri"}}});
+    let args = json!({"host":"http://[64:ff9b::a9fe:a9fe]/latest/meta-data/"});
+    let refusal = guard(&schema, &args, public()).unwrap_err();
+    assert_eq!(refusal.pointer, "/host");
+    assert!(matches!(
+        refusal.why,
+        ArgWhy::CloudMetadata(_) | ArgWhy::InternalHost(_)
+    ));
 }
 
 /// THE UNDECLARED CASE, and the decision it encodes. Most real MCP tools take a URL in a plain
+/// `{"type": "string"}`, so a walk that judged only declared fields would refuse almost nothing.
+/// A string whose WHOLE value is an `http(s)` URL is therefore judged wherever it appears — and
+/// nothing narrower is, because refusing a hostname-shaped word in free text breaks real tools.
 #[test]
 fn an_http_url_in_an_undeclared_field_is_judged_and_a_hostname_shaped_word_is_not() {
     let schema = json!({
@@ -522,6 +569,7 @@ fn an_http_url_in_an_undeclared_field_is_judged_and_a_hostname_shaped_word_is_no
 }
 
 /// A URL-ish format reached only through a combinator branch, through `additionalProperties`, or at
+/// a tuple position is still found. Each is a shape a naive `properties`-only walk misses.
 #[test]
 fn combinators_additional_properties_and_tuple_positions_are_all_followed() {
     let schema = json!({
@@ -563,6 +611,7 @@ fn combinators_additional_properties_and_tuple_positions_are_all_followed() {
 }
 
 /// `uri-reference` may legitimately be relative, so a relative reference is admissible — but a
+/// SCHEME-RELATIVE one names a host and is judged like any other.
 #[test]
 fn a_uri_reference_is_relative_or_judged_but_never_waved_through() {
     let schema = json!({
@@ -588,6 +637,7 @@ fn a_uri_reference_is_relative_or_judged_but_never_waved_through() {
 }
 
 /// Arguments nested past the walk's depth bound are REFUSED rather than silently truncated. A walk
+/// that quietly stops reports "nothing found" on the one document built to make it stop.
 #[test]
 fn arguments_nested_past_the_bound_are_refused_rather_than_truncated() {
     let mut deep = json!("http://169.254.169.254/");
@@ -602,6 +652,7 @@ fn arguments_nested_past_the_bound_are_refused_rather_than_truncated() {
 }
 
 /// A key containing a `/` or a `~` is escaped per RFC 6901, so the pointer in a refusal names the
+/// field it actually came from rather than a different one.
 #[test]
 fn pointer_tokens_are_escaped_so_a_key_cannot_forge_a_location() {
     let schema = json!({
@@ -618,6 +669,9 @@ fn pointer_tokens_are_escaped_so_a_key_cannot_forge_a_location() {
 }
 
 /// An address the connector destination guard refuses is refused in a tool argument too: the
+/// argument check used the 1.5.5 plaintext predicate, which misses these ranges. The zone forms
+/// are spelled `%25lo` as a URL carries them; the host reader percent-decodes to `%lo` and
+/// `host_ip` strips the zone before parsing.
 #[test]
 fn an_address_the_connector_guard_refuses_is_refused_in_an_argument_too() {
     let urls = [
@@ -634,12 +688,9 @@ fn an_address_the_connector_guard_refuses_is_refused_in_an_argument_too() {
     assert_eq!(urls.len(), 9);
 
     for v6 in ["2002:c0a8:101::", "2001:0:4136:e378:8000:63bf:f5ff:fffe"] {
-        let ip: core::net::Ipv6Addr = v6.parse().expect("parses");
-        assert!(
-            busbar_contract::net::host_is_private_or_loopback(v6),
-            "`{v6}` must be private to the plaintext predicate too"
-        );
-        assert!(busbar_contract::net::ipv6_is_internal(&ip), "`{v6}`");
+        let url = format!("http://[{v6}]/");
+        let refusal = guard(&nested_uri_schema(), &nested_uri_args(&url), public()).unwrap_err();
+        assert!(matches!(refusal.why, ArgWhy::InternalHost(_)));
     }
     for url in urls {
         let err = guard(&nested_uri_schema(), &nested_uri_args(url), public())
@@ -653,6 +704,7 @@ fn an_address_the_connector_guard_refuses_is_refused_in_an_argument_too() {
 }
 
 /// The internal-range table, one representative per range, pinned against `ip_is_internal`, and
+/// every internal row is refused by the argument check as an `http://<addr>/x` URL.
 #[test]
 fn the_internal_range_table_is_pinned() {
     let internal = [
@@ -786,6 +838,10 @@ fn a_url_is_read_as_a_whatwg_parser_reads_it() {
 }
 
 /// A URL IS JUDGED HOWEVER A WHATWG READER WOULD ACCEPT IT. Most MCP servers fetch with a WHATWG
+/// parser (a browser's or Node's `fetch`), which reads `http:/h`, `https:\\h`, a scheme split by a
+/// tab and a value led by a control character as the same `http(s)://h/...` URL. Each of those
+/// names the metadata host to the upstream, so each is put to the destination judge: undeclared,
+/// and in a declared `uri-reference`, where a backslash starts a scheme-relative reference too.
 #[test]
 fn a_url_a_whatwg_reader_accepts_is_judged_however_it_is_spelled() {
     let undeclared = json!({
@@ -837,6 +893,10 @@ fn a_url_a_whatwg_reader_accepts_is_judged_however_it_is_spelled() {
 }
 
 /// A TRAILING ROOT DOT IS JUDGED AS THE NAME IT ROOTS, whichever reader found the host: a
+/// reference a WHATWG reader resolves (`\\example.com.\x`, read against a web base) and an
+/// absolute URL both ask `dest.judge` about `example.com`, the host the guard has asked about since
+/// it was written (`judge_host` normalises every host it is handed). Pinned so the host reader the
+/// guard shares with the contract can never move a rule's allow or deny on a rooted name.
 #[test]
 fn a_trailing_root_dot_is_judged_as_the_name_it_roots() {
     let schema = json!({
@@ -864,6 +924,11 @@ const FULLWIDTH_METADATA: &str = "\u{ff11}\u{ff16}\u{ff19}\u{ff0e}\u{ff12}\u{ff1
                                   \u{ff11}\u{ff16}\u{ff19}\u{ff0e}\u{ff12}\u{ff15}\u{ff14}";
 
 /// A HOST A CLIENT MAPS ONTO A FORBIDDEN ADDRESS IS REFUSED AS THAT ADDRESS, in every field the
+/// guard reads a host from: a declared `uri` (the absolute-URL judge), a declared `hostname` (the
+/// bare-host judge), an undeclared `https://` value and a `http:/` spelling only a WHATWG reader
+/// takes for a URL. A fetching client maps each spelling through UTS-46 before it dials, so the
+/// judge must be asked about the mapped name: asked about the spelling as written, the stand-in
+/// judge (like the host's) recognises none of them and the value would pass.
 #[test]
 fn a_host_a_client_maps_to_a_forbidden_address_is_refused_as_that_address() {
     let schema = json!({
@@ -908,6 +973,9 @@ fn a_host_a_client_maps_to_a_forbidden_address_is_refused_as_that_address() {
 }
 
 /// A HOST OUTSIDE ASCII IS NEVER JUDGED AS WRITTEN. The judge is asked about the punycode name a
+/// fetching client dials (`bücher.example` is `xn--bcher-kva.example` to it), whichever reader
+/// found the host; and a host UTS-46 refuses, or maps onto a forbidden domain code point
+/// (`ｂ＜.example` maps to `b<.example`), is refused with no host and never reaches the judge.
 #[test]
 fn a_host_outside_ascii_is_judged_as_the_name_a_client_dials_never_as_written() {
     let schema = json!({
@@ -996,6 +1064,7 @@ fn field_schema(field: Field) -> Value {
 }
 
 /// Whether `value` in a `field` is refused at `/target` by the guard over a deployment with no
+/// private reach, and the verdict it got.
 fn refused_in(field: Field, value: &str) -> (bool, Result<super::ArgScan, ArgRefusal>) {
     let got = guard(&field_schema(field), &json!({ "target": value }), public());
     let refused = got.as_ref().is_err_and(|e| e.pointer == "/target");
@@ -1003,6 +1072,7 @@ fn refused_in(field: Field, value: &str) -> (bool, Result<super::ArgScan, ArgRef
 }
 
 /// One input a WHATWG reader reads as naming an internal or metadata host, refused in every field
+/// kind it was found allowed in.
 fn assert_refused(value: &str, fields: &[Field]) {
     for &field in fields {
         let (refused, got) = refused_in(field, value);
@@ -1050,6 +1120,9 @@ fn ftp_backslashes_localhost_is_refused() {
 }
 
 /// `file:\\127.0.0.1\x` fails the contract's reader whichever special-scheme set the contract
+/// keeps (it reads `file` opaque), so its refusal rests on the plane's OWN set naming `file`: the
+/// set is pinned here as the six WHATWG names, and the refusal is pinned with the contract's reading
+/// of the value shown to be a refusal, so a contract that changes its set cannot change this one.
 #[test]
 fn the_plane_reads_its_own_six_special_schemes_whatever_the_contract_keeps() {
     assert_eq!(
@@ -1094,6 +1167,9 @@ fn gopher_backslash_userinfo_loopback_is_refused() {
 }
 
 /// THE TWINS. The same reading leaves an ordinary value alone: a public `ftp`/`ws` URL is judged
+/// and passes, and a value no reader takes for a URL naming a host (an opaque `foo:bar`, prose
+/// holding a backslash or a URL mid-sentence, a bare IDN or hex-looking name, a `file` URL with no
+/// host) is not judged at all.
 #[test]
 fn ordinary_values_beside_the_special_schemes_stay_allowed() {
     let undeclared = field_schema(Field::Undeclared);
@@ -1137,6 +1213,8 @@ fn ordinary_values_beside_the_special_schemes_stay_allowed() {
 }
 
 /// EVERY GAP THE DIFFERENTIAL REVIEW FOUND after dev + #1450 + #1461: 48 inputs, each a JSON string
+/// literal decoded exactly, whose WHATWG host is internal or metadata, each in every field kind it
+/// was found allowed in (58 cases). Every one is refused.
 const REVIEW_GAPS: &[(&str, &[Field], &str, &str)] = &[
     (
         r#""\\\\ｌｏｃａｌｈｏｓｔ\\x""#,
@@ -1429,6 +1507,8 @@ const REVIEW_GAPS: &[(&str, &[Field], &str, &str)] = &[
 ];
 
 /// THE SPELLINGS WITHOUT `//` the busbar-side door test pinned before #1461 moved it (`http:h`,
+/// `http:/\h` with a literal backslash, and `http:0x`, which a URL client dials as `0.0.0.0`), each
+/// with every plain host that test spelt, in both field kinds. The plane pins them now.
 fn odd_spellings() -> Vec<String> {
     let hosts = [
         "localhost",
@@ -1447,6 +1527,7 @@ fn odd_spellings() -> Vec<String> {
 }
 
 /// A SPECIAL SCHEME NO READER ACCEPTS is refused only as a raw URL: a value holding whitespace or
+/// a control character is prose to the guard (no raw URL holds one) and goes the ordinary way.
 #[test]
 fn a_special_scheme_no_reader_accepts_is_refused_and_prose_after_it_is_not() {
     assert_refused("ftp:/127.0.0.1", &[Field::Undeclared, Field::Reference]);
@@ -1508,6 +1589,8 @@ fn every_gap_the_differential_review_found_is_refused() {
 }
 
 /// M1-1: a scheme-relative `uri-reference` whose authority holds a backslash before an `@`. A
+/// WHATWG reader ends a special authority at the backslash, so `//169.254.169.254\@public.example/x`
+/// dials the metadata address; the `@` is never inside the authority it reads.
 #[test]
 fn a_scheme_relative_reference_with_a_backslash_before_the_at_is_judged_on_the_dialled_host() {
     let schema = field_schema(Field::Reference);
@@ -1582,6 +1665,7 @@ fn an_undeclared_special_url_judges_both_authorities_after_cleanup() {
 }
 
 /// M1-2: a path-relative `uri-reference` whose query carries a URL names no host of its own, so it
+/// is admitted without asking the judge.
 #[test]
 fn a_relative_reference_carrying_a_url_in_its_query_is_admitted() {
     let mut asked = 0;
@@ -1606,3 +1690,204 @@ mod pattern_tests;
 
 #[path = "argguard_pattern_engine_tests.rs"]
 mod pattern_engine_tests;
+
+#[test]
+fn nested_resource_fragments_and_relative_ids_keep_their_scope() {
+    for reference in ["#/$defs/h", "#host", "#h%6fst"] {
+        let schema = json!({
+            "$id": "https://schemas.example/root.json",
+            "$defs": {"h": {"$anchor": "host"}},
+            "properties": {"target": {
+                "$id": "child.json",
+                "$defs": {"h": {"$anchor": "host", "format": "hostname"}},
+                "$ref": reference
+            }}
+        });
+        let err = guard(&schema, &json!({"target": "169.254.169.254"}), public())
+            .expect_err("nested resources own their fragments and anchors");
+        assert!(matches!(err.why, ArgWhy::CloudMetadata(_)));
+        let scan = guard(&schema, &json!({"target": "example.com"}), public()).unwrap();
+        assert_eq!(scan.declared_judged, 1);
+    }
+    let schema = json!({
+        "$id": "https://schemas.example/a/root.json",
+        "$defs": {"child": {"$id": "../host.json", "format": "hostname"}},
+        "properties": {"target": {"$ref": "../host.json"}}
+    });
+    assert!(matches!(
+        guard(&schema, &json!({"target": "169.254.169.254"}), public())
+            .unwrap_err()
+            .why,
+        ArgWhy::CloudMetadata(_)
+    ));
+}
+
+#[test]
+fn schema_identifiers_ignore_data_and_reject_ambiguous_resources() {
+    let schema = json!({
+        "$id": "https://schemas.example/root",
+        "default": {"$id": "https://schemas.example/host", "$anchor": "host"},
+        "examples": [{"$id": "https://schemas.example/host"}],
+        "$defs": {"host": {"$id": "https://schemas.example/host", "format": "hostname"}},
+        "properties": {"target": {"$ref": "https://schemas.example/host"}}
+    });
+    assert!(matches!(
+        guard(&schema, &json!({"target": "169.254.169.254"}), public())
+            .unwrap_err()
+            .why,
+        ArgWhy::CloudMetadata(_)
+    ));
+    for defs in [
+        json!({"a": {"$id": "same"}, "b": {"$id": "same", "format": "hostname"}}),
+        json!({"a": {"$anchor": "same"}, "b": {"$anchor": "same", "format": "hostname"}}),
+    ] {
+        let schema = json!({"$defs": defs, "properties": {"target": {"$ref": "#same"}}});
+        assert!(matches!(
+            guard(&schema, &json!({"target": "example.com"}), public())
+                .unwrap_err()
+                .why,
+            ArgWhy::SchemaRef(_)
+        ));
+    }
+    let schema = json!({
+        "default": {"$anchor": "fake"},
+        "properties": {"target": {"$ref": "#fake"}}
+    });
+    assert!(matches!(
+        guard(&schema, &json!({"target": "example.com"}), public())
+            .unwrap_err()
+            .why,
+        ArgWhy::SchemaRef(_)
+    ));
+}
+
+#[test]
+fn dynamic_and_recursive_reference_overrides_cannot_hide_formats() {
+    for (anchor, reference, fragment) in [
+        ("$dynamicAnchor", "$dynamicRef", "#host"),
+        ("$recursiveAnchor", "$recursiveRef", "#"),
+    ] {
+        let anchor_value = if anchor == "$dynamicAnchor" {
+            json!("host")
+        } else {
+            json!(true)
+        };
+        let schema = json!({
+            "$id": "https://schemas.example/root",
+            "$defs": {
+                "outer": {"$id": "outer", anchor: anchor_value.clone(), "format": "hostname"},
+                "inner": {"$id": "inner", anchor: anchor_value, reference: fragment}
+            },
+            "properties": {"target": {"$ref": "inner"}}
+        });
+        assert!(matches!(
+            guard(&schema, &json!({"target": "169.254.169.254"}), public())
+                .unwrap_err()
+                .why,
+            ArgWhy::CloudMetadata(_)
+        ));
+        guard(&schema, &json!({"target": "example.com"}), public()).unwrap();
+    }
+}
+
+#[test]
+fn contains_and_unevaluated_fallbacks_survive_inapplicable_branches() {
+    let schema = json!({"contains": {"format": "hostname"}});
+    assert!(matches!(
+        guard(&schema, &json!(["169.254.169.254"]), public())
+            .unwrap_err()
+            .why,
+        ArgWhy::CloudMetadata(_)
+    ));
+    for branch in [
+        json!({"anyOf": [{"properties": {"target": {}}, "required": ["missing"]}, {}]}),
+        json!({"if": {"required": ["missing"]}, "then": {"properties": {"target": {}}}}),
+        json!({"dependentSchemas": {"missing": {"properties": {"target": {}}}}}),
+    ] {
+        let mut schema = branch;
+        schema["unevaluatedProperties"] = json!({"format": "hostname"});
+        assert!(matches!(
+            guard(&schema, &json!({"target": "169.254.169.254"}), public())
+                .unwrap_err()
+                .why,
+            ArgWhy::CloudMetadata(_)
+        ));
+    }
+    let schema = json!({
+        "anyOf": [{"items": {}, "minItems": 2}, {}],
+        "unevaluatedItems": {"format": "hostname"}
+    });
+    assert!(matches!(
+        guard(&schema, &json!(["169.254.169.254"]), public())
+            .unwrap_err()
+            .why,
+        ArgWhy::CloudMetadata(_)
+    ));
+    let schema = json!({
+        "properties": {"note": {}}, "unevaluatedProperties": {"format": "hostname"}
+    });
+    let scan = guard(&schema, &json!({"note": "ordinary free text"}), public()).unwrap();
+    assert_eq!(
+        scan.declared_judged, 0,
+        "local unconditional coverage is preserved"
+    );
+}
+
+#[test]
+fn anchors_do_not_escape_their_resource_and_unsupported_uri_rewrites_refuse() {
+    let schema = json!({
+        "$defs": {"child": {"$id": "https://schemas.example/child", "$anchor": "host"}},
+        "properties": {"target": {"$ref": "#host"}}
+    });
+    assert!(matches!(
+        guard(&schema, &json!({"target": "example.com"}), public())
+            .unwrap_err()
+            .why,
+        ArgWhy::SchemaRef(_)
+    ));
+    for reference in [
+        "https://127.1/host",
+        "https:schemas.example/host",
+        "file:///host",
+        "https://schemas.example/%2e/host",
+    ] {
+        let schema = json!({"properties": {"target": {"$ref": reference}}});
+        assert!(matches!(
+            guard(&schema, &json!({"target": "example.com"}), public())
+                .unwrap_err()
+                .why,
+            ArgWhy::SchemaRef(_)
+        ));
+    }
+}
+
+#[test]
+fn schema_scope_index_shares_inherited_bases_and_bounds_expanded_identifiers() {
+    let mut schema =
+        json!({"$id": format!("https://schemas.example/{}", "a".repeat(2000)), "$defs": {}});
+    for i in 0..600 {
+        schema["$defs"][format!("s{i}")] = json!({});
+    }
+    let index = super::SchemaReferences::new(&schema).unwrap_or_else(|_| panic!("bounded schema"));
+    let mut bases = index.bases.values();
+    let first = bases.next().unwrap();
+    assert!(bases.all(|base| std::sync::Arc::ptr_eq(first, base)));
+    drop(index);
+    for i in 0..600 {
+        schema["$defs"][format!("s{i}")] = json!({"$anchor": format!("s{i}")});
+    }
+    let err = guard(&schema, &json!({}), public()).expect_err("expanded anchor names are bounded");
+    assert_eq!(err.why, ArgWhy::WorkExceeded);
+}
+
+#[test]
+fn property_key_bytes_count_toward_pattern_cross_product_work() {
+    let patterns: serde_json::Map<String, Value> =
+        (0..100).map(|i| (format!("^p{i}"), json!({}))).collect();
+    let schema = json!({"patternProperties": patterns});
+    assert!(guard(&schema, &json!({"plain": 1}), public()).is_ok());
+    let mut args = serde_json::Map::new();
+    args.insert("x".repeat(10_000), json!(1));
+    let error = guard(&schema, &Value::Object(args), public()).unwrap_err();
+    assert_eq!(error.why, ArgWhy::WorkExceeded);
+}
