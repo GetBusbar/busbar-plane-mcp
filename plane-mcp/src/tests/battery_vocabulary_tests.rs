@@ -61,7 +61,11 @@ fn looks_like_a_method(piece: &str) -> bool {
     ];
     heads.iter().any(|head| {
         piece.strip_prefix(head).is_some_and(|tail| {
-            !tail.is_empty() && tail.split('/').all(|segment| !segment.is_empty())
+            !tail.is_empty()
+                && tail.split('/').all(|segment| {
+                    // Quoted prose uses ellipses for a family, not a wire method.
+                    !segment.is_empty() && !matches!(segment, "…" | "...")
+                })
         })
     }) && !piece.contains(' ')
 }
@@ -69,6 +73,8 @@ fn looks_like_a_method(piece: &str) -> bool {
 #[test]
 fn battery_method_names_are_complete_and_unknown_names_still_reach_the_coverage_gate() {
     assert!(!looks_like_a_method("notifications/"));
+    assert!(!looks_like_a_method("notifications/…"));
+    assert!(!looks_like_a_method("notifications/..."));
     assert!(!looks_like_a_method("notifications//changed"));
     assert!(!looks_like_a_method("tools/call with a space"));
     assert!(looks_like_a_method("notifications/tools/list_changed"));
