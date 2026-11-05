@@ -235,3 +235,82 @@ fn settings_schema_integer_tokens_match_native_parser() {
         }
     }
 }
+
+#[test]
+fn authored_configuration_profile_uses_actual_raw_tools_and_endpoint_parsers() {
+    let document: serde_json::Value = serde_json::from_slice(SETTINGS_SCHEMA).unwrap();
+    let profile = &document["x-busbar-user-configuration"];
+    assert_eq!(profile["version"], 1);
+    assert_eq!(profile["context"], "raw_user_configuration");
+    let schema = serde_json::json!({"$schema":"https://json-schema.org/draft/2020-12/schema","x-busbar-settings-profile":"integer-token-v1","$defs":document["$defs"],"$ref":profile["schema_ref"]});
+    let validator = settings_profile::validator(&schema).unwrap();
+    for (source, accepted) in [
+        (r#"{}"#, true),
+        (r#"{"tools":null,"mcp":null}"#, true),
+        (
+            r#"{"tools":{"s":{"url":"https://server.example/mcp","pin":{"mechanism":"unpinned"},"tools_allow":{"read":{"input_schema":{"type":"object"},"output_schema":{"type":"string"},"task_support":"optional"}},"sampling_bounds":{"max_messages":1}}},"mcp":{"canonical_uri":"https://gateway.example/mcp","authorization_servers":["https://issuer.example"]}}"#,
+            true,
+        ),
+        (
+            r#"{"tools":{"s":{"transport":"stdio","command":"/bin/tool","cwd":"/tmp","pin":{"mechanism":"local_program","key":"/bin/tool"},"env":{"TOKEN":{"env":"TOKEN"}}}}}"#,
+            true,
+        ),
+        (
+            r#"{"tools":{"s":{"transport":"stdio","command":"/bin/tool","pin":{"mechanism":"local_program","key":"/bin/tool"},"env":{"TOKEN":{"env":"TOKEN"}}}}}"#,
+            false,
+        ),
+        (
+            r#"{"tools":{"s":{"url":"https://server.example/mcp"}}}"#,
+            false,
+        ),
+        (
+            r#"{"tools":{"s":{"url":"https://server.example/mcp","pin":{"mechanism":"pinned_pubkey"}}}}"#,
+            false,
+        ),
+        (r#"{"tools":{"pools":{"p":{"members":["s"]}}}}"#, false),
+        (
+            r#"{"mcp":{"canonical_uri":"https://gateway.example/mcp","authorization_servers":[]}}"#,
+            false,
+        ),
+    ] {
+        let value: serde_json::Value = serde_json::from_str(source).unwrap();
+        let mut host_dealt = value.clone();
+        if let Some(map) = host_dealt.as_object_mut() {
+            map.retain(|_, value| !value.is_null());
+        }
+        let parsed = statement::read_dealt_tools(&serde_json::to_vec(&host_dealt).unwrap());
+        assert_eq!(
+            parsed.is_ok(),
+            accepted,
+            "parser: {source}; refusal: {:?}",
+            parsed.as_ref().err()
+        );
+        if value
+            .pointer("/tools/s/pin/mechanism")
+            .is_some_and(|mode| mode == "local_program")
+            && value.pointer("/tools/s/cwd").is_none()
+        {
+            let reason = parsed
+                .as_ref()
+                .expect_err("local_program without cwd must be refused");
+            assert!(
+                reason.contains("needs an explicit absolute `cwd:`"),
+                "actual refusal: {reason}"
+            );
+        }
+        assert_eq!(validator.is_valid(&value), accepted, "schema: {source}");
+    }
+    // `pools` is host-reserved even when its value looks like a valid registration.
+    // Standalone plane parsers do not replace the host's reserved-name boundary.
+    let reserved: serde_json::Value = serde_json::from_str(r#"{"tools":{"pools":{"url":"https://example.test/endpoint","pin":{"mechanism":"unpinned"}}}}"#).unwrap();
+    assert!(
+        !validator.is_valid(&reserved),
+        "raw authoring must not offer the runtime pool projection as a registration"
+    );
+    assert!(
+        document["$defs"]["section"]["properties"]
+            .get("pools")
+            .is_some(),
+        "existing lifecycle pool projection stays intact"
+    );
+}

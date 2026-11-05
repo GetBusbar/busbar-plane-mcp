@@ -1311,8 +1311,142 @@
           ]
         }
       ]
+    },
+    "authored_section": {
+      "type": "object",
+      "properties": {
+        "hooks": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "upstream_credentials": {
+          "const": "own"
+        },
+        "pools": false
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/server"
+      },
+      "propertyNames": {
+        "anyOf": [
+          {
+            "enum": [
+              "hooks",
+              "upstream_credentials",
+              "pools"
+            ]
+          },
+          {
+            "pattern": "^[A-Za-z0-9.-]+$"
+          }
+        ]
+      },
+      "description": "Plane-owned raw tools section grammar; host-injected pools are not writable registration input. Core security/source policy, reserved-name checks, SecretRef resolution and module validation still apply."
+    },
+    "user_configuration": {
+      "type": "object",
+      "properties": {
+        "tools": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/authored_section"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Null/absent is an unconfigured host section; the host does not pass null as a lifecycle settings object."
+        },
+        "mcp": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "canonical_uri": {
+                  "type": "string",
+                  "pattern": "^\\s*https?://[^/?#]+/mcp\\s*$"
+                },
+                "authorization_servers": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^\\s*https?://[^?#]+\\s*$"
+                  },
+                  "minItems": 1
+                },
+                "scopes_supported": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": []
+                },
+                "allowed_origins": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": []
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "canonical_uri",
+                "authorization_servers"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Raw host endpoint block; null/absent leaves the endpoint unconfigured."
+        }
+      },
+      "additionalProperties": true,
+      "x-busbar-partial": true,
+      "description": "The supported plane-owned blocks within a complete deploy document. This is not a complete host boot schema."
     }
   },
   "description": "Lifecycle tools settings and the dealt validate envelope. Cross-entry published-name uniqueness, URI/base64 validity, schema annotations, matching local-program keys, duration values and cross-field numerical comparisons remain lifecycle judgments.",
-  "x-busbar-settings-profile": "integer-token-v1"
+  "x-busbar-settings-profile": "integer-token-v1",
+  "x-busbar-user-configuration": {
+    "version": 1,
+    "context": "raw_user_configuration",
+    "schema_ref": "#/$defs/user_configuration",
+    "reference_base": "returned_schema_document",
+    "roots": [
+      "tools",
+      "mcp"
+    ],
+    "member_schema_refs": {
+      "tools": "#/$defs/server"
+    },
+    "settings_representation": "raw SecretRef user input; distinct from material resolved for a lifecycle call",
+    "host_context": {
+      "validation": "Run the canonical host validate/apply path, including semantic security policy, source/config fences, module resolution, reserved names, declared secret paths and runtime acknowledgement/activation receipts.",
+      "host_schema": "x-busbar-config-schemas",
+      "injected_fields": {
+        "tools.pools": "runtime projection only; author the top-level pools block using the host-owned Pools grammar instead"
+      },
+      "registration_hooks": "host resolves hook names and preserves all unedited private values; module fields do not confer mutation authority"
+    },
+    "edit": {
+      "section_route": "PUT /api/v1/admin/config/settings document_patch",
+      "definition_route": "PUT /api/v1/admin/tools/{name}",
+      "partial_edit": "Use canonical source-fenced document edits or the named settings edit operation; never reconstruct a replacement from sanitized readback.",
+      "generation_binding": "Use the returned canonical module/kind/version, declaration source and archive digest if supplied; installed schema is not proof of activation."
+    },
+    "runtime_validation": [
+      "actual parser, URL/duration and cross-field requirements",
+      "module capability and current host admission policy",
+      "native source-bound validation/apply is authoritative"
+    ],
+    "read_only_or_unsupported": {
+      "tools.*.pin.mechanism=pinned_pubkey": "refused; use an implemented pin mechanism",
+      "legacy roots/sampling fields": "not accepted; grants and sampling_bounds are distinct current controls"
+    }
+  }
 }

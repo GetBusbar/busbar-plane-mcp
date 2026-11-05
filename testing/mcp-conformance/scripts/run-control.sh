@@ -21,7 +21,7 @@ fi
 
 mkdir -p reports
 exec node bin/mcp-battery.mjs run \
-  --name "control-python-mcp-2.0.0" \
+  --name "control-python-mcp-2.2.0" \
   --server-cmd "$PY $(pwd)/control/control_server.py" \
   --client-cmd "$PY $(pwd)/control/control_client.py" \
   --failing-tool always_fails \
