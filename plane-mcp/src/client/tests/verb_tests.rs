@@ -13,13 +13,18 @@ fn every_variant_appears_in_all_exactly_once() {
     let variants: std::collections::BTreeSet<_> = all
         .iter()
         .map(|verb| match verb {
+            UpstreamVerb::Discover => "server/discover",
             UpstreamVerb::Initialize { .. } => "initialize",
             UpstreamVerb::NotificationsInitialized => "notifications/initialized",
         })
         .collect();
     assert_eq!(
         variants,
-        std::collections::BTreeSet::from(["initialize", "notifications/initialized"])
+        std::collections::BTreeSet::from([
+            "server/discover",
+            "initialize",
+            "notifications/initialized"
+        ])
     );
     let mut names: Vec<&str> = all.iter().map(UpstreamVerb::method).collect();
     let before = names.len();
@@ -143,10 +148,22 @@ impl UpstreamVerb {
     /// test counts production construction sites, never this list.
     pub fn all() -> Vec<UpstreamVerb> {
         vec![
+            UpstreamVerb::Discover,
             UpstreamVerb::Initialize {
                 client_version: "0.0.0",
             },
             UpstreamVerb::NotificationsInitialized,
         ]
     }
+}
+
+#[test]
+fn initialization_requests_a_supported_session_revision() {
+    let body = UpstreamVerb::Initialize {
+        client_version: "1.6.0",
+    }
+    .build("", 1, None)
+    .body;
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["params"]["protocolVersion"], "2025-11-25");
 }

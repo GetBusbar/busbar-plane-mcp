@@ -59,7 +59,7 @@ fn a_refusal_moves_the_ladder_and_an_outage_does_not() {
     assert_eq!(probe_outcome(400, b""), StepOutcome::Refused4xx);
     assert_eq!(probe_outcome(404, b"{}"), StepOutcome::Refused4xx);
     assert_eq!(probe_outcome(502, b""), StepOutcome::Unreachable);
-    for code in [-32601, -32600, -32602, -32022] {
+    for code in [-32601, -32600, -32602] {
         let body = json!({"jsonrpc":"2.0","id":1,"error":{"code":code,"message":"m"}}).to_string();
         assert_eq!(
             probe_outcome(200, body.as_bytes()),
@@ -75,34 +75,66 @@ fn a_refusal_moves_the_ladder_and_an_outage_does_not() {
     );
 }
 
-/// ANY `4xx` to the stateless request refuses its revision, whatever JSON-RPC error rides it.
 #[test]
-fn red_any_4xx_to_the_stateless_request_refuses_its_revision() {
-    for status in [400u16, 401, 404, 405, 409, 422] {
-        let body = json!({"jsonrpc":"2.0","id":null,
-            "error":{"code":-32600,"message":"Bad Request: Unsupported protocol version"}})
-        .to_string();
-        assert_eq!(
-            stateless_outcome(status, body.as_bytes()),
-            StepOutcome::Refused4xx,
-            "{status}"
-        );
+fn only_unrecognized_transport_refusals_move_the_stateless_ladder() {
+    for status in [400u16, 404, 405] {
         assert_eq!(stateless_outcome(status, b""), StepOutcome::Refused4xx);
+        let body = json!({"jsonrpc":"2.0","id":null,
+            "error":{"code":-32600,"message":"Bad Request: Unsupported protocol version"}});
+        assert_eq!(
+            stateless_outcome(status, &crate::codec::json(&body)),
+            StepOutcome::Refused4xx
+        );
+    }
+    for status in [401u16, 403, 407, 409, 422, 429] {
+        assert_eq!(stateless_outcome(status, b""), StepOutcome::Answered);
+        assert_eq!(probe_outcome(status, b""), StepOutcome::Answered);
     }
     assert_eq!(stateless_outcome(503, b""), StepOutcome::Unreachable);
+}
 
-    let own =
-        json!({"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"bad args"}}).to_string();
-    assert_eq!(
-        stateless_outcome(200, own.as_bytes()),
-        StepOutcome::Answered
-    );
-    let unsupported =
-        json!({"jsonrpc":"2.0","id":1,"error":{"code":-32022,"message":"m"}}).to_string();
-    assert_eq!(
-        stateless_outcome(200, unsupported.as_bytes()),
-        StepOutcome::Refused4xx
-    );
+#[test]
+fn recognized_modern_errors_never_select_a_session_revision() {
+    for status in [200u16, 400, 404, 405] {
+        for code in [
+            CODE_HEADER_MISMATCH,
+            CODE_MISSING_CLIENT_CAPABILITY,
+            CODE_UNSUPPORTED_PROTOCOL_VERSION,
+        ] {
+            let body = crate::codec::json(&json!({"jsonrpc":"2.0","id":1,
+                "error":{"code":code,"message":"correct the request"}}));
+            assert_eq!(
+                stateless_outcome(status, &body),
+                StepOutcome::Answered,
+                "{status}/{code}"
+            );
+            assert_eq!(
+                probe_outcome(status, &body),
+                StepOutcome::Answered,
+                "{status}/{code}"
+            );
+        }
+    }
+    let missing = crate::codec::json(&json!({"jsonrpc":"2.0","id":1,
+        "error":{"code":-32601,"message":"Method not found"}}));
+    assert_eq!(stateless_outcome(404, &missing), StepOutcome::Answered);
+    assert_eq!(probe_outcome(404, &missing), StepOutcome::Answered);
+    // The same generic JSON-RPC code is not enough to identify a stdio discovery refusal's era.
+    assert_eq!(modern_error(&missing), None);
+}
+
+#[test]
+fn an_error_code_without_a_response_envelope_does_not_establish_a_modern_peer() {
+    for body in [
+        json!({"error":{"code":-32022,"message":"unsupported"}}),
+        json!({"jsonrpc":"1.0","id":1,"error":{"code":-32022,"message":"unsupported"}}),
+        json!({"jsonrpc":"2.0","id":1,"result":{},"error":{"code":-32022,"message":"unsupported"}}),
+    ] {
+        assert_eq!(
+            stateless_outcome(400, &crate::codec::json(&body)),
+            StepOutcome::Refused4xx
+        );
+    }
 }
 
 #[test]
@@ -323,4 +355,10 @@ fn audit_endpoint_relative_references_and_default_ports() {
             Ok(expected)
         );
     }
+}
+
+#[test]
+fn a_modern_http_error_without_an_id_still_identifies_the_protocol() {
+    let body = br#"{"jsonrpc":"2.0","error":{"code":-32020,"message":"header mismatch"}}"#;
+    assert_eq!(stateless_outcome(400, body), StepOutcome::Answered);
 }

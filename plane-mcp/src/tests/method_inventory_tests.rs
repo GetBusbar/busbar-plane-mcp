@@ -53,7 +53,6 @@ const NOT_ISSUED: &[&str] = &[
     "resources/subscribe",
     "resources/templates/list",
     "resources/unsubscribe",
-    "server/discover",
     "subscriptions/listen",
     "tasks/cancel",
     "tasks/get",

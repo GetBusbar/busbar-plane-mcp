@@ -6,13 +6,13 @@
 //! host keeps ONE long-lived program per member. Every exchange the door has with that program — the
 //! relayed `tools/call` over the kernel's walk, verify-on-call's `tools/list`, an operator's
 //! `connect`, a further round, a reply to the program's own ask — is a lease on the same running
-//! child, so this module correlates what it reads BY JSON-RPC ID, the previous release's rule:
+//! child, so this module correlates what it reads by JSON-RPC id:
 //!
 //! * Each lease reads every message the child writes after it opened. A message is a JSON value
 //!   ([`Frames`]: the child's frames, read whole however the host's buffer cut them); only a
 //!   response carrying the id this exchange sent is its answer ([`Correlator::take`]). A response
 //!   to another id is another exchange's and is passed over.
-//! * A message of the child's own is handled as the previous release handled it on the stdio leg
+//! * A message of the child's own is handled on the stdio leg
 //!   (`client::peer`): `notifications/progress` carrying this call's token is relayed; a list-changed
 //!   notification brings verify-on-call forward; every other notification is passed over; `ping`,
 //!   an unknown method and an UNGRANTED authority ask are ANSWERED (the empty result, `-32601`, the
@@ -24,10 +24,10 @@
 //!   ([`Correlator::asks`]) and busbar writes nothing back, every other exchange passes it over,
 //!   and an ask raised while no such call is open is refused on the child's input, once. At most
 //!   [`MAX_INTERLEAVED_MESSAGES`] such messages per exchange.
-//! * `initialize` runs ONCE PER GENERATION of the child (the generation each lease's head names):
-//!   an exchange that opens on a generation the door has not greeted greets it first
-//!   ([`ProgramExchange`]); a JSON-RPC refusal of the handshake is recorded and the leg continues,
-//!   as the previous release did, and only a transport failure fails it.
+//! * Protocol negotiation runs once per checked child generation. Initialization is attempted
+//!   first so supported session servers which ignore pre-handshake requests still respond. A
+//!   JSON-RPC error triggers modern `server/discover`, never an ordinary tool request. Only a
+//!   valid session handshake or supported modern discovery completes the greeting.
 //! * Every id busbar sends a child is its own: a call's carries the unit, so concurrent exchanges on
 //!   one child never share one ([`call_id`], [`list_id`]).
 
@@ -46,9 +46,11 @@ use serde_json::Value;
 use crate::client::jsonrpc::{ServerRequestGrants, HANDSHAKE_REQUEST_ID};
 use crate::client::peer::{NotificationEffect, ServerMessage};
 
+/// Modern discovery has its own id, disjoint from initialization and ordinary dispatch.
+const DISCOVERY_REQUEST_ID: u64 = HANDSHAKE_REQUEST_ID + 1;
+
 /// THE WORK BUDGET of one exchange: how many messages of its own a child may send while busbar
-/// waits for one answer (the previous release's bound, and its reason: the deadline bounds the
-/// exchange in time, this bounds it in work).
+/// waits for one answer: the deadline bounds the exchange in time, this bounds it in work.
 pub const MAX_INTERLEAVED_MESSAGES: u32 = 256;
 
 /// The most host services one exchange makes (each read is one): past it the exchange fails
@@ -66,7 +68,7 @@ const PROGRAM_IDS: u64 = 1 << 40;
 /// Within [`PROGRAM_IDS`]: the `tools/list` exchanges.
 const LIST_IDS: u64 = 1 << 39;
 
-const _: () = assert!(PROGRAM_IDS > HANDSHAKE_REQUEST_ID);
+const _: () = assert!(PROGRAM_IDS > DISCOVERY_REQUEST_ID);
 
 /// The JSON-RPC id unit `unit`'s call carries on a child, round `round`: the unit's own, so two
 /// units' calls on one child never share an id.
@@ -469,7 +471,7 @@ pub struct Exchanged {
     pub generation: u64,
     /// The answer to its request, when it sent one.
     pub answer: Option<Vec<u8>>,
-    /// It greeted the child (`initialize`): the generation is the door's now.
+    /// It negotiated the child protocol: the generation is the door's now.
     pub greeted: bool,
 }
 
@@ -834,6 +836,24 @@ impl ProgramExchange {
                                         Ok(Some(answer)) => {
                                             self.waiting = None;
                                             if wait.as_u64() == Some(HANDSHAKE_REQUEST_ID) {
+                                                if matches!(
+                                                    crate::client::jsonrpc::parse_response(
+                                                        &answer,
+                                                        HANDSHAKE_REQUEST_ID
+                                                    ),
+                                                    crate::client::jsonrpc::RpcOutcome::Error { .. }
+                                                ) {
+                                                    // The peer may be modern, where initialize no longer
+                                                    // exists. Remove the old acknowledgement and prove
+                                                    // modern discovery before sending any tool request.
+                                                    self.queue.pop_front();
+                                                    self.queue.push_front((
+                                                        discover(),
+                                                        Some(Value::from(DISCOVERY_REQUEST_ID)),
+                                                    ));
+                                                    self.step = Step::Next;
+                                                    continue;
+                                                }
                                                 if let Err(reason) = self.greeted(&answer) {
                                                     self.fail(reason);
                                                     continue;
@@ -841,6 +861,13 @@ impl ProgramExchange {
                                                 if self.greeted {
                                                     self.completed_greeting(peer);
                                                 }
+                                            } else if wait.as_u64() == Some(DISCOVERY_REQUEST_ID) {
+                                                if let Err(reason) = self.discovered(&answer) {
+                                                    self.fail(reason);
+                                                    continue;
+                                                }
+                                                self.greeted = true;
+                                                self.completed_greeting(peer);
                                             } else {
                                                 self.answer = Some(answer);
                                             }
@@ -909,6 +936,36 @@ impl ProgramExchange {
         }
         Err("stdio MCP child returned an invalid or failed initialization response".to_string())
     }
+
+    /// Discovery must positively identify the supported modern revision. A generic result,
+    /// error, or unsupported version never permits the queued tool exchange to proceed.
+    fn discovered(&self, answer: &[u8]) -> Result<(), String> {
+        if let crate::client::jsonrpc::RpcOutcome::Result(result) =
+            crate::client::jsonrpc::parse_response(answer, DISCOVERY_REQUEST_ID)
+        {
+            let supported = result
+                .get("supportedVersions")
+                .and_then(Value::as_array)
+                .is_some_and(|versions| {
+                    versions.iter().all(Value::is_string)
+                        && versions
+                            .iter()
+                            .any(|version| version.as_str() == Some(crate::codec::PROTOCOL_VERSION))
+                });
+            if supported
+                && result.get("capabilities").is_some_and(Value::is_object)
+                && result.get("resultType").and_then(Value::as_str) == Some("complete")
+                && result.get("ttlMs").is_some_and(Value::is_number)
+                && matches!(
+                    result.get("cacheScope").and_then(Value::as_str),
+                    Some("public" | "private")
+                )
+            {
+                return Ok(());
+            }
+        }
+        Err("stdio MCP child did not discover a supported modern protocol revision".to_string())
+    }
 }
 
 /// The bytes `span` names in `buf`.
@@ -937,6 +994,14 @@ pub fn initialize() -> Vec<u8> {
     }
     .build("", HANDSHAKE_REQUEST_ID, None)
     .body
+}
+
+/// A bounded second probe for a peer that refuses initialization. Keeping initialization
+/// first preserves supported session servers which ignore requests before their handshake.
+fn discover() -> Vec<u8> {
+    crate::client::verb::UpstreamVerb::Discover
+        .build("", DISCOVERY_REQUEST_ID, None)
+        .body
 }
 
 /// The handshake's acknowledgement, a notification.

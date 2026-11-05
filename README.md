@@ -96,8 +96,12 @@ dispatch. The destination policy checks both tool arguments and URL-bearing repl
 asks. Schema references must resolve inside the registered schema; an exhausted inspection budget
 refuses the request rather than inspecting only part of it.
 
-Stdio servers must return a valid initialization result for a supported session revision before
-receiving tool requests. A partial host write is resumed from its remaining bytes.
+Stdio servers must return a valid initialization result for a supported session revision or,
+after an initialization error, valid discovery advertising the supported modern revision before
+receiving tool requests. Negotiation currently tries initialization first to preserve supported
+session servers that do not answer requests before initialization. This differs from the modern
+specification's discovery-first recommendation; a modern server that does not answer initialization
+cannot be negotiated by this path. A partial host write is resumed from its remaining bytes.
 
 Local rendered responses are limited to 64 MiB, with bounded normalization work. Task-record
 listings retain at most 16 MiB and 16,384 rows per lookup. The local approval replay ledger holds

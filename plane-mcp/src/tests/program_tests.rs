@@ -40,6 +40,9 @@ struct Child {
     next: u64,
     /// Written ahead of each answer: messages of the child's own and other exchanges' answers.
     chatter: Vec<Value>,
+    initialize_error: Option<i64>,
+    discovery: Option<Value>,
+    discovery_error: bool,
 }
 
 impl Child {
@@ -52,8 +55,21 @@ impl Child {
             return Vec::new();
         }
         let mut out = self.chatter.clone();
+        if message["method"] == "server/discover" && self.discovery_error {
+            out.push(json!({"jsonrpc": "2.0", "id": id,
+                "error": {"code": -32601, "message": "discovery is unavailable"}}));
+            return out;
+        }
+        if message["method"] == "initialize" {
+            if let Some(code) = self.initialize_error {
+                out.push(json!({"jsonrpc": "2.0", "id": id,
+                    "error": {"code": code, "message": "initialize is unavailable"}}));
+                return out;
+            }
+        }
         let result = match message["method"].as_str() {
             Some("initialize") => json!({"protocolVersion": "2025-06-18", "capabilities": {}}),
+            Some("server/discover") => self.discovery.clone().unwrap_or_else(|| json!({})),
             Some("tools/list") => {
                 json!({"tools": [{"name": "echo", "inputSchema": {"type": "object"}}]})
             }
@@ -188,6 +204,10 @@ impl Peer for Door {
 
 /// A `tools/list` exchange with the member, under `id`, driven to its end.
 fn list(door: &mut Door, id: Value, ticket: u32) -> Exchanged {
+    try_list(door, id, ticket).expect("the exchange succeeded")
+}
+
+fn try_list(door: &mut Door, id: Value, ticket: u32) -> Result<Exchanged, String> {
     let host = ChildConn;
     let mut exchange = ProgramExchange::listing("srv", crate::statement::NEED_PROGRAM, id, true);
     let ticket = Ticket {
@@ -202,9 +222,9 @@ fn list(door: &mut Door, id: Value, ticket: u32) -> Exchanged {
                 if done.greeted {
                     door.greeted = Some(done.generation);
                 }
-                return done;
+                return Ok(done);
             }
-            Poll::Ready(Err(e)) => panic!("the exchange failed: {e}"),
+            Poll::Ready(Err(e)) => return Err(e),
             Poll::Pending => {}
         }
     }
@@ -424,4 +444,109 @@ fn a_resource_update_announces_without_forcing_an_unrelated_tools_list_fetch() {
         peer.noticed, 0,
         "a resource's content change is not a list change"
     );
+}
+
+fn modern_discovery() -> Value {
+    json!({"resultType": "complete", "supportedVersions": [crate::codec::PROTOCOL_VERSION],
+        "capabilities": {}, "ttlMs": 0, "cacheScope": "private"})
+}
+
+#[test]
+fn a_modern_child_is_discovered_before_tools_and_once_per_generation() {
+    let _one = SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    reset(1, Vec::new());
+    with(|c| {
+        c.initialize_error = Some(-32601);
+        c.discovery = Some(modern_discovery());
+    });
+    let mut door = Door::default();
+    assert!(list(&mut door, list_id(1, 0), 1).greeted);
+    assert!(!list(&mut door, list_id(2, 0), 2).greeted);
+    assert_eq!(
+        methods(&with(|c| c.received.clone())),
+        ["initialize", "server/discover", "tools/list", "tools/list"]
+    );
+    with(|c| c.generation = 2);
+    assert!(list(&mut door, list_id(3, 0), 3).greeted);
+    assert_eq!(
+        methods(&with(|c| c.received.clone())),
+        [
+            "initialize",
+            "server/discover",
+            "tools/list",
+            "tools/list",
+            "initialize",
+            "server/discover",
+            "tools/list"
+        ]
+    );
+    let requests = with(|c| c.received.clone());
+    assert_ne!(requests[0]["id"], requests[1]["id"]);
+    assert_ne!(requests[1]["id"], requests[2]["id"]);
+}
+
+#[test]
+fn invalid_or_unsupported_discovery_never_releases_the_tool_request() {
+    let _one = SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let valid = modern_discovery();
+    let mut unsupported = valid.clone();
+    unsupported["supportedVersions"] = json!(["2025-11-25"]);
+    let mut missing_capabilities = valid.clone();
+    missing_capabilities
+        .as_object_mut()
+        .unwrap()
+        .remove("capabilities");
+    let mut partial = valid.clone();
+    partial["resultType"] = json!("partial");
+    let mut mixed_versions = valid;
+    mixed_versions["supportedVersions"] = json!([crate::codec::PROTOCOL_VERSION, 123]);
+    for discovery in [
+        json!({}),
+        unsupported,
+        missing_capabilities,
+        partial,
+        mixed_versions,
+    ] {
+        reset(1, Vec::new());
+        with(|c| {
+            c.initialize_error = Some(-32601);
+            c.discovery = Some(discovery);
+        });
+        let mut door = Door::default();
+        let error = try_list(&mut door, list_id(1, 0), 1).unwrap_err();
+        assert!(
+            error.contains("supported modern protocol revision"),
+            "{error}"
+        );
+        assert_eq!(door.greeted, None);
+        assert_eq!(
+            methods(&with(|c| c.received.clone())),
+            ["initialize", "server/discover"]
+        );
+        assert!(with(|c| c.leases.is_empty()));
+    }
+}
+
+#[test]
+fn discovery_errors_do_not_release_tools_or_acknowledge_initialization() {
+    let _one = SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    reset(1, Vec::new());
+    with(|c| {
+        c.initialize_error = Some(-32022);
+        c.discovery_error = true;
+    });
+    let mut door = Door::default();
+    assert!(try_list(&mut door, list_id(1, 0), 1).is_err());
+    assert_eq!(door.greeted, None);
+    assert_eq!(
+        methods(&with(|c| c.received.clone())),
+        ["initialize", "server/discover"]
+    );
+    assert!(with(|c| c.leases.is_empty()));
 }

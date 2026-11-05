@@ -16,10 +16,10 @@
 //!
 //! ## What is issued, and from where
 //!
-//! - `initialize` and `notifications/initialized`: the handshake a STDIO CHILD demands before any
-//!   other request (`crate::tool_program::initialize`, `initialized_notification`). Over streamable
-//!   HTTP the stateless revision deleted the handshake; a session revision's is the client
-//!   ladder's (`super::compat`).
+//! - `initialize` and `notifications/initialized`: the session-revision handshake, attempted
+//!   first for stdio children that ignore pre-handshake requests. A child refusing it receives
+//!   `server/discover`, and must establish the modern revision before any tool request.
+//!   HTTP session negotiation is the client ladder's (`super::compat`).
 //!
 //! A caller's resource subscription is never carried upstream: busbar records the uri and relays
 //! what the member announces, so `resources/subscribe` and `resources/unsubscribe` are not issued.
@@ -45,6 +45,8 @@ use crate::codec::{META_CLIENT_CAPABILITIES, META_PROTOCOL_VERSION, PROTOCOL_VER
 /// header); none is kept for a caller that does not exist.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UpstreamVerb {
+    /// Discover a modern stdio peer after it refuses the session handshake.
+    Discover,
     /// The handshake a stdio child demands.
     Initialize {
         /// busbar's release, sent as `clientInfo.version`.
@@ -58,6 +60,7 @@ impl UpstreamVerb {
     /// THE WIRE METHOD NAME.
     pub fn method(&self) -> &'static str {
         match self {
+            UpstreamVerb::Discover => "server/discover",
             UpstreamVerb::Initialize { .. } => "initialize",
             UpstreamVerb::NotificationsInitialized => "notifications/initialized",
         }
@@ -73,8 +76,9 @@ impl UpstreamVerb {
     /// Split that way so no variant can forget the revision's required `_meta`.
     fn params(&self) -> serde_json::Value {
         match self {
+            UpstreamVerb::Discover => serde_json::json!({}),
             UpstreamVerb::Initialize { client_version } => serde_json::json!({
-                "protocolVersion": PROTOCOL_VERSION,
+                "protocolVersion": crate::revision::SESSION_REVISIONS[0].wire(),
                 "capabilities": {},
                 "clientInfo": { "name": "busbar", "version": client_version },
             }),

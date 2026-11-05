@@ -12,9 +12,9 @@ use super::jsonrpc::OutboundRequest;
 use crate::adapt::H_SESSION_ID;
 use crate::codec::json;
 use crate::codec::{
-    CODE_INVALID_PARAMS, CODE_INVALID_REQUEST, CODE_METHOD_NOT_FOUND, CODE_REFUSED,
-    CODE_UNSUPPORTED_PROTOCOL_VERSION, H_MCP_METHOD, H_MCP_NAME, H_PROTOCOL_VERSION,
-    META_CLIENT_CAPABILITIES, META_PROTOCOL_VERSION,
+    CODE_HEADER_MISMATCH, CODE_INVALID_PARAMS, CODE_INVALID_REQUEST, CODE_METHOD_NOT_FOUND,
+    CODE_MISSING_CLIENT_CAPABILITY, CODE_REFUSED, CODE_UNSUPPORTED_PROTOCOL_VERSION, H_MCP_METHOD,
+    H_MCP_NAME, H_PROTOCOL_VERSION, META_CLIENT_CAPABILITIES, META_PROTOCOL_VERSION,
 };
 use crate::revision::{Revision, StepOutcome};
 
@@ -22,18 +22,29 @@ use crate::revision::{Revision, StepOutcome};
 /// reads back exactly, above every other id busbar sends.
 pub const INITIALIZE_ID: u64 = (1 << 53) - 1;
 
-/// Reads whether an initialize response permits trying the legacy transport.
-///
-/// A status in `400..500`, or a JSON-RPC error that says the method, the request shape or the
-/// revision is not understood, is a refusal of the revision and moves the ladder. A `5xx`, or no
-/// answer, says nothing about the revision. Anything else answered.
+/// Reads whether an initialize response permits trying the older HTTP+SSE transport.
+/// Only the transport detection statuses (400, 404, 405) or an unrecognized initialization
+/// refusal move the ladder. Recognized modern errors and other HTTP refusals do not.
 #[must_use]
 pub fn probe_outcome(status: u16, body: &[u8]) -> StepOutcome {
     if (500..600).contains(&status) {
         return StepOutcome::Unreachable;
     }
-    if (400..500).contains(&status) {
+    if modern_error(body).is_some()
+        || (status == 404
+            && serde_json::from_slice::<Value>(body)
+                .ok()
+                .as_ref()
+                .and_then(response_error)
+                == Some(CODE_METHOD_NOT_FOUND))
+    {
+        return StepOutcome::Answered;
+    }
+    if matches!(status, 400 | 404 | 405) {
         return StepOutcome::Refused4xx;
+    }
+    if (400..500).contains(&status) {
+        return StepOutcome::Answered;
     }
     let code = serde_json::from_slice::<Value>(body)
         .ok()
@@ -42,8 +53,7 @@ pub fn probe_outcome(status: u16, body: &[u8]) -> StepOutcome {
         Some(c)
             if c == CODE_METHOD_NOT_FOUND
                 || c == CODE_INVALID_REQUEST
-                || c == CODE_INVALID_PARAMS
-                || c == CODE_UNSUPPORTED_PROTOCOL_VERSION =>
+                || c == CODE_INVALID_PARAMS =>
         {
             StepOutcome::Refused4xx
         }
@@ -51,38 +61,50 @@ pub fn probe_outcome(status: u16, body: &[u8]) -> StepOutcome {
     }
 }
 
-/// Reads what the answer to busbar's STATELESS request says about the upstream's revision: the
-/// ladder moves on any refusal of the request, and any other answer, an upstream's own JSON-RPC
-/// error at a success status included, is the stateless path's answer, handed on as it came (THE
-/// DESIGN section 2, the mcp bullet: the stateless path of the `2026-07-28` revision stays
-/// byte-identical).
-///
-/// A refusal of the revision is what a server of an earlier revision answers a request that opens
-/// no session:
-///
-/// - ANY `4xx`, whatever its body: the MCP specification (2025-06-18 and 2025-11-25, Streamable
-///   HTTP) has a server that does not support the `MCP-Protocol-Version` it was sent answer
-///   `400 Bad Request` and fixes no JSON-RPC code or wording for it, so no body can tell that
-///   refusal from another; a `2024-11-05` server's `404`/`405` at its event stream's endpoint and a
-///   session server's `400`/`404` for the session it was not named are the same answer. The
-///   earlier revisions are tried before the upstream is taken for a stateless one, and the `4xx`
-///   never reaches the caller as the call's answer;
-/// - a JSON-RPC error `-32022` (the revision is unsupported), at any status;
-/// - an invalid-request/params or generic server error with a recognised missing-session or
-///   uninitialized-server message; an application error mentioning a session is still its answer.
-///
-/// A `5xx`, or no answer, says nothing about the revision.
+/// A recognized modern protocol error, independent of the transport status. These codes
+/// establish the peer's era; they must never trigger an initialization fallback.
+fn modern_error(body: &[u8]) -> Option<i64> {
+    let value: Value = serde_json::from_slice(body).ok()?;
+    let code = response_error(&value)?;
+    matches!(
+        code,
+        CODE_HEADER_MISMATCH | CODE_MISSING_CLIENT_CAPABILITY | CODE_UNSUPPORTED_PROTOCOL_VERSION
+    )
+    .then_some(code)
+}
+
+fn response_error(value: &Value) -> Option<i64> {
+    if value.get("jsonrpc")?.as_str()? != "2.0" || value.get("result").is_some() {
+        return None;
+    }
+    let error = value.get("error")?;
+    error.get("message")?.as_str()?;
+    error.get("code")?.as_i64()
+}
+
+/// Classifies a stateless request's response without discarding modern protocol errors.
+/// A recognized modern error establishes the peer's era and is handed back for correction,
+/// including HTTP 404/-32601. Only an unrecognized 400/404/405, or a known missing-session
+/// response from an older implementation, permits initialization. Authentication, rate-limit
+/// and other application refusals are terminal; 5xx or no answer is not a revision signal.
 #[must_use]
 pub fn stateless_outcome(status: u16, body: &[u8]) -> StepOutcome {
     if (500..600).contains(&status) {
         return StepOutcome::Unreachable;
     }
-    if (400..500).contains(&status) {
+    let value = serde_json::from_slice::<Value>(body).ok();
+    if modern_error(body).is_some()
+        || (status == 404 && value.as_ref().and_then(response_error) == Some(CODE_METHOD_NOT_FOUND))
+    {
+        return StepOutcome::Answered;
+    }
+    if matches!(status, 400 | 404 | 405) {
         return StepOutcome::Refused4xx;
     }
-    let error = serde_json::from_slice::<Value>(body)
-        .ok()
-        .and_then(|v| v.get("error").filter(|e| e.is_object()).cloned());
+    if (400..500).contains(&status) {
+        return StepOutcome::Answered;
+    }
+    let error = value.and_then(|v| v.get("error").filter(|e| e.is_object()).cloned());
     let Some(error) = error else {
         return StepOutcome::Answered;
     };
@@ -106,7 +128,7 @@ pub fn stateless_outcome(status: u16, body: &[u8]) -> StepOutcome {
             | "session id is required"
             | "invalid session id"
     );
-    if code == Some(CODE_UNSUPPORTED_PROTOCOL_VERSION) || names_session {
+    if names_session {
         StepOutcome::Refused4xx
     } else {
         StepOutcome::Answered

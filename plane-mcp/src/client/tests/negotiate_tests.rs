@@ -283,3 +283,25 @@ fn audit_terminal_negotiation_never_opens_stream_on_late_answer() {
         Action::Fail(_)
     ));
 }
+
+#[test]
+fn a_new_modern_peers_error_is_returned_without_initialization_or_replay() {
+    for (status, code) in [(400, -32020), (400, -32021), (400, -32022), (404, -32601)] {
+        let mut negotiation = Negotiator::new(call(), None, "1.6.0");
+        assert!(matches!(negotiation.start(), Action::Send { .. }));
+        let response = answer(
+            status,
+            json!({"jsonrpc":"2.0","id":5,
+            "error":{"code":code,"message":"modern refusal","data":{"supported":["2026-07-28"]}}}),
+        )
+        .unwrap();
+        assert_eq!(
+            negotiation.on_answer(Some(response.clone())),
+            Action::Finish(response)
+        );
+        assert_eq!(
+            negotiation.remembered().unwrap().revision,
+            Revision::R2026_07_28
+        );
+    }
+}
