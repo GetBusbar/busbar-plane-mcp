@@ -41,6 +41,12 @@ fi
 # wedges must cost this script one timeout rather than the whole run: a negative control nobody can
 # wait out is a negative control nobody runs.
 PER_MODE_TIMEOUT="${MCP_NEGCTL_TIMEOUT:-120}"
+# Every run has a new evidence directory; never overwrite a previous mode receipt.
+REPORT_PARENT="${MCP_NEGCTL_REPORT_DIR:-$(pwd)/reports}"
+mkdir -p "$REPORT_PARENT" || exit 2
+REPORT_DIR="$(mktemp -d "$REPORT_PARENT/negative-control.XXXXXXXX")" || exit 2
+printf '%s\n' "$MODES" > "$REPORT_DIR/modes.txt"
+echo "negative-control artifacts: $REPORT_DIR" >&2
 timeout_cmd=""
 command -v timeout >/dev/null 2>&1 && timeout_cmd="timeout $PER_MODE_TIMEOUT"
 command -v gtimeout >/dev/null 2>&1 && timeout_cmd="gtimeout $PER_MODE_TIMEOUT"
@@ -71,8 +77,13 @@ incomplete=""
 for mode in $MODES; do
   run_status=0
   # shellcheck disable=SC2086
-  OUT=$(MCP_FAKE_MODE="$mode" $timeout_cmd "$NODE" bin/mcp-battery.mjs run --name "fake-$mode" \
-    --server-cmd "\"$NODE\" \"$FAKE\"" --tier push,pr --role server 2>&1) || run_status=$?
+  MCP_FAKE_MODE="$mode" $timeout_cmd "$NODE" bin/mcp-battery.mjs run --name "fake-$mode" \
+    --server-cmd "\"$NODE\" \"$FAKE\"" --failing-tool fail --tier push,pr --role server \
+    --out "$REPORT_DIR/$mode.json" --checkpoint "$REPORT_DIR/$mode.checkpoint.json" \
+    > "$REPORT_DIR/$mode.stdout.log" 2> "$REPORT_DIR/$mode.stderr.log" || run_status=$?
+  # The shell status and raw streams survive even if no final report could be written.
+  printf '{"mode":"%s","exit_status":%s}\n' "$mode" "$run_status" > "$REPORT_DIR/$mode.status.json"
+  OUT="$(cat "$REPORT_DIR/$mode.stdout.log" "$REPORT_DIR/$mode.stderr.log")"
   R=$(echo "$OUT" | grep "^results" | sed 's/results *: //')
   F=$(echo "$OUT" | grep -E "^  FAIL" | sed -E 's/^  FAIL *\[[^]]*\] *//' | tr '\n' ' ')
   E=$(echo "$OUT" | grep -E "^  ERR " | sed -E 's/^  ERR *\[[^]]*\] *//' | tr '\n' ' ')

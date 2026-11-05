@@ -186,7 +186,7 @@ export async function runOne(t, target) {
   return record;
 }
 
-export async function runAll(target, filter = {}) {
+export async function runAll(target, filter = {}, onProgress = null) {
   const selected = allTests().filter((t) => {
     if (filter.tiers && !filter.tiers.includes(t.tier)) return false;
     if (filter.areas && !filter.areas.includes(t.area)) return false;
@@ -196,8 +196,13 @@ export async function runAll(target, filter = {}) {
     return true;
   });
   const results = [];
+  // Checkpoints report only observations already made. An interrupted run remains incomplete;
+  // neither a failsafe nor a process timeout changes any scenario verdict.
+  if (onProgress) onProgress(results, selected.length, false);
   for (const t of selected) {
     results.push(await runOne(t, target));
+    if (onProgress) onProgress(results, selected.length, false);
   }
+  if (onProgress) onProgress(results, selected.length, true);
   return results;
 }

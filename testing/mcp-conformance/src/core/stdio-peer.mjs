@@ -25,6 +25,17 @@ if (!Number.isFinite(FAILSAFE_MS) || FAILSAFE_MS <= 0) {
 }
 
 export class StdioPeer {
+  static ownedPeers = new Set();
+
+  static terminateOwnedPeers() {
+    for (const peer of StdioPeer.ownedPeers) {
+      try {
+        if (process.platform === 'win32') peer.proc.kill('SIGKILL');
+        else process.kill(-peer.proc.pid, 'SIGKILL');
+      } catch { /* already exited */ }
+    }
+  }
+
   constructor(command, args = [], opts = {}) {
     this.command = command;
     this.args = args;
@@ -55,6 +66,7 @@ export class StdioPeer {
       env: { ...process.env, ...(this.opts.env || {}), MCP_BATTERY_HTTP_STATUS_FD: '3' },
       cwd: this.opts.cwd,
     });
+    StdioPeer.ownedPeers.add(this);
     this.proc.stdout.on('data', (chunk) => {
       this.stdoutBytes = Buffer.concat([this.stdoutBytes, chunk]);
       this._buf += this._decoder.write(chunk);
@@ -82,6 +94,7 @@ export class StdioPeer {
     });
     // `close` follows stdout/stderr/status drain; `exit` may precede the final pipe data.
     this.proc.on('close', (code, signal) => {
+      StdioPeer.ownedPeers.delete(this);
       this._buf += this._decoder.end();
       if (this._buf !== '') { this._onLine(this._buf); this._buf = ''; }
       this._httpBuf += this._httpDecoder.end();
@@ -99,6 +112,7 @@ export class StdioPeer {
       }
     });
     this.proc.on('error', (err) => {
+      StdioPeer.ownedPeers.delete(this);
       this.spawnError = err;
       this.exited = true;
       for (const w of this._exitWaiters.splice(0)) w.resolve();

@@ -420,7 +420,7 @@ official_control() {
 never float it to a branch, or this leg goes red the day somebody else's main breaks."
     say "   building the control peer at $(git -C "$sdk" rev-parse --short HEAD)"
     rm -f "$stamp"
-    ( cd "$sdk" && pnpm install --frozen-lockfile && pnpm run build:all ) >"$dir/build.log" 2>&1 \
+    ( cd "$sdk" && env NPM_CONFIG_OFFLINE=false npm_config_offline=false pnpm install --frozen-lockfile && pnpm run build:all ) >"$dir/build.log" 2>&1 \
       || { tail -40 "$dir/build.log" >&2; die "the control peer would not build. Harness/runner \
 finding, not a busbar finding."; }
     git -C "$sdk" rev-parse HEAD >"$stamp"

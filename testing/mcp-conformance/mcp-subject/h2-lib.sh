@@ -45,7 +45,7 @@ h2_wait_for_http() {
 # The card is the PLANE's own (`tools.rate_card`, keyed by lane): it must configure every class the plane
 # declares, and an explicit 0 counts. Written inside the `tools:` section, two-space indented.
 H2_RATE_CARD_DEFAULT='  rate_card:
-    probe_ping: { units: { tool_calls: 0, bytes: 0 } }'
+    mcp_server:probe: { units: { tool_calls: 0, bytes: 0 } }'
 
 H2_BIN="${MCP_SUBJECT_BUSBAR_BIN:-${H2_REPO}/target/release/busbar}"
 [ -x "$H2_BIN" ] || { echo "H2: no busbar binary at $H2_BIN (build with: cargo build --release -p busbar)" >&2; exit 2; }
@@ -126,6 +126,9 @@ ${H2_RATE_CARD_YAML:-$H2_RATE_CARD_DEFAULT}
   probe:
     url: "https://127.0.0.1:${H2_UPSTREAM_PORT}/mcp"
     allow_private: true
+    tls:
+      ca_cert_pem: |
+$(sed 's/^/        /' "$MCP_FIXTURE_CA_FILE")
     pin:
       mechanism: cert_spki
       key: "$MCP_FIXTURE_KEY_PIN"

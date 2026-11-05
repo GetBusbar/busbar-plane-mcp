@@ -8,11 +8,12 @@
 // The harness knows nothing about any particular implementation. A target is a
 // launch command supplied on the command line or in the environment.
 
-import { writeFileSync, readFileSync, mkdirSync } from 'node:fs';
+import { writeFileSync, readFileSync, mkdirSync, renameSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runAll, runOne, allTests, VERDICT } from '../src/core/runner.mjs';
 import { Target } from '../src/core/target.mjs';
+import { StdioPeer } from '../src/core/stdio-peer.mjs';
 import { compare, renderDifferential } from '../src/core/differential.mjs';
 import { REVISION } from '../src/core/spec.mjs';
 
@@ -58,6 +59,7 @@ run options
                          it, a requested-but-unarmed role EXITS 2 rather than quietly leaving the
                          denominator. Never set this to keep a gate green.
   --only SUBSTR          run only tests whose id contains SUBSTR
+  --checkpoint FILE      atomically preserve completed cases, including incomplete runs
   --out FILE             write the result JSON here
   --quiet                summary only
 
@@ -223,7 +225,18 @@ Do ONE of these, and either way the choice is now visible in the log and in the 
   }
 
   const started = new Date().toISOString();
-  const results = await runAll(target, filter);
+  const checkpointPath = args.checkpoint ? resolve(args.checkpoint) : null;
+  const checkpoint = checkpointPath ? (results, total, completed) => {
+    mkdirSync(dirname(checkpointPath), { recursive: true });
+    const temporary = `${checkpointPath}.tmp`;
+    writeFileSync(temporary, JSON.stringify({
+      harnessVersion: '1.0.0', revision: REVISION, target: target.toJSON(),
+      startedAt: started, filter, roleAudit, results,
+      execution: { completed, selectedCases: total, recordedCases: results.length },
+    }, null, 2));
+    renameSync(temporary, checkpointPath);
+  } : null;
+  const results = await runAll(target, filter, checkpoint);
   const payload = {
     harnessVersion: '1.0.0',
     revision: REVISION,
@@ -364,6 +377,10 @@ function cmdCompare(args) {
   }
   const c = JSON.parse(readFileSync(resolve(args.control), 'utf8'));
   const s = JSON.parse(readFileSync(resolve(args.subject), 'utf8'));
+  if (c.execution?.completed === false || s.execution?.completed === false) {
+    console.error('FATAL: an interrupted checkpoint is incomplete evidence, not a completed report.');
+    process.exit(1);
+  }
   const report = compare(c.results, s.results, {
     controlName: c.target.name,
     subjectName: s.target.name,
@@ -403,6 +420,11 @@ function cmdList(args) {
 // SCENARIOS catch a broken peer, and this proves the MACHINERY the scenarios are scored by cannot
 // be lied to. Every fixture has a red half and a green half, because a rule that refuses everything
 // proves as little as one that refuses nothing.
+// The timeout driver may stop this process while a detached peer is active.
+// Terminate only process groups created by this harness; preserve the checkpoint and exit red.
+for (const [signal, status] of [['SIGTERM', 143], ['SIGINT', 130]]) {
+  process.once(signal, () => { StdioPeer.terminateOwnedPeers(); process.exit(status); });
+}
 const args = parseArgs(process.argv.slice(2));
 const cmd = args._[0];
 if (cmd === 'run') await cmdRun(args);

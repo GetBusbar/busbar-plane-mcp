@@ -75,7 +75,7 @@ RATE_TOOL_CALLS=2
 RATE_BYTES=3
 FEE_MICROS=10000 # tools.fees.per_request: 1 cent, lifted by the one scale (1 cent = 10000 micros)
 export H2_RATE_CARD_YAML="  rate_card:
-    probe_ping: { units: { tool_calls: ${RATE_TOOL_CALLS}, bytes: ${RATE_BYTES} } }"
+    mcp_server:probe: { units: { tool_calls: ${RATE_TOOL_CALLS}, bytes: ${RATE_BYTES} } }"
 
 # ── (1) THE CARD MUST BE ABLE TO NAME THE CLASSES ─────────────────────────────────────────────────
 h2_boot "$WORK" "$H2_GROUPS_YAML" || {

@@ -196,6 +196,9 @@ tools:
     # is a quarantine on the first unattended sweep tick. See dg() above.
     url: "https://127.0.0.1:$upstream_port/mcp/json"
     allow_private: true
+    tls:
+      ca_cert_pem: |
+$(sed 's/^/        /' "$MCP_FIXTURE_CA_FILE")
     pin:
       mechanism: cert_spki
       key: "$MCP_FIXTURE_KEY_PIN"
@@ -247,6 +250,9 @@ tools:
     # out loud to permit that, and saying it here is honest rather than convenient: the SSRF guard
     # refuses a private address by default and this registration genuinely is an internal one.
     allow_private: true
+    tls:
+      ca_cert_pem: |
+$(sed 's/^/        /' "$MCP_FIXTURE_CA_FILE")
     pin:
       mechanism: cert_spki
       key: "$MCP_FIXTURE_KEY_PIN"
@@ -672,6 +678,9 @@ tools:
     # is a quarantine on the first unattended sweep tick. See dg() above.
     url: "https://127.0.0.1:$upstream_port/mcp/slow"
     allow_private: true
+    tls:
+      ca_cert_pem: |
+$(sed 's/^/        /' "$MCP_FIXTURE_CA_FILE")
     pin:
       mechanism: cert_spki
       key: "$MCP_FIXTURE_KEY_PIN"
@@ -702,6 +711,9 @@ tools:
     # is a quarantine on the first unattended sweep tick. See dg() above.
     url: "https://127.0.0.1:$upstream_port/mcp/failing"
     allow_private: true
+    tls:
+      ca_cert_pem: |
+$(sed 's/^/        /' "$MCP_FIXTURE_CA_FILE")
     pin:
       mechanism: cert_spki
       key: "$MCP_FIXTURE_KEY_PIN"
@@ -727,6 +739,9 @@ tools:
     # is a quarantine on the first unattended sweep tick. See dg() above.
     url: "https://127.0.0.1:$upstream_port/mcp/protocol"
     allow_private: true
+    tls:
+      ca_cert_pem: |
+$(sed 's/^/        /' "$MCP_FIXTURE_CA_FILE")
     pin:
       mechanism: cert_spki
       key: "$MCP_FIXTURE_KEY_PIN"
@@ -746,6 +761,9 @@ tools:
     # is a quarantine on the first unattended sweep tick. See dg() above.
     url: "https://127.0.0.1:$upstream_port/mcp/confirm"
     allow_private: true
+    tls:
+      ca_cert_pem: |
+$(sed 's/^/        /' "$MCP_FIXTURE_CA_FILE")
     pin:
       mechanism: cert_spki
       key: "$MCP_FIXTURE_KEY_PIN"
@@ -787,6 +805,9 @@ tools:
     # is a quarantine on the first unattended sweep tick. See dg() above.
     url: "https://127.0.0.1:$upstream_port/mcp/multi"
     allow_private: true
+    tls:
+      ca_cert_pem: |
+$(sed 's/^/        /' "$MCP_FIXTURE_CA_FILE")
     pin:
       mechanism: cert_spki
       key: "$MCP_FIXTURE_KEY_PIN"
@@ -851,6 +872,9 @@ tools:
     # is a quarantine on the first unattended sweep tick. See dg() above.
     url: "https://127.0.0.1:$upstream_port/mcp/greeter"
     allow_private: true
+    tls:
+      ca_cert_pem: |
+$(sed 's/^/        /' "$MCP_FIXTURE_CA_FILE")
     pin:
       mechanism: cert_spki
       key: "$MCP_FIXTURE_KEY_PIN"
@@ -899,6 +923,9 @@ YAML
   seam:
     url: "$MCP_SEAM_UPSTREAM_URL"
     allow_private: true
+    tls:
+      ca_cert_pem: |
+$(sed 's/^/        /' "$MCP_FIXTURE_CA_FILE")
     timeout: 10s
     # verify_ttl SAID OUT LOUD, at its default (docs/tool-and-agent-trust.md): \`client-arm.sh\`
     # waits it out (MCP_SEAM_VERIFY_TTL_S) so each CLI scenario's call is judged on a verification
@@ -924,6 +951,9 @@ YAML
   seamright:
     url: "$MCP_SEAM_RIGHT_UPSTREAM_URL"
     allow_private: true
+    tls:
+      ca_cert_pem: |
+$(sed 's/^/        /' "$MCP_FIXTURE_CA_FILE")
     timeout: 10s
     verify_ttl: ${SEAM_VERIFY_TTL_S}s
     pin:
@@ -965,6 +995,9 @@ YAML
   probe:
     url: "$MCP_SEAM_UPSTREAM_URL"
     allow_private: true
+    tls:
+      ca_cert_pem: |
+$(sed 's/^/        /' "$MCP_FIXTURE_CA_FILE")
     timeout: 10s
     pin:
       mechanism: cert_spki
