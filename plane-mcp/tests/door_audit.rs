@@ -296,6 +296,7 @@ static HOST_SLOTS: HostSlots = HostSlots {
     work_find: None,
     work_settle: None,
     work_resume: None,
+    work_status: None,
     trust_sight: Some(sighted),
     trust_due: None,
     verify_lookup: None,

@@ -1,0 +1,1318 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "mcp plane lifecycle settings",
+  "anyOf": [
+    {
+      "$ref": "#/$defs/section"
+    },
+    {
+      "type": "object",
+      "properties": {
+        "tools": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/validate_section"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mcp": {
+          "type": "object",
+          "properties": {
+            "canonical_uri": {
+              "type": "string",
+              "pattern": "^\\s*https?://[^/?#]+/mcp\\s*$"
+            },
+            "authorization_servers": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^\\s*https?://[^?#]+\\s*$"
+              },
+              "minItems": 1
+            },
+            "scopes_supported": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "allowed_origins": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "canonical_uri",
+            "authorization_servers"
+          ]
+        }
+      },
+      "additionalProperties": true,
+      "anyOf": [
+        {
+          "required": [
+            "tools"
+          ]
+        },
+        {
+          "required": [
+            "mcp"
+          ]
+        }
+      ]
+    }
+  ],
+  "$defs": {
+    "section": {
+      "type": "object",
+      "properties": {
+        "hooks": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "upstream_credentials": {
+          "const": "own"
+        },
+        "pools": {
+          "type": "object",
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "members": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "default": []
+                  },
+                  "repeatable": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "default": []
+                  }
+                },
+                "additionalProperties": true
+              },
+              {
+                "not": {
+                  "type": "object"
+                }
+              }
+            ]
+          },
+          "default": {}
+        }
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/server"
+      },
+      "propertyNames": {
+        "anyOf": [
+          {
+            "enum": [
+              "hooks",
+              "upstream_credentials",
+              "pools"
+            ]
+          },
+          {
+            "pattern": "^[A-Za-z0-9.-]+$"
+          }
+        ]
+      }
+    },
+    "validate_section": {
+      "type": "object",
+      "properties": {
+        "hooks": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "upstream_credentials": {
+          "const": "own"
+        }
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/server"
+      },
+      "propertyNames": {
+        "anyOf": [
+          {
+            "enum": [
+              "hooks",
+              "upstream_credentials",
+              "pools"
+            ]
+          },
+          {
+            "pattern": "^[A-Za-z0-9.-]+$"
+          }
+        ]
+      }
+    },
+    "server": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string",
+          "default": ""
+        },
+        "command": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "$ref": "#/$defs/secret"
+              }
+            ],
+            "x-busbar-secret": true,
+            "writeOnly": true
+          },
+          "default": {},
+          "propertyNames": {
+            "pattern": "^[^=\\u0000]+$"
+          }
+        },
+        "cwd": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pin": {
+          "type": "object",
+          "properties": {
+            "mechanism": {
+              "enum": [
+                "cert_spki",
+                "mtls",
+                "local_program",
+                "unpinned"
+              ]
+            },
+            "key": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "mechanism"
+          ]
+        },
+        "client_identity": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "cert": {
+                  "$ref": "#/$defs/secret",
+                  "x-busbar-secret": true,
+                  "writeOnly": true
+                },
+                "key": {
+                  "$ref": "#/$defs/secret",
+                  "x-busbar-secret": true,
+                  "writeOnly": true
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "cert",
+                "key"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tls": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "ca_cert_pem": {
+                  "type": "string",
+                  "pattern": "\\S"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "ca_cert_pem"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "verify_ttl": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "5s"
+        },
+        "timeout": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^\\s*0*[1-9][0-9]*[smhd]\\s*$"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "30s",
+          "description": "Positive duration parsed by the host duration grammar."
+        },
+        "tools_allow": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/tool"
+          },
+          "default": {},
+          "propertyNames": {
+            "pattern": "^[A-Za-z0-9_.-]+$"
+          }
+        },
+        "prompts_allow": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/prompt"
+          },
+          "default": {},
+          "propertyNames": {
+            "type": "string",
+            "pattern": "\\S"
+          }
+        },
+        "resources_allow": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/resource"
+          },
+          "default": {},
+          "propertyNames": {
+            "type": "string",
+            "pattern": "\\S"
+          }
+        },
+        "resource_templates_allow": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/resource_template"
+          },
+          "default": {},
+          "propertyNames": {
+            "type": "string",
+            "pattern": "\\S"
+          }
+        },
+        "transport": {
+          "enum": [
+            "streamable_http",
+            "stdio",
+            null
+          ],
+          "default": "streamable_http"
+        },
+        "aud": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^https?://",
+              "description": "Absolute HTTP(S) resource indicator, without fragment, userinfo, whitespace or controls."
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "grants": {
+          "type": "object",
+          "properties": {
+            "sampling": {
+              "type": "boolean",
+              "default": false
+            },
+            "elicitation": {
+              "type": "boolean",
+              "default": false
+            },
+            "roots": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          "additionalProperties": false,
+          "default": {
+            "sampling": false,
+            "elicitation": false,
+            "roots": false
+          }
+        },
+        "allow_private": {
+          "type": "boolean",
+          "default": false
+        },
+        "token_exchange": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "token_url": {
+                  "type": "string",
+                  "pattern": "^https?://"
+                },
+                "subject_token": {
+                  "$ref": "#/$defs/secret",
+                  "x-busbar-secret": true,
+                  "writeOnly": true
+                },
+                "subject_token_type": {
+                  "type": "string",
+                  "default": "urn:ietf:params:oauth:token-type:access_token"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "token_url",
+                "subject_token"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "max_input_required_rounds": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295,
+              "x-busbar-integer-token": "unsigned"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": 3
+        },
+        "max_caller_ask_rounds": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295,
+              "x-busbar-integer-token": "unsigned"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": 3
+        },
+        "sampling_bounds": {
+          "type": "object",
+          "properties": {
+            "max_messages": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4294967295,
+              "default": 64,
+              "x-busbar-integer-token": "unsigned"
+            },
+            "max_prompt_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4294967295,
+              "default": 65536,
+              "x-busbar-integer-token": "unsigned"
+            },
+            "max_stop_sequences": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295,
+              "default": 8,
+              "x-busbar-integer-token": "unsigned"
+            },
+            "max_stop_sequence_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295,
+              "default": 64,
+              "x-busbar-integer-token": "unsigned"
+            },
+            "temperature_min_milli": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295,
+              "default": 0,
+              "x-busbar-integer-token": "unsigned"
+            },
+            "temperature_max_milli": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295,
+              "default": 2000,
+              "x-busbar-integer-token": "unsigned"
+            },
+            "max_input_response_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4294967295,
+              "default": 1048576,
+              "x-busbar-integer-token": "unsigned"
+            }
+          },
+          "additionalProperties": false,
+          "description": "Lifecycle additionally requires temperature_min_milli <= temperature_max_milli."
+        },
+        "upstream_credentials": {
+          "enum": [
+            "own",
+            null
+          ]
+        },
+        "hooks": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "pin"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "transport"
+            ],
+            "properties": {
+              "transport": {
+                "const": "stdio"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "command"
+            ],
+            "properties": {
+              "command": {
+                "type": "string",
+                "pattern": "^/(?:[\\s\\S]*\\S)?$"
+              },
+              "cwd": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^/(?:[\\s\\S]*\\S)?$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "url": {
+                "type": "string",
+                "pattern": "^\\s*$"
+              },
+              "pin": {
+                "properties": {
+                  "mechanism": {
+                    "enum": [
+                      "local_program",
+                      "unpinned"
+                    ]
+                  }
+                }
+              },
+              "allow_private": {
+                "const": false
+              },
+              "token_exchange": {
+                "type": "null"
+              },
+              "aud": {
+                "type": "null"
+              },
+              "upstream_credentials": {
+                "type": "null"
+              },
+              "client_identity": {
+                "type": "null"
+              },
+              "tls": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "required": [
+              "url"
+            ],
+            "properties": {
+              "url": {
+                "type": "string",
+                "pattern": "^https?://"
+              },
+              "command": {
+                "type": "null"
+              },
+              "cwd": {
+                "type": "null"
+              },
+              "args": {
+                "maxItems": 0
+              },
+              "env": {
+                "maxProperties": 0
+              },
+              "pin": {
+                "properties": {
+                  "mechanism": {
+                    "enum": [
+                      "cert_spki",
+                      "mtls",
+                      "unpinned"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "pin": {
+                "properties": {
+                  "mechanism": {
+                    "const": "mtls"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "client_identity"
+            ],
+            "properties": {
+              "client_identity": {
+                "type": "object",
+                "properties": {
+                  "cert": {
+                    "$ref": "#/$defs/secret",
+                    "x-busbar-secret": true,
+                    "writeOnly": true
+                  },
+                  "key": {
+                    "$ref": "#/$defs/secret",
+                    "x-busbar-secret": true,
+                    "writeOnly": true
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "cert",
+                  "key"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "client_identity"
+            ],
+            "properties": {
+              "client_identity": {
+                "type": "object"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "url": {
+                "type": "string",
+                "pattern": "^https://"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "tls"
+            ],
+            "properties": {
+              "tls": {
+                "type": "object"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "url": {
+                "type": "string",
+                "pattern": "^https://"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "pin": {
+                "properties": {
+                  "mechanism": {
+                    "const": "local_program"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "cwd"
+            ],
+            "properties": {
+              "cwd": {
+                "type": "string",
+                "pattern": "^/"
+              },
+              "pin": {
+                "required": [
+                  "key"
+                ],
+                "properties": {
+                  "key": {
+                    "type": "string",
+                    "pattern": "^/"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "token_exchange"
+            ],
+            "properties": {
+              "token_exchange": {
+                "type": "object"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "aud"
+            ],
+            "properties": {
+              "aud": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "allow_private": {
+                "const": false
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "token_exchange": {
+                "properties": {
+                  "token_url": {
+                    "type": "string",
+                    "pattern": "^https://"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "tool": {
+      "type": "object",
+      "properties": {
+        "schema_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "input_schema": {
+          "description": "Operator-approved tool input JSON Schema; schema annotations are also validated by the lifecycle."
+        },
+        "output_schema": {
+          "description": "Opaque operator-supplied output JSON Schema."
+        },
+        "publish_as": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ask_caller": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "method": {
+                  "enum": [
+                    "elicitation/create",
+                    "sampling/createMessage",
+                    "roots/list"
+                  ]
+                },
+                "params": {
+                  "description": "Caller request params are opaque JSON, sent verbatim."
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "method"
+              ]
+            }
+          },
+          "default": []
+        },
+        "task_support": {
+          "enum": [
+            "none",
+            "optional",
+            "required"
+          ],
+          "default": "none"
+        },
+        "task_ask_caller": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "method": {
+                  "enum": [
+                    "elicitation/create",
+                    "sampling/createMessage",
+                    "roots/list"
+                  ]
+                },
+                "params": {
+                  "description": "Caller request params are opaque JSON, sent verbatim."
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "method"
+              ]
+            }
+          },
+          "default": []
+        }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "task_support": {
+                "const": "none"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "task_ask_caller": {
+                "maxItems": 0
+              }
+            }
+          }
+        }
+      ]
+    },
+    "prompt": {
+      "type": "object",
+      "properties": {
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "template": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ask_caller": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "method": {
+                  "enum": [
+                    "elicitation/create",
+                    "sampling/createMessage",
+                    "roots/list"
+                  ]
+                },
+                "params": {
+                  "description": "Caller request params are opaque JSON, sent verbatim."
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "method"
+              ]
+            }
+          },
+          "default": []
+        },
+        "messages": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "role": {
+                "enum": [
+                  "user",
+                  "assistant"
+                ],
+                "default": "user"
+              },
+              "content": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "type": {
+                        "const": "text"
+                      },
+                      "text": {
+                        "type": "string"
+                      }
+                    },
+                    "additionalProperties": false,
+                    "required": [
+                      "type",
+                      "text"
+                    ]
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "type": {
+                        "const": "image"
+                      },
+                      "data": {
+                        "type": "string",
+                        "contentEncoding": "base64",
+                        "description": "Lifecycle requires valid standard base64."
+                      },
+                      "mime_type": {
+                        "type": "string"
+                      }
+                    },
+                    "additionalProperties": false,
+                    "required": [
+                      "type",
+                      "data",
+                      "mime_type"
+                    ]
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "type": {
+                        "const": "audio"
+                      },
+                      "data": {
+                        "type": "string",
+                        "contentEncoding": "base64",
+                        "description": "Lifecycle requires valid standard base64."
+                      },
+                      "mime_type": {
+                        "type": "string"
+                      }
+                    },
+                    "additionalProperties": false,
+                    "required": [
+                      "type",
+                      "data",
+                      "mime_type"
+                    ]
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "type": {
+                        "const": "resource"
+                      },
+                      "resource": {
+                        "type": "object",
+                        "properties": {
+                          "uri": {
+                            "type": "string",
+                            "pattern": "\\S"
+                          },
+                          "mime_type": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "text": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "blob": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "contentEncoding": "base64",
+                                "description": "Lifecycle requires valid standard base64."
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "additionalProperties": false,
+                        "required": [
+                          "uri"
+                        ],
+                        "not": {
+                          "required": [
+                            "text",
+                            "blob"
+                          ],
+                          "properties": {
+                            "text": {
+                              "type": "string"
+                            },
+                            "blob": {
+                              "type": "string"
+                            }
+                          }
+                        }
+                      }
+                    },
+                    "additionalProperties": false,
+                    "required": [
+                      "type",
+                      "resource"
+                    ]
+                  }
+                ]
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "content"
+            ]
+          },
+          "default": []
+        }
+      },
+      "additionalProperties": false,
+      "not": {
+        "required": [
+          "template",
+          "messages"
+        ],
+        "properties": {
+          "template": {
+            "type": "string"
+          },
+          "messages": {
+            "minItems": 1
+          }
+        }
+      }
+    },
+    "resource": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mime_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "blob": {
+          "anyOf": [
+            {
+              "type": "string",
+              "contentEncoding": "base64",
+              "description": "Lifecycle requires valid standard base64."
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "not": {
+        "required": [
+          "text",
+          "blob"
+        ],
+        "properties": {
+          "text": {
+            "type": "string"
+          },
+          "blob": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "resource_template": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mime_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "secret": {
+      "oneOf": [
+        {
+          "const": "none"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "module": {
+              "type": "string",
+              "pattern": "\\S"
+            },
+            "settings": {
+              "type": "object"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "module"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "env": {
+              "type": "string",
+              "pattern": "\\S"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "env"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "file": {
+              "type": "string",
+              "pattern": "\\S"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "file"
+          ]
+        }
+      ]
+    }
+  },
+  "description": "Lifecycle tools settings and the dealt validate envelope. Cross-entry published-name uniqueness, URI/base64 validity, schema annotations, matching local-program keys, duration values and cross-field numerical comparisons remain lifecycle judgments.",
+  "x-busbar-settings-profile": "integer-token-v1"
+}

@@ -42,6 +42,9 @@ pub const VERSION: &str = "1.6.0";
 /// At most 64 calls in flight on one instance, as the transport doors state it.
 pub const MAX_INFLIGHT: u32 = 64;
 
+/// The lifecycle grammar, separate from MCP JSON-RPC request schemas.
+const SETTINGS_SCHEMA: &[u8] = include_bytes!("settings.schema.json");
+
 /// THE STATEMENT: the plane's name and version, the settings sections it declares
 /// ([`statement::SECTIONS`]), its outbound needs ([`statement::NEEDS`]) and its tail
 /// ([`statement::TAIL`]).
@@ -52,6 +55,7 @@ pub const STATEMENT: Statement = {
         .with_secret_refs(statement::SECRET_REFS)
         .with_diag_ids(door_sessions::DIAG_IDS)
         .with_kind_tail(statement::TAIL);
+    s.settings_schema = busbar_contract::abi::mechanism::call::Blob::json(SETTINGS_SCHEMA);
     s.extensions = EXTENSIONS;
     s
 };
@@ -4666,3 +4670,7 @@ mod published_scope;
 #[cfg(test)]
 #[path = "tests/reported_progress.rs"]
 mod reported_progress;
+
+#[cfg(test)]
+#[path = "tests/settings_schema.rs"]
+mod settings_schema_tests;
