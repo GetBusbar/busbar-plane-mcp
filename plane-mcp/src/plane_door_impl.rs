@@ -160,6 +160,8 @@ pub struct McpDoor {
     listens: Keyed<u64, door_listen::Listening>,
     /// The instance's driver ticket and the tick clock, as its last `tick` handed them.
     driver: Keyed<(), (Ticket, u64)>,
+    /// The next scheduled subscription poll, separate from the last observed clock.
+    listen_poll: Keyed<(), u64>,
     /// THE STDIO SERVERS' GREETINGS: the generation of each member's child the door ran
     /// `initialize` on ([`door_program`]), once per generation.
     greeted: Keyed<String, u64>,

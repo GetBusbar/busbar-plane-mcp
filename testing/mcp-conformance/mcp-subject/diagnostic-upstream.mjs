@@ -392,6 +392,16 @@ TOOLS.header_param = {
   }),
 };
 
+// Actual catalogue mutations are performed by the trusted fixture operator,
+// using the product admin reload, before these ordinary routed calls arrive.
+// This peer has no admin credential and emits no list_changed notifications.
+for (const kind of ['tool', 'prompt']) {
+  TOOLS[`trigger_${kind}_change`] = {
+    description: `Acknowledges the trusted operator's ${kind} catalogue mutation.`,
+    result: () => ({ content: [{ type: 'text', text: 'Operator catalogue mutation requested.' }] }),
+  };
+}
+
 const TOOL_LIST = Object.entries(TOOLS).map(([name, t]) => ({
   name,
   description: t.description,

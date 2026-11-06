@@ -39,6 +39,7 @@
 import http from 'node:http';
 import { readFileSync, closeSync, appendFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
+import { MUTATIONS, operatorMutation } from './operator-mutation.mjs';
 
 const [listenPort, upstreamPort] = process.argv.slice(2);
 let token;
@@ -49,7 +50,35 @@ if (!listenPort || !upstreamPort || !token) {
   process.exit(2);
 }
 
-const server = http.createServer((req, res) => {
+// Optional trusted operator controller, explicitly armed by the fixture boot.
+// The admin credential never reaches the diagnostic peer or any HTTP response.
+let mutate;
+if (process.env.MCP_OPERATOR_CONFIG) {
+  const adminToken = readFileSync(4, 'utf8').trim();
+  closeSync(4);
+  if (!adminToken || !process.env.MCP_OPERATOR_ADMIN_PORT) throw new Error('operator mutation credential/configuration missing');
+  mutate = operatorMutation({ config: process.env.MCP_OPERATOR_CONFIG,
+    adminPort: process.env.MCP_OPERATOR_ADMIN_PORT, token: adminToken,
+    receipt: process.env.MCP_OPERATOR_RECEIPT });
+}
+
+const server = http.createServer(async (req, res) => {
+  let buffered;
+  // This is a test operator action, not an MCP implementation or an emitted
+  // notification. Only named, configured hooks from the admitted fixture client
+  // can cause it. All other bytes follow the ordinary transparent transport.
+  if (mutate && req.method === 'POST' && MUTATIONS.has(req.headers['mcp-name'])
+      && (!req.headers.authorization || req.headers.authorization === `Bearer ${token}`)) {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    buffered = Buffer.concat(chunks);
+    let message;
+    try { message = JSON.parse(buffered.toString('utf8')); } catch { /* forwarded as-is */ }
+    if (message?.method === 'tools/call' && message.params?.name === req.headers['mcp-name']) {
+      try { await mutate(message.params.name); }
+      catch (error) { console.error(`fixture operator: ${error.message}`); res.writeHead(502, { 'content-type': 'text/plain' }).end(`fixture operator: ${error.message}`); return; }
+    }
+  }
   // Optional, hash-only witness for the credential seam. Observe the client's
   // supplied header before adding our fallback; never persist credential bytes
   // or request bodies, including on the negative forwarding case.
@@ -96,7 +125,8 @@ const server = http.createServer((req, res) => {
     res.writeHead(502, { 'content-type': 'text/plain' });
     res.end(`credential-shim: upstream busbar at 127.0.0.1:${upstreamPort} did not answer: ${e}`);
   });
-  req.pipe(upstream);
+  if (buffered) upstream.end(buffered);
+  else req.pipe(upstream);
 });
 
 server.listen(Number(listenPort), '127.0.0.1');

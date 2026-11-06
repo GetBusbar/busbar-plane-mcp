@@ -307,6 +307,12 @@ $(sed 's/^/        /' "$MCP_FIXTURE_CA_FILE")
       # above, and it puts no \`test_*\` literal into crates/*/src — but it is worth saying out loud
       # that a real deployment would declare an ask because it wants a confirmation gate, not
       # because a suite asked for one.
+      trigger_tool_change:
+        schema_hash: "$(dg test trigger_tool_change)"
+        description: "Acknowledges a trusted operator tool catalogue mutation."
+      trigger_prompt_change:
+        schema_hash: "$(dg test trigger_prompt_change)"
+        description: "Acknowledges a trusted operator prompt catalogue mutation."
       input_required_result_elicitation:
         schema_hash: "$(dg test input_required_result_elicitation)"
         description: "Asks the caller for a name before it runs."
@@ -1277,7 +1283,9 @@ with what the fixture actually serves: $view" ;;
   export MCP_SEAM_BEARER_FILE="$dir/seam-bearer"
   export MCP_SEAM_FRONT_TRANSCRIPT="$dir/seam-front-headers.jsonl"
   ( umask 077; printf '%s' "$bound" > "$MCP_SEAM_BEARER_FILE"; : > "$MCP_SEAM_FRONT_TRANSCRIPT" )
-  node testing/mcp-conformance/mcp-subject/credential-shim.mjs "$mcp_port" "$data_port" 3<<<"$bound" \
+  MCP_OPERATOR_CONFIG="$dir/config.yaml" MCP_OPERATOR_ADMIN_PORT="$admin_port" \
+    MCP_OPERATOR_RECEIPT="$dir/operator-mutations.jsonl" \
+    node testing/mcp-conformance/mcp-subject/credential-shim.mjs "$mcp_port" "$data_port" 3<<<"$bound" 4<<<"$admin_token" \
     >"$dir/credential-shim.log" 2>&1 &
   SUBJECT_PIDS="$SUBJECT_PIDS $!"
 
@@ -1308,4 +1316,27 @@ same token directly. That is a finding about the shim, not about busbar."
   SUBJECT_ADMIN_URL="http://127.0.0.1:$admin_port"
   # shellcheck disable=SC2034
   SUBJECT_ADMIN_TOKEN="$admin_token"
+
+  # Bootstrap connects and fixture mutations share the genuine admin rate
+  # window. A bounded diagnostic can reserve a fresh window before observation;
+  # the limiter, per-scenario deadlines and original assertions stay unchanged.
+  if [ "${MCP_OPERATOR_FRESH_WINDOW:-0}" = 1 ]; then
+    say "   allowing the existing 60-second admin mutation window to expire before notification observations"
+    printf '{"reason":"separate bootstrap from observed operator mutations","wait_seconds":60}\n' > "$dir/operator-window.json"
+    sleep 60
+  fi
+
+  # Additive native diagnostic, explicitly armed by its bounded runner. It uses
+  # this exact fresh boot and issued credential; it neither rewrites the official
+  # scenario nor excuses its initial-prefill warning. Failure remains fatal.
+  if [ -n "${MCP_SIGNED_EXTRA_RECEIPT:-}" ]; then
+    node testing/mcp-conformance/scripts/signed-extra-input.mjs \
+      "$SUBJECT_URL" "$MCP_SEAM_BEARER_FILE" "$MCP_SIGNED_EXTRA_RECEIPT" \
+      || die "the native signed-extra-input diagnostic failed; see its receipt"
+  fi
+  if [ -n "${MCP_NOTIFICATION_PROBE_RECEIPT:-}" ]; then
+    node testing/mcp-conformance/scripts/notification-mutation-probe.mjs \
+      "$SUBJECT_URL" "$MCP_SEAM_BEARER_FILE" "$MCP_NOTIFICATION_PROBE_RECEIPT" \
+      || say "   additive notification diagnostic failed; retained its raw frames and continuing the unchanged official suite"
+  fi
 }

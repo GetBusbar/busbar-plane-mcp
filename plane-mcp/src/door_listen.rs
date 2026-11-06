@@ -332,6 +332,21 @@ fn step(plane: &McpDoor, ticket: Ticket, principal: &str, unit: &mut CallUnit) -
 /// woken when any is held. The next tick is [`POLL_NS`] on.
 pub(super) fn tick(plane: &McpDoor, driver: Ticket, now_ns: u64) -> u64 {
     plane.driver.insert((), (driver, now_ns));
+    // A driver wake makes the host re-poll tick immediately. Only a scheduled
+    // poll may wake the driver again; otherwise a live subscription feeds its
+    // own wake back forever. Publication still wakes independently via wake_all.
+    let (due, next) = plane.listen_poll.with_all(|poll| {
+        let next = poll.entry(()).or_default();
+        if now_ns < *next {
+            (false, *next)
+        } else {
+            *next = now_ns.saturating_add(POLL_NS);
+            (true, *next)
+        }
+    });
+    if !due {
+        return next;
+    }
     let stale = MAX_LIFETIME_NS.saturating_add(KEEPALIVE_NS);
     let (gone, any) = plane.listens.with_all(|m| {
         let mut gone = Vec::new();
@@ -356,7 +371,7 @@ pub(super) fn tick(plane: &McpDoor, driver: Ticket, now_ns: u64) -> u64 {
     if any || super::door_legacy::any(plane) {
         wake_driver(plane);
     }
-    now_ns.saturating_add(POLL_NS)
+    next
 }
 
 /// A new generation: every held subscription is asked for a step at once.
@@ -489,5 +504,63 @@ pub(super) fn standing(
             ),
             reason: busbar_contract::vocab::REASON_IDENTITY_NOT_LIVE.to_string(),
         },
+    }
+}
+
+#[cfg(test)]
+mod poll_regressions {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn driver_wake_repoll_does_not_request_another_collection_before_the_poll_deadline() {
+        let plane = McpDoor::default();
+        let listen = Listen::open(
+            Some(&json!({"notifications": {"toolsListChanged": true}})),
+            json!(1),
+            0,
+            |_| true,
+        )
+        .unwrap();
+        plane.listens.insert(
+            7,
+            Listening {
+                owner: "caller".into(),
+                listen: Box::new(listen),
+                ticket: Ticket::NONE,
+                first_tick: 0,
+                due: false,
+                headed: true,
+                updates: Vec::new(),
+            },
+        );
+        assert_eq!(tick(&plane, Ticket::NONE, 0), POLL_NS);
+        assert!(plane.listens.with(&7, |l| l.unwrap().due));
+        // A completed drive consumes the collection request.
+        plane.listens.with(&7, |l| l.unwrap().due = false);
+        for now in [1, 10, POLL_NS - 1] {
+            let next = tick(&plane, Ticket::NONE, now);
+            assert!(
+                !plane.listens.with(&7, |l| l.unwrap().due),
+                "the host's wake re-poll must not feed another wake back"
+            );
+            assert_eq!(next, POLL_NS);
+            assert_eq!(
+                plane.driver.get(&()).unwrap().1,
+                now,
+                "legacy users still see every newly observed clock reading"
+            );
+        }
+        wake_all(&plane);
+        assert!(
+            plane.listens.with(&7, |l| l.unwrap().due),
+            "publication immediately requests a collection between scheduled polls"
+        );
+        plane.listens.with(&7, |l| l.unwrap().due = false);
+        assert_eq!(tick(&plane, Ticket::NONE, POLL_NS), 2 * POLL_NS);
+        assert!(
+            plane.listens.with(&7, |l| l.unwrap().due),
+            "the next actual poll still requests a collection"
+        );
     }
 }
