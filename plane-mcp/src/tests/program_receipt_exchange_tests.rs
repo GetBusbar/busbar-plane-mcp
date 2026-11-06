@@ -310,3 +310,29 @@ fn child_body_before_the_first_head_closes_without_parsing_or_writing() {
     assert!(state.written.is_empty());
     assert_eq!(state.closed, [STREAM]);
 }
+
+#[test]
+fn a_numberless_complete_host_receipt_permits_the_program_exchange() {
+    let host = ScriptedConn::new([Piece::head(0, &receipt(COMMAND))]);
+    let mut peer = StrictPeer::default();
+    let done =
+        exchange(&host, &mut peer).expect("the actual process contract carries no numeric status");
+    assert!(done.greeted);
+    assert_ne!(done.generation, 0);
+    assert_eq!(peer.greeted, [done.generation]);
+    assert_eq!(
+        peer.checked,
+        [(crate::statement::NEED_PROGRAM, MEMBER.to_owned(), 0)]
+    );
+    let state = host.0.borrow();
+    let methods: Vec<_> = state.written.iter().map(|v| v["method"].as_str()).collect();
+    assert_eq!(
+        methods,
+        [
+            Some("initialize"),
+            Some("notifications/initialized"),
+            Some("tools/list")
+        ]
+    );
+    assert_eq!(state.closed, [STREAM]);
+}

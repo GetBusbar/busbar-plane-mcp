@@ -31,6 +31,9 @@ fn a_short_session_buffer_retains_completed_legacy_results_until_a_successful_re
         .unwrap()
         .events
         .push_back(ping);
+    // This crossing exercises a scheduled collection, not an immediate driver repoll.
+    // Move the host clock through the subscription's 250ms polling deadline.
+    TICKS.fetch_add(250_000_000, Ordering::Relaxed);
     d.tick();
     let extensions = d.retirement.borrow().input();
     let mut input = PlaneDriveIn {

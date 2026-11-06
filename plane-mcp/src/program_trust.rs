@@ -115,7 +115,8 @@ fn number(value: &[u8]) -> Result<u64, String> {
 }
 
 /// The host pair a launch head's `fields` (at `status`) name for the approved `command`. A
-/// `rooted` (`local_program`) member requires the full single canonical receipt on a `2xx` head;
+/// `rooted` (`local_program`) member requires the full single canonical receipt on a `2xx` head
+/// or a numberless host program head (`0`, the connector ABI spelling for no status code);
 /// any other member accepts a head that names only its generation, unless the head's status says
 /// the launch failed.
 pub(crate) fn observe<'a>(
@@ -157,7 +158,11 @@ pub(crate) fn observe<'a>(
             generation,
         });
     }
-    if !(200..300).contains(&status) {
+    // Program framing has no numeric status: the connector exports an absent code as 0.
+    // Only a rooted local_program receipt may use that spelling; its complete canonical
+    // host-owned identity below still proves the successful checked launch. Legacy heads
+    // and every explicit unsuccessful status retain their existing refusal.
+    if !(200..300).contains(&status) && !(rooted && status == 0) {
         return Err(UNTRUSTED.into());
     }
     let generation = number(generation.ok_or_else(|| UNTRUSTED.to_string())?)?;

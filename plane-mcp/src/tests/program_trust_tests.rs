@@ -25,7 +25,7 @@ fn canonical_host_receipt_binds_exact_command_without_header_injection() {
         }
     );
     assert!(block(200, &fields("37", "2", COMMAND), "/approved/other", true).is_err());
-    for status in [0, 199, 300, 403, 500] {
+    for status in [199, 300, 403, 500] {
         assert!(block(status, &fields("37", "2", COMMAND), COMMAND, true).is_err());
     }
 }
@@ -303,4 +303,65 @@ fn persisted_child_generation_cannot_alias_the_same_instances_new_generation() {
     assert!(fresh
         .expected_child_fields("server", stamp, Some((37, 2)))
         .is_some());
+}
+
+#[test]
+fn a_numberless_local_program_head_requires_the_complete_canonical_host_receipt() {
+    let good = fields("37", "2", COMMAND);
+    assert_eq!(
+        block(0, &good, COMMAND, true).unwrap(),
+        Observed {
+            instance: 37,
+            generation: 2
+        }
+    );
+    assert!(
+        block(0, &good, COMMAND, false).is_err(),
+        "only local_program has the host launch contract"
+    );
+    assert!(block(0, &good, "/unapproved/child", true).is_err());
+    assert!(block(0, b"", COMMAND, true).is_err());
+    assert!(block(0, b"generation: 2\r\n", COMMAND, true).is_err());
+    let text = std::str::from_utf8(&good).unwrap();
+    for name in ["generation", "program-instance", "program-identity"] {
+        let absent = text
+            .lines()
+            .filter(|line| !line.starts_with(name))
+            .map(|line| format!("{line}\r\n"))
+            .collect::<String>();
+        assert!(
+            block(0, absent.as_bytes(), COMMAND, true).is_err(),
+            "missing {name}"
+        );
+        let original = text
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("{name}: ")))
+            .unwrap();
+        for duplicate in [name.to_string(), name.to_uppercase()] {
+            let mut repeated = good.clone();
+            repeated.extend_from_slice(format!("{duplicate}: {original}\r\n").as_bytes());
+            assert!(
+                block(0, &repeated, COMMAND, true).is_err(),
+                "duplicate {name}"
+            );
+        }
+    }
+    for bad in [
+        "0",
+        "00",
+        "01",
+        "+1",
+        " 1",
+        "1 ",
+        "-1",
+        "18446744073709551616",
+    ] {
+        assert!(block(0, &fields(bad, "2", COMMAND), COMMAND, true).is_err());
+        assert!(block(0, &fields("37", bad, COMMAND), COMMAND, true).is_err());
+    }
+    for tail in [b"broken".as_slice(), b"\r\n", b"x:y\r\n"] {
+        let mut malformed = good.clone();
+        malformed.extend_from_slice(tail);
+        assert!(block(0, &malformed, COMMAND, true).is_err());
+    }
 }

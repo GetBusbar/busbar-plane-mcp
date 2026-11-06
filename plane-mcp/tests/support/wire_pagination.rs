@@ -175,9 +175,17 @@ extern "C" fn program_read(_: HostCtx, input: *const c_void, out: *mut ServiceOu
     let state = state.as_mut().unwrap();
     let (head, pending, inbox) = state.streams.get_mut(&input.stream).unwrap();
     let (kind, bytes) = if std::mem::take(head) {
+        // This HostTables stand-in models a host-owned local_program receipt.
+        // Process success carries no numeric status; the fields name its launch.
         (
             REPLY_HEAD,
-            format!("{}: 1\r\n", busbar_contract::conn::PROGRAM_GENERATION_FIELD).into_bytes(),
+            format!(
+                "{}: 1\r\n{}: 1\r\n{}: L3Vzci9iaW4vdHJ1ZQ==\r\n",
+                busbar_contract::conn::PROGRAM_GENERATION_FIELD,
+                busbar_contract::conn::PROGRAM_INSTANCE_FIELD,
+                busbar_contract::conn::PROGRAM_IDENTITY_FIELD,
+            )
+            .into_bytes(),
         )
     } else if std::mem::take(pending) {
         return answer(out, Outcome::Pending, 0, 0);
@@ -252,7 +260,7 @@ static PROGRAM_TABLES: Tables = Tables(HostTables {
 });
 
 fn program_door() -> Door {
-    let section = br#"{"pg":{"transport":"stdio","command":"/usr/bin/true","pin":{"mechanism":"unpinned"},"tools_allow":{"first":{},"second":{},"third":{}}}}"#;
+    let section = br#"{"pg":{"transport":"stdio","command":"/usr/bin/true","cwd":"/","pin":{"mechanism":"local_program","key":"/usr/bin/true"},"tools_allow":{"first":{},"second":{},"third":{}}}}"#;
     let mut input: PlaneOpenIn = z();
     input.open = OpenIn {
         head: head::<PlaneOpenIn>(life::OPEN, Ticket::NONE),
@@ -319,11 +327,18 @@ fn a_completed_stdio_response_obeys_the_reply_bound_on_its_final_piece() {
         let count = pieces.len();
         for (at, bytes) in pieces.enumerate() {
             let head = if at == 0 {
-                vec![(busbar_contract::conn::PROGRAM_GENERATION_FIELD, "1")]
+                vec![
+                    (busbar_contract::conn::PROGRAM_GENERATION_FIELD, "1"),
+                    (busbar_contract::conn::PROGRAM_INSTANCE_FIELD, "1"),
+                    (
+                        busbar_contract::conn::PROGRAM_IDENTITY_FIELD,
+                        "L3Vzci9iaW4vdHJ1ZQ==",
+                    ),
+                ]
             } else {
                 Vec::new()
             };
-            let mut given = Given::far(ALICE, 200, head, bytes);
+            let mut given = Given::far(ALICE, 0, head, bytes);
             if at + 1 != count {
                 given.flags &= !PIECE_LAST;
             }

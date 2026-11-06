@@ -1554,6 +1554,18 @@ mod both_ways {
             Push::caller(TOOLS_LIST),
             64,
         ));
+        // Hooks project an admitted, still-live unit and its pinned catalogue.
+        t.push(
+            arrive(
+                p,
+                "arrive projected call",
+                54,
+                post,
+                RELAY_CALL,
+                RELAY_FIELDS,
+            )
+            .0,
+        );
         t.push(project(p, "project call", RELAY_CALL));
         t.push(project(p, "project list", TOOLS_LIST));
         t.push(project_with(
@@ -1596,6 +1608,7 @@ mod both_ways {
         ];
         let mut j: Frame<ProjectIn, ProjectOut> = Frame::new(z(), z());
         (j.input.head, j.out.head) = (in_head(), out_head());
+        j.input.unit = 54;
         j.input.body = octets(body);
         if let Some(rewrite) = rewrite {
             j.input.rewrite = octets(rewrite);
@@ -1703,12 +1716,11 @@ mod both_ways {
         expected["params"]["arguments"] = json!({ "path": "/redacted" });
         assert_eq!(document(body.as_bytes()), expected);
         let unusable = step(&t, "project unusable rewrite");
-        assert_eq!(unusable.outcome, Outcome::Ready);
-        assert!(unusable.fields.iter().all(|(n, _)| n != "rewritten"));
-        assert_eq!(
-            document(&unusable.reply),
-            json!({ "tool": "fs_read_file", "arguments": { "path": "/a" } })
-        );
+        // A malformed hook rewrite must fail closed instead of forwarding the
+        // original arguments that the hook did not approve.
+        assert_eq!(unusable.outcome, Outcome::Fault);
+        assert!(unusable.fields.is_empty());
+        assert!(unusable.reply.is_empty());
     }
 
     fn served(grants: &'static [&'static str]) -> Dispatcher {

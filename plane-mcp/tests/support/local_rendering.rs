@@ -164,8 +164,10 @@ fn repeated_prompt_and_resource_answers_stream_past_an_upstream_reply_limit_with
 ) {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
 
-    let argument = "x".repeat(65536);
-    let copies = 257;
+    // Keep the resource URI within the selector bound while the expanded answer
+    // still exceeds the 16MiB upstream reply limit.
+    let argument = "x".repeat(4096);
+    let copies = 4097;
     let expanded = argument.len() * copies;
     let template = "{value}".repeat(copies);
     let d = open_with(&section(&template));
