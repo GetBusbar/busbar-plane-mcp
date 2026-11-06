@@ -97,12 +97,28 @@ fn reactor() -> tokio::runtime::Handle {
     })
     .clone()
 }
-pub fn host(wake: ConnWake, anchors: Option<&str>) -> Arc<dyn DeclaredConns> {
+pub fn host_with_services(
+    wake: ConnWake,
+    anchors: Option<&str>,
+    services: Arc<dyn busbar_contract::services::HostServices>,
+) -> Arc<dyn DeclaredConns> {
+    host_on(
+        wake,
+        anchors,
+        Dispatcher::with_services(DispatchConfig::default(), services),
+    )
+}
+
+fn host_on(
+    wake: ConnWake,
+    anchors: Option<&str>,
+    dispatcher: Dispatcher,
+) -> Arc<dyn DeclaredConns> {
     if let Some(anchors) = anchors {
         assert_eq!(anchors, self::anchors());
     }
     busbar_core_connector::io::install_process_reactor(reactor());
-    let dispatcher = Arc::new(Dispatcher::new(DispatchConfig::default()));
+    let dispatcher = Arc::new(dispatcher);
     dispatcher.install_runtime(reactor());
     dispatcher.install_io(busbar_core_connector::hostio::process());
     let doors: [(&str, busbar_contract::abi::mechanism::door::DoorFn); 3] = [

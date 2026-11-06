@@ -14,7 +14,15 @@ fn an_older_host_gets_an_explained_task_failure_without_a_fictitious_ttl() {
     d.piece(1, &Given::attempt(ALICE, "st"));
     let refused = d.piece(1, &Given::caller(ALICE, &body));
     assert_ne!(refused.status, 200, "{}", refused.text());
-    assert!(refused.text().contains("Unsupported"), "{}", refused.text());
+    assert_eq!(
+        refused.json()["error"]["data"]["reason"],
+        "task_unavailable"
+    );
+    assert!(
+        refused.text().contains("host inspection unsupported"),
+        "{}",
+        refused.text()
+    );
     assert!(refused.json().get("result").is_none());
 }
 

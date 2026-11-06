@@ -214,7 +214,13 @@ extern "C" fn program_read(_: HostCtx, input: *const c_void, out: *mut ServiceOu
         let (head, inbox) = c.leases.get_mut(&i.stream)?;
         if *head {
             *head = false;
-            Some((REPLY_HEAD, b"generation: 1\r\n".to_vec()))
+            // The HostTables stand-in supplies a canonical host-owned launch
+            // receipt. Process success has no numeric status, so code stays zero.
+            Some((
+                REPLY_HEAD,
+                b"generation: 1\r\nprogram-instance: 1\r\nprogram-identity: L3Vzci9iaW4vdHJ1ZQ==\r\n"
+                    .to_vec(),
+            ))
         } else {
             inbox.pop_front().map(|bytes| (REPLY_BODY, bytes))
         }
@@ -279,13 +285,20 @@ static PROGRAM_TABLES: Tables = Tables(HostTables {
     services: &HOST_SLOTS,
 });
 
+fn greeting_section() -> Value {
+    let mut section = program_section(false);
+    section["io"]["cwd"] = json!("/");
+    section["io"]["pin"] = json!({"mechanism":"local_program","key":"/usr/bin/true"});
+    section
+}
+
 #[test]
 fn a_task_rechecks_grant_and_trust_after_its_child_greeting_pends() {
     for quarantine in [false, true] {
         let _serial = fresh();
         with_child(|c| *c = GreetingChild::default());
         PEND_GREETING.store(false, Ordering::SeqCst);
-        let d = open_on(&PROGRAM_TABLES, &program_section(false));
+        let d = open_on(&PROGRAM_TABLES, &greeting_section());
         let task = create(&d, 1, "io", "io_read_file");
         let body = last_nested();
         PEND_GREETING.store(true, Ordering::SeqCst);
@@ -325,7 +338,7 @@ fn a_task_resumes_a_pending_child_greeting_and_preserves_its_result() {
     let _serial = fresh();
     with_child(|c| *c = GreetingChild::default());
     PEND_GREETING.store(false, Ordering::SeqCst);
-    let d = open_on(&PROGRAM_TABLES, &program_section(false));
+    let d = open_on(&PROGRAM_TABLES, &greeting_section());
     let task = create(&d, 1, "io", "io_read_file");
     let body = last_nested();
     PEND_GREETING.store(true, Ordering::SeqCst);
@@ -338,8 +351,12 @@ fn a_task_resumes_a_pending_child_greeting_and_preserves_its_result() {
         sent.text()
     );
     let result = result_of(&sent, "greeted task complete");
-    let mut answered = Given::far(ALICE, 200, &result);
-    answered.head.push(("generation", "1"));
+    let mut answered = Given::far(ALICE, 0, &result);
+    answered.head.extend([
+        ("generation", "1"),
+        ("program-instance", "1"),
+        ("program-identity", "L3Vzci9iaW4vdHJ1ZQ=="),
+    ]);
     d.piece(2, &answered);
     assert_completed(&get(&d, 3, &task), "greeted task complete");
 }

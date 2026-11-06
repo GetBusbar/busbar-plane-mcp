@@ -408,9 +408,10 @@ fn task_verbs_report_a_host_read_failure_as_internal_and_leave_work_live() {
         assert_eq!(d.arrive(unit, &body).outcome, Outcome::Ready);
         let read = d.piece(unit, &Given::caller(ALICE, &body));
         assert_eq!(read.json()["error"]["code"], -32603, "{}", read.text());
-        assert!(read.json()["error"]["message"]
-            .as_str()
-            .is_some_and(|m| m.contains("work.find")));
+        assert_eq!(
+            read.json()["error"]["message"],
+            "the host could not read this task; retry reading the task"
+        );
         assert!(settle_of(&task).is_none());
     }
     FAIL.store(0, Ordering::SeqCst);

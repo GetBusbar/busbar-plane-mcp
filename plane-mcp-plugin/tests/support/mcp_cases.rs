@@ -263,8 +263,13 @@ fn mint_store_op() -> busbar_contract::abi::store::OpId {
 impl busbar_contract::services::HostServices for McpServices {
     fn now(&self) -> busbar_plugin_loader::dispatch::Reading {
         busbar_plugin_loader::dispatch::Reading {
-            wall_ns: 0,
-            mono_ns: 0,
+            wall_ns: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("host wall clock is after the epoch")
+                .as_nanos()
+                .try_into()
+                .expect("host wall clock fits u64 nanoseconds"),
+            mono_ns: now_ns(),
         }
     }
     fn dest_judge(
@@ -1320,7 +1325,13 @@ fn actual_mcp_cases(dropped: bool) -> BTreeMap<String, String> {
         DispatchConfig::default(),
         services.clone(),
     ));
-    let table = super::mcp_network::host(d.conn_waker(), Some(super::mcp_network::anchors()));
+    // Request-head deadlines use the clock of the actual transport dispatcher.
+    // Bind the same host provider that owns this fixture's admitted plane.
+    let table = super::mcp_network::host_with_services(
+        d.conn_waker(),
+        Some(super::mcp_network::anchors()),
+        services.clone(),
+    );
     let diagnostics = Arc::new(McpDiagnostics::default());
     let bound = Bind {
         instance: Arc::from("mcp-case"),
@@ -1487,7 +1498,11 @@ fn actual_mcp_cases(dropped: bool) -> BTreeMap<String, String> {
                 let label = (label).to_string();
                 let before = count();
                 let value = { on_piece(&p, &d, &one, g, room, c).line(Piece::line) };
-                assert_eq!(count() - before, 1, "{label}: exact first crossings");
+                assert_eq!(
+                    count() - before,
+                    1,
+                    "{label}: exact first crossings; answer={value}; prior={r:?}"
+                );
                 r.insert(label, value)
             };
         }
