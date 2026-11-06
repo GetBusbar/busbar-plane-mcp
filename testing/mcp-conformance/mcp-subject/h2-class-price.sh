@@ -95,8 +95,8 @@ read -r call_status _ <<<"$(h2_call "$bound" "price")"
 sleep 2
 
 # ── THE CONTROL: billing is ON and the row is there ───────────────────────────────────────────────
-row_requests="$(h2_meter_row_field "probe_ping" "mcp" requests)"
-[ "$row_requests" = "1" ] || { failures=$((failures+1)); detail="${detail}metering row for (probe_ping, mcp) reports requests=${row_requests}(want 1 -- with no such row the rig is not reading a billing-ON node at all); "; }
+row_requests="$(h2_meter_row_field "mcp_server:probe" "mcp" requests)"
+[ "$row_requests" = "1" ] || { failures=$((failures+1)); detail="${detail}metering row for (mcp_server:probe, mcp) reports requests=${row_requests}(want 1 -- with no such row the rig is not reading a billing-ON node at all); "; }
 key_spend="$(h2_usage_field "$kid" spend_cents)"
 h2_int_is "$key_spend" -eq 1 || { failures=$((failures+1)); detail="${detail}the key's own spend reads ${key_spend}(want 1, the flat fee -- the classes add well under a cent, and if this is wrong the rig is not reading money correctly and the reds below cannot be trusted); "; }
 
@@ -104,8 +104,8 @@ h2_int_is "$key_spend" -eq 1 || { failures=$((failures+1)); detail="${detail}the
 # Each declared class's count off the row's `classes` object. Asked through h2_int_is so ANY read
 # that is not a positive integer -- `-` (no row), 0 (the class absent from the row), empty,
 # non-numeric -- is a failure (item 499).
-tc_count="$(h2_meter_row_class "probe_ping" "mcp" tool_calls count)"
-by_count="$(h2_meter_row_class "probe_ping" "mcp" bytes count)"
+tc_count="$(h2_meter_row_class "mcp_server:probe" "mcp" tool_calls count)"
+by_count="$(h2_meter_row_class "mcp_server:probe" "mcp" bytes count)"
 if ! h2_int_is "$tc_count" -eq 1; then
   failures=$((failures+1))
   detail="${detail}(2) the served call reported classes.tool_calls.count=${tc_count} (want exactly 1: one call is one tool_call); "
@@ -114,7 +114,11 @@ expected_bytes="$(python3 - "$H2_EGRESS_DIR" <<'PY_BYTES'
 import json, pathlib, sys
 calls = []
 for path in pathlib.Path(sys.argv[1]).glob('*.json'):
-    request = json.loads(path.read_text())['body']
+    captured = json.loads(path.read_text())
+    # The independent witness also records readiness GETs with empty bodies.
+    if captured.get('method') != 'POST':
+        continue
+    request = captured['body']
     if isinstance(request, str):
         request = json.loads(request)
     if request.get('method') == 'tools/call' and request.get('params', {}).get('arguments', {}).get('label') == 'price':
@@ -131,9 +135,9 @@ if ! h2_int_is "$by_count" -eq "$expected_bytes"; then
 fi
 
 # ── (3) THE PRICE MUST BE THE PRODUCT ─────────────────────────────────────────────────────────────
-tc_cost="$(h2_meter_row_class "probe_ping" "mcp" tool_calls cost)"
-by_cost="$(h2_meter_row_class "probe_ping" "mcp" bytes cost)"
-spend_micros="$(h2_meter_row_field "probe_ping" "mcp" spend_micros)"
+tc_cost="$(h2_meter_row_class "mcp_server:probe" "mcp" tool_calls cost)"
+by_cost="$(h2_meter_row_class "mcp_server:probe" "mcp" bytes cost)"
+spend_micros="$(h2_meter_row_field "mcp_server:probe" "mcp" spend_micros)"
 if [ "$failures" -ne 0 ]; then
   detail="${detail}(3) price = Σ count × rate is BLOCKED BY the above (classes.tool_calls.cost=${tc_cost}, classes.bytes.cost=${by_cost}, row spend_micros=${spend_micros}); "
 else

@@ -107,13 +107,9 @@ impl Negotiator {
         remembered: Option<Remembered>,
         client_version: &str,
     ) -> Self {
-        #[derive(serde::Deserialize)]
-        struct EnvelopeId {
-            id: Option<Value>,
-        }
-        let original_id = serde_json::from_slice::<EnvelopeId>(&original.body)
+        let original_id = crate::codec::wire_json::parse(&original.body)
             .ok()
-            .and_then(|v| v.id)
+            .and_then(|v| v.get("id").cloned())
             .filter(|v| !v.is_null());
         Self {
             original,

@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Run the battery against the CONTROL (the pinned reference implementation).
+# Run the battery against explicitly named reference components: official
+# Python SDK server, adapted modern Python client, independent HTTP host fixture.
 #
-# WHAT THIS JOB PROVES: that the HARNESS still works. It does not test any
-# product. If a test here goes red, the test is wrong, or the control changed,
-# or our reading of the spec was wrong. Any of those you want to know the same
-# day, not while chasing a phantom defect in a subject.
+# WHAT THIS JOB PROVES: observations about this explicit reference composition.
+# It does not test a product. A red result can reveal a control implementation
+# defect, fixture/configuration failure, harness error, or spec interpretation.
+# See control/REFERENCE.md for the boundaries and the original SDK deviation.
 #
 # Usage: scripts/run-control.sh [tier]     tier defaults to push,pr
 set -euo pipefail
@@ -20,11 +21,19 @@ if [ ! -x "$PY" ]; then
 fi
 
 mkdir -p reports
-exec node bin/mcp-battery.mjs run \
-  --name "control-python-mcp-2.2.0" \
+# Credentials belong to the front-door client. They are generated for this run,
+# checked by the host, and observed as hashes; they are never upstream headers.
+CONTROL_STATE="$(mktemp -d "${TMPDIR:-/tmp}/mcp-control.XXXXXX")"
+trap 'rm -rf "$CONTROL_STATE"' EXIT
+export MCP_SEAM_BEARER_FILE="$CONTROL_STATE/bearer"
+export MCP_SEAM_FRONT_TRANSCRIPT="$(pwd)/reports/control-${TIER//,/-}-front.jsonl"
+node -e 'require("node:fs").writeFileSync(process.argv[1], require("node:crypto").randomBytes(32).toString("hex"), {mode: 0o600})' "$MCP_SEAM_BEARER_FILE"
+export MCP_SUBJECT_UPSTREAM_CONFIG_CMD="node $(pwd)/control/control_host.mjs"
+node bin/mcp-battery.mjs run \
+  --name "reference-python2.2-server-modern-client-independent-host" \
   --server-cmd "$PY $(pwd)/control/control_server.py" \
   --client-cmd "$PY $(pwd)/control/control_client.py" \
   --failing-tool always_fails \
   --tier "$TIER" \
   --expected-failures control/control-baseline.json \
-  --out "reports/control-${TIER//,/-}.json"
+  --out "reports/control-${TIER//,/-}.json" "${@:2}"

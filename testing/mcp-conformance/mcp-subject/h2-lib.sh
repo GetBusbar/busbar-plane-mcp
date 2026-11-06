@@ -258,6 +258,7 @@ h2_meter_row_field() {
   local model="$1" provider="$2" field="$3"
   curl -sS -m 10 -H @/dev/fd/3 3<<<"Authorization: Bearer $H2_ADMIN_TOKEN" \
     "http://127.0.0.1:${H2_ADMIN_PORT}/api/v1/admin/usage" \
+    | tee "$H2_WORKDIR/admin-usage.$$.${RANDOM}.json" \
     | python3 -c "import json,sys
 d=json.load(sys.stdin)
 rows=[r for r in (d.get('by_model') or []) if r.get('model')=='$model' and r.get('provider')=='$provider']
@@ -277,6 +278,7 @@ h2_meter_row_quantity() {
   local model="$1" provider="$2"
   curl -sS -m 10 -H @/dev/fd/3 3<<<"Authorization: Bearer $H2_ADMIN_TOKEN" \
     "http://127.0.0.1:${H2_ADMIN_PORT}/api/v1/admin/usage" \
+    | tee "$H2_WORKDIR/admin-usage.$$.${RANDOM}.json" \
     | python3 -c "import json,sys
 d=json.load(sys.stdin)
 rows=[r for r in (d.get('by_model') or []) if r.get('model')=='$model' and r.get('provider')=='$provider']
@@ -296,6 +298,7 @@ h2_meter_row_class() {
   local model="$1" provider="$2" class="$3" field="$4"
   curl -sS -m 10 -H @/dev/fd/3 3<<<"Authorization: Bearer $H2_ADMIN_TOKEN" \
     "http://127.0.0.1:${H2_ADMIN_PORT}/api/v1/admin/usage" \
+    | tee "$H2_WORKDIR/admin-usage.$$.${RANDOM}.json" \
     | python3 -c "import json,sys
 d=json.load(sys.stdin)
 rows=[r for r in (d.get('by_model') or []) if r.get('model')=='$model' and r.get('provider')=='$provider']
@@ -364,7 +367,7 @@ def flow(text, i):
                 v, i = flow(text, i)
                 out.append(v)
                 continue
-            m = re.match(r'("(?:[^"\\]|\\.)*"|[^:,{}\[\]]+):\s', text[i:])
+            m = re.match(r'("(?:[^"\\]|\\.)*"|[^,{}\[\]]+?):\s', text[i:])
             if not m:
                 fail("unreadable flow key at: " + text[i:])
             out[scalar(m.group(1))], i = flow(text, i + m.end())
@@ -397,14 +400,20 @@ def block(i, indent):
         return out, i
     out = {}
     while i < len(lines) and lines[i][0] == indent:
-        m = re.match(r'("(?:[^"\\]|\\.)*"|[^:]+):(?:\s+(.*))?$', lines[i][1])
+        m = re.match(r'("(?:[^"\\]|\\.)*"|.+?):(?:\s+(.*))?$', lines[i][1])
         if not m:
             fail("unreadable mapping line: " + lines[i][1])
         key, rest = scalar(m.group(1)), m.group(2)
         if key in out:
             fail("a key written twice: " + str(key))
         i += 1
-        if rest:
+        if rest in ('|', '|-', '|+'):
+            literal = []
+            while i < len(lines) and lines[i][0] > indent:
+                literal.append(lines[i][1])
+                i += 1
+            out[key] = '\n'.join(literal) + ('' if rest == '|-' else '\n')
+        elif rest:
             out[key] = value(rest)
         elif i < len(lines) and lines[i][0] > indent:
             out[key], i = block(i, lines[i][0])

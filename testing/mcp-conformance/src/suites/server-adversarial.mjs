@@ -21,8 +21,16 @@ async function listedTool(peer, ctx) {
   peer.send(request('probe-tool-list', 'tools/list'));
   const res = await peer.waitForId('probe-tool-list');
   if (res.error) ctx.skip('tools/list is unsupported; cannot deliver hostile arguments to a known tool');
+  ctx.assert('PAT.MRTR.ONLY-SUPPORTED-METHODS', res.result?.resultType !== 'input_required',
+    'tools/list returned InputRequiredResult, which is only allowed on prompts/get, resources/read and tools/call');
+  if (res.result?.resultType === 'input_required') return null;
   const tools = res.result?.tools;
-  if (!Array.isArray(tools)) throw new Error('tools/list returned no tool array');
+  // A received malformed listing is a concrete protocol failure, not a
+  // missing observation or a harness exception. Do not invent a tool name to
+  // continue an argument probe whose required target the peer did not supply.
+  ctx.assert('TOOLS.LIST-RESPONDS', Array.isArray(tools),
+    `tools/list response id=${JSON.stringify(res.id)} has no tools array; result keys=${JSON.stringify(Object.keys(res.result || {}))}`);
+  if (!Array.isArray(tools)) return null;
   const tool = tools.find((entry) => entry && typeof entry.name === 'string');
   if (!tool) ctx.skip('the target exposes no tool for hostile argument delivery');
   return tool.name;
@@ -182,6 +190,7 @@ adversarial({
   catches: 'A recursive-descent parser or validator with no depth bound, a one-line denial of service.',
   inject: async (peer, ctx) => {
     const name = await listedTool(peer, ctx);
+    if (name === null) return;
     let deep = '1';
     for (let i = 0; i < 2000; i++) deep = `[${deep}]`;
     peer.sendRaw(`{"jsonrpc":"2.0","id":"deep","method":"tools/call","params":{"name":${JSON.stringify(name)},"arguments":{"text":${deep}},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}\n`);
@@ -195,6 +204,7 @@ adversarial({
   tier: 'prerelease',
   inject: async (peer, ctx) => {
     const name = await listedTool(peer, ctx);
+    if (name === null) return;
     const big = 'A'.repeat(8 * 1024 * 1024);
     peer.send(request('big', 'tools/call', { name, arguments: { text: big } }));
   },
@@ -267,6 +277,7 @@ adversarial({
   catches: 'A server that passes raw control bytes into logs or downstream systems, enabling log injection.',
   inject: async (peer, ctx) => {
     const name = await listedTool(peer, ctx);
+    if (name === null) return;
     peer.send(request('ctrl', 'tools/call', {
       name, arguments: { text: 'a\u0000b\u001bc\u0007d' },
     }));
@@ -284,6 +295,7 @@ adversarial({
   catches: 'A UTF-8 encoder that emits invalid sequences, corrupting the stream for a strict client.',
   inject: async (peer, ctx) => {
     const name = await listedTool(peer, ctx);
+    if (name === null) return;
     peer.send(request('uni', 'tools/call', {
       name, arguments: { text: 'ok \ud83d\ude00 done' },
     }));

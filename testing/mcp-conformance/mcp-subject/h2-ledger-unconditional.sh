@@ -23,7 +23,7 @@
 # that. Measured on the release binary, same traffic, one config key apart:
 #
 #     rate_card ABSENT   GET /api/v1/admin/usage -> by_model: [],  total.requests: 0
-#     rate_card PRESENT  GET /api/v1/admin/usage -> by_model: [ {probe_ping, mcp, requests: 1} ]
+#     rate_card PRESENT  GET /api/v1/admin/usage -> by_model: [ {mcp_server:probe, mcp, requests: 1} ]
 #
 # The exchange happened both times. Only one of them left a record of it.
 #
@@ -65,12 +65,12 @@ h2_arm() {
     # The metering write is write-behind (`usage_flush_interval_ms`, 100ms), so the read waits a
     # flush cadence with margin rather than racing it.
     sleep 2
-    printf "%s %s\n" "$st" "$(h2_meter_row_field "probe_ping" "mcp" requests)"
+    printf "%s %s\n" "$st" "$(h2_meter_row_field "mcp_server:probe" "mcp" requests)"
   ' _ "$here" "$1"
 }
 
 # The row's lane is the PUBLISHED tool name (`catalogue.rs:1050`, `{server}_{tool}` with
-# `NAMESPACE_SEP = "_"`, `config.rs:83`) -- `probe_ping` -- and its provider is the literal `"mcp"`
+# `NAMESPACE_SEP = "_"`, `config.rs:83`) -- `mcp_server:probe` -- and its provider is the literal `"mcp"`
 # (`method.rs:2517`).
 #
 # `H2_RATE_CARD_YAML=" "` is a card-ABSENT config: a blank line where the key would go. It is the

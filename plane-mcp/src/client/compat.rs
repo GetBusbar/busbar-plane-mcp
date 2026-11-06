@@ -32,7 +32,7 @@ pub fn probe_outcome(status: u16, body: &[u8]) -> StepOutcome {
     }
     if modern_error(body).is_some()
         || (status == 404
-            && serde_json::from_slice::<Value>(body)
+            && crate::codec::wire_json::parse(body)
                 .ok()
                 .as_ref()
                 .and_then(response_error)
@@ -46,7 +46,7 @@ pub fn probe_outcome(status: u16, body: &[u8]) -> StepOutcome {
     if (400..500).contains(&status) {
         return StepOutcome::Answered;
     }
-    let code = serde_json::from_slice::<Value>(body)
+    let code = crate::codec::wire_json::parse(body)
         .ok()
         .and_then(|v| v.pointer("/error/code").and_then(Value::as_i64));
     match code {
@@ -64,7 +64,7 @@ pub fn probe_outcome(status: u16, body: &[u8]) -> StepOutcome {
 /// A recognized modern protocol error, independent of the transport status. These codes
 /// establish the peer's era; they must never trigger an initialization fallback.
 fn modern_error(body: &[u8]) -> Option<i64> {
-    let value: Value = serde_json::from_slice(body).ok()?;
+    let value: Value = crate::codec::wire_json::parse(body).ok()?;
     let code = response_error(&value)?;
     matches!(
         code,
@@ -92,7 +92,7 @@ pub fn stateless_outcome(status: u16, body: &[u8]) -> StepOutcome {
     if (500..600).contains(&status) {
         return StepOutcome::Unreachable;
     }
-    let value = serde_json::from_slice::<Value>(body).ok();
+    let value = crate::codec::wire_json::parse(body).ok();
     if modern_error(body).is_some()
         || (status == 404 && value.as_ref().and_then(response_error) == Some(CODE_METHOD_NOT_FOUND))
     {
@@ -173,7 +173,7 @@ pub fn initialized_notification(
 /// busbar must not continue with: the spec's rule for a client offered a revision it cannot speak.
 #[must_use]
 pub fn offered_revision(body: &[u8]) -> Option<Revision> {
-    let v: Value = serde_json::from_slice(body).ok()?;
+    let v: Value = crate::codec::wire_json::parse(body).ok()?;
     let busbar_contract::jsonrpc::Reply::Result(result) =
         busbar_contract::jsonrpc::read_response(&v, &Value::from(INITIALIZE_ID)).ok()?
     else {
@@ -196,7 +196,7 @@ pub fn lower_request(
     session: Option<&str>,
     id: Option<u64>,
 ) -> OutboundRequest {
-    let mut body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
+    let mut body: Value = crate::codec::wire_json::parse(&req.body).unwrap_or(Value::Null);
     if let (Some(id), Some(obj)) = (id, body.as_object_mut()) {
         obj.insert("id".to_string(), Value::from(id));
 

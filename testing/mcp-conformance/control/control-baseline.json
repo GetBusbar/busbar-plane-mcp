@@ -22,20 +22,9 @@
     "This file is NOT a way to silence inconvenient tests. Adding an entry",
     "requires the verbatim spec clause, the observed behaviour, and a judgement."
   ],
-  "control": "python-sdk mcp==2.0.0",
-  "recordedAt": "2026-08-08",
-  "expectedFailures": [
-    {
-      "testId": "CLI.HOSTILE.SERVER-INITIATED-REQUEST-IS-NOT-ANSWERED",
-      "clause": "STDIO.CLIENT-NO-RESPONSES",
-      "specQuote": "The client sends messages by writing JSON-RPC requests and notifications to the server's stdin, one message per line. The client MUST NOT write JSON-RPC responses.",
-      "specUrl": "https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/stdio#sending-messages",
-      "observed": "When the fake server sends a forbidden server-initiated JSON-RPC request (method elicitation/create, id \"server-initiated-1\"), the control client replies on the server's stdin with {\"jsonrpc\":\"2.0\",\"id\":\"server-initiated-1\",\"error\":{\"code\":-32601,\"message\":\"Method not found\",\"data\":\"elicitation/create\"}}.",
-      "judgement": "DEFECT IN THE CONTROL. The stdio binding states the client MUST NOT write JSON-RPC responses, without qualification, and the message-patterns page states that clients do not send JSON-RPC responses at all. Replying 'Method not found' is well intentioned but it is exactly the wire behaviour the 2026-07-28 revision removed. A server still on the pre-2026 pattern will read the reply as a normal response and stay in legacy mode, which is the interoperability failure the MUST NOT exists to prevent.",
-      "counterArgument": "One could argue an error reply is a courtesy to a misbehaving peer and that the MUST NOT targets well-formed request/response flow rather than error signalling. The spec text carries no such carve-out, so we treat the plain reading as authoritative and record the disagreement here rather than weakening the test.",
-      "upstreamReference": "drafted 2026-10-14 in testing/upstream-issue-drafts.txt; filing held for the owner's OK"
-    }
-  ],
+  "control": "official Python mcp==2.2.0 server + modern-only client transport adapter + independent HTTP host fixture",
+  "recordedAt": "2026-11-05",
+  "expectedFailures": [],
   "pinnedObservations": [
     {
       "testId": "AMB.CONNECTION-ERA-LOCK",
@@ -92,6 +81,19 @@
       "expectedValue": "none",
       "ambiguity": "AMB-NULL-ID",
       "why": "MCP forbids id: null from the client but does not state the server's obligation. The control stays silent. Pinned so a drift to answering with a result, which no client could correlate, fails the build."
+    }
+  ],
+  "resolvedDeviations": [
+    {
+      "testId": "CLI.HOSTILE.SERVER-INITIATED-REQUEST-IS-NOT-ANSWERED",
+      "clause": "STDIO.CLIENT-NO-RESPONSES",
+      "specQuote": "The client sends messages by writing JSON-RPC requests and notifications to the server's stdin, one message per line. The client MUST NOT write JSON-RPC responses.",
+      "specUrl": "https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/stdio#sending-messages",
+      "observed": "When the fake server sends a forbidden server-initiated JSON-RPC request (method elicitation/create, id \"server-initiated-1\"), the control client replies on the server's stdin with {\"jsonrpc\":\"2.0\",\"id\":\"server-initiated-1\",\"error\":{\"code\":-32601,\"message\":\"Method not found\",\"data\":\"elicitation/create\"}}.",
+      "judgement": "DEFECT IN THE CONTROL. The stdio binding states the client MUST NOT write JSON-RPC responses, without qualification, and the message-patterns page states that clients do not send JSON-RPC responses at all. Replying 'Method not found' is well intentioned but it is exactly the wire behaviour the 2026-07-28 revision removed. A server still on the pre-2026 pattern will read the reply as a normal response and stay in legacy mode, which is the interoperability failure the MUST NOT exists to prevent.",
+      "counterArgument": "One could argue an error reply is a courtesy to a misbehaving peer and that the MUST NOT targets well-formed request/response flow rather than error signalling. The spec text carries no such carve-out, so we treat the plain reading as authoritative and record the disagreement here rather than weakening the test.",
+      "upstreamReference": "drafted 2026-10-14 in testing/upstream-issue-drafts.txt; filing held for the owner's OK",
+      "resolution": "The explicitly named modern-only reference client rejects server-initiated requests at its inbound transport boundary. The original official SDK behavior remains recorded here; it is no longer an expected failure for the adapted control."
     }
   ]
 }

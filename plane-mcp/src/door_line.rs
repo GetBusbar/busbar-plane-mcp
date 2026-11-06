@@ -230,7 +230,7 @@ pub(super) fn arrive(plane: &McpDoor, session: u64, body: &[u8]) -> Arrival {
 /// [`arrive`]'s reading of the line into `unit`: the bytes the one dispatch decides on, `None` when
 /// the unit answers its preset.
 fn read(plane: &McpDoor, session: u64, body: &[u8], unit: &mut LineUnit) -> Option<Vec<u8>> {
-    let Ok(mut value) = serde_json::from_slice::<Value>(body) else {
+    let Ok(mut value) = crate::codec::wire_json::parse(body) else {
         return Some(body.to_vec());
     };
 
@@ -430,7 +430,7 @@ pub(super) fn liven(plane: &McpDoor, ticket: Ticket, unit: &mut CallUnit) {
     if pending.request.is_some() || pending.status != 200 || pending.bytes.is_empty() {
         return;
     }
-    let Ok(answer) = serde_json::from_slice::<Value>(&pending.bytes) else {
+    let Ok(answer) = crate::codec::wire_json::parse(&pending.bytes) else {
         return;
     };
     let Some(result) = answer.get("result") else {

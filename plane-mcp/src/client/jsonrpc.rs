@@ -242,7 +242,7 @@ pub fn next_list_request(
     template: &OutboundRequest,
     cursor: &str,
 ) -> Result<OutboundRequest, String> {
-    let mut body: serde_json::Value = serde_json::from_slice(&template.body)
+    let mut body: serde_json::Value = crate::codec::wire_json::parse(&template.body)
         .map_err(|_| "the outgoing tools/list is not JSON".to_string())?;
     let params = body
         .get_mut("params")
@@ -382,7 +382,7 @@ pub fn parse_response(body: &[u8], sent_id: u64) -> RpcOutcome {
 pub fn parse_response_id(body: &[u8], sent_id: &serde_json::Value) -> RpcOutcome {
     use busbar_contract::jsonrpc::{read_response, NotAnAnswerKind, Reply};
 
-    let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
+    let Ok(value) = crate::codec::wire_json::parse(body) else {
         return RpcOutcome::Malformed("upstream response is not valid JSON".to_string());
     };
     let reply = match read_response(&value, sent_id) {

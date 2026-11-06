@@ -350,8 +350,9 @@ test({
     let ack = null;
     try {
       ack = await peer.waitFor(
-        (m) => m && m.method === 'notifications/subscriptions/acknowledged',
-        'subscription acknowledgement', 8000,
+        (m) => m && (m.method === 'notifications/subscriptions/acknowledged'
+          || (m.id === 50 && ('result' in m || 'error' in m))),
+        'subscription acknowledgement or terminal response', 8000,
       );
     } catch {
       // The server may legally answer subscriptions/listen with an error if it
@@ -360,6 +361,22 @@ test({
       ctx.variance('subscriptions.listenRejected', Boolean(err && err.error));
       if (err && err.error) ctx.skip(`server rejected subscriptions/listen: ${err.error.code}`);
       throw new Error('no acknowledgement and no error response to subscriptions/listen');
+    }
+
+    // An explicit rejection is legal. A success result terminating the listen
+    // request before any acknowledgement is an observed protocol violation;
+    // silence still follows the existing ERROR path above.
+    if (ack.id === 50 && ('result' in ack || 'error' in ack)) {
+      ctx.variance('subscriptions.listenRejected', Boolean(ack.error));
+      if (ack.error) ctx.skip(`server rejected subscriptions/listen: ${ack.error.code}`);
+      if (ack.result?.resultType === 'input_required') {
+        ctx.assert('PAT.MRTR.ONLY-SUPPORTED-METHODS', false,
+          'subscriptions/listen returned InputRequiredResult, which is not permitted on this method');
+        return;
+      }
+      ctx.assert('SUB.ACK-FIRST', false,
+        `subscriptions/listen returned a success result before acknowledging subscription 50; result keys=${JSON.stringify(Object.keys(ack.result || {}))}`);
+      return;
     }
 
     const SUB_KEY = 'io.modelcontextprotocol/subscriptionId';

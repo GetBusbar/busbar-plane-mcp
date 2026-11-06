@@ -1216,7 +1216,7 @@ slot!(
         let own_body = line_body.as_deref().or(task_body.as_deref());
         let body: &[u8] = own_body.or(session_body.as_deref()).unwrap_or(body);
         // THE BODY IS PARSED ONCE: decided, framed, routed and kept from this one document.
-        let value = serde_json::from_slice::<Value>(body).ok();
+        let value = crate::codec::wire_json::parse(body).ok();
         // A line's or a continuation's own body implies the fields it is decided under.
         let mirrored = match (own_body, value.as_ref()) {
             (Some(_), Some(v)) => crate::codec::mirrored(v),
@@ -4513,7 +4513,7 @@ slot!(
     /// Any other request carries an empty view (absent body) for the hook.
     Project, ProjectIn, ProjectOut, |instance, input, mut out| {
         // THE BODY IS PARSED ONCE: rewritten in place, its params kept, its arguments projected.
-        let mut request = serde_json::from_slice::<Value>(input.body().bytes()).ok();
+        let mut request = crate::codec::wire_json::parse(input.body().bytes()).ok();
         let rewrite = input.rewrite().bytes();
         let rewritten = request
             .as_mut()

@@ -945,6 +945,13 @@ $(sed 's/^/        /' "$MCP_FIXTURE_CA_FILE")
             text:
               type: string
               description: "The text to echo."
+      fail:
+        schema_hash: "$(dg seam fail)"
+        description: "Always returns a tool execution error."
+        input_schema:
+          type: object
+          properties: {}
+          additionalProperties: false
 
   # A separate HTTP process exposes the SAME bare tool name. The aggregate must
   # keep it reachable independently of seam/echo; sharing one peer cannot prove it.
@@ -969,6 +976,13 @@ $(sed 's/^/        /' "$MCP_FIXTURE_CA_FILE")
             text:
               type: string
               description: "The text to echo."
+      fail:
+        schema_hash: "$(dg seamright fail)"
+        description: "Always returns a tool execution error."
+        input_schema:
+          type: object
+          properties: {}
+          additionalProperties: false
 
   # ── THE CLIENT-ROLE PROBE: the registration \`client-arm.sh\` refreshes ─────────────────────────
   #
@@ -1006,6 +1020,13 @@ $(sed 's/^/        /' "$MCP_FIXTURE_CA_FILE")
       echo:
         schema_hash: "$(dg probe echo)"
         description: "Returns the string it was given."
+      fail:
+        schema_hash: "$(dg probe fail)"
+        description: "Always returns a tool execution error."
+        input_schema:
+          type: object
+          properties: {}
+          additionalProperties: false
 YAML
     say "   seam upstream registered: $MCP_SEAM_UPSTREAM_URL (published as echo, 10s deadline; refresh probe: probe)"
   fi
@@ -1078,6 +1099,35 @@ minting the wrong thing. Either way no verdict from this leg means anything unti
 
 # Boot busbar, obtain a credential for it, and put a credential-holding client shim in front.
 # Sets SUBJECT_URL (what the suite is pointed at) and SUBJECT_PIDS (what the caller must reap).
+# Bootstrap alone may issue more than the actual admin mutation window admits.
+# Honor a genuine 429 and its Retry-After; no scenario request uses this helper.
+subject_bootstrap_connect() {
+  local name="$1" port="$2" token="$3" directory="$4"
+  local headers="$directory/bootstrap-connect-$name.headers"
+  local body="$directory/bootstrap-connect-$name.json"
+  local status retry attempt
+  for attempt in 1 2; do
+    status=$(curl -sS --max-time 45 -D "$headers" -o "$body" -w '%{http_code}' \
+      -X POST "http://127.0.0.1:$port/api/v1/admin/tools/$name/connect" \
+      -H @/dev/fd/3 3<<<"authorization: Bearer $token") || return 1
+    if [ "$status" != "429" ]; then
+      cat "$body"
+      return 0
+    fi
+    node -e 'const x=require(process.argv[1]); if(x?.error?.code!=="rate_limited") process.exit(1)' "$body" \
+      || { echo "bootstrap 429 was not an admin mutation budget refusal" >&2; return 1; }
+    retry=$(awk 'tolower($1)=="retry-after:" {gsub(/\r/,"",$2); print $2}' "$headers")
+    case "$retry" in ''|*[!0-9]*) echo "bootstrap rate refusal has invalid Retry-After" >&2; return 1 ;; esac
+    [ "$retry" -ge 1 ] && [ "$retry" -le 60 ] && [ "$attempt" -eq 1 ] \
+      || { echo "bootstrap mutation retry exceeds its one-window budget" >&2; return 1; }
+    printf '{"registration":"%s","http_status":429,"retry_after_seconds":%s,"attempt":%s}\n' \
+      "$name" "$retry" "$attempt" >> "$directory/admin-bootstrap-rate.jsonl"
+    echo "bootstrap admin mutation budget exhausted for $name; honoring Retry-After ${retry}s" >&2
+    sleep "$retry"
+  done
+  return 1
+}
+
 boot_busbar_subject() {
   local bin="${MCP_SUBJECT_BUSBAR_BIN:?boot_busbar_subject needs MCP_SUBJECT_BUSBAR_BIN}"
   [ -x "$bin" ] || die "MCP_SUBJECT_BUSBAR_BIN=$bin is not an executable. The subject leg judges a \
@@ -1212,9 +1262,8 @@ token to, and a made-up one would be refused."
   [ -n "${MCP_SEAM_UPSTREAM_URL:-}" ] && connect_subjects="$connect_subjects seam seamright probe"
   local s view
   for s in $connect_subjects; do
-    view=$(curl -s --max-time 45 -X POST "http://127.0.0.1:$admin_port/api/v1/admin/tools/$s/connect" \
-             -H @/dev/fd/3 3<<<"authorization: Bearer $admin_token") \
-      || die "the boot-time connect of '$s' did not complete"
+    view=$(subject_bootstrap_connect "$s" "$admin_port" "$admin_token" "$dir") \
+      || die "the boot-time connect of '$s' did not complete within its actual admin mutation budget"
     case "$view" in
       *'"state":"approved"'*) ;;
       *) die "the boot-time connect of '$s' did not land approved — the rig's approvals disagree \

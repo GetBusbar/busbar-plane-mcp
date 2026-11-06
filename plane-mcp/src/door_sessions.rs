@@ -243,7 +243,7 @@ pub(super) fn arrive(
             None => SessionArrived::NotAllowed,
         },
         "POST" => {
-            let value = serde_json::from_slice::<Value>(body).ok();
+            let value = crate::codec::wire_json::parse(body).ok();
             let message_session = adapt::message_session_of(query).map(str::to_string);
             let kind = match &value {
                 Some(v) => adapt::classify_post(v, session.as_deref(), message_session.as_deref()),
@@ -664,7 +664,7 @@ fn discovery(plane: &McpDoor, ticket: Ticket, unit: &mut CallUnit, id: &Value) -
     let held = unit.held.clone().or_else(|| plane.current())?;
     ask_entitlements(plane.services, ticket, unit, &held.catalogue.grants());
     let document = crate::answer::discover(&held.catalogue, id, &admit(&unit.entitled));
-    serde_json::from_slice::<Value>(&document)
+    crate::codec::wire_json::parse(&document)
         .ok()?
         .get("result")
         .cloned()
@@ -906,7 +906,7 @@ pub(super) fn heard(
     let mut reader = crate::client::compat::EventReader::new(raw.len());
     for event in reader.feed(raw) {
         let data = event.data;
-        let Ok(frame) = serde_json::from_str::<Value>(&data) else {
+        let Ok(frame) = crate::codec::wire_json::parse_str(&data) else {
             continue;
         };
         match frame.get("method").and_then(Value::as_str) {
@@ -1042,7 +1042,7 @@ pub(super) fn lower(plane: &McpDoor, ticket: Ticket, caller: &str, unit: &mut Ca
         }
         return;
     }
-    let Ok(v) = serde_json::from_slice::<Value>(&pending.bytes) else {
+    let Ok(v) = crate::codec::wire_json::parse(&pending.bytes) else {
         return;
     };
     let rpc = v.get("jsonrpc").is_some() && (v.get("result").is_some() || v.get("error").is_some());
@@ -1984,7 +1984,7 @@ pub(super) fn fetch_in(
     original: OutboundRequest,
 ) -> Poll<Result<busbar_contract::abi::sdk::exchange::ExchangeResponse, String>> {
     use crate::client::jsonrpc::{parse_response_id, Paged, RpcOutcome, ToolPages};
-    let original_id = serde_json::from_slice::<Value>(&original.body)
+    let original_id = crate::codec::wire_json::parse(&original.body)
         .ok()
         .and_then(|value| value.get("id").cloned())
         .unwrap_or(Value::Null);
@@ -2083,7 +2083,7 @@ pub(super) fn fetch_in(
 }
 
 fn request_id(request: &OutboundRequest) -> Option<Value> {
-    serde_json::from_slice::<Value>(&request.body)
+    crate::codec::wire_json::parse(&request.body)
         .ok()?
         .get("id")
         .cloned()
@@ -2092,7 +2092,7 @@ fn request_id(request: &OutboundRequest) -> Option<Value> {
 /// `request` with the progress token it carries (when it asks for progress at all) replaced by one
 /// no other request of this instance carries: `busbar-` and an id from the instance's one counter.
 fn with_progress_token(plane: &McpDoor, mut request: OutboundRequest) -> OutboundRequest {
-    let Ok(mut body) = serde_json::from_slice::<Value>(&request.body) else {
+    let Ok(mut body) = crate::codec::wire_json::parse(&request.body) else {
         return request;
     };
     let Some(token) = body
@@ -2114,7 +2114,7 @@ fn with_progress_token(plane: &McpDoor, mut request: OutboundRequest) -> Outboun
 /// `body` (one JSON-RPC answer) with its top-level `id` put back to `id` when it is `sent`, the
 /// id the request carried in its session: the answer as the request that asked it is correlated.
 fn with_id(body: Vec<u8>, sent: u64, id: serde_json::Value) -> Vec<u8> {
-    let Ok(mut doc) = serde_json::from_slice::<serde_json::Value>(&body) else {
+    let Ok(mut doc) = crate::codec::wire_json::parse(&body) else {
         return body;
     };
     match doc.as_object_mut() {

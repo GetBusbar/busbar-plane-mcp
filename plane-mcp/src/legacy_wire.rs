@@ -425,7 +425,7 @@ impl Link {
             ) {
                 continue;
             }
-            let Ok(v) = serde_json::from_str::<Value>(&event.data) else {
+            let Ok(v) = crate::codec::wire_json::parse_str(&event.data) else {
                 self.die(
                     "the MCP server sent malformed JSON on its 2024-11-05 event stream",
                     woken,

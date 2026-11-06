@@ -316,7 +316,7 @@ pub enum Lowered {
 #[must_use]
 pub fn lower_answer(answer: &[u8]) -> Option<Lowered> {
     let text = std::str::from_utf8(answer).ok()?;
-    let mut value: Value = serde_json::from_str(text).ok()?;
+    let mut value: Value = crate::codec::wire_json::parse_str(text).ok()?;
     let Some(result) = value.get_mut("result") else {
         return Some(Lowered::Unchanged);
     };

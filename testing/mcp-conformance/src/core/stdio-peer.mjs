@@ -44,11 +44,15 @@ export class StdioPeer {
     this.rawLines = [];        // every stdout line as received, pre-parse
     this.badLines = [];        // stdout lines that did not parse as JSON
     this.stderr = '';
-    this.stdoutBytes = Buffer.alloc(0);
+    this._stdoutChunks = [];
+    this._stdoutLength = 0;
+    this._stdoutSnapshot = null;
+    this.stdoutEnded = false;
+    this.stdoutError = null;
     this.exited = false;
     this.exitCode = null;
     this.exitSignal = null;
-    this._buf = '';
+    this._lineParts = [];
     this._decoder = new StringDecoder('utf8');
     this.httpTransport = false;
     this.httpStatuses = [];
@@ -68,14 +72,29 @@ export class StdioPeer {
     });
     StdioPeer.ownedPeers.add(this);
     this.proc.stdout.on('data', (chunk) => {
-      this.stdoutBytes = Buffer.concat([this.stdoutBytes, chunk]);
-      this._buf += this._decoder.write(chunk);
-      let idx;
-      while ((idx = this._buf.indexOf('\n')) >= 0) {
-        const line = this._buf.slice(0, idx);
-        this._buf = this._buf.slice(idx + 1);
-        this._onLine(line);
+      // Retain each chunk once. Repeated Buffer.concat and rescanning the whole
+      // unfinished line made a large (legal) reply quadratic in bytes received.
+      this._stdoutChunks.push(chunk);
+      this._stdoutLength += chunk.length;
+      this._stdoutSnapshot = null;
+      this._consumeStdout(this._decoder.write(chunk));
+    });
+    this.proc.stdout.on('end', () => {
+      this._consumeStdout(this._decoder.end());
+      if (this._lineParts.length) {
+        this._onLine(this._lineParts.join(''));
+        this._lineParts = [];
       }
+      this.stdoutEnded = true;
+      // A child can close stdout while keeping stdin/process alive. No future
+      // message can arrive; waiting for process close here wastes the failsafe.
+      for (const w of this._waiters.splice(0)) {
+        w.reject(new Error(`peer stdout ended while waiting for: ${w.label}`));
+      }
+    });
+    this.proc.stdout.on('error', (error) => {
+      this.stdoutError = error;
+      for (const w of this._waiters.splice(0)) w.reject(error);
     });
     this.proc.stderr.on('data', (c) => { this.stderr += c.toString('utf8'); });
     this.proc.stdio[3].on('data', (chunk) => {
@@ -95,8 +114,6 @@ export class StdioPeer {
     // `close` follows stdout/stderr/status drain; `exit` may precede the final pipe data.
     this.proc.on('close', (code, signal) => {
       StdioPeer.ownedPeers.delete(this);
-      this._buf += this._decoder.end();
-      if (this._buf !== '') { this._onLine(this._buf); this._buf = ''; }
       this._httpBuf += this._httpDecoder.end();
       if (this._httpBuf !== '') {
         this.httpObservationError = new Error('HTTP observation ended inside a record');
@@ -119,6 +136,31 @@ export class StdioPeer {
       for (const w of this._waiters.splice(0)) w.reject(err);
     });
     return this;
+  }
+
+  // Materialise only when an assertion asks for the complete wire. Subsequent
+  // reads without new data reuse the snapshot, preserving the public Buffer API.
+  get stdoutBytes() {
+    if (this._stdoutSnapshot === null) {
+      this._stdoutSnapshot = Buffer.concat(this._stdoutChunks, this._stdoutLength);
+    }
+    return this._stdoutSnapshot;
+  }
+
+  _consumeStdout(text) {
+    let start = 0;
+    for (;;) {
+      const end = text.indexOf('\n', start);
+      if (end < 0) {
+        if (start < text.length) this._lineParts.push(text.slice(start));
+        return;
+      }
+      this._lineParts.push(text.slice(start, end));
+      const line = this._lineParts.join('');
+      this._lineParts = [];
+      this._onLine(line);
+      start = end + 1;
+    }
   }
 
   _onLine(line) {
@@ -198,6 +240,8 @@ export class StdioPeer {
       if (predicate(m)) return Promise.resolve(m);
     }
     if (this.spawnError || this.writeError) return Promise.reject(this.spawnError || this.writeError);
+    if (this.stdoutError) return Promise.reject(this.stdoutError);
+    if (this.stdoutEnded) return Promise.reject(new Error(`peer stdout ended while waiting for: ${label}`));
     if (this.exited) return Promise.reject(new Error(`peer exited while waiting for: ${label}`));
     return new Promise((resolve, reject) => {
       const w = { predicate, resolve, reject, label };

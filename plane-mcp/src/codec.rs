@@ -4,6 +4,9 @@
 //! THE MCP WIRE VOCABULARY, written down once: the revision string, the method names, the `_meta`
 //! keys, the mirror headers and the JSON-RPC error code table.
 
+#[path = "wire_json.rs"]
+pub(crate) mod wire_json;
+
 /// The discriminator on a result this node is handing over as finished.
 pub const RESULT_TYPE_COMPLETE: &str = "complete";
 
@@ -169,3 +172,7 @@ pub(crate) fn json_len(value: &impl serde::Serialize) -> usize {
         counter.0
     }
 }
+
+#[cfg(test)]
+#[path = "tests/wire_json.rs"]
+mod wire_json_tests;

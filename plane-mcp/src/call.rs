@@ -846,7 +846,7 @@ pub fn invocation(request: Value) -> Option<busbar_contract::ir::invoke::InvokeR
 /// applies it in its own dialect and re-projects).
 #[must_use]
 pub fn rewritten(request: &mut Value, rewrite: &[u8]) -> Option<()> {
-    let reply: Value = serde_json::from_slice(rewrite).ok()?;
+    let reply: Value = crate::codec::wire_json::parse(rewrite).ok()?;
     let mut arguments: Option<Value> = None;
     for message in reply.get("messages")?.as_array()? {
         let candidate = match message.get("content") {
@@ -859,7 +859,7 @@ pub fn rewritten(request: &mut Value, rewrite: &[u8]) -> Option<()> {
         };
         let resolved = match candidate {
             Value::Object(_) => Some(candidate.clone()),
-            Value::String(text) => serde_json::from_str::<Value>(text)
+            Value::String(text) => crate::codec::wire_json::parse_str(text)
                 .ok()
                 .filter(Value::is_object),
             _ => None,
@@ -1088,7 +1088,7 @@ pub(crate) fn progress_frames_bounded(raw: &[u8], limit: usize) -> Vec<Value> {
     use crate::client::peer::{NotificationEffect, ServerMessage};
     event_stream_data(&String::from_utf8_lossy(raw))
         .into_iter()
-        .filter_map(|d| serde_json::from_str::<Value>(d.trim()).ok())
+        .filter_map(|d| crate::codec::wire_json::parse_str(d.trim()).ok())
         .filter(|frame| {
             matches!(
                 crate::client::peer::classify(frame),
@@ -1322,7 +1322,7 @@ pub fn settle_call_as(
             &failure_reason(status, &failure).unwrap_or_default(),
         ),
         RpcOutcome::InputRequired { kind } => {
-            let payload = serde_json::from_slice::<Value>(&body)
+            let payload = crate::codec::wire_json::parse(&body)
                 .ok()
                 .and_then(|v| v.get("result").cloned())
                 .unwrap_or_else(|| json!({}));
@@ -1398,14 +1398,14 @@ pub fn leg_of(settled: &Settled, raw: &[u8], sse: bool, sent_id: impl Into<Value
     };
     if line.outcome == vocab::OUTCOME_DISPATCHED && line.reason.is_empty() {
         if let Some(result) =
-            serde_json::from_slice::<Value>(&answer_body(raw, sse, &sent_id.into()))
+            crate::codec::wire_json::parse(&answer_body(raw, sse, &sent_id.into()))
                 .ok()
                 .and_then(|v| v.get("result").cloned())
         {
             return Leg::Done(result);
         }
     }
-    let answer = serde_json::from_slice::<Value>(body).unwrap_or(Value::Null);
+    let answer = crate::codec::wire_json::parse(body).unwrap_or(Value::Null);
     let words = answer
         .pointer("/error/message")
         .or_else(|| answer.pointer("/result/content/0/text"))

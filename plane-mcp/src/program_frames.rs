@@ -88,7 +88,7 @@ impl Frames {
                     self.depth -= 1;
                     if self.depth == 0 {
                         let whole = &self.buf[start..self.seen];
-                        out.push(match serde_json::from_slice(whole) {
+                        out.push(match crate::codec::wire_json::parse(whole) {
                             Ok(value) => Message::Value(value),
                             Err(_) => Message::NotJson(whole.to_vec()),
                         });
@@ -109,5 +109,31 @@ impl Frames {
     #[must_use]
     pub fn overgrown(&self) -> bool {
         self.overgrown || self.buf.len() > MESSAGE_MAX
+    }
+}
+
+#[cfg(test)]
+mod marker_tests {
+    use super::*;
+
+    #[test]
+    fn marker_object_ids_survive_program_framing_for_rejection() {
+        for key in [
+            "$serde_json::private::Number",
+            r"\u0024serde_json::private::Number",
+        ] {
+            let body = format!(r#"{{"jsonrpc":"2.0","id":{{"{key}":"27"}},"result":{{}}}}"#);
+            let mut frames = Frames::default();
+            let split = body.len() / 2;
+            assert!(frames.push(&body.as_bytes()[..split]).is_empty());
+            let messages = frames.push(&body.as_bytes()[split..]);
+            let [Message::Value(value)] = messages.as_slice() else {
+                panic!("one complete frame")
+            };
+            assert!(value["id"].is_object());
+            let wire = serde_json::to_vec(value).unwrap();
+            let reparsed = crate::codec::wire_json::parse(&wire).unwrap();
+            assert!(busbar_contract::jsonrpc::read_response(&reparsed, &Value::from(27)).is_err());
+        }
     }
 }

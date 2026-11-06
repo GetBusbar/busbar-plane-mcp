@@ -3,6 +3,12 @@
 #[allow(dead_code)]
 #[path = "../../plane-mcp/src/program_frames.rs"]
 mod program_frames;
+#[allow(dead_code)]
+#[path = "../../plane-mcp/src/wire_json.rs"]
+pub(crate) mod wire_json;
+mod codec {
+    pub(crate) use super::wire_json;
+}
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 thread_local! { static ALLOCATIONS: Cell<u64> = const { Cell::new(0) }; }
