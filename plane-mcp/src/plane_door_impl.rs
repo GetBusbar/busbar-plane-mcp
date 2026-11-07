@@ -633,6 +633,7 @@ struct ConnectFetch {
 struct Verified {
     sighting: crate::trust::Sighting,
     sight_seq: u32,
+    item_base: u32,
     receipt: Option<Result<(), String>>,
 }
 
@@ -1754,11 +1755,27 @@ fn verify_on_call(
                 };
                 sighting_of(answer, CONNECT_REQUEST_ID)
             };
-            let seq = door_tasks::handle(ticket, &mut unit.issued, &mut None).seq;
+            // Reserve one immutable handle range before any sighting can pend.
+            // Later polls may issue clocks, but each tool keeps its original handle.
+            let sight_seq = unit.issued;
+            let item_base = sight_seq.checked_add(1);
+            let next = u32::try_from(held.catalogue.tools_of(server).count())
+                .ok()
+                .and_then(|count| item_base.and_then(|base| base.checked_add(count)));
+            let receipt = match next {
+                Some(next) => {
+                    unit.issued = next;
+                    None
+                }
+                None => Some(Err(
+                    "the trust sighting exhausted completion handles".to_string()
+                )),
+            };
             Verified {
                 sighting,
-                sight_seq: seq,
-                receipt: None,
+                sight_seq,
+                item_base: item_base.unwrap_or(sight_seq),
+                receipt,
             }
         }
     };
@@ -1768,7 +1785,7 @@ fn verify_on_call(
             &services,
             ticket,
             verified.sight_seq,
-            &mut unit.issued,
+            verified.item_base,
             &held.catalogue,
             server,
             &verified.sighting,
@@ -1929,7 +1946,7 @@ fn record_sighting(
     services: &Services,
     ticket: Ticket,
     sight_seq: u32,
-    seq: &mut u32,
+    item_base: u32,
     catalogue: &Catalogue,
     server: &str,
     sighting: &crate::trust::Sighting,
@@ -1953,11 +1970,21 @@ fn record_sighting(
         std::task::Poll::Ready(Ok(_)) => {}
     }
     if let Sighting::Seen(obs) = sighting {
-        for entry in catalogue.tools_of(server) {
+        for (index, entry) in catalogue.tools_of(server).enumerate() {
             if let Some(digest) = obs.capabilities.get(&entry.tool) {
-                let handle = door_tasks::handle(ticket, seq, &mut None);
-                if let Err(error) = services.trust_sight_item(handle, server, &entry.tool, digest) {
-                    return std::task::Poll::Ready(Err(format!("the kernel could not record server `{server}` tool `{}`'s trust sighting: {error:?}", entry.tool)));
+                let Some(seq) = u32::try_from(index)
+                    .ok()
+                    .and_then(|index| item_base.checked_add(index))
+                else {
+                    return std::task::Poll::Ready(Err(
+                        "the trust sighting exhausted completion handles".to_string(),
+                    ));
+                };
+                let handle = handle_at(ticket, seq);
+                match services.trust_sight_item(handle, server, &entry.tool, digest) {
+                    std::task::Poll::Pending=>return std::task::Poll::Pending,
+                    std::task::Poll::Ready(Err(error))=>return std::task::Poll::Ready(Err(format!("the kernel could not record server `{server}` tool `{}`'s trust sighting: {error:?}", entry.tool))),
+                    std::task::Poll::Ready(Ok(_))=>{},
                 }
             }
         }
@@ -3880,7 +3907,11 @@ fn write(
             units.push(*count);
         }
         let short = busbar_contract::abi::sdk::plane::settle_piece(
-            out, &fields, &units, &arena, Some(&records),
+            out,
+            &fields,
+            &units,
+            &arena,
+            Some(&records),
         );
         if short {
             return Err(());
@@ -4447,8 +4478,7 @@ slot!(
         let Some(services) = plane.services else {
             return out.answer(&input, 503, &[(CONTENT_TYPE, "text/plain")], b"the kernel lends no trust-sighting service", AUDIT_REJECTED);
         };
-        let mut seq = SIGHT_SEQ + 3;
-        match record_sighting(&services, instance.ticket(), SIGHT_SEQ, &mut seq, &held.catalogue, name, &sighting) {
+        match record_sighting(&services, instance.ticket(), SIGHT_SEQ, SIGHT_SEQ + 3, &held.catalogue, name, &sighting) {
             std::task::Poll::Pending => {
                 instance.park(Sighted(held.clone(), sighting));
                 return Outcome::Pending;
