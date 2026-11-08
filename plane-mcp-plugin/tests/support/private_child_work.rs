@@ -208,7 +208,7 @@ fn run(case: Case) -> Calls {
         io: std::ptr::null(),
     };
     let plane = McpDoor {
-        services: unsafe { Services::from_raw(&tables) },
+        services: unsafe { Services::test_from_raw(&tables) },
         ..McpDoor::default()
     };
     let case = CASE.with(|case| case.borrow().as_ref().unwrap().clone());

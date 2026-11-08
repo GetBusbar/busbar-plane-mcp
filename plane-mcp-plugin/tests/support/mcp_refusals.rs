@@ -28,8 +28,8 @@ use busbar_contract::abi::mechanism::call::AbiStr;
 use busbar_contract::abi::mechanism::door::{Door as AbiDoor, DoorParts, Statement};
 use busbar_contract::abi::mechanism::KindCode;
 use busbar_plugin_loader::dispatch::kinds::{
-    auth::Auth, export::Export, hook::Hook, plane::Plane, secret::Secret, store::Store,
-    transport::Transport,
+    auth::Auth, export::Export, hook::Hook, plane::Plane, secret::Secret,
+    store_v4::StoreV4 as Store, transport::Transport,
 };
 use busbar_plugin_loader::dispatch::{
     load_dropped, load_linked, rendering_of, DispatchConfig, Dispatcher, LinkedRow, LoadError,
@@ -56,7 +56,10 @@ fn incompatible_abi_layout_and_statement_metadata_are_refused() {
     let _lock = METADATA
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let d = Dispatcher::new(DispatchConfig::default());
+    let d = Dispatcher::new(
+        DispatchConfig::default(),
+        busbar_contract::services::test_caller_binding(),
+    );
     let honest = rendering_of(busbar_plane_mcp::door).unwrap();
     for by in [Door::Linked, Door::Dropped] {
         load::<Plane>(by, &d).expect("honest MCP loads");
@@ -160,7 +163,10 @@ fn incompatible_abi_layout_and_statement_metadata_are_refused() {
 }
 
 fn wrong_kind<K: busbar_plugin_loader::dispatch::Kind>() {
-    let d = Dispatcher::new(DispatchConfig::default());
+    let d = Dispatcher::new(
+        DispatchConfig::default(),
+        busbar_contract::services::test_caller_binding(),
+    );
     for by in [Door::Linked, Door::Dropped] {
         assert_eq!(
             load::<K>(by, &d).map(|_| ()).unwrap_err(),
@@ -183,7 +189,10 @@ fn the_actual_mcp_plane_refuses_every_other_kind_through_both_doors() {
 
 #[test]
 fn the_actual_mcp_serving_door_requires_a_connection_table_through_both_origins() {
-    let d = Dispatcher::new(DispatchConfig::default());
+    let d = Dispatcher::new(
+        DispatchConfig::default(),
+        busbar_contract::services::test_caller_binding(),
+    );
     let row = LinkedRow::of(busbar_plane_mcp::door).unwrap();
     let statement = busbar_contract::abi::mechanism::rendering::read(&row.statement).unwrap();
     let needs = statement.needs.len();
@@ -223,7 +232,10 @@ fn a_mcp_plane_with_another_answer_layout_is_refused() {
     let st = unsafe { real.statement.read_unaligned() };
     let tail = unsafe { st.kind_tail.cast::<PlaneTail>().read_unaligned() };
     assert_eq!(tail.answer_layout, ANSWER_LAYOUT);
-    let d = Dispatcher::new(DispatchConfig::default());
+    let d = Dispatcher::new(
+        DispatchConfig::default(),
+        busbar_contract::services::test_caller_binding(),
+    );
     for by in [Door::Linked, Door::Dropped] {
         load::<Plane>(by, &d).expect("honest MCP plane loads");
     }
@@ -290,7 +302,10 @@ fn failing_mcp_readiness_is_not_retried_and_preserves_its_exact_error() {
         ready: Some(failing_ready),
         ..real()
     });
-    let d = Dispatcher::new(DispatchConfig::default());
+    let d = Dispatcher::new(
+        DispatchConfig::default(),
+        busbar_contract::services::test_caller_binding(),
+    );
     let p = load_linked::<Plane>(&LinkedRow::of_raw(malformed).unwrap(), bind(&d)).unwrap();
     assert!(p.has_ready());
     let cfg: serde_json::Value = serde_json::from_str(super::inputs()).unwrap();
@@ -308,17 +323,14 @@ fn failing_mcp_readiness_is_not_retried_and_preserves_its_exact_error() {
     let mut o: PlaneOpenOut = unsafe { std::mem::zeroed() };
     o.open.head = out_head();
     assert_eq!(p.open(&mut Frame::new(i, o)).0.outcome, Outcome::Ready);
-    let before = p.inner.crossings.load(Ordering::SeqCst) - p.inner.resumes.load(Ordering::SeqCst);
+    let before = p.test_invocations().0 - p.test_invocations().1;
     let error = p.ready(&d, std::time::Duration::from_secs(30)).unwrap_err();
     assert_eq!(
         error,
         format!("plugin '{}' ready failed: {READY_FAILURE}", p.name())
     );
     assert_eq!(READY_CALLS.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        p.inner.crossings.load(Ordering::SeqCst) - p.inner.resumes.load(Ordering::SeqCst) - before,
-        1
-    );
+    assert_eq!(p.test_invocations().0 - p.test_invocations().1 - before, 1);
     let mut close = Frame::new(in_head(), out_head());
     assert_eq!(
         p.call(

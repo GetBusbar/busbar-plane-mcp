@@ -42,7 +42,7 @@ mod tool_tasks;
 mod tools_config;
 
 /// The plugin's memory-ABI door.
-pub use plane_door::door;
+pub use plane_door::{door, MACRO_DOOR};
 
 /// The plane's declared metadata (`declares.json`), linked by the distribution and signed
 /// into a dropped-in plane's manifest.

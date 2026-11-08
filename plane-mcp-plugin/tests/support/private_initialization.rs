@@ -179,8 +179,8 @@ impl<'host> InitializationCase<'host> {
         });
         CALLS.with(|calls| calls.borrow_mut().clear());
         let plane = McpDoor {
-            host: Some(unsafe { Host::from_raw(&host.tables) }),
-            wake: unsafe { busbar_contract::abi::sdk::services::Wake::from_raw(&host.tables) },
+            host: Some(unsafe { Host::test_from_raw(&host.tables) }),
+            wake: unsafe { busbar_contract::abi::sdk::services::Wake::test_from_raw(&host.tables) },
             ..McpDoor::default()
         };
         let mut link = link();

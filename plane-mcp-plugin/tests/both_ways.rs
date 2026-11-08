@@ -577,7 +577,10 @@ mod both_ways {
     /// literals, which the config-schema census reads).
     #[test]
     fn the_statements_sections_are_the_grammars() {
-        let d = Dispatcher::new(DispatchConfig::default());
+        let d = Dispatcher::new(
+            DispatchConfig::default(),
+            busbar_contract::services::test_caller_binding(),
+        );
         let served = linked(&d).served();
         assert_eq!(served.section, TOOLS_SECTION);
         assert_eq!(served.owns, vec![ENDPOINT_SECTION]);
@@ -588,7 +591,10 @@ mod both_ways {
     /// held to them in the crate.
     #[test]
     fn the_door_answers_what_the_plane_says() {
-        let d = Dispatcher::new(DispatchConfig::default());
+        let d = Dispatcher::new(
+            DispatchConfig::default(),
+            busbar_contract::services::test_caller_binding(),
+        );
         let t = script(&linked(&d));
 
         assert_eq!(step(&t, "validate refused").outcome, Outcome::Refused);
@@ -813,7 +819,10 @@ mod both_ways {
     /// apply with a well-formed block, or with none, refreshes.
     #[test]
     fn an_apply_carrying_a_malformed_endpoint_block_is_refused_at_refresh() {
-        let d = Dispatcher::new(DispatchConfig::default());
+        let d = Dispatcher::new(
+            DispatchConfig::default(),
+            busbar_contract::services::test_caller_binding(),
+        );
         for (how, p) in [("linked", linked(&d)), ("dropped in", dropped(&d))] {
             let mut i: PlaneOpenIn = z();
             i.open.head = in_head();
@@ -858,7 +867,10 @@ mod both_ways {
 
     #[test]
     fn the_linked_and_the_dropped_in_door_answer_every_op_the_same() {
-        let d = Dispatcher::new(DispatchConfig::default());
+        let d = Dispatcher::new(
+            DispatchConfig::default(),
+            busbar_contract::services::test_caller_binding(),
+        );
         let linked = script(&linked(&d));
         assert_eq!(script(&dropped(&d)), linked, "the dropped-in door");
     }
@@ -886,7 +898,10 @@ mod both_ways {
     fn p_item_refusal_reason_collapse_the_door_answers_every_reason_at_the_kernels_status_never_internal(
     ) {
         use busbar_contract::abi::plane::{reason_of, RefusalCode};
-        let d = Dispatcher::new(DispatchConfig::default());
+        let d = Dispatcher::new(
+            DispatchConfig::default(),
+            busbar_contract::services::test_caller_binding(),
+        );
         let p = linked(&d);
         let mut i: PlaneOpenIn = z();
         i.open.head = in_head();
@@ -1120,8 +1135,15 @@ mod both_ways {
         ) -> busbar_plugin_loader::dispatch::Ran {
             busbar_plugin_loader::dispatch::Ran::Now(Stored::refused(UNSERVED))
         }
-        fn snapshot_read(&self, _: &Caller, _: u32) -> busbar_contract::services::Snapshot {
-            busbar_contract::services::Snapshot::Refused(UNSERVED)
+        fn snapshot_read(
+            &self,
+            _: &Caller,
+            _: u32,
+            _later: busbar_contract::services::Later,
+        ) -> busbar_contract::services::Ran {
+            busbar_contract::services::Ran::Now(
+                (busbar_contract::services::Snapshot::Refused(UNSERVED)).stored(),
+            )
         }
 
         fn trust_unreached(
@@ -1137,17 +1159,24 @@ mod both_ways {
             _counterparty: &str,
             _item: &str,
             _digest: &str,
-        ) -> busbar_contract::services::Stored {
-            busbar_contract::services::Stored::refused(busbar_contract::services::UNSERVED)
+            _later: busbar_contract::services::Later,
+        ) -> busbar_contract::services::Ran {
+            busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused(
+                busbar_contract::services::UNSERVED,
+            ))
         }
         fn trust_decide(
             &self,
             _caller: &busbar_contract::services::Caller,
+            _ticket: busbar_contract::abi::mechanism::ticket::Ticket,
             _key: busbar_contract::services::TrustKeyRef<'_>,
             _expected: Option<&str>,
             _approve: bool,
-        ) -> busbar_contract::services::Stored {
-            busbar_contract::services::Stored::refused(busbar_contract::services::UNSERVED)
+            _later: busbar_contract::services::Later,
+        ) -> busbar_contract::services::Ran {
+            busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused(
+                busbar_contract::services::UNSERVED,
+            ))
         }
         fn trust_state(
             &self,
@@ -1170,8 +1199,11 @@ mod both_ways {
             _unit: Option<u64>,
             _ttl_secs: u64,
             _record: &[u8],
-        ) -> busbar_contract::services::Stored {
-            busbar_contract::services::Stored::refused(busbar_contract::services::UNSERVED)
+            _later: busbar_contract::services::Later,
+        ) -> busbar_contract::services::Ran {
+            busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused(
+                busbar_contract::services::UNSERVED,
+            ))
         }
         fn ticket_take(
             &self,
@@ -1371,8 +1403,15 @@ mod both_ways {
         ) -> busbar_plugin_loader::dispatch::Ran {
             busbar_plugin_loader::dispatch::Ran::Now(Stored::refused(UNSERVED))
         }
-        fn snapshot_read(&self, _: &Caller, _: u32) -> busbar_contract::services::Snapshot {
-            busbar_contract::services::Snapshot::Refused(UNSERVED)
+        fn snapshot_read(
+            &self,
+            _: &Caller,
+            _: u32,
+            _later: busbar_contract::services::Later,
+        ) -> busbar_contract::services::Ran {
+            busbar_contract::services::Ran::Now(
+                (busbar_contract::services::Snapshot::Refused(UNSERVED)).stored(),
+            )
         }
 
         fn trust_unreached(
@@ -1388,17 +1427,24 @@ mod both_ways {
             _counterparty: &str,
             _item: &str,
             _digest: &str,
-        ) -> busbar_contract::services::Stored {
-            busbar_contract::services::Stored::refused(busbar_contract::services::UNSERVED)
+            _later: busbar_contract::services::Later,
+        ) -> busbar_contract::services::Ran {
+            busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused(
+                busbar_contract::services::UNSERVED,
+            ))
         }
         fn trust_decide(
             &self,
             _caller: &busbar_contract::services::Caller,
+            _ticket: busbar_contract::abi::mechanism::ticket::Ticket,
             _key: busbar_contract::services::TrustKeyRef<'_>,
             _expected: Option<&str>,
             _approve: bool,
-        ) -> busbar_contract::services::Stored {
-            busbar_contract::services::Stored::refused(busbar_contract::services::UNSERVED)
+            _later: busbar_contract::services::Later,
+        ) -> busbar_contract::services::Ran {
+            busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused(
+                busbar_contract::services::UNSERVED,
+            ))
         }
         fn trust_state(
             &self,
@@ -1421,8 +1467,11 @@ mod both_ways {
             _unit: Option<u64>,
             _ttl_secs: u64,
             _record: &[u8],
-        ) -> busbar_contract::services::Stored {
-            busbar_contract::services::Stored::refused(busbar_contract::services::UNSERVED)
+            _later: busbar_contract::services::Later,
+        ) -> busbar_contract::services::Ran {
+            busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused(
+                busbar_contract::services::UNSERVED,
+            ))
         }
         fn ticket_take(
             &self,
@@ -1724,7 +1773,11 @@ mod both_ways {
     }
 
     fn served(grants: &'static [&'static str]) -> Dispatcher {
-        Dispatcher::with_services(DispatchConfig::default(), Arc::new(Grants(grants)))
+        Dispatcher::with_services(
+            DispatchConfig::default(),
+            Arc::new(Grants(grants)),
+            busbar_contract::services::test_caller_binding(),
+        )
     }
 
     #[test]
@@ -2027,11 +2080,12 @@ mod both_ways {
     /// An `on_piece` that relays the caller's bytes back instead of answering from the catalogue.
     struct Echo;
     impl SafeSlot for Echo {
+        type Kind = busbar_contract::plugin::markers::PlaneKind;
         type In = OnPieceIn;
         type Out = OnPieceOut;
         type State = ();
         fn call(
-            _: Instance<'_, ()>,
+            _: Instance<'_, (), busbar_contract::plugin::markers::PlaneKind>,
             input: Lent<'_, OnPieceIn>,
             mut out: Out<'_, OnPieceOut>,
         ) -> Outcome {
@@ -2049,7 +2103,8 @@ mod both_ways {
         let d = door();
         // SAFETY: the macro's `'static` door states a plane table.
         let mut ops = unsafe { *d.ops().cast::<plane::Ops>() };
-        ops.on_piece = kind_op::<plane::Ops, Safe<Echo>, TestCapture, { slot::ON_PIECE }>();
+        ops.on_piece =
+            kind_op::<plane::Ops, plane::Ops, Safe<Echo>, TestCapture, { slot::ON_PIECE }>();
         let ops: &'static plane::Ops = Box::leak(Box::new(ops));
         let mut parts = d.parts();
         parts.ops = std::ptr::from_ref(ops).cast();
@@ -2060,7 +2115,10 @@ mod both_ways {
 
     #[test]
     fn red_a_door_that_stops_answering_from_the_catalogue_answers_differently() {
-        let d = Dispatcher::new(DispatchConfig::default());
+        let d = Dispatcher::new(
+            DispatchConfig::default(),
+            busbar_contract::services::test_caller_binding(),
+        );
         let honest = script(&linked(&d));
         // SAFETY: `echo_door` answers a leaked `'static`, fully initialised door whose Statement is
         // the macro door's own.
@@ -2096,6 +2154,7 @@ mod both_ways {
         let d = Dispatcher::with_services(
             DispatchConfig::default(),
             Arc::new(Minting(Grants(&[]), std::sync::atomic::AtomicU64::new(1))),
+            busbar_contract::services::test_caller_binding(),
         );
         const ACCEPT: &[Field] = &[field("accept", "text/event-stream")];
         for dropped_in in [false, true] {
@@ -2323,7 +2382,10 @@ mod bounds {
     /// it kept.
     #[test]
     fn a_unit_the_kernel_refuses_is_dropped() {
-        let d = Dispatcher::new(DispatchConfig::default());
+        let d = Dispatcher::new(
+            DispatchConfig::default(),
+            busbar_contract::services::test_caller_binding(),
+        );
         let p = started(&d);
         assert_eq!(
             arrive(&p, 7, TOOLS_LIST, LIST_FIELDS).0,
@@ -2341,7 +2403,10 @@ mod bounds {
     /// A unit a piece of which the plane refuses is over too: nothing else would ever end it.
     #[test]
     fn a_unit_whose_piece_the_plane_refuses_is_dropped() {
-        let d = Dispatcher::new(DispatchConfig::default());
+        let d = Dispatcher::new(
+            DispatchConfig::default(),
+            busbar_contract::services::test_caller_binding(),
+        );
         let p = started(&d);
         assert_eq!(
             arrive(&p, 8, TOOLS_LIST, LIST_FIELDS).0,
@@ -2457,17 +2522,24 @@ mod bounds {
             _counterparty: &str,
             _item: &str,
             _digest: &str,
-        ) -> busbar_contract::services::Stored {
-            busbar_contract::services::Stored::refused(busbar_contract::services::UNSERVED)
+            _later: busbar_contract::services::Later,
+        ) -> busbar_contract::services::Ran {
+            busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused(
+                busbar_contract::services::UNSERVED,
+            ))
         }
         fn trust_decide(
             &self,
             _caller: &busbar_contract::services::Caller,
+            _ticket: busbar_contract::abi::mechanism::ticket::Ticket,
             _key: busbar_contract::services::TrustKeyRef<'_>,
             _expected: Option<&str>,
             _approve: bool,
-        ) -> busbar_contract::services::Stored {
-            busbar_contract::services::Stored::refused(busbar_contract::services::UNSERVED)
+            _later: busbar_contract::services::Later,
+        ) -> busbar_contract::services::Ran {
+            busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused(
+                busbar_contract::services::UNSERVED,
+            ))
         }
         fn trust_state(
             &self,
@@ -2522,8 +2594,11 @@ mod bounds {
             _unit: Option<u64>,
             _ttl_secs: u64,
             _record: &[u8],
-        ) -> busbar_contract::services::Stored {
-            busbar_contract::services::Stored::refused(busbar_contract::services::UNSERVED)
+            _later: busbar_contract::services::Later,
+        ) -> busbar_contract::services::Ran {
+            busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused(
+                busbar_contract::services::UNSERVED,
+            ))
         }
         fn ticket_take(
             &self,
@@ -2657,14 +2732,22 @@ mod bounds {
             &self,
             _caller: &busbar_contract::services::Caller,
             _scope: u32,
-        ) -> busbar_contract::services::Snapshot {
-            busbar_contract::services::Snapshot::Refused(busbar_contract::services::UNSERVED)
+            _later: busbar_contract::services::Later,
+        ) -> busbar_contract::services::Ran {
+            busbar_contract::services::Ran::Now(
+                (busbar_contract::services::Snapshot::Refused(busbar_contract::services::UNSERVED))
+                    .stored(),
+            )
         }
     }
 
     /// A dispatcher whose host serves a clock.
     fn clocked() -> Dispatcher {
-        Dispatcher::with_services(DispatchConfig::default(), Arc::new(Clocked))
+        Dispatcher::with_services(
+            DispatchConfig::default(),
+            Arc::new(Clocked),
+            busbar_contract::services::test_caller_binding(),
+        )
     }
 
     /// One caller opening its quota's worth of subscriptions, plus one, cuts off no
@@ -2710,7 +2793,10 @@ mod bounds {
 
     #[test]
     fn a_subscription_on_a_host_whose_clock_is_unbound_is_refused() {
-        let d = Dispatcher::new(DispatchConfig::default());
+        let d = Dispatcher::new(
+            DispatchConfig::default(),
+            busbar_contract::services::test_caller_binding(),
+        );
         let p = started(&d);
         assert_eq!(
             arrive(&p, 1, LISTEN, LISTEN_FIELDS).0,
@@ -2730,7 +2816,10 @@ mod bounds {
     /// unit is still held and still answers.
     #[test]
     fn a_full_unit_table_refuses_the_next_arrival_and_evicts_nothing() {
-        let d = Dispatcher::new(DispatchConfig::default());
+        let d = Dispatcher::new(
+            DispatchConfig::default(),
+            busbar_contract::services::test_caller_binding(),
+        );
         let p = started(&d);
         let mut first_refused = None;
         for unit in 1..=5000 {

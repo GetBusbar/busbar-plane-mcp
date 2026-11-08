@@ -125,7 +125,7 @@ pub(super) fn work(
 /// Drives unit `key`'s inspection crossing: PENDING while the host's answer is out, then the caller
 /// it was asked for (`None`: the unit holds no inspection).
 pub(super) fn poll_unit<I: AbiIn, O: AbiOut>(
-    instance: &Instance<'_, McpDoor>,
+    instance: &Instance<'_, McpDoor, busbar_contract::plugin::markers::PlaneKind>,
     plane: &McpDoor,
     input: Lent<'_, I>,
     out: &mut Out<'_, O>,
@@ -192,7 +192,7 @@ pub(super) fn begin_maintenance(
 /// Drives the maintenance sweep: every session the host says is no longer live is retired, page by
 /// page; READY with when the sweep began once every session was asked (`None`: no sweep runs).
 pub(super) fn maintain<I: AbiIn, O: AbiOut>(
-    instance: &Instance<'_, McpDoor>,
+    instance: &Instance<'_, McpDoor, busbar_contract::plugin::markers::PlaneKind>,
     plane: &McpDoor,
     input: Lent<'_, I>,
     out: &mut Out<'_, O>,

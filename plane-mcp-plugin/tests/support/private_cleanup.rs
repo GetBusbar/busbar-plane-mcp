@@ -210,8 +210,8 @@ impl<'host> MaintenanceCase<'host> {
             }
         });
         let plane = McpDoor {
-            services: unsafe { Services::from_raw(&host.tables) },
-            host: Some(unsafe { busbar_contract::abi::sdk::conn::Host::from_raw(&host.tables) }),
+            services: unsafe { Services::test_from_raw(&host.tables) },
+            host: Some(unsafe { busbar_contract::abi::sdk::conn::Host::test_from_raw(&host.tables) }),
             ..McpDoor::default()
         };
         if clock_fails {

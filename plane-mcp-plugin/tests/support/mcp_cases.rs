@@ -152,7 +152,7 @@ fn validate(p: &Plugin<Plane>, settings: &[u8]) -> Called {
 }
 
 struct McpServices {
-    store: busbar_plugin_loader::store_v3::LoadedStore,
+    store: Arc<busbar_kernel::persistence::facade::CoreStore>,
     kinds: Mutex<Vec<(String, bool)>>,
     sightings: Mutex<BTreeMap<(String, Option<String>), String>>,
 }
@@ -165,9 +165,12 @@ fn block<T>(future: impl std::future::Future<Output = T>) -> T {
 }
 impl McpServices {
     fn new() -> Self {
-        use busbar_plugin_loader::dispatch::kinds::store::Store;
+        use busbar_plugin_loader::dispatch::kinds::store_v4::StoreV4 as Store;
         use busbar_plugin_loader::dispatch::{Bind, ConnTable, DispatchConfig, LinkedRow, NoSink};
-        let d = Arc::new(Dispatcher::new(DispatchConfig::default()));
+        let d = Arc::new(Dispatcher::new(
+            DispatchConfig::default(),
+            busbar_contract::services::test_caller_binding(),
+        ));
         let row =
             LinkedRow::of(busbar_store_memory::door).expect("actual MemoryStore door Statement");
         let plugin = busbar_plugin_loader::dispatch::load_linked::<Store>(
@@ -186,34 +189,95 @@ impl McpServices {
             "memory",
             "the test requires the actual memory product"
         );
-        let store =
-            busbar_plugin_loader::store_v3::LoadedStore::open(plugin, d, b"{}", mint_store_op)
-                .expect("actual memory store opens");
+        let backend = block(busbar_plugin_loader::store_v4::LoadedPersistence::open(
+            plugin,
+            d,
+            b"{}",
+            busbar_plugin_loader::store_v4::Limits {
+                descriptor_bytes: 4096,
+                output_items: 4096,
+                output_bytes: 8 * 1024 * 1024,
+                decode_bytes: 16 * 1024 * 1024,
+            },
+        ))
+        .expect("actual memory backend opens");
+        let mut startup = busbar_kernel::persistence::startup::Startup::new(
+            Arc::new(backend),
+            busbar_kernel::persistence::facade::Limits {
+                pending_operations: 64,
+                conflict_retries: 8,
+                scan_items: 4096,
+                scan_bytes: 8 * 1024 * 1024,
+            },
+            true,
+        )
+        .expect("core admits native backend identity");
+        for _ in 0..16 {
+            use busbar_kernel::persistence::startup::Progress;
+            match block(startup.advance()).expect("core initializes native store") {
+                Progress::Admitted => break,
+                Progress::Advanced => {}
+                other => panic!("unexpected native memory startup progress: {other:?}"),
+            }
+        }
+        let store = startup.store().expect("bounded startup admits persistence");
         Self {
             store,
             kinds: Mutex::new(Vec::new()),
             sightings: Mutex::new(BTreeMap::new()),
         }
     }
+    fn records(&self) -> busbar_kernel::persistence::scoped::ScopedStore {
+        busbar_kernel::persistence::scoped::ScopedStore::authorized(
+            self.store.clone(),
+            "mcp-case",
+            self.kinds
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(name, _)| name.clone()),
+        )
+        .expect("host binds the plane's declared schemas")
+    }
+    fn scan(
+        &self,
+        schema: &str,
+        prefix: &[u8],
+    ) -> Vec<(Vec<u8>, busbar_contract::Secret<Vec<u8>>)> {
+        let store = self.records();
+        let mut after = None;
+        let mut rows = Vec::new();
+        loop {
+            let page = block(store.page(schema, prefix, after.as_ref()))
+                .expect("core scans the actual backend");
+            rows.extend(page.rows);
+            after = page.next;
+            if after.is_none() {
+                return rows;
+            }
+        }
+    }
     fn keep(&self, kind: u32, key: &[u8], value: &[u8]) {
-        use busbar_contract::kinds::RecordBytes;
-        use busbar_contract::store_calls::StoreCalls;
-        let kinds = self.kinds.lock().unwrap();
-        let (name, chained) = kinds.get(kind as usize).expect("record kind is declared");
-        let key = if *chained {
-            let rows = block(self.store.record_scan(name, &[], u32::MAX))
-                .expect("actual chain records scan");
+        use busbar_kernel::persistence::scoped::Outcome;
+        let store = self.records();
+        let (name, chained) = self
+            .kinds
+            .lock()
+            .unwrap()
+            .get(kind as usize)
+            .expect("record kind is declared")
+            .clone();
+        let key = if chained {
+            let rows = self.scan(&name, &[]);
             if value.is_empty() {
                 for (row, _) in rows {
                     if busbar_contract::services::chain_key_parts(&row)
                         .is_some_and(|(scope, _)| scope == key)
                     {
-                        block(self.store.record_put(
-                            name,
-                            &row,
-                            &RecordBytes::new(Vec::new()).unwrap(),
-                        ))
-                        .expect("actual chain row removes");
+                        assert!(matches!(
+                            block(store.delete(&name, &row)).expect("core deletes chain row"),
+                            Outcome::Applied
+                        ));
                     }
                 }
                 return;
@@ -230,12 +294,13 @@ impl McpServices {
         } else {
             key.to_vec()
         };
-        block(self.store.record_put(
-            name,
-            &key,
-            &RecordBytes::new(value.to_vec()).expect("record bound"),
-        ))
-        .expect("actual store retains MCP output record");
+        let outcome = if value.is_empty() {
+            block(store.delete(&name, &key))
+        } else {
+            block(store.put(&name, &key, busbar_contract::Secret::new(value.to_vec())))
+        }
+        .expect("core persists the plane's record through actual memory");
+        assert!(matches!(outcome, Outcome::Applied), "{outcome:?}");
     }
     fn sighting(&self, name: &str, item: Option<&str>, digest: &str) -> Stored {
         use busbar_contract::abi::host::service::{TRUST_DRIFTED, TRUST_NEW, TRUST_SAME};
@@ -251,13 +316,6 @@ impl McpServices {
             Some(_) => TRUST_DRIFTED,
         })
     }
-}
-fn mint_store_op() -> busbar_contract::abi::store::OpId {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-    busbar_contract::abi::store::OpId::from_parts(
-        0x6d6370,
-        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-    )
 }
 
 impl busbar_contract::services::HostServices for McpServices {
@@ -289,13 +347,15 @@ impl busbar_contract::services::HostServices for McpServices {
         _: busbar_contract::services::Later,
     ) -> Ran {
         use busbar_contract::abi::host::service::{ItemSpan, ABSENT, FOUND};
-        use busbar_contract::store_calls::StoreCalls;
         let mut answer = Stored::ready(ABSENT);
         if let Some(value) =
-            block(self.store.record_get(kind, key)).expect("actual store record reads")
+            block(self.records().get(kind, key)).expect("actual store record reads")
         {
             answer = Stored::ready(FOUND);
-            answer.bytes = value.as_slice().to_vec();
+            answer.bytes = value
+                .expose(&busbar_contract::plugin::TestKernelSeal)
+                .as_slice()
+                .to_vec();
             answer.spans.push(ItemSpan {
                 key: Span {
                     offset: u32::MAX,
@@ -316,14 +376,12 @@ impl busbar_contract::services::HostServices for McpServices {
         _: busbar_contract::services::Later,
     ) -> Ran {
         use busbar_contract::abi::host::service::{ItemSpan, MAX_SPANS};
-        use busbar_contract::store_calls::StoreCalls;
         let limit = if list.limit == 0 {
             MAX_SPANS
         } else {
             u64::from(list.limit).min(MAX_SPANS)
         } as usize;
-        let rows = block(self.store.record_scan(&list.kind, &list.prefix, u32::MAX))
-            .expect("actual store record scan");
+        let rows = self.scan(&list.kind, &list.prefix);
         let mut answer = Stored::ready(0);
         for (key, value) in rows
             .into_iter()
@@ -333,7 +391,11 @@ impl busbar_contract::services::HostServices for McpServices {
             let key_at = answer.bytes.len();
             answer.bytes.extend_from_slice(&key);
             let value_at = answer.bytes.len();
-            answer.bytes.extend_from_slice(value.as_slice());
+            answer.bytes.extend_from_slice(
+                value
+                    .expose(&busbar_contract::plugin::TestKernelSeal)
+                    .as_slice(),
+            );
             answer.spans.push(ItemSpan {
                 key: Span {
                     offset: key_at as u32,
@@ -341,7 +403,10 @@ impl busbar_contract::services::HostServices for McpServices {
                 },
                 value: Span {
                     offset: value_at as u32,
-                    len: value.as_slice().len() as u32,
+                    len: value
+                        .expose(&busbar_contract::plugin::TestKernelSeal)
+                        .as_slice()
+                        .len() as u32,
                 },
             });
         }
@@ -499,8 +564,8 @@ impl busbar_contract::services::HostServices for McpServices {
     ) -> busbar_plugin_loader::dispatch::Ran {
         busbar_plugin_loader::dispatch::Ran::Now(Stored::refused(UNSERVED))
     }
-    fn snapshot_read(&self, _: &Caller, _: u32) -> busbar_contract::services::Snapshot {
-        busbar_contract::services::Snapshot::Refused(UNSERVED)
+    fn snapshot_read(&self, _: &Caller, _: u32, _later: busbar_contract::services::Later) -> Ran {
+        Ran::Now((busbar_contract::services::Snapshot::Refused(UNSERVED)).stored())
     }
 
     fn trust_unreached(
@@ -510,17 +575,28 @@ impl busbar_contract::services::HostServices for McpServices {
     ) -> busbar_contract::services::Stored {
         busbar_contract::services::Stored::refused(busbar_contract::services::UNSERVED)
     }
-    fn trust_sight_item(&self, _: &Caller, name: &str, item: &str, digest: &str) -> Stored {
-        self.sighting(name, Some(item), digest)
+    fn trust_sight_item(
+        &self,
+        _: &Caller,
+        name: &str,
+        item: &str,
+        digest: &str,
+        _later: busbar_contract::services::Later,
+    ) -> Ran {
+        Ran::Now(self.sighting(name, Some(item), digest))
     }
     fn trust_decide(
         &self,
         _caller: &busbar_contract::services::Caller,
+        _ticket: busbar_contract::abi::mechanism::ticket::Ticket,
         _key: busbar_contract::services::TrustKeyRef<'_>,
         _expected: Option<&str>,
         _approve: bool,
-    ) -> busbar_contract::services::Stored {
-        busbar_contract::services::Stored::refused(busbar_contract::services::UNSERVED)
+        _later: busbar_contract::services::Later,
+    ) -> Ran {
+        Ran::Now(busbar_contract::services::Stored::refused(
+            busbar_contract::services::UNSERVED,
+        ))
     }
     fn trust_state(
         &self,
@@ -543,8 +619,11 @@ impl busbar_contract::services::HostServices for McpServices {
         _unit: Option<u64>,
         _ttl_secs: u64,
         _record: &[u8],
-    ) -> busbar_contract::services::Stored {
-        busbar_contract::services::Stored::refused(busbar_contract::services::UNSERVED)
+        _later: busbar_contract::services::Later,
+    ) -> Ran {
+        Ran::Now(busbar_contract::services::Stored::refused(
+            busbar_contract::services::UNSERVED,
+        ))
     }
     fn ticket_take(
         &self,
@@ -1102,11 +1181,10 @@ fn drive(p: &Plugin<Plane>, driver: Option<Ticket>) -> (Called, Vec<u64>) {
             Vec::new(),
         );
     };
-    let driven = &p.inner.driven;
-    let seen = driven.answers();
-    busbar_plugin_loader::dispatch::ticket::host_wake(p.inner.ctx(), driver);
-    match driven.answered_after(seen, OP_DEADLINE) {
-        Some(outcome) => (answer(outcome, None), driven.drain()),
+    let seen = p.test_driver_answers();
+    busbar_plugin_loader::dispatch::ticket::host_wake(p.test_host_context(), driver);
+    match p.test_driver_answer_after(seen, OP_DEADLINE) {
+        Some(outcome) => (answer(outcome, None), p.test_driver_sessions()),
         None => (
             answer(Outcome::Fault, Some(b"the woken driver never answered")),
             Vec::new(),
@@ -1324,6 +1402,7 @@ fn actual_mcp_cases(dropped: bool) -> BTreeMap<String, String> {
     let d = Arc::new(Dispatcher::with_services(
         DispatchConfig::default(),
         services.clone(),
+        busbar_contract::services::test_caller_binding(),
     ));
     // Request-head deadlines use the clock of the actual transport dispatcher.
     // Bind the same host provider that owns this fixture's admitted plane.
@@ -1369,11 +1448,11 @@ fn actual_mcp_cases(dropped: bool) -> BTreeMap<String, String> {
         host: Some(services),
     };
     let c = &carried;
-    let held = p.inner.clone();
-    let resumes_before = held.resumes.load(std::sync::atomic::Ordering::SeqCst);
+    let probe = p.test_invocation_probe();
+    let resumes_before = probe().1;
     let count = || {
-        let resumed = held.resumes.load(std::sync::atomic::Ordering::SeqCst);
-        held.crossings.load(std::sync::atomic::Ordering::SeqCst) - resumed
+        let resumed = probe().1;
+        probe().0 - resumed
     };
     let mut r: BTreeMap<String, String> = BTreeMap::new();
     let before = count();
@@ -1744,7 +1823,7 @@ fn actual_mcp_cases(dropped: bool) -> BTreeMap<String, String> {
         d.recycle(driver);
     }
     assert!(
-        held.resumes.load(std::sync::atomic::Ordering::SeqCst) > resumes_before,
+        probe().1 > resumes_before,
         "actual networked MCP {} leg must resume at least one pending operation",
         if dropped { "dropped" } else { "linked" },
     );

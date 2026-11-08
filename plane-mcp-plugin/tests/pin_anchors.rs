@@ -40,7 +40,10 @@ fn linked(d: &Dispatcher) -> Plugin<Plane> {
 /// end's.
 #[test]
 fn tls_roots_pin_peer_keys_and_local_program_has_its_own_launch_root() {
-    let d = Dispatcher::new(DispatchConfig::default());
+    let d = Dispatcher::new(
+        DispatchConfig::default(),
+        busbar_contract::services::test_caller_binding(),
+    );
     let served = linked(&d).served();
     let pin = served
         .trust_keys
@@ -86,7 +89,10 @@ fn tls_roots_pin_peer_keys_and_local_program_has_its_own_launch_root() {
 /// certificate would never be resolved or presented.
 #[test]
 fn the_http_member_need_names_structured_tls_and_legacy_identity_secret_references() {
-    let d = Dispatcher::new(DispatchConfig::default());
+    let d = Dispatcher::new(
+        DispatchConfig::default(),
+        busbar_contract::services::test_caller_binding(),
+    );
     let served = linked(&d).served();
     let at = served
         .need_targets

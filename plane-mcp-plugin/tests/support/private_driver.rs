@@ -135,7 +135,7 @@ fn with_host(run: impl FnOnce(&Host, &RefCell<State>)) {
         io: std::ptr::null(),
     };
     // SAFETY: complete immutable local tables remain live through run; all callbacks obey their exact slot layouts.
-    let host = unsafe { Host::from_raw(&tables) };
+    let host = unsafe { Host::test_from_raw(&tables) };
     STATE.with(|state| {
         *state.borrow_mut() = State::default();
         run(&host, state);

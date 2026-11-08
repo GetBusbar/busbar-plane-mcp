@@ -31,7 +31,7 @@ pub(super) fn any(plane: &McpDoor) -> bool {
 /// waits on any more is let go. Pending operations retain their handles. A terminal handle is
 /// acknowledged through the SDK and reused only after the host confirms its result was retired.
 pub(super) fn drive(
-    instance: &Instance<'_, McpDoor>,
+    instance: &Instance<'_, McpDoor, busbar_contract::plugin::markers::PlaneKind>,
     plane: &McpDoor,
     owner: HostCtx,
     extensions: &[u8],
@@ -228,7 +228,7 @@ fn framed_answer(body: Vec<u8>, frames: Vec<Value>) -> (Vec<u8>, bool) {
 /// call's request POSTed to the message address under an id of the stream's, and its answer taken
 /// once the driver read it. PENDING meanwhile.
 pub(super) fn call(
-    instance: &Instance<'_, McpDoor>,
+    instance: &Instance<'_, McpDoor, busbar_contract::plugin::markers::PlaneKind>,
     plane: &McpDoor,
     binding: (&str, &str),
     original: &OutboundRequest,
@@ -542,7 +542,7 @@ fn fail_link(plane: &McpDoor, key: &str, ticket: Ticket, why: &str) -> String {
 /// ONE POST to the message address on the call's ticket: taken when the server answered it 2xx (the
 /// answer itself arrives on the stream).
 fn post(
-    instance: &Instance<'_, McpDoor>,
+    instance: &Instance<'_, McpDoor, busbar_contract::plugin::markers::PlaneKind>,
     plane: &McpDoor,
     (base, member): (u32, &str),
     request: &OutboundRequest,

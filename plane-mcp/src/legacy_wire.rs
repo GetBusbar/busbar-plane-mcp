@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
+type Host = KindHost<busbar_contract::plugin::markers::PlaneKind>;
+
+type Connector<'a> = KindConnector<'a, busbar_contract::plugin::markers::PlaneKind>;
+
 use std::collections::{BTreeMap, VecDeque};
 use std::task::Poll;
 
@@ -9,7 +13,7 @@ use busbar_contract::abi::host::conn::connector::{
 };
 use busbar_contract::abi::mechanism::ticket::{CompletionHandle, HostCtx, Ticket};
 use busbar_contract::abi::sdk::completion_retirement::{Domain, Error, Handle, Retirement};
-use busbar_contract::abi::sdk::conn::{Connector, Host};
+use busbar_contract::abi::sdk::conn::{Connector as KindConnector, Host as KindHost};
 use busbar_contract::abi::transport::{fields, FrameSpan};
 use serde_json::Value;
 

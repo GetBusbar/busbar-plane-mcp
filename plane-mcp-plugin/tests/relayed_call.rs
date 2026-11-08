@@ -506,8 +506,15 @@ impl busbar_contract::services::HostServices for Grants {
     ) -> busbar_plugin_loader::dispatch::Ran {
         busbar_plugin_loader::dispatch::Ran::Now(Stored::refused(UNSERVED))
     }
-    fn snapshot_read(&self, _: &Caller, _: u32) -> busbar_contract::services::Snapshot {
-        busbar_contract::services::Snapshot::Refused(UNSERVED)
+    fn snapshot_read(
+        &self,
+        _: &Caller,
+        _: u32,
+        _later: busbar_contract::services::Later,
+    ) -> busbar_contract::services::Ran {
+        busbar_contract::services::Ran::Now(
+            (busbar_contract::services::Snapshot::Refused(UNSERVED)).stored(),
+        )
     }
 
     fn trust_unreached(
@@ -523,17 +530,24 @@ impl busbar_contract::services::HostServices for Grants {
         _counterparty: &str,
         _item: &str,
         _digest: &str,
-    ) -> busbar_contract::services::Stored {
-        busbar_contract::services::Stored::refused(busbar_contract::services::UNSERVED)
+        _later: busbar_contract::services::Later,
+    ) -> busbar_contract::services::Ran {
+        busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused(
+            busbar_contract::services::UNSERVED,
+        ))
     }
     fn trust_decide(
         &self,
         _caller: &busbar_contract::services::Caller,
+        _ticket: busbar_contract::abi::mechanism::ticket::Ticket,
         _key: busbar_contract::services::TrustKeyRef<'_>,
         _expected: Option<&str>,
         _approve: bool,
-    ) -> busbar_contract::services::Stored {
-        busbar_contract::services::Stored::refused(busbar_contract::services::UNSERVED)
+        _later: busbar_contract::services::Later,
+    ) -> busbar_contract::services::Ran {
+        busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused(
+            busbar_contract::services::UNSERVED,
+        ))
     }
     fn trust_state(
         &self,
@@ -556,8 +570,11 @@ impl busbar_contract::services::HostServices for Grants {
         _unit: Option<u64>,
         _ttl_secs: u64,
         _record: &[u8],
-    ) -> busbar_contract::services::Stored {
-        busbar_contract::services::Stored::refused(busbar_contract::services::UNSERVED)
+        _later: busbar_contract::services::Later,
+    ) -> busbar_contract::services::Ran {
+        busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused(
+            busbar_contract::services::UNSERVED,
+        ))
     }
     fn ticket_take(
         &self,
@@ -590,7 +607,11 @@ const JSON_HEAD: &[Field] = &[field("content-type", "application/json")];
 const SSE_HEAD: &[Field] = &[field("content-type", "text/event-stream")];
 
 fn served(grants: &'static [&'static str]) -> Dispatcher {
-    Dispatcher::with_services(DispatchConfig::default(), Arc::new(Grants(grants)))
+    Dispatcher::with_services(
+        DispatchConfig::default(),
+        Arc::new(Grants(grants)),
+        busbar_contract::services::test_caller_binding(),
+    )
 }
 
 /// THE RELAY SCRIPT'S CALLS: each far answer a member gives one relayed call, read back.

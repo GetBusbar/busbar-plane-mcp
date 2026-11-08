@@ -1,3 +1,7 @@
+type StaticServices = KindStaticServices<busbar_contract::plugin::markers::PlaneKind>;
+
+type Services = KindServices<busbar_contract::plugin::markers::PlaneKind>;
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -21,7 +25,7 @@ use busbar_contract::abi::sdk::plane_life::{Opened, PlaneLife, Published};
 use busbar_contract::abi::sdk::publish::{Generations, Keyed};
 use busbar_contract::abi::sdk::services::ServiceError;
 use busbar_contract::abi::sdk::{
-    HostBuf, Instance, Lent, LentList, Out, Safe, SafeSlot, Services, StaticServices,
+    HostBuf, Instance, Lent, LentList, Out, Safe, SafeSlot, Services as KindServices, Services as KindStaticServices,
 };
 use serde_json::Value;
 
@@ -130,7 +134,7 @@ pub struct McpDoor {
     /// every sealed exchange rather than none.
     roots_shared: Keyed<(), u64>,
     /// The host tables `open` handed it: the connector a `connect` reaches its server through.
-    host: Option<busbar_contract::abi::sdk::conn::StaticHost>,
+    host: Option<busbar_contract::abi::sdk::conn::Host<busbar_contract::plugin::markers::PlaneKind>>,
     /// Each registered server's PUBLISHED TOOL LIST ([`PublishedList`]): its last sighting
     /// (verify-on-call's re-fetch, or `connect`), under its generation. What the trust views and the
     /// dispatch gate judge against the section's approval; replaced whole, in one swap
@@ -231,10 +235,11 @@ macro_rules! slot {
         $(#[$doc])*
         pub struct $name;
         impl SafeSlot for $name {
+    type Kind = busbar_contract::plugin::markers::PlaneKind;
             type In = $in;
             type Out = $out;
             type State = McpDoor;
-            fn call($inst: Instance<'_, McpDoor>, $input: Lent<'_, $in>, $o: Out<'_, $out>)
+            fn call($inst: Instance<'_, McpDoor, busbar_contract::plugin::markers::PlaneKind>, $input: Lent<'_, $in>, $o: Out<'_, $out>)
                 -> Outcome $body
         }
     };
@@ -264,7 +269,7 @@ impl PlaneLife for McpDoor {
 
     /// `open`: the instance over the section, the public base URL and the host services, and
     /// the first generation's snapshot.
-    fn open(input: &Lent<'_, PlaneOpenIn>) -> Result<Opened<Self>, Refusal> {
+    fn open(input: &Lent<'_, PlaneOpenIn>, host: Option<busbar_contract::abi::sdk::lent::KindHostLoan<'_, busbar_contract::plugin::markers::PlaneKind>>) -> Result<Opened<Self>, Refusal> {
         let (cfg, pools) =
             statement::read_open(input.open().settings().bytes()).map_err(Refusal::refused)?;
         let generation = input.open().generation();
@@ -273,8 +278,6 @@ impl PlaneLife for McpDoor {
             .map_err(Refusal::refused)?;
         let facts = statement::resource_facts(owned).map_err(Refusal::refused)?;
         let origins = statement::allowed_origins(owned).map_err(Refusal::refused)?;
-        let open = input.field(|i| &i.open);
-        let host = open.host();
         let plane = McpDoor {
             admitted,
             facts,
@@ -360,7 +363,7 @@ impl PlaneLife for McpDoor {
     /// `tick`: the clock of the subscriptions held as sessions ([`door_listen::tick`]), every
     /// [`door_listen::POLL_NS`].
     fn tick(
-        instance: Instance<'_, Self>,
+        instance: Instance<'_, Self, busbar_contract::plugin::markers::PlaneKind>,
         input: Lent<'_, TickIn>,
         mut out: Out<'_, TickOut>,
     ) -> Outcome {
@@ -403,7 +406,7 @@ impl PlaneLife for McpDoor {
 
     /// `drive`: the subscriptions held as sessions whose step is due ([`door_listen::drive`]).
     fn drive(
-        instance: Instance<'_, Self>,
+        instance: Instance<'_, Self, busbar_contract::plugin::markers::PlaneKind>,
         input: Lent<'_, PlaneDriveIn>,
         mut out: Out<'_, PlaneDriveOut>,
     ) -> Outcome {
@@ -466,7 +469,7 @@ impl PlaneLife for McpDoor {
     /// `cancel`: the cancelled unit's state is dropped, found by its ticket or, cancelled
     /// before any piece reached it, by the unit the host names.
     fn cancel(
-        instance: Instance<'_, Self>,
+        instance: Instance<'_, Self, busbar_contract::plugin::markers::PlaneKind>,
         input: Lent<'_, PlaneCancelIn>,
         mut out: Out<'_, PlaneCancelOut>,
     ) -> Outcome {
@@ -1660,7 +1663,7 @@ enum Looked {
 /// now), digested, stamped on the kernel's trust book and kept, so the trust gate judges the
 /// call against what the server serves NOW.
 fn verify_on_call(
-    instance: &Instance<'_, McpDoor>,
+    instance: &Instance<'_, McpDoor, busbar_contract::plugin::markers::PlaneKind>,
     plane: &McpDoor,
     ticket: Ticket,
     unit: &mut CallUnit,
@@ -2253,7 +2256,7 @@ fn never_sent_answer(
 }
 
 fn answer_body(
-    instance: &Instance<'_, McpDoor>,
+    instance: &Instance<'_, McpDoor, busbar_contract::plugin::markers::PlaneKind>,
     plane: &McpDoor,
     ticket: Ticket,
     caller: &str,
@@ -4232,8 +4235,8 @@ const NEGOTIATE_SEQ: u32 = 1 << 28;
 pub(crate) mod exchange_observations;
 /// ONE EXCHANGE ON A UNIT'S TICKET, its connector services numbered from `base`.
 fn exchange_at(
-    instance: &Instance<'_, McpDoor>,
-    host: Option<&busbar_contract::abi::sdk::conn::Host>,
+    instance: &Instance<'_, McpDoor, busbar_contract::plugin::markers::PlaneKind>,
+    host: Option<&busbar_contract::abi::sdk::conn::Host<busbar_contract::plugin::markers::PlaneKind>>,
     base: u32,
     url: &str,
     member: &str,
@@ -4268,7 +4271,7 @@ fn exchange_at(
 /// The actual framed exchange with its owned state supplied explicitly; the real ABI adapter
 /// above resumes and parks this state on its actual SDK Instance.
 fn exchange_with_state(
-    host: Option<&busbar_contract::abi::sdk::conn::Host>,
+    host: Option<&busbar_contract::abi::sdk::conn::Host<busbar_contract::plugin::markers::PlaneKind>>,
     ticket: Ticket,
     base: u32,
     url: &str,

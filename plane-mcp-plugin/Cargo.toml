@@ -25,13 +25,13 @@ busbar-contract = { workspace = true }
 
 [dev-dependencies]
 # Ordinary tests use the actual loader for linked and freshly built dropped MCP doors.
-busbar-plugin-loader = { workspace = true }
+busbar-plugin-loader = { workspace = true , features = ["test-support"] }
 # The door witness reads the plane's answers as JSON documents.
 serde_json = { workspace = true }
 # Actual carrier doors composed by the ordinary MCP TLS/process host.
 busbar-transport-http = { workspace = true }
 busbar-transport-tcp = { workspace = true }
-busbar-transport-stdio = { git = "https://github.com/GetBusbar/busbar-transport-stdio", rev = "271d069244f15585b01b86b013942bad902b564c" }
+busbar-transport-stdio = { git = "https://github.com/GetBusbar/busbar-transport-stdio", rev = "bd728d125617afe592aa0192cf8d82a01c241cb1" }
 
 # Actual production connector/TLS for MCP's local catalogue; no shared test host.
 busbar-core-connector = { workspace = true }
@@ -48,3 +48,5 @@ indexmap = { workspace = true }
 jsonschema = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
+busbar-contract = { workspace = true, features = ["test-seal"] }
+busbar-kernel = { workspace = true }

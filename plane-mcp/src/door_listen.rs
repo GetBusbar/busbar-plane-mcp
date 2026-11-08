@@ -19,6 +19,8 @@
 //! - Every frame is one `message` event (`event: message`, `data: <json>`).
 //! - The session's one line carries the request's fee unit, reported with the acknowledgement.
 
+type StaticServices = KindStaticServices<busbar_contract::plugin::markers::PlaneKind>;
+
 use super::{admit, ask_entitlements, write, CallUnit, Held, McpDoor, Pending, Written, MAX_UNITS};
 use crate::catalogue::Lookup;
 use crate::framing::{events, CACHE_CONTROL, CONTENT_TYPE, EVENT_STREAM, NO_STORE};
@@ -29,7 +31,7 @@ use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::plane::{
     OnPieceIn, OnPieceOut, PlaneDriveIn, PlaneDriveOut, FROM_CALLER, FROM_KERNEL, PIECE_LAST,
 };
-use busbar_contract::abi::sdk::{Lent, Out, StaticServices};
+use busbar_contract::abi::sdk::{Lent, Out, Services as KindStaticServices};
 use serde_json::Value;
 
 /// How often the instance's tick steps its held subscriptions (the generation is re-read and

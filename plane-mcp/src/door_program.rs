@@ -588,7 +588,7 @@ pub(super) fn program_generation<'a>(
 /// Drive `exchange` with member `member` on `ticket` from `base`: the door's greeting record kept.
 fn exchange_child(
     plane: &McpDoor,
-    host: &busbar_contract::abi::sdk::conn::Host,
+    host: &busbar_contract::abi::sdk::conn::Host<busbar_contract::plugin::markers::PlaneKind>,
     ticket: Ticket,
     base: u32,
     member: &str,
@@ -713,7 +713,7 @@ pub(super) fn tools_listed(
 /// An operator's `connect` to a stdio member: its `tools/list` on the verb's own ticket (the
 /// exchange parked on the instance while it pends), correlated by `id`.
 pub(super) fn connect_child(
-    instance: &Instance<'_, McpDoor>,
+    instance: &Instance<'_, McpDoor, busbar_contract::plugin::markers::PlaneKind>,
     plane: &McpDoor,
     def: &crate::tools_config::McpServerDefCfg,
     server: &str,
@@ -777,7 +777,7 @@ impl ProgramList {
     fn drive(
         &mut self,
         plane: &McpDoor,
-        host: &busbar_contract::abi::sdk::conn::Host,
+        host: &busbar_contract::abi::sdk::conn::Host<busbar_contract::plugin::markers::PlaneKind>,
         ticket: Ticket,
         base: u32,
         server: &str,

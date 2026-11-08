@@ -33,6 +33,8 @@
 
 #![cfg_attr(not(test), allow(dead_code))]
 
+type Host = KindHost<busbar_contract::plugin::markers::PlaneKind>;
+
 use std::collections::VecDeque;
 use std::task::Poll;
 
@@ -40,7 +42,7 @@ use busbar_contract::abi::host::conn::connector::{
     ReplyPiece, REPLY_ACK, REPLY_BODY, REPLY_END, REPLY_HEAD,
 };
 use busbar_contract::abi::mechanism::ticket::Ticket;
-use busbar_contract::abi::sdk::conn::{Host, Replied};
+use busbar_contract::abi::sdk::conn::{Host as KindHost, Replied};
 use serde_json::Value;
 
 use crate::client::jsonrpc::{ServerRequestGrants, HANDSHAKE_REQUEST_ID};

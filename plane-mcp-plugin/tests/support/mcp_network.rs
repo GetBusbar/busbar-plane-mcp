@@ -105,7 +105,11 @@ pub fn host_with_services(
     host_on(
         wake,
         anchors,
-        Dispatcher::with_services(DispatchConfig::default(), services),
+        Dispatcher::with_services(
+            DispatchConfig::default(),
+            services,
+            busbar_contract::services::test_caller_binding(),
+        ),
     )
 }
 
@@ -123,8 +127,8 @@ fn host_on(
     dispatcher.install_io(busbar_core_connector::hostio::process());
     let doors: [(&str, busbar_contract::abi::mechanism::door::DoorFn); 3] = [
         ("tcp", busbar_transport_tcp::linked::door),
-        ("http", busbar_transport_http::door::door),
-        ("stdio", busbar_transport_stdio::door::door),
+        ("http", busbar_transport_http::door),
+        ("stdio", busbar_transport_stdio::door),
     ];
     let entries = doors
         .into_iter()

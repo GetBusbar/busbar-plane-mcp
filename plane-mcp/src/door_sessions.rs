@@ -1799,7 +1799,7 @@ impl Negotiating {
     /// next call to `member`.
     fn drive(
         &mut self,
-        instance: &Instance<'_, McpDoor>,
+        instance: &Instance<'_, McpDoor, busbar_contract::plugin::markers::PlaneKind>,
         plane: &McpDoor,
         base: u32,
         member: &str,
@@ -1977,7 +1977,7 @@ pub(super) fn exchange_request(
 /// A FETCH OF THE DOOR'S OWN (verify-on-call's `tools/list`), negotiated: every hop over the
 /// connector from `base`, the conversation parked on the unit while one pends.
 pub(super) fn fetch_in(
-    instance: &Instance<'_, McpDoor>,
+    instance: &Instance<'_, McpDoor, busbar_contract::plugin::markers::PlaneKind>,
     plane: &McpDoor,
     slot: &mut Option<Box<Negotiating>>,
     (base, member, binding, timeout_ms): (u32, &str, &str, u64),
@@ -2130,7 +2130,7 @@ fn with_id(body: Vec<u8>, sent: u64, id: serde_json::Value) -> Vec<u8> {
 /// conversation from there: READY with what it came to, `None` when the answer is handed on as it
 /// came (the stateless path, or no connector to negotiate over).
 pub(super) fn far_answer(
-    instance: &Instance<'_, McpDoor>,
+    instance: &Instance<'_, McpDoor, busbar_contract::plugin::markers::PlaneKind>,
     plane: &McpDoor,
     negotiating: &mut Negotiating,
     (base, member, timeout_ms): (u32, &str, u64),
