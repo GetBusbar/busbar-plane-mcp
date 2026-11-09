@@ -260,6 +260,8 @@ $(sed 's/^/        /' "$MCP_FIXTURE_CA_FILE")
     # upstream's: what an approval means is that this operator vouched for this tool, and echoing
     # text the upstream can rewrite at will would let it edit its own approval. The suite requires
     # every listed tool to carry one, which is the same requirement read from the other side.
+    grants:
+      elicitation: true
     tools_allow:
       simple_text:
         schema_hash: "$(dg test simple_text)"
@@ -287,26 +289,9 @@ $(sed 's/^/        /' "$MCP_FIXTURE_CA_FILE")
       # MINTS — bound to the authenticated principal, the method, the tool, a digest of the
       # arguments and the catalogue generation, with a short TTL and a round index.
       #
-      # THIS IS NOT A RELAY, AND THE DISTINCTION IS THE WHOLE POINT. An upstream's own
-      # InputRequiredResult still TERMINATES at busbar (\`mcp/inputreq.rs\`): busbar either satisfies
-      # it under a grant the operator gave that server, or fails the call with a busbar-attributed
-      # error. It is never handed to the caller. What is on the wire here is a demand busbar makes
-      # in its own name, which is the only kind it is entitled to make — the same rule that already
-      # makes busbar publish the OPERATOR's tool description rather than the upstream's, applied to
-      # the field where it matters most.
-      #
-      # Minting rather than relaying is also the only conformant option. mrtr.mdx:232 makes it a
-      # MUST to reject state that fails verification, and mrtr.mdx:130 makes an upstream's state
-      # opaque to everyone but that upstream — so a relayer could only forward it blind. Worse,
-      # mrtr.mdx:235 requires the state to bind the authenticated principal, and the only principal
-      # an upstream can see is busbar, identically for every one of busbar's callers: relayed state
-      # would make caller A's state redeemable by caller B.
-      #
-      # NOBODY SHOULD PRETEND THERE IS AN OPERATOR BEHIND THE \`roots/list\` ASK. There is a scenario
-      # behind it. That is legitimate — this is operator config exactly like the six approvals
-      # above, and it puts no \`test_*\` literal into crates/*/src — but it is worth saying out loud
-      # that a real deployment would declare an ask because it wants a confirmation gate, not
-      # because a suite asked for one.
+      # Operator-owned confirmations below remain mandatory signed exchanges.
+      # The ordinary elicitation fixture instead asks upstream; Busbar wraps any
+      # upstream state in its own caller-bound, single-use relay state.
       trigger_tool_change:
         schema_hash: "$(dg test trigger_tool_change)"
         description: "Acknowledges a trusted operator tool catalogue mutation."
@@ -315,7 +300,10 @@ $(sed 's/^/        /' "$MCP_FIXTURE_CA_FILE")
         description: "Acknowledges a trusted operator prompt catalogue mutation."
       input_required_result_elicitation:
         schema_hash: "$(dg test input_required_result_elicitation)"
-        description: "Asks the caller for a name before it runs."
+        description: "The upstream requests the caller's name."
+      signed_input_required_result_elicitation:
+        schema_hash: "$(dg test signed_input_required_result_elicitation)"
+        description: "An operator-owned signed confirmation before dispatch."
         ask_caller:
           # The KEY IS ASSERTED BY NAME by sep-2322-elicitation-incomplete. It is not decorative.
           - user_name:

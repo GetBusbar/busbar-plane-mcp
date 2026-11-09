@@ -121,20 +121,9 @@ const TOOLS = {
 
 // ── THE SEP-2322 FIXTURE TOOLS ───────────────────────────────────────────────────────────────────
 //
-// These exist so the `input-required-result-*` scenarios have a tool to name. They are the ORDINARY
-// KIND: each returns a plain complete result and knows nothing whatsoever about MRTR.
-//
-// That is the whole point, and it is worth being explicit because the opposite would be the easy
-// mistake. The ask those scenarios observe is BUSBAR'S OWN — composed from the operator's
-// `ask_caller:` configuration in boot.sh, filtered by the caller's declared capabilities, and sealed
-// with a `requestState` busbar mints. It is emitted BEFORE busbar dispatches anywhere, so on the
-// first request this upstream is never contacted at all. What it serves is the retry: the call that
-// finally runs once the caller has answered.
-//
-// An upstream that returned an `InputRequiredResult` of its own would be testing the opposite
-// property, and busbar's answer to that is a refusal — see `mcp/inputreq.rs`. That case is exercised
-// by the in-tree battery's hostile peer, deliberately not here: this fixture is a content source,
-// and a content source that also mounted an attack would make every red ambiguous.
+// Most fixtures complete after Busbar's operator-owned ask. The ordinary
+// elicitation fixture implements its own MRTR exchange; a separate signed alias
+// retains the local confirmation-gate regression.
 // SEP-2575 (the `server-stateless` scenario). Three tools whose ABSENCE made four of that
 // scenario's checks report "Not testable" rather than pass or fail — a shape worth naming, because
 // an untestable check is counted as a FAILURE by the suite and reads in the summary exactly like a
@@ -234,6 +223,9 @@ for (const [name, description] of Object.entries(MRTR_FIXTURES)) {
     }),
   };
 }
+
+// Same final content, but this alias is guarded only by the explicit operator ask.
+TOOLS.signed_input_required_result_elicitation = { ...TOOLS.input_required_result_elicitation };
 
 // ── THE SEP-2663 (TASKS EXTENSION) FIXTURE TOOLS ─────────────────────────────────────────────────
 //
@@ -547,6 +539,21 @@ const server = createServer((req, res) => {
       const tool = TOOLS[msg?.params?.name];
       if (!tool) {
         return rpcError(res, 200, id, -32602, `unknown tool ${msg?.params?.name}`);
+      }
+      if (msg.params.name === 'input_required_result_elicitation') {
+        const responses = msg.params.inputResponses;
+        const value = responses?.user_name;
+        if (responses !== undefined && (!responses || typeof responses !== 'object' || Array.isArray(responses))
+          || value !== undefined && (!value || typeof value !== 'object' || value.action !== 'accept'
+            || typeof value.content?.name !== 'string')) {
+          return rpcError(res, 400, id, -32602, 'invalid user_name input response');
+        }
+        if (value === undefined) return send(res, 200, { jsonrpc: '2.0', id, result: {
+          resultType: 'input_required', inputRequests: { user_name: { method: 'elicitation/create', params: {
+            mode: 'form', message: 'What is your name?', requestedSchema: { type: 'object',
+              properties: { name: { type: 'string', description: 'Your name' } }, required: ['name'] },
+          } } },
+        } });
       }
       if (tool.streams) {
         return sendStream(res, id, tool, meta?.progressToken);

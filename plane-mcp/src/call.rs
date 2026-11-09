@@ -219,6 +219,9 @@ pub struct AdmittedCall {
     /// The digest of the arguments AS THE CALLER SENT THEM (before any answer of busbar's own asks
     /// was merged): what a relayed ask's state is bound to.
     pub sent_digest: String,
+    /// Untrusted initial upstream input, only without operator asks or presented state.
+    /// It is never merged into arguments or treated as a redeemed continuation.
+    pub initial_input_responses: Option<Value>,
     /// THE RETRY OF A RELAYED UPSTREAM ASK: the member that asked (the call goes back to it and no
     /// other) and the continuation it is sent (the caller's `inputResponses` and the upstream's own
     /// `requestState`, verbatim). `None` for every other call.
@@ -726,6 +729,28 @@ pub fn admit_trusted(
             );
         }
     }
+    let initial_input_responses = if relay.is_none()
+        && entry.ask_caller.is_empty()
+        && params.and_then(|p| p.get("requestState")).is_none()
+    {
+        match params.and_then(|p| p.get("inputResponses")) {
+            Some(value) if !value.is_object() => {
+                return Admission::Refused(
+                    error(
+                        STATUS_BAD_REQUEST,
+                        id,
+                        CODE_INVALID_PARAMS,
+                        "`params.inputResponses` must be an object.".to_string(),
+                        None,
+                    ),
+                    line(vocab::REASON_MALFORMED).map(CallLine::unaudited),
+                )
+            }
+            value => value.cloned(),
+        }
+    } else {
+        None
+    };
     Admission::Go(AdmittedCall {
         entry: entry.clone(),
         arguments,
@@ -736,6 +761,7 @@ pub fn admit_trusted(
             .cloned(),
         capabilities,
         sent_digest,
+        initial_input_responses,
         relay,
     })
 }
@@ -782,6 +808,7 @@ pub fn judge_arguments(
                 .relay
                 .as_ref()
                 .and_then(|r| r.continuation.get("inputResponses"))
+                .or(admitted.initial_input_responses.as_ref())
             {
                 crate::argguard::guard(&Value::Null, responses, |dest| judge(entry, dest))?;
             }
@@ -972,6 +999,10 @@ fn call_request(
     continuation: Option<&Value>,
 ) -> Option<wire::OutboundRequest> {
     let key = ToolKey::new(ServerId::new(member).ok()?, &admitted.entry.tool).ok()?;
+    let initial = admitted
+        .initial_input_responses
+        .as_ref()
+        .map(|responses| serde_json::json!({ "inputResponses": responses }));
     Some(wire::tools_call_id(
         url,
         &key,
@@ -979,7 +1010,7 @@ fn call_request(
         &id.into(),
         None,
         advertised(admitted, def),
-        continuation,
+        continuation.or(initial.as_ref()),
     ))
 }
 

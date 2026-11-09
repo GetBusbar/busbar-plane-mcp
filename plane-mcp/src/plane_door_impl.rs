@@ -2724,8 +2724,16 @@ pub fn decide_ask<S: SealHost>(
         .and_then(|p| p.get("_meta"))
         .and_then(|m| m.get(crate::codec::META_CLIENT_CAPABILITIES))
         .unwrap_or(&null);
+    // With no local ask and no presented state, inputResponses is ordinary
+    // upstream data. Admission validates its map and destination guards inspect it.
+    let initial_upstream = site.method == crate::codec::METHOD_TOOLS_CALL && site.rounds.is_empty()
+        && params.and_then(|p| p.get("requestState")).is_none();
     let retry = crate::ask::Retry {
-        responses: params.and_then(|p| p.get("inputResponses")),
+        responses: if initial_upstream {
+            None
+        } else {
+            params.and_then(|p| p.get("inputResponses"))
+        },
         state: params
             .and_then(|p| p.get("requestState"))
             .and_then(Value::as_str),
@@ -3156,7 +3164,14 @@ fn send_to_member(
             &def.sampling_bounds,
             crate::codec::json_len(continuation),
         ),
-        (None, None) => Ok(()),
+        (None, None) => match relay.admitted.initial_input_responses.as_ref() {
+            Some(responses) => crate::call::judge_input_response(
+                member,
+                &def.sampling_bounds,
+                crate::codec::json_len(&serde_json::json!({ "inputResponses": responses })),
+            ),
+            None => Ok(()),
+        },
     };
     if let Err(refusal) = judged {
         return Some(MemberSend::Judged(Box::new(relay.admitted), refusal));

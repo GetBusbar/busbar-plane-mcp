@@ -17,7 +17,7 @@ const inputResponses = {
 };
 async function call(id, suppliedInputs, requestState) {
   const message = { jsonrpc: '2.0', id, method: 'tools/call', params: {
-    name: 'test_input_required_result_elicitation', arguments: {}, inputResponses: suppliedInputs,
+    name: 'test_signed_input_required_result_elicitation', arguments: {}, inputResponses: suppliedInputs,
     ...(requestState === undefined ? {} : { requestState }),
     _meta: { 'io.modelcontextprotocol/protocolVersion': '2026-07-28',
       'io.modelcontextprotocol/clientCapabilities': { elicitation: { form: {} } },

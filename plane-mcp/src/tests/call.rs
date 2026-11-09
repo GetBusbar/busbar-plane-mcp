@@ -1689,3 +1689,70 @@ fn a_malformed_final_rewrite_does_not_fall_back_to_an_earlier_object() {
     assert_eq!(rewritten(&mut request, rewrite), None);
     assert_eq!(request, original);
 }
+
+#[test]
+fn initial_upstream_input_responses_remain_untrusted_data() {
+    let known = json!({"user_name":{"action":"accept","content":{"name":"Alice"}}});
+    let extra = json!({"user_name":{"action":"accept","content":{"name":"Alice"}},
+        "unknown_extra_key":{"action":"accept","content":{"foo":"bar"}}});
+    for responses in [known, extra] {
+        let supplied =
+            json!({"name":"fs_read_file","arguments":{},"inputResponses":responses,"_meta":{}});
+        let call = go(admit_call(
+            &catalogue(),
+            &json!(7),
+            Some(&supplied),
+            &no_header,
+            &everyone,
+            &mut proceed,
+        ));
+        assert!(
+            call.relay.is_none(),
+            "initial data creates no relay authority"
+        );
+        assert_eq!(call.arguments, json!({}), "answers are never arguments");
+        let wire = outbound(&call, "fs", &section().servers["fs"], 0, None).unwrap();
+        let body: Value = serde_json::from_slice(&wire.body).unwrap();
+        assert_eq!(body["params"]["inputResponses"], responses);
+        assert!(body["params"].get("requestState").is_none());
+        let retry = json!({"inputResponses":{"other":true},"requestState":"upstream-state"});
+        let wire = outbound(&call, "fs", &section().servers["fs"], 1, Some(&retry)).unwrap();
+        let body: Value = serde_json::from_slice(&wire.body).unwrap();
+        assert_eq!(body["params"]["inputResponses"], retry["inputResponses"]);
+        assert_eq!(body["params"]["requestState"], retry["requestState"]);
+    }
+}
+
+#[test]
+fn initial_upstream_input_responses_refuse_malformed_maps_and_nested_destinations() {
+    for malformed in [Value::Null, json!(13), json!([]), json!("answers")] {
+        let supplied =
+            json!({"name":"fs_read_file","arguments":{},"inputResponses":malformed,"_meta":{}});
+        let (refusal, _) = refused(admit_call(
+            &catalogue(),
+            &json!(7),
+            Some(&supplied),
+            &no_header,
+            &everyone,
+            &mut proceed,
+        ));
+        assert_eq!((refusal.status, refusal.code), (400, CODE_INVALID_PARAMS));
+    }
+    let supplied = json!({"name":"fs_read_file","arguments":{},"inputResponses":{
+        "unknown_extra_key":{"nested":[{"url":"http://169.254.169.254/"}]}},"_meta":{}});
+    let admission = admit_call(
+        &catalogue(),
+        &json!(7),
+        Some(&supplied),
+        &no_header,
+        &everyone,
+        &mut proceed,
+    );
+    let mut seen = false;
+    let checked = judge_arguments(admission, &mut |_, host| {
+        seen |= host == "169.254.169.254";
+        Some(busbar_contract::abi::host::service::DEST_METADATA)
+    });
+    assert!(seen);
+    assert_eq!(refused(checked).0.status, 403);
+}

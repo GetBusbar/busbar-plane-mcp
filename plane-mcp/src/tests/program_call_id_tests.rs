@@ -18,6 +18,7 @@ fn admitted() -> (
         progress_token: Some(json!("caller-progress")),
         capabilities: json!({"sampling":{}}),
         sent_digest: String::new(),
+        initial_input_responses: None,
         relay: None,
     };
     (admitted, section.servers["srv"].clone())

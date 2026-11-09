@@ -248,3 +248,29 @@ fn a_task_relay_under_a_failed_clock_is_refused_naming_the_clock() {
         "{refusal}"
     );
 }
+
+#[test]
+fn initial_upstream_answers_do_not_bypass_local_asks_or_presented_state() {
+    let spent = Keyed::new();
+    let mut supplied = caps();
+    supplied["inputResponses"] = json!({"ok":true,"unknown":{"x":1}});
+    assert_eq!(
+        decide_on(&MINTS, &spent, &[], &supplied),
+        AskDecision::Proceed
+    );
+    assert!(
+        matches!(
+            decide_on(&MINTS, &spent, &confirm(), &supplied),
+            AskDecision::Ask { .. }
+        ),
+        "an operator-owned gate still issues its signed challenge"
+    );
+    supplied["requestState"] = json!("tampered");
+    assert!(
+        matches!(
+            decide_on(&MINTS, &spent, &[], &supplied),
+            AskDecision::Refuse(_)
+        ),
+        "initial upstream data cannot excuse presented state"
+    );
+}

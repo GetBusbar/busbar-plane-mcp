@@ -12,6 +12,7 @@ fn stdio_progress_mapping_applies_the_existing_frame_bound() {
         progress_token: Some(json!("caller-token")),
         capabilities: json!({}),
         sent_digest: String::new(),
+        initial_input_responses: None,
         relay: None,
     };
     let frames:Vec<_>=(0..257).map(|n|json!({"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":"far-token","progress":n}})).collect();

@@ -114,7 +114,7 @@ for rig in testing/mcp-conformance/mcp-subject/h2-*.sh; do
 done
 # Bootstrap connects consume the real admin mutation window. Reserve a fresh
 # existing window so the official live mutations are admitted before their timers.
-leg official-subject env MCP_OPERATOR_FRESH_WINDOW=1 bash testing/mcp-conformance/mcp-conformance.sh --official-subject
+leg official-subject env MCP_OPERATOR_FRESH_WINDOW=1 MCP_SIGNED_EXTRA_RECEIPT="$out/signed-extra-input.json" bash testing/mcp-conformance/mcp-conformance.sh --official-subject
 leg battery-subject  bash testing/mcp-conformance/mcp-conformance.sh --battery-subject
 
 if [ -z "$failed" ]; then

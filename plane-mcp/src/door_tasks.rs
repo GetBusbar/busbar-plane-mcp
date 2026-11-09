@@ -372,6 +372,9 @@ fn run_params(admitted: &AdmittedCall, params: Option<&Value>) -> Value {
     let mut out = Map::new();
     out.insert("name".into(), admitted.entry.namespaced.clone().into());
     out.insert("arguments".into(), admitted.arguments.clone());
+    if let Some(responses) = &admitted.initial_input_responses {
+        out.insert("inputResponses".into(), responses.clone());
+    }
     if let Some(mut meta) = params.and_then(|p| p.get("_meta")).cloned() {
         if let Some(m) = meta.as_object_mut() {
             m.remove("progressToken");
@@ -1842,7 +1845,11 @@ fn call(
     }
     super::admit_task_send(plane, ticket, unit, held, &entry, &arguments).map_err(End::Failed)?;
 
-    if let Some(Retry::Relayed { responses, .. }) = &run.retry {
+    let responses = match &run.retry {
+        Some(Retry::Relayed { responses, .. }) => Some(responses),
+        _ => run.params.get("inputResponses"),
+    };
+    if let Some(responses) = responses {
         crate::argguard::guard(&json!({}), responses, |destination| {
             let h = handle(ticket, &mut unit.issued, &mut None);
             plane
@@ -1873,7 +1880,7 @@ fn call(
         arguments,
         id: json!(0),
         progress_token: None,
-
+        initial_input_responses: run.params.get("inputResponses").cloned(),
         capabilities: client_capabilities(Some(&run.params)),
         relay,
     };
