@@ -1756,3 +1756,24 @@ fn initial_upstream_input_responses_refuse_malformed_maps_and_nested_destination
     assert!(seen);
     assert_eq!(refused(checked).0.status, 403);
 }
+
+#[test]
+fn invalid_initial_upstream_answer_is_reasked_without_a_completed_tool_error() {
+    let mut admitted = admitted();
+    admitted.initial_input_responses = Some(json!({"user_name":12345}));
+    admitted.capabilities = json!({"elicitation":{"form":{}}});
+    let mut def = section().servers["fs"].clone();
+    def.grants.elicitation = true;
+    let far = r#"{"jsonrpc":"2.0","id":0,"result":{"resultType":"input_required","inputRequests":{"user_name":{"method":"elicitation/create","params":{"mode":"form","message":"What is your name?","requestedSchema":{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}}}}}}"#;
+    let settled = settle_call(&admitted, Some(&def), 200, far.as_bytes(), false, 0);
+    let Settled::Relay { result, round, .. } = settled else {
+        panic!("a fresh upstream challenge must be relayed, not completed: {settled:?}");
+    };
+    assert_eq!(round, 0);
+    assert_eq!(result["resultType"], "input_required");
+    assert_eq!(
+        result["inputRequests"]["user_name"]["method"],
+        "elicitation/create"
+    );
+    assert!(result.get("isError").is_none());
+}

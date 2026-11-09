@@ -16,6 +16,9 @@ export function judgeNegativePeer(mode, report, checkpoint, transcript, status) 
   const errors = report.results.filter(row => row.verdict === 'ERROR');
   if (!errors.length) return 0;
   if (!['stall', 'truncate', 'half-answer'].includes(mode)) throw new Error('unrelated negative-control ERROR');
+  // Large ordinary replies need no injected-error witness. Read those bytes
+  // only after completeness is proved and an authorized ERROR needs explaining.
+  if (typeof transcript === 'function') transcript = transcript();
   for (const row of errors) {
     const o = row.peerObservation;
     const expectedKind = mode === 'half-answer' ? 'stdout-eof' : 'response-timeout';
@@ -55,7 +58,7 @@ export function judgeNegativePeer(mode, report, checkpoint, transcript, status) 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const [mode, reportPath, checkpointPath, transcriptPath, status] = process.argv.slice(2);
-    const transcript = readFileSync(transcriptPath, 'utf8').split('\n').filter(Boolean).map(JSON.parse);
+    const transcript = () => readFileSync(transcriptPath, 'utf8').split('\n').filter(Boolean).map(JSON.parse);
     const count = judgeNegativePeer(mode, JSON.parse(readFileSync(reportPath)),
       JSON.parse(readFileSync(checkpointPath)), transcript, Number(status));
     console.log(count);

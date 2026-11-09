@@ -54,3 +54,25 @@ for (const mode of ['honest', 'stall', 'truncate', 'half-answer']) {
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 }
+
+// A completed giant run has ordinary assertion failures and no peer ERRORs. Its
+// large fault transcript is not evidence needed for any exception, while every
+// original completion/count/row check must still run before accepting it.
+test('ordinary complete failures never load an irrelevant injected-error transcript', () => {
+  const results = [{ id: 'fixture.giant', verdict: 'FAIL' }];
+  const report = { results };
+  const checkpoint = { results, execution: { completed: true, selectedCases: 1, recordedCases: 1 } };
+  const unavailable = () => { throw new Error('transcript must not be read'); };
+  assert.equal(judgeNegativePeer('giant', report, checkpoint, unavailable, 1), 0);
+  for (const execution of [
+    { completed: false, selectedCases: 1, recordedCases: 1 },
+    { completed: true, selectedCases: 2, recordedCases: 1 },
+    { completed: true, selectedCases: 1, recordedCases: 0 },
+  ]) assert.throws(() => judgeNegativePeer('giant', report, { ...checkpoint, execution }, unavailable, 1), /incomplete/);
+  assert.throws(() => judgeNegativePeer('giant', report, { ...checkpoint, results: [] }, unavailable, 1), /incomplete/);
+  const errors = [{ id: 'fixture.giant', verdict: 'ERROR' }];
+  assert.throws(() => judgeNegativePeer('giant', { results: errors },
+    { ...checkpoint, results: errors }, unavailable, 1), /unrelated/);
+  assert.throws(() => judgeNegativePeer('stall', { results: errors },
+    { ...checkpoint, results: errors }, unavailable, 1), /transcript must not be read/);
+});

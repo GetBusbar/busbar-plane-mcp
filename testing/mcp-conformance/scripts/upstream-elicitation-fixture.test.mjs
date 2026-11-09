@@ -6,7 +6,7 @@ import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 
 const fixture = fileURLToPath(new URL('../mcp-subject/diagnostic-upstream.mjs', import.meta.url));
-test('ordinary upstream MRTR accepts known and extra answers equivalently and rejects malformed data', async () => {
+test('ordinary upstream MRTR accepts known and extra answers equivalently and reasks invalid answers', async () => {
   const reservation = createServer();
   reservation.listen(0, '127.0.0.1'); await once(reservation, 'listening');
   const port = reservation.address().port;
@@ -39,8 +39,15 @@ test('ordinary upstream MRTR accepts known and extra answers equivalently and re
     const missing = await call();
     assert.equal(missing.result.resultType, 'input_required');
     assert.equal(missing.result.inputRequests.user_name.method, 'elicitation/create');
-    for (const malformed of [null, 3, [], { user_name: 12345 }, { user_name: { action: 'accept', content: { name: 123 } } }]) {
+    for (const malformed of [null, 3, []]) {
       assert.equal((await call(malformed)).error.code, -32602);
+    }
+    for (const invalid of [{ user_name: 12345 }, { user_name: { action: 'accept', content: { name: 123 } } }]) {
+      const reasked = await call(invalid);
+      assert.equal(reasked.result.resultType, 'input_required', 'invalid known answers cannot complete the tool');
+      assert.deepEqual(reasked.result.inputRequests, missing.result.inputRequests);
+      assert.equal(reasked.result.inputRequests.user_name.params.requestedSchema.properties.name.type, 'string');
+      assert.equal(reasked.result.isError, undefined);
     }
     const signed = await call(undefined, 'signed_input_required_result_elicitation');
     assert.equal(signed.result.resultType, 'complete', 'the separate operator gate is implemented by Busbar before this alias runs');

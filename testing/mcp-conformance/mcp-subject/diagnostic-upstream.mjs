@@ -543,12 +543,15 @@ const server = createServer((req, res) => {
       if (msg.params.name === 'input_required_result_elicitation') {
         const responses = msg.params.inputResponses;
         const value = responses?.user_name;
-        if (responses !== undefined && (!responses || typeof responses !== 'object' || Array.isArray(responses))
-          || value !== undefined && (!value || typeof value !== 'object' || value.action !== 'accept'
-            || typeof value.content?.name !== 'string')) {
-          return rpcError(res, 400, id, -32602, 'invalid user_name input response');
+        if (responses !== undefined && (!responses || typeof responses !== 'object' || Array.isArray(responses))) {
+          return rpcError(res, 400, id, -32602, 'inputResponses must be an object');
         }
-        if (value === undefined) return send(res, 200, { jsonrpc: '2.0', id, result: {
+        // A missing or invalid answer has not supplied the requested name. Ask
+        // again instead of emitting an upstream error that a gateway correctly
+        // represents as a completed ToolResult with isError, not a client RPC error.
+        const valid = value && typeof value === 'object' && value.action === 'accept'
+          && typeof value.content?.name === 'string';
+        if (!valid) return send(res, 200, { jsonrpc: '2.0', id, result: {
           resultType: 'input_required', inputRequests: { user_name: { method: 'elicitation/create', params: {
             mode: 'form', message: 'What is your name?', requestedSchema: { type: 'object',
               properties: { name: { type: 'string', description: 'Your name' } }, required: ['name'] },
