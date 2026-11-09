@@ -186,7 +186,7 @@ impl McpServices {
         .expect("actual MemoryStore loads");
         assert_eq!(
             plugin.name(),
-            "memory",
+            "busbar-store-memory",
             "the test requires the actual memory product"
         );
         let backend = block(busbar_plugin_loader::store_v4::LoadedPersistence::open(
