@@ -47,8 +47,9 @@ if ! command -v pnpm >/dev/null 2>&1; then
 fi
 
 # The battery's control (python `mcp`) needs python >= 3.10; ModernCI compute has older. Fetch the
-# pinned python-build-standalone 3.12.16 (sha256 checked) when python3 is too old.
-if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null; then
+# pinned python-build-standalone 3.12.16 (sha256 checked) when python3 is too old
+# or cannot bootstrap a venv (minimal Debian/Ubuntu installations omit ensurepip).
+if ! python3 -c 'import sys, ensurepip; sys.exit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null; then
   case "$(uname -m)" in
     x86_64|amd64) pyasset="cpython-3.12.16+20261026-x86_64-unknown-linux-gnu-install_only.tar.gz"
                   pysha=6a79e922e50006b601f29e688407659da1c2b86ebcd4e9c7254cf234be8b89de ;;
