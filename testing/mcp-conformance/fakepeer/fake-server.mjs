@@ -125,7 +125,7 @@ const TRANSCRIPT = process.env.MCP_FAKE_TRANSCRIPT || null;
 function record(direction, payload) {
   if (!TRANSCRIPT) return;
   try {
-    appendFileSync(TRANSCRIPT, `${JSON.stringify({ direction, mode: MODE, payload })}\n`);
+    appendFileSync(TRANSCRIPT, `${JSON.stringify({ direction, mode: MODE, peerPid: process.pid, payload })}\n`);
   } catch (error) {
     process.stderr.write(`cannot record fake-peer transcript: ${error}\n`);
     process.exit(2);
@@ -342,6 +342,7 @@ function hostile(id, method, params) {
     ok(id, { content: [], isError: false }, method);
     return true;
   }
+  if (['stall', 'truncate', 'half-answer'].includes(MODE)) record('injected-fault', { requestId: id, method, kind: MODE });
   if (MODE === 'truncate') { raw('{"jsonrpc":"2.0","id":"x","result":{"resultTy'); return true; }
   if (MODE === 'stall') { return true; }
   if (MODE === 'half-answer') {

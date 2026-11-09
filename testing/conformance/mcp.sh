@@ -112,7 +112,9 @@ for rig in testing/mcp-conformance/mcp-subject/h2-*.sh; do
   case "$rig" in */h2-lib.sh) continue ;; esac
   leg "$(basename "$rig" .sh)" bash "$rig"
 done
-leg official-subject bash testing/mcp-conformance/mcp-conformance.sh --official-subject
+# Bootstrap connects consume the real admin mutation window. Reserve a fresh
+# existing window so the official live mutations are admitted before their timers.
+leg official-subject env MCP_OPERATOR_FRESH_WINDOW=1 bash testing/mcp-conformance/mcp-conformance.sh --official-subject
 leg battery-subject  bash testing/mcp-conformance/mcp-conformance.sh --battery-subject
 
 if [ -z "$failed" ]; then

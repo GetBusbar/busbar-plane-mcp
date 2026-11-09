@@ -352,15 +352,15 @@ test({
       ack = await peer.waitFor(
         (m) => m && (m.method === 'notifications/subscriptions/acknowledged'
           || (m.id === 50 && ('result' in m || 'error' in m))),
-        'subscription acknowledgement or terminal response', 8000,
+        'subscription acknowledgement or terminal response', 8000, 50,
       );
-    } catch {
+    } catch (error) {
       // The server may legally answer subscriptions/listen with an error if it
       // does not support the requested filter.
       const err = peer.responsesFor(50)[0];
       ctx.variance('subscriptions.listenRejected', Boolean(err && err.error));
       if (err && err.error) ctx.skip(`server rejected subscriptions/listen: ${err.error.code}`);
-      throw new Error('no acknowledgement and no error response to subscriptions/listen');
+      throw new Error('no acknowledgement and no error response to subscriptions/listen', { cause: error });
     }
 
     // An explicit rejection is legal. A success result terminating the listen

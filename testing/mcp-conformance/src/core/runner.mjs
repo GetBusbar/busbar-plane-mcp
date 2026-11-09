@@ -14,6 +14,7 @@
 // A differential harness that fails on every legal difference gets switched
 // off within a week. The whole value is in keeping these two apart.
 
+import { PeerObservationError } from './stdio-peer.mjs';
 import { cite } from './spec.mjs';
 
 export const VERDICT = {
@@ -180,6 +181,8 @@ export async function runOne(t, target) {
       record.error = err.message;
     } else {
       record.verdict = VERDICT.ERROR;
+      const observed = err instanceof PeerObservationError ? err : err?.cause instanceof PeerObservationError ? err.cause : null;
+      if (observed?.peerObservation) record.peerObservation = observed.peerObservation;
       record.error = err && err.stack ? err.stack : String(err);
     }
   }

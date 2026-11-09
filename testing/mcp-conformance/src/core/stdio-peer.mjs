@@ -17,11 +17,22 @@
 
 import { spawn } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
+import { createHash } from 'node:crypto';
 import { classify } from './jsonrpc.mjs';
 
 const FAILSAFE_MS = Number(process.env.MCP_BATTERY_FAILSAFE_MS || 15000);
 if (!Number.isFinite(FAILSAFE_MS) || FAILSAFE_MS <= 0) {
   throw new Error('MCP_BATTERY_FAILSAFE_MS must be a positive finite duration');
+}
+
+export class PeerObservationError extends Error {
+  constructor(message, peer, kind, requestId) {
+    super(message);
+    const sent = peer.sentRequests.get(requestId);
+    if (sent) this.peerObservation = { kind, peerPid: peer.proc.pid, requestId,
+      method: sent.method, stdoutEnded: peer.stdoutEnded,
+      stdoutSha256: createHash('sha256').update(peer.stdoutBytes).digest('hex') };
+  }
 }
 
 export class StdioPeer {
@@ -40,6 +51,7 @@ export class StdioPeer {
     this.command = command;
     this.args = args;
     this.opts = opts;
+    this.sentRequests = new Map();
     this.messages = [];        // parsed messages, in arrival order
     this.rawLines = [];        // every stdout line as received, pre-parse
     this.badLines = [];        // stdout lines that did not parse as JSON
@@ -89,7 +101,7 @@ export class StdioPeer {
       // A child can close stdout while keeping stdin/process alive. No future
       // message can arrive; waiting for process close here wastes the failsafe.
       for (const w of this._waiters.splice(0)) {
-        w.reject(new Error(`peer stdout ended while waiting for: ${w.label}`));
+        w.reject(new PeerObservationError(`peer stdout ended while waiting for: ${w.label}`, this, 'stdout-eof', w.requestId));
       }
     });
     this.proc.stdout.on('error', (error) => {
@@ -221,6 +233,7 @@ export class StdioPeer {
 
   /** One JSON object as one newline-delimited frame. */
   send(obj) {
+    if (obj && typeof obj === 'object' && Object.hasOwn(obj, 'id')) this.sentRequests.set(obj.id, obj);
     this.sendRaw((typeof obj === 'string' ? obj : JSON.stringify(obj)) + '\n');
     return this;
   }
@@ -235,21 +248,24 @@ export class StdioPeer {
    * Already-received messages are considered first, so there is no race
    * between sending and waiting.
    */
-  waitFor(predicate, label = 'message', failsafeMs = FAILSAFE_MS) {
+  waitFor(predicate, label = 'message', failsafeMs = FAILSAFE_MS, requestId = undefined) {
     for (const m of this.messages) {
       if (predicate(m)) return Promise.resolve(m);
     }
     if (this.spawnError || this.writeError) return Promise.reject(this.spawnError || this.writeError);
     if (this.stdoutError) return Promise.reject(this.stdoutError);
-    if (this.stdoutEnded) return Promise.reject(new Error(`peer stdout ended while waiting for: ${label}`));
+    if (this.stdoutEnded) return Promise.reject(new PeerObservationError(`peer stdout ended while waiting for: ${label}`, this, 'stdout-eof', requestId));
     if (this.exited) return Promise.reject(new Error(`peer exited while waiting for: ${label}`));
+    const fixtureDeadline = Number(this.opts.env?.MCP_INJECTED_PEER_TIMEOUT_MS || 0);
+    if (this.sentRequests.get(requestId)?.method !== 'server/discover' && requestId !== undefined
+      && Number.isFinite(fixtureDeadline) && fixtureDeadline > 0) failsafeMs = Math.min(failsafeMs, fixtureDeadline);
     return new Promise((resolve, reject) => {
-      const w = { predicate, resolve, reject, label };
+      const w = { predicate, resolve, reject, label, requestId };
       this._waiters.push(w);
       const t = setTimeout(() => {
         const i = this._waiters.indexOf(w);
         if (i >= 0) this._waiters.splice(i, 1);
-        reject(new Error(`failsafe timeout after ${failsafeMs}ms waiting for: ${label}`));
+        reject(new PeerObservationError(`failsafe timeout after ${failsafeMs}ms waiting for: ${label}`, this, 'response-timeout', requestId));
       }, failsafeMs);
       const clear = () => clearTimeout(t);
       const origResolve = w.resolve;
@@ -265,6 +281,7 @@ export class StdioPeer {
       (m) => m && m.id === id && ('result' in m || 'error' in m),
       `response to id ${JSON.stringify(id)}`,
       failsafeMs,
+      id,
     );
   }
 

@@ -65,6 +65,7 @@ function negativeControlWithPeerStartup(errorMode) {
   try {
     for (const subdir of ['scripts', 'bin', 'fakepeer']) mkdirSync(join(dir, subdir));
     copyFileSync(join(root, 'scripts/negative-control.sh'), join(dir, 'scripts/negative-control.sh'));
+    copyFileSync(join(root, 'scripts/judge-negative-peer.mjs'), join(dir, 'scripts/judge-negative-peer.mjs'));
     // Use the actual battery and actual StdioPeer process path, selecting an existing request
     // scenario so a peer startup failure is an ERROR-only report, rather than a fabricated log.
     writeFileSync(join(dir, 'bin/mcp-battery.mjs'),

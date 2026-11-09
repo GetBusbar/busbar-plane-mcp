@@ -59,7 +59,7 @@ export class Target {
     }
     const { command, args } = parseLaunch(this.serverLaunch);
     return new StdioPeer(command, args, {
-      env: { ...this.env, ...extraEnv },
+      env: { ...this.env, ...(process.env.MCP_INJECTED_PEER_TIMEOUT_MS ? { MCP_INJECTED_PEER_TIMEOUT_MS: process.env.MCP_INJECTED_PEER_TIMEOUT_MS } : {}), ...extraEnv },
       cwd: this.cwd,
     }).start();
   }

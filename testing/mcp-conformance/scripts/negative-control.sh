@@ -76,8 +76,13 @@ stale=""
 incomplete=""
 for mode in $MODES; do
   run_status=0
+  : > "$REPORT_DIR/$mode.fixture.jsonl"
+  # Only these intentionally nonresponsive fixtures receive a shorter observation
+  # deadline; honest peers, the reference control and subjects keep their budget.
+  fixture_deadline=""
+  case "$mode" in stall|truncate|half-answer) fixture_deadline=1000 ;; esac
   # shellcheck disable=SC2086
-  MCP_FAKE_MODE="$mode" $timeout_cmd "$NODE" bin/mcp-battery.mjs run --name "fake-$mode" \
+  MCP_INJECTED_PEER_TIMEOUT_MS="$fixture_deadline" MCP_FAKE_TRANSCRIPT="$REPORT_DIR/$mode.fixture.jsonl" MCP_FAKE_MODE="$mode" $timeout_cmd "$NODE" bin/mcp-battery.mjs run --name "fake-$mode" \
     --server-cmd "\"$NODE\" \"$FAKE\"" --failing-tool fail --tier push,pr --role server \
     --out "$REPORT_DIR/$mode.json" --checkpoint "$REPORT_DIR/$mode.checkpoint.json" \
     > "$REPORT_DIR/$mode.stdout.log" 2> "$REPORT_DIR/$mode.stderr.log" || run_status=$?
@@ -87,10 +92,17 @@ for mode in $MODES; do
   R=$(echo "$OUT" | grep "^results" | sed 's/results *: //')
   F=$(echo "$OUT" | grep -E "^  FAIL" | sed -E 's/^  FAIL *\[[^]]*\] *//' | tr '\n' ' ')
   E=$(echo "$OUT" | grep -E "^  ERR " | sed -E 's/^  ERR *\[[^]]*\] *//' | tr '\n' ' ')
-  # Errors and interrupted runs are not observations of a caught protocol defect.
-  # This applies to honest and intentionally uncatchable peers as well as attack modes.
-  if [ -z "$R" ] || [ -n "$E" ] || [ "$run_status" -gt 1 ] \
-      || { [ "$run_status" -ne 0 ] && [ -z "$F" ]; }; then
+  # A completed, independently witnessed injected fault can prove sensitivity
+  # while its original scenario remains ERROR. Missing verdicts and unrelated
+  # exceptions remain fatal, even when another row also failed.
+  injected=""
+  if injected="$($NODE scripts/judge-negative-peer.mjs "$mode" "$REPORT_DIR/$mode.json" \
+      "$REPORT_DIR/$mode.checkpoint.json" "$REPORT_DIR/$mode.fixture.jsonl" "$run_status" 2>"$REPORT_DIR/$mode.judge.stderr.log")"; then
+    if [ "$injected" -gt 0 ]; then
+      F="$F INJECTED-PEER-OBSERVATION($injected; original rows remain ERROR)"
+      E=""
+    fi
+  else
     incomplete="$incomplete $mode"
   fi
   allowed=0
