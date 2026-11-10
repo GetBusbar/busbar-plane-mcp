@@ -7,7 +7,7 @@ use crate::root::serve::planes_tests::PUBLISHING;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-async fn ask(rig: &Rig, token: &str, method: &str, mut params: Value) -> (u16, Value) {
+pub(super) async fn ask(rig: &Rig, token: &str, method: &str, mut params: Value) -> (u16, Value) {
     params["_meta"] = json!({"io.modelcontextprotocol/protocolVersion":tool_door::protocol_version(),"io.modelcontextprotocol/clientCapabilities":{}});
     let request = json!({"jsonrpc":"2.0","id":31,"method":method,"params":params});
     let (status, body) = tokio::time::timeout(
@@ -23,7 +23,7 @@ async fn ask(rig: &Rig, token: &str, method: &str, mut params: Value) -> (u16, V
     )
 }
 
-async fn enroll(rig: &Rig, token: &str, owner: &str, issuer: &str) {
+pub(super) async fn enroll(rig: &Rig, token: &str, owner: &str, issuer: &str) {
     let (status, auth) = ask(
         rig,
         token,

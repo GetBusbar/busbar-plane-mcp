@@ -50,3 +50,5 @@ tracing = { workspace = true }
 url = { workspace = true }
 busbar-contract = { workspace = true, features = ["test-seal"] }
 busbar-kernel = { workspace = true }
+
+zeroize = { workspace = true }

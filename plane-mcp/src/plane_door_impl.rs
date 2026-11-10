@@ -225,6 +225,7 @@ pub struct McpDoor {
     connection_refresh: Keyed<crate::connections::ConnectionKey, u64>,
     connection_checked: Keyed<crate::connections::DiscoveryKey, u64>,
     connection_config: Keyed<crate::connections::ConnectionKey, (String, String, String)>,
+    app_resources: Keyed<String, door_apps::Mapping>,
 }
 
 impl McpDoor {
@@ -658,6 +659,8 @@ struct Verified {
 
 /// One unit's state, from its arrival to its end.
 struct CallUnit {
+    apps_profile: crate::apps::Profile,
+    app_read: Option<door_apps::Read>,
     /// The unit's own key, as the kernel minted it.
     key: u64,
     /// What the plane held for the generation it arrived under.
@@ -1352,7 +1355,7 @@ slot!(
                 None => out.route(ROUTE_DIRECT, &entry.server),
             },
             None => {
-                if let Some(server) = door_connections::route(&disposition, value.as_ref()) { out.route(ROUTE_DIRECT, server); out.once(); } else { out.local(); }
+                if let Some(server) = door_connections::route(&disposition, value.as_ref()) { out.route(ROUTE_DIRECT, server); out.once(); } else if let Some(mapping) = door_apps::route(plane, &disposition, value.as_ref()) { out.route(ROUTE_DIRECT, &mapping.server); out.once(); } else { out.local(); }
             },
         }
         // The subscription on the HTTP carrier: a session,
@@ -1388,6 +1391,8 @@ slot!(
             }
         }
         let unit = CallUnit {
+            apps_profile: crate::apps::Profile::default(),
+            app_read: None,
             key: input.unit(),
             held,
             disposition,
@@ -2319,9 +2324,13 @@ fn answer_body(
             return Some(door_tasks::verb(plane, ticket, principal, unit, op, &id));
         }
     }
+    if let Some(step) = door_apps::preflight(plane, ticket, caller, unit) {
+        return Some(step);
+    }
     if let Some(step) = door_connections::answer(plane, ticket, caller, unit) {
         return Some(step);
     }
+    if let Some(step) = door_apps::answer(plane, ticket, caller, unit) { return Some(step); }
     let held = unit.held.clone()?;
     let local_revision = local_revision(unit);
     if let Some(step) = take_turn(plane, ticket, principal, held.catalogue.generation(), unit) {
@@ -2362,6 +2371,12 @@ fn answer_body(
         .and_then(|_| params.as_ref()?.get("name")?.as_str())
         .and_then(|name| held.catalogue.tool(name));
 
+    if let Some(entry) = called {
+        let def = held.section.servers.get(&entry.server)?;
+        if !unit.apps_profile.effective(&def.apps).enabled() && !crate::apps::model_visible(entry.meta.as_ref(), def.apps.allow_legacy_resource_meta) {
+            return Some(door_apps::refuse(unit, "This tool is not in the model-facing catalogue."));
+        }
+    }
     let grants = match (&named_tool, called) {
         (Some(_), Some(t)) => vec![
             (statement::SCOPE, t.server.as_str()),
@@ -2394,11 +2409,9 @@ fn answer_body(
 
     let verdict = called.map(|entry| {
         let list = if door_connections::enabled(&held, &entry.server) {
-            door_connections::list(
-                plane,
-                caller,
-                &entry.server,
-                wall_ms(services, ticket, &mut unit.issued).unwrap_or(u64::MAX),
+            door_connections::list_for(
+                plane, caller, &entry.server,
+                wall_ms(services, ticket, &mut unit.issued).unwrap_or(u64::MAX), &held, &unit.apps_profile,
             )
         } else {
             published_in(plane, &held, &entry.server)
@@ -2425,12 +2438,21 @@ fn answer_body(
         let now = wall_ms(services, ticket, &mut unit.issued).unwrap_or(u64::MAX);
         for entry in held.catalogue.tools_for(&admit(&unit.entitled)) {
             if door_connections::enabled(&held, &entry.server) {
-                let list = door_connections::list(plane, caller, &entry.server, now);
+                let list = door_connections::list_for(plane, caller, &entry.server, now, &held, &unit.apps_profile);
                 if !matches!(&list.sighting,crate::trust::Sighting::Seen(seen) if seen.capabilities.contains_key(&entry.tool))
                 {
                     hidden.insert(entry.namespaced.clone());
                 }
             }
+        }
+    }
+    if listing {
+        for entry in held.catalogue.tools_for(&admit(&unit.entitled)) {
+            let def = held.section.servers.get(&entry.server)?;
+            if !unit.apps_profile.effective(&def.apps).enabled() && !crate::apps::model_visible(entry.meta.as_ref(), def.apps.allow_legacy_resource_meta) { hidden.insert(entry.namespaced.clone()); }
+        }
+        if matches!(&disposition, Disposition::Request { row, .. } if row.op == crate::tool_ops::OP_TOOLS_LIST) {
+            return Some(door_apps::list(plane, ticket, caller, unit, &held, &hidden));
         }
     }
     let mut seal = services
@@ -3318,7 +3340,8 @@ fn send_to_member(
         let scope = exchange_scope(services, ticket, unit, held, member, &relay.admitted);
         scoped(&mut outbound.fields, scope.as_deref());
 
-        let original = door_sessions::original(&def.url, &outbound);
+        let mut original = door_sessions::original(&def.url, &outbound);
+        unit.apps_profile.effective(&def.apps).apply(&mut original);
 
         let partition = door_connections::partition(plane, ticket, caller, unit, member);
         let negotiating = door_sessions::Negotiating::begin(
@@ -3478,6 +3501,7 @@ slot!(
                         if matches!(step, Step::Taken) && door_connections::ready(unit) { return answer_body(&instance, plane, ticket, &caller, unit); }
                         return Some(step);
                     }
+                    if let Some(step) = door_apps::far(plane, ticket, &caller, unit, input) { return Some(step); }
                     let held = unit.held.clone();
                     let generation = held.as_ref().map_or(0, |h| h.catalogue.generation());
                     let framing = unit.framing.clone();
@@ -3831,6 +3855,7 @@ slot!(
                     let answered = relay.status != 0;
                     let far_len = relay.far.len();
                     let ts = clock_s(plane.services, ticket, unit);
+                    let body = match door_apps::rewrite_reply(plane, ticket, &caller, unit, body) { Ok(body) => body, Err(reason) => return Some(door_apps::refuse(unit, &reason)) };
                     let mut pending = Pending::answer(status, body, framing.as_ref(), &progress)
                         .logged(Some(&line), principal, generation, ts);
                     for _ in 0..dropped_replies {
@@ -4797,3 +4822,6 @@ mod settings_schema_tests;
 
 #[path = "door_connections.rs"]
 mod door_connections;
+
+#[path = "door_apps.rs"]
+mod door_apps;

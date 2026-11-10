@@ -6,6 +6,8 @@ use serde_json::json;
 
 fn unit() -> CallUnit {
     CallUnit {
+        apps_profile: crate::apps::Profile::default(),
+        app_read: None,
         key: 1,
         held: None,
         disposition: Disposition::Notice {
@@ -263,4 +265,18 @@ fn local_line_revision_is_retained_across_carrier_reinitialization() {
         plane.line_revisions.insert(7, after);
         assert_eq!(local_revision(&request), before);
     }
+}
+
+#[test]
+fn apps_dispatch_keeps_ordinary_catalogue_bytes_and_cache_hints() {
+    let cfg = statement::test_support::read_tools_section(br#"{
+        "server":{"url":"https://example.test","pin":{"mechanism":"unpinned"},
+        "tools_allow":{"plain":{"description":"plain","input_schema":{"type":"object"}}}}
+    }"#).unwrap();
+    let held = Held::of(1, cfg);
+    let mut unit = unit();
+    for (kind, name) in held.catalogue.grants() { unit.entitled.insert(format!("{kind}:{name}"), true); }
+    let expected = held.catalogue.tools_list(&Value::Null, &admit(&unit.entitled), |_| false);
+    door_apps::list(&McpDoor::default(), Ticket::NONE, "bob", &mut unit, &held, &Default::default());
+    assert_eq!(unit.pending.unwrap().bytes, expected);
 }

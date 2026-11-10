@@ -56,6 +56,54 @@ An unknown key in either section is refused. `validate` judges both; a reload ju
 and refuses a malformed one, but keeps the endpoint `open` read.
 
 
+### MCP Apps gateway
+
+Each HTTP member may enable the [2026-01-26 Apps extension](https://github.com/modelcontextprotocol/ext-apps/blob/main/specification/2026-01-26/apps.mdx)
+with `apps.enabled: true`. It requires `upstream_credentials: connection` and the member's
+OAuth registration. Downstream clients negotiate `io.modelcontextprotocol/ui` in an HTTP
+session's `initialize` capabilities; stateless and line clients keep the model projection.
+The gateway advertises only configured types the client supports. Defaults are:
+
+```yaml
+apps:
+  enabled: false
+  spec_version: 2026-01-26
+  mime_types: [text/html;profile=mcp-app]
+  max_resource_bytes: 1048576
+  allow_legacy_resource_meta: false
+  resources:
+    ui://example/view:
+      ui: {} # Exact approved resource _meta.ui; absent CSP has restrictive host defaults.
+      # digest: sha256:<digest of decoded HTML bytes> # Optional immutable content pin.
+```
+
+Put approved tool metadata in `tools_allow.<tool>.meta`, matching the upstream `_meta`.
+`meta.ui.resourceUri` must name an exact entry in `apps.resources`; local `resources_allow`
+and URI templates do not serve Apps HTML. `meta.ui.visibility` defaults to `[model, app]`.
+An Apps session receives all authorized tools and their metadata. Ordinary clients never see
+or call app-only tools. The authenticated downstream host must distinguish app-origin calls
+from model-origin calls and enforce same-server app visibility; the gateway cannot establish
+that distinction from a standard `tools/call` or a caller-supplied origin flag.
+
+Apps approvals use a domain-separated version-one SHA-256 digest over the definition,
+effective visibility, resource identity and full metadata. Legacy definition-only approvals
+cannot approve Apps tools. Tool metadata drift fails the existing trust check. Existing
+non-Apps tool hashes remain unchanged. The deprecated flat resource key is accepted only
+with the explicit compatibility setting; conflicting old/new resource identities fail.
+
+UI resource addresses are opaque, session-specific `ui://busbar/...` mappings. The same
+upstream URI on two members, users, capability profiles or approval generations remains
+separate. Dynamic reads use MCP `resources/read` through the member's governed per-user
+connection, recheck authorization after the response, and preserve HTML bytes and approved
+CSP/permissions. Resource policies admit exact HTTPS/WSS origins and supported permission
+names; drift, unsupported MIME, invalid base64, non-UTF-8 or oversized content is refused.
+Resources without a content pin carry `_meta["io.busbar/mutable"]: true`. UI-only resources
+are discovered through tool metadata and may be omitted from `resources/list`.
+
+The gateway does not execute HTML. Browser rendering, HTML interpretation and sandbox/CSP
+enforcement remain the host's responsibility. Protocol fixture coverage is not a claim of
+interoperability with an external rendering host.
+
 ### Host-launched stdio identity
 
 A `transport: stdio` server can use `pin.mechanism: local_program`. Its `pin.key` must equal

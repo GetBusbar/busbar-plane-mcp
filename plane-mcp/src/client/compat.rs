@@ -144,9 +144,16 @@ pub fn initialize_request(
     asked: Revision,
     client_version: &str,
 ) -> OutboundRequest {
+    let capabilities = crate::codec::wire_json::parse(&template.body)
+        .ok()
+        .and_then(|v| {
+            v.pointer("/params/_meta/io.modelcontextprotocol~1clientCapabilities")
+                .cloned()
+        });
+    let apps = crate::apps::Profile::parse(capabilities.as_ref()).unwrap_or_default();
     let params = serde_json::json!({
         "protocolVersion": asked.wire(),
-        "capabilities": {},
+        "capabilities": apps.capabilities(),
         "clientInfo": { "name": "busbar", "version": client_version },
     });
     let body = busbar_contract::jsonrpc::request_bytes(

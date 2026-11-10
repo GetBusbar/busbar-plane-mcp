@@ -134,6 +134,7 @@ pub(super) enum SessionUnit {
     Open {
         id: Value,
         requested: Option<String>,
+        capabilities: Option<Value>,
     },
     /// A message in `session`, carried as `carriage`, with the version header it carried.
     Message {
@@ -255,6 +256,7 @@ pub(super) fn arrive(
                 (adapt::PostKind::Initialize, Some(v)) => match crate::tool_arrival::request(&v) {
                     Ok(busbar_contract::jsonrpc::Envelope::Request { id, .. }) => {
                         local(SessionUnit::Open {
+                            capabilities: v.pointer("/params/capabilities").cloned(),
                             id,
                             requested: v
                                 .pointer("/params/protocolVersion")
@@ -575,7 +577,20 @@ pub(super) fn answer(
         SessionUnit::Rejected(refusal) => answer_of(refusal.status, refusal.body()),
         SessionUnit::Notification => answer_of(STATUS_ACCEPTED, Vec::new()),
         SessionUnit::Line | SessionUnit::Stream { .. } => return None,
-        SessionUnit::Open { id, requested } => {
+        SessionUnit::Open {
+            id,
+            requested,
+            capabilities,
+        } => {
+            unit.apps_profile = match crate::apps::Profile::parse(capabilities.as_ref()) {
+                Ok(profile) => profile,
+                Err(why) => {
+                    return Some(written(
+                        unit,
+                        answer_of(400, rpc_error(&id, CODE_INVALID_PARAMS, &why)),
+                    ))
+                }
+            };
             open_endpoint(plane, ticket, unit, &owner, &id, requested.as_deref(), now)
         }
         SessionUnit::Delete { session, header } => {
@@ -601,6 +616,9 @@ pub(super) fn answer(
             }
             if with_sessions(plane, |t| t.close(&session, &owner, now)) == Some(true) {
                 plane.session_state.remove(&session);
+                plane
+                    .app_resources
+                    .with_all(|m| m.retain(|_, resource| resource.session() != session));
 
                 due(plane, &session);
                 answer_of(200, Vec::new())
@@ -632,6 +650,12 @@ pub(super) fn answer(
             if let Some(SessionUnit::Message { checked, .. }) = unit.session.as_mut() {
                 *checked = Some(revision);
             }
+            unit.apps_profile = plane
+                .session_state
+                .get(&session)
+                .filter(|s| s.owner.as_ref() == Some(&owner))
+                .map(|s| s.apps_profile)
+                .unwrap_or_default();
             match kind {
                 Kind::Dispatch => return None,
                 Kind::Accept(_) => answer_of(STATUS_ACCEPTED, Vec::new()),
@@ -691,7 +715,23 @@ fn open_endpoint(
         Ok(session) => session,
         Err((status, why)) => return answer_of(status, rpc_error(id, CODE_REFUSED, why)),
     };
-    let result = adapt::initialize_result(&discovered, revision);
+    state_of(plane, &session, owner, |s| {
+        s.apps_profile = unit.apps_profile.clone()
+    });
+    let mut result = adapt::initialize_result(&discovered, revision);
+    if unit.apps_profile.enabled()
+        && unit.held.as_ref().is_some_and(|h| {
+            h.section
+                .servers
+                .values()
+                .any(|d| unit.apps_profile.effective(&d.apps).enabled())
+        })
+    {
+        result["capabilities"]["extensions"][crate::apps::EXTENSION] =
+            crate::apps::Profile([crate::apps::MIME.to_owned()].into()).capabilities()
+                ["extensions"][crate::apps::EXTENSION]
+                .clone();
+    }
     let body = busbar_contract::jsonrpc::result_bytes(
         &crate::codec::json(id),
         &crate::codec::json(&result),
@@ -726,8 +766,30 @@ fn here(
         adapt::METHOD_PING => ok(json!({})),
 
         adapt::METHOD_INITIALIZE if revision.is_event_stream_revision() => {
+            let profile = match crate::apps::Profile::parse(value.pointer("/params/capabilities")) {
+                Ok(p) => p,
+                Err(reason) => return invalid(&reason),
+            };
+            state_of(plane, session, owner, |s| s.apps_profile = profile.clone());
+            unit.apps_profile = profile;
             match discovery(plane, ticket, unit, &id) {
-                Some(d) => ok(adapt::initialize_result(&d, revision)),
+                Some(d) => {
+                    let mut result = adapt::initialize_result(&d, revision);
+                    if unit.apps_profile.enabled()
+                        && unit.held.as_ref().is_some_and(|h| {
+                            h.section
+                                .servers
+                                .values()
+                                .any(|d| unit.apps_profile.effective(&d.apps).enabled())
+                        })
+                    {
+                        result["capabilities"]["extensions"][crate::apps::EXTENSION] =
+                            crate::apps::Profile([crate::apps::MIME.to_owned()].into())
+                                .capabilities()["extensions"][crate::apps::EXTENSION]
+                                .clone();
+                    }
+                    ok(result)
+                }
                 None => rpc_error(
                     &id,
                     CODE_INTERNAL,
@@ -804,6 +866,7 @@ fn here(
 /// announced for it its stream has not collected.
 #[derive(Debug, Clone, Default)]
 pub(super) struct SessionState {
+    apps_profile: crate::apps::Profile,
     owner: Option<Owner>,
     uris: Vec<String>,
     level: Option<String>,
@@ -947,6 +1010,12 @@ pub(super) fn heard(
             _ => {}
         }
     }
+}
+
+pub(super) fn session_live(plane: &McpDoor, session: &str, caller: &str, now: u64) -> bool {
+    with_sessions(plane, |t| t.revision(session, &owner_of(caller), now))
+        .flatten()
+        .is_some()
 }
 
 /// The session a unit's caller is in, when it is in one whose check passed.
@@ -1229,6 +1298,9 @@ pub(super) fn tick(plane: &McpDoor) {
         .into_iter()
         .filter(|id| with_sessions(plane, |t| !t.holds(id)).unwrap_or(false))
         .collect();
+    plane
+        .app_resources
+        .with_all(|m| m.retain(|_, resource| !gone.iter().any(|s| s == resource.session())));
     plane.session_state.with_all(|m| {
         for id in &gone {
             m.remove(id);
@@ -1693,7 +1765,12 @@ impl Negotiating {
         binding: &str,
         original: OutboundRequest,
     ) -> Self {
-        let key = crate::tool_sessions::upstream_key(member, binding);
+        let profile = crate::codec::wire_json::parse(&original.body).ok()
+            .and_then(|v| v.pointer("/params/_meta/io.modelcontextprotocol~1clientCapabilities/extensions/io.modelcontextprotocol~1ui").cloned());
+        let binding = profile
+            .map(|p| serde_json::json!([binding, p]).to_string())
+            .unwrap_or_else(|| binding.to_owned());
+        let key = crate::tool_sessions::upstream_key(member, &binding);
         let (remembered, session_id) = remembered(plane, &key);
 
         let original = match session_id {

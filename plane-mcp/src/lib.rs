@@ -7,6 +7,7 @@
 /// The session revisions raised into, and lowered out of, the one dispatch.
 mod adapt;
 mod answer;
+mod apps;
 /// The argument half of the dispatch SSRF guard: a schema-aware walk judging every URL and
 /// host a call's arguments carry.
 mod argguard;

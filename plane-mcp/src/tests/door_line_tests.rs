@@ -159,6 +159,8 @@ fn an_unwatched_resource_is_not_retained_by_a_line_subscription() {
 
 fn host_check_unit() -> CallUnit {
     CallUnit {
+        apps_profile: crate::apps::Profile::default(),
+        app_read: None,
         key: 1,
         held: None,
         disposition: crate::tool_arrival::Disposition::Notice {

@@ -6,6 +6,8 @@
 mod adapt;
 #[path = "../../plane-mcp/src/answer.rs"]
 mod answer;
+#[path = "../../plane-mcp/src/apps.rs"]
+mod apps;
 /// The argument half of the dispatch SSRF guard: a schema-aware walk judging every URL and host
 /// a call's arguments carry.
 #[path = "../../plane-mcp/src/argguard.rs"]
@@ -22,6 +24,8 @@ mod checks;
 mod client;
 #[path = "../../plane-mcp/src/codec.rs"]
 mod codec;
+#[path = "../../plane-mcp/src/connections.rs"]
+mod connections;
 /// The plane's diagnostic catalog: the codes it raises, which its `declares.json` states (the
 /// tests hold the two equal, and the codes equal to the ones the door raises).
 #[cfg(test)]

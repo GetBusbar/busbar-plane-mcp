@@ -159,6 +159,9 @@ extern "C" fn settle_work(_: HostCtx, input: *const c_void, out: *mut ServiceOut
 /// Only the binder's child_work/issued fields are relevant; the other unit state is inert.
 pub(super) fn unit() -> CallUnit {
     CallUnit {
+        connection: None,
+        apps_profile: crate::apps::Profile::default(),
+        app_read: None,
         key: 7,
         held: None,
         disposition: Disposition::Notice {

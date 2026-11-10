@@ -143,6 +143,9 @@ pub struct McpTlsCfg {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolAllowCfg {
+    /// Full approved tool metadata, including MCP Apps UI metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<serde_json::Value>,
     /// The APPROVED schema/description hash; empty = pending, which does not serve.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema_hash: Option<String>,
@@ -461,6 +464,9 @@ pub const DEFAULT_UPSTREAM_TIMEOUT_MS: u64 = 30_000;
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct McpServerDefCfg {
+    /// MCP Apps gateway policy for this member.
+    #[serde(default)]
+    pub apps: crate::apps::AppsCfg,
     /// The remote MCP endpoint. Required for `streamable_http`, refused for `stdio` (see [`validate_server`]).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub url: String,
@@ -1093,6 +1099,21 @@ fn validate_local_program(at: &str, def: &McpServerDefCfg) -> Result<(), String>
 /// THE VALUE-LEVEL RULES for one `tools:` entry, run at boot and by the admin write path alike.
 pub fn validate_server(name: &str, def: &McpServerDefCfg) -> Result<(), String> {
     let at = format!("`tools.{name}`");
+    def.apps.validate()?;
+    if def.apps.enabled
+        && (def.resources_allow.keys().any(|u| u.starts_with("ui://"))
+            || def
+                .resource_templates_allow
+                .keys()
+                .any(|u| u.starts_with("ui://")))
+    {
+        return Err(format!("{at}: Apps UI resources require exact apps.resources policies, not local resources or URI templates"));
+    }
+    if def.apps.enabled && (def.transport == Some(ServerTransport::Stdio) || def.oauth.is_none()) {
+        return Err(format!(
+            "{at}: Apps currently requires an HTTP per-user connection"
+        ));
+    }
 
     if name.contains(NAMESPACE_SEP) {
         return Err(format!(
@@ -1127,6 +1148,37 @@ pub fn validate_server(name: &str, def: &McpServerDefCfg) -> Result<(), String> 
     }
 
     for (tool, allow) in &def.tools_allow {
+        if let Some(ui) =
+            crate::apps::tool_meta(allow.meta.as_ref(), def.apps.allow_legacy_resource_meta)?
+        {
+            if !def.apps.enabled {
+                return Err(format!("{at}: UI metadata requires apps.enabled"));
+            }
+            let expected = crate::apps::digest(
+                tool,
+                allow.description.as_deref().unwrap_or(""),
+                allow
+                    .input_schema
+                    .as_ref()
+                    .unwrap_or(&serde_json::json!({})),
+                allow.meta.as_ref(),
+                def.apps.allow_legacy_resource_meta,
+            )?;
+            if allow
+                .schema_hash
+                .as_deref()
+                .is_some_and(|h| !h.trim().is_empty() && h.trim() != expected)
+            {
+                return Err(format!("{at}: Apps approval requires the versioned definition and metadata digest {expected}"));
+            }
+            if let Some(uri) = ui.get("resourceUri").and_then(serde_json::Value::as_str) {
+                if !def.apps.resources.contains_key(uri) {
+                    return Err(format!(
+                        "{at}: UI resource requires an apps.resources policy"
+                    ));
+                }
+            }
+        }
         if let Some(schema) = &allow.input_schema {
             crate::adapt::validate_param_annotations(Some(schema))
                 .map_err(|reason| format!("{at}: `tools_allow.{tool}.input_schema`: {reason}"))?;

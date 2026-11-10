@@ -106,6 +106,7 @@ static HOST_SLOTS: HostSlots = HostSlots {
     dest_judge: None,
     sign: None,
     unit_nest: None,
+    outbound_authorize: None,
     work_open: None,
     work_find: None,
     work_settle: None,

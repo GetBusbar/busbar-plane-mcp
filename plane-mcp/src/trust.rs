@@ -103,10 +103,21 @@ pub struct Observation {
 ///
 /// The result carries no `tools` array, or an entry with no (or an empty) `name`.
 pub fn observe(result: &Value) -> Result<Observation, String> {
+    validate_tools(result)?;
     let mut capabilities = BTreeMap::new();
-    visit_tools(result, |name, description, schema| {
-        capabilities.insert(name.to_string(), tool_digest(name, description, schema));
-    })?;
+    for item in result["tools"].as_array().expect("validated tools") {
+        let name = item["name"].as_str().expect("validated name");
+        let digest = crate::apps::digest(
+            name,
+            item.get("description")
+                .and_then(Value::as_str)
+                .unwrap_or(""),
+            item.get("inputSchema").unwrap_or(&serde_json::json!({})),
+            item.get("_meta"),
+            true,
+        )?;
+        capabilities.insert(name.to_string(), digest);
+    }
     Ok(Observation { capabilities })
 }
 
@@ -140,6 +151,7 @@ fn visit_tools(result: &Value, mut visit: impl FnMut(&str, &str, &Value)) -> Res
         if !names.insert(name) {
             return Err("a `tools/list` result repeats a tool name".to_string());
         }
+        crate::apps::tool_meta(item.get("_meta"), true)?;
         visit(
             name,
             description,

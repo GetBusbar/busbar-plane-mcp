@@ -81,6 +81,10 @@ pub struct PublicConnection {
 /// revision. Cache hits must still call [`Connections::discovery_key`] to check current expiry.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub struct DiscoveryKey {
+    /// Negotiated MCP capability profile; empty for the legacy catalogue.
+    pub capability_profile: String,
+    /// Operator approval generation for capability-dependent discovery.
+    pub approval_revision: u64,
     /// Enrollment identity: re-consent cannot reuse a previous enrollment's cached results.
     pub connection_id: String,
     /// Public connection identity.
@@ -469,6 +473,8 @@ impl Connections {
             return Err(Error::Expired);
         }
         Ok(DiscoveryKey {
+            capability_profile: String::new(),
+            approval_revision: 0,
             connection_id: connection.public.id.clone(),
             connection: key.clone(),
             revision: connection.public.revision,

@@ -696,6 +696,9 @@
               "type": "null"
             }
           ]
+        },
+        "apps": {
+          "$ref": "#/$defs/apps"
         }
       },
       "additionalProperties": false,
@@ -1099,6 +1102,10 @@
             }
           },
           "default": []
+        },
+        "meta": {
+          "type": "object",
+          "description": "Approved MCP tool metadata, including versioned Apps visibility and resource identity."
         }
       },
       "additionalProperties": false,
@@ -1765,6 +1772,59 @@
         },
         "token_exchange": {
           "type": "null"
+        }
+      }
+    },
+    "apps": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "spec_version": {
+          "const": "2026-01-26",
+          "default": "2026-01-26"
+        },
+        "mime_types": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "const": "text/html;profile=mcp-app"
+          }
+        },
+        "max_resource_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8388608
+        },
+        "allow_legacy_resource_meta": {
+          "type": "boolean",
+          "default": false
+        },
+        "resources": {
+          "type": "object",
+          "maxProperties": 1024,
+          "propertyNames": {
+            "pattern": "^ui://"
+          },
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "digest": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "pattern": "^sha256:[a-fA-F0-9]{64}$"
+              },
+              "ui": {
+                "type": "object"
+              }
+            }
+          }
         }
       }
     }

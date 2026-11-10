@@ -134,8 +134,37 @@ fn emit(unit: &mut CallUnit, request: crate::client::jsonrpc::OutboundRequest) -
 fn bound_key(plane: &McpDoor, caller: &str, server: &str, now: u64) -> Option<DiscoveryKey> {
     table(plane, |t| t.discovery_key(&key(caller, server), now).ok())
 }
+#[cfg(test)]
 pub(super) fn list(plane: &McpDoor, caller: &str, server: &str, now: u64) -> PublishedList {
     bound_key(plane, caller, server, now)
+        .and_then(|k| plane.connection_lists.get(&k))
+        .unwrap_or_default()
+}
+pub(super) fn scoped_key(
+    plane: &McpDoor,
+    caller: &str,
+    server: &str,
+    now: u64,
+    held: &Held,
+    profile: &crate::apps::Profile,
+) -> Option<DiscoveryKey> {
+    let mut key = bound_key(plane, caller, server, now)?;
+    let cfg = &held.section.servers.get(server)?.apps;
+    if cfg.enabled {
+        key.capability_profile = serde_json::to_string(&profile.effective(cfg)).ok()?;
+        key.approval_revision = held.catalogue.generation();
+    }
+    Some(key)
+}
+pub(super) fn list_for(
+    plane: &McpDoor,
+    caller: &str,
+    server: &str,
+    now: u64,
+    held: &Held,
+    profile: &crate::apps::Profile,
+) -> PublishedList {
+    scoped_key(plane, caller, server, now, held, profile)
         .and_then(|k| plane.connection_lists.get(&k))
         .unwrap_or_default()
 }
@@ -168,11 +197,14 @@ pub(super) fn answer(
         let Disposition::Request { row, .. } = &unit.disposition else {
             return None;
         };
-        if row.op != crate::tool_ops::OP_TOOL_CALL {
+        if row.op == crate::tool_ops::OP_RESOURCE_READ {
+            door_apps::mapping(plane, unit)?.server
+        } else if row.op == crate::tool_ops::OP_TOOL_CALL {
+            let name = unit.params.as_ref()?.get("name")?.as_str()?;
+            held.catalogue.tool(name)?.server.clone()
+        } else {
             return None;
         }
-        let name = unit.params.as_ref()?.get("name")?.as_str()?;
-        held.catalogue.tool(name)?.server.clone()
     };
     if !enabled(&held, &server) {
         return method.map(|_| refused(unit, "This member does not use per-user connections."));
@@ -356,6 +388,9 @@ pub(super) fn answer(
                 }
                 let refresh_revision = plane.connection_refresh.get(&k).unwrap_or(0);
                 plane
+                    .app_resources
+                    .with_all(|map| map.retain(|_, mapping| mapping.key_connection() != &k));
+                plane
                     .connection_lists
                     .with_all(|lists| lists.retain(|d, _| d.connection != k));
                 plane
@@ -537,6 +572,9 @@ pub(super) fn answer(
                     });
                     match completed {
                         Ok(public) if public.revision == revision => {
+                            plane.app_resources.with_all(|map| {
+                                map.retain(|_, mapping| mapping.key_connection() != &state.key)
+                            });
                             plane
                                 .connection_lists
                                 .with_all(|lists| lists.retain(|d, _| d.connection != state.key));
@@ -615,7 +653,7 @@ pub(super) fn answer(
             Poll::Ready(Err(_)) => Some(refused(unit, "The host refused this connection binding.")),
             Poll::Ready(Ok(_)) => {
                 state.handle = None;
-                let discovery = bound_key(plane, caller, &server, now)?;
+                let discovery = scoped_key(plane, caller, &server, now, &held, &unit.apps_profile)?;
                 let ttl = busbar_contract::duration::parse_duration_secs(
                     def.verify_ttl
                         .as_deref()
@@ -631,7 +669,8 @@ pub(super) fn answer(
                     || !fresh
                     || plane.connection_lists.get(&discovery).is_none()
                 {
-                    let original = list_request(&held, &server, def);
+                    let mut original = list_request(&held, &server, def);
+                    unit.apps_profile.effective(&def.apps).apply(&mut original);
                     let n = door_sessions::Negotiating::begin(
                         plane,
                         &server,
@@ -818,12 +857,20 @@ pub(super) fn far(
                         Ok(crate::client::jsonrpc::Paged::Next(cursor)) => {
                             let held = unit.held.clone()?;
                             let def = held.section.servers.get(&state.key.upstream)?;
-                            let original = list_request(&held, &state.key.upstream, def);
+                            let mut original = list_request(&held, &state.key.upstream, def);
+                            unit.apps_profile.effective(&def.apps).apply(&mut original);
                             let request =
                                 crate::client::jsonrpc::next_list_request(&original, &cursor)
                                     .ok()?;
                             let now = wall_ms(plane.services, ticket, &mut unit.issued)?;
-                            let key = bound_key(plane, caller, &state.key.upstream, now)?;
+                            let key = scoped_key(
+                                plane,
+                                caller,
+                                &state.key.upstream,
+                                now,
+                                &held,
+                                &unit.apps_profile,
+                            )?;
                             **negotiating = door_sessions::Negotiating::begin(
                                 plane,
                                 &state.key.upstream,
@@ -836,7 +883,14 @@ pub(super) fn far(
                         }
                         Ok(crate::client::jsonrpc::Paged::Done(result)) => {
                             let now = wall_ms(plane.services, ticket, &mut unit.issued)?;
-                            let Some(k) = bound_key(plane, caller, &state.key.upstream, now) else {
+                            let Some(k) = scoped_key(
+                                plane,
+                                caller,
+                                &state.key.upstream,
+                                now,
+                                unit.held.as_ref()?,
+                                &unit.apps_profile,
+                            ) else {
                                 return Some(failed(
                                     plane,
                                     unit,
@@ -896,7 +950,15 @@ pub(super) fn partition(
     member: &str,
 ) -> Option<String> {
     let now = wall_ms(plane.services, ticket, &mut unit.issued)?;
-    bound_key(plane, caller, member, now).map(|k| k.session_key())
+    scoped_key(
+        plane,
+        caller,
+        member,
+        now,
+        unit.held.as_ref()?,
+        &unit.apps_profile,
+    )
+    .map(|k| k.session_key())
 }
 
 fn cleanup_state(plane: &McpDoor, state: Unit) {

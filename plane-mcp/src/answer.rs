@@ -65,7 +65,7 @@ fn discover_visible(
     let tools: Vec<_> = catalogue
         .tools_for(admit)
         .into_iter()
-        .filter(|tool| !hidden(tool))
+        .filter(|tool| !hidden(tool) && crate::apps::model_visible(tool.meta.as_ref(), true))
         .collect();
     let prompts = catalogue.prompts_for(admit);
     let resources = catalogue.resources_for(admit);

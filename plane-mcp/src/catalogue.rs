@@ -24,6 +24,7 @@ pub const CACHE_TTL_MS: i64 = 0;
 /// One listed tool.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolEntry {
+    pub(crate) meta: Option<Value>,
     /// The registered server id.
     pub server: String,
     /// The tool's name as the upstream spells it.
@@ -250,6 +251,7 @@ impl Catalogue {
                 catalogue.tools.insert(
                     published.clone(),
                     ToolEntry {
+                        meta: allow.meta.clone(),
                         server: id.clone(),
                         tool: tool.clone(),
                         namespaced: published,
@@ -440,7 +442,10 @@ impl Catalogue {
         admit: &impl Fn(&str, &str) -> bool,
         hidden: impl Fn(&ToolEntry) -> bool,
     ) -> Vec<u8> {
-        let tools = self.tools_for(admit).into_iter().filter(|t| !hidden(t));
+        let tools = self
+            .tools_for(admit)
+            .into_iter()
+            .filter(|t| !hidden(t) && crate::apps::model_visible(t.meta.as_ref(), true));
         listing(id, "tools", tools.map(ToolEntry::render))
     }
 
@@ -489,8 +494,12 @@ impl ToolEntry {
         if let Some(s) = &self.output_schema {
             obj.insert("outputSchema".into(), s.clone());
         }
+        if let Some(meta) = &self.meta {
+            obj.insert("_meta".into(), meta.clone());
+        }
         if let Some(h) = &self.schema_hash {
-            obj.insert("_meta".into(), json!({ "io.busbar/schemaHash": h }));
+            obj.entry("_meta").or_insert_with(|| json!({}))["io.busbar/schemaHash"] =
+                h.clone().into();
         }
         Value::Object(obj)
     }
