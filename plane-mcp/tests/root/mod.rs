@@ -87,3 +87,5 @@ fn fill_reference(value: &str) -> serde_json::Value {
 pub(crate) fn minimal_valid_config() -> (&'static str, serde_json::Value) {
     ("tools", serde_json::json!({"hooks": []}))
 }
+
+mod plane_driver_serve;
