@@ -112,7 +112,7 @@ mod tools_door {
     }
 
     fn scraped(family: &str, labels: &[(&str, &str)]) -> f64 {
-        crate::root::serve::door_tests::render_metrics()
+        crate::root::serve::metrics_fixture::render_metrics()
             .lines()
             .filter(|l| !l.starts_with('#') && l.starts_with(&format!("{family}{{")))
             .filter(|l| {
