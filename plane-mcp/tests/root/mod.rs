@@ -51,6 +51,34 @@ mod secret_source;
 
 pub(crate) fn secret_source_driven() -> Vec<String> {
     vec![super::secret_source_tests::statement_name(
-        crate::root::door_steps::tests::tool_door::line_door(),
+        crate::root::serve::plane_mcp_door::tool_door::line_door(),
     )]
+}
+
+use crate::root::door_steps::tests::{
+    isolated_fixture_cases, isolated_fixture_done, TokenEndpoint,
+};
+use crate::root::serve::door_tests::{independent_case_done, independent_cases};
+include!("door_steps.rs");
+include!("tools_door.rs");
+#[path = "member_tls_negative.rs"]
+mod member_tls_negative_tests;
+#[path = "member_tls.rs"]
+mod member_tls_tests;
+
+// These owner-supplied cells execute inside the composition root, whose sealed
+// authoring authority constructs the same reference document an operator submits.
+fn fill_reference(value: &str) -> serde_json::Value {
+    use busbar_contract::secret::SecretAxis as _;
+    #[cfg(distribution_root)]
+    crate::dist_root_install::install();
+    let reference = crate::root::linked::secret_rows()
+        .sugars()
+        .reference_for_role(
+            busbar_contract::abi::mechanism::door::SUGAR_ROLE_FILL,
+            value,
+        )
+        .expect("the linked source supplies the fixture's fill role");
+    serde_json::to_value(reference.authoring(&busbar_kernel::seal::acquire()))
+        .expect("the root authors the fixture reference")
 }

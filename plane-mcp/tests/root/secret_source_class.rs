@@ -7,7 +7,7 @@ use super::{
     assert_clean, call, missing, program_section, refused_naming_its_source, rendered, source_in,
     unset,
 };
-use crate::root::door_steps::tests::tool_door::try_rig_tools;
+use crate::root::serve::plane_mcp_door::tool_door::try_rig_tools;
 use crate::root::serve::planes_tests::PUBLISHING;
 
 type Answer = (StatusCode, HeaderMap, Vec<u8>);

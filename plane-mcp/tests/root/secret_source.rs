@@ -84,7 +84,7 @@ fn env(key: impl AsRef<str>) -> SourceFixture {
         key.as_ref(),
     )
 }
-use crate::root::door_steps::tests::tool_door::{
+use crate::root::serve::plane_mcp_door::tool_door::{
     send_headed, surface, three_tools, tool_digest, try_rig_tools, Rig, TlsToolServer, CALL,
 };
 use scan::rendered;
@@ -111,7 +111,7 @@ fn program_section(secret: &SourceFixture) -> serde_yaml::Value {
         "args".into(),
         serde_yaml::Value::Sequence(vec![
             "-c".into(),
-            crate::root::door_steps::tests::program_member::script().into(),
+            crate::root::serve::plane_mcp_door::program_member::script().into(),
         ]),
     );
     let reference = authored(secret);
