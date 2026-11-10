@@ -82,3 +82,8 @@ fn fill_reference(value: &str) -> serde_json::Value {
     serde_json::to_value(reference.authoring(&busbar_kernel::seal::acquire()))
         .expect("the root authors the fixture reference")
 }
+
+/// The owner's minimal valid section for composition-root coverage fixtures.
+pub(crate) fn minimal_valid_config() -> (&'static str, serde_json::Value) {
+    ("tools", serde_json::json!({"hooks": []}))
+}
