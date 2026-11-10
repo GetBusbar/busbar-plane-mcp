@@ -89,3 +89,5 @@ pub(crate) fn minimal_valid_config() -> (&'static str, serde_json::Value) {
 }
 
 mod plane_driver_serve;
+
+mod connections;

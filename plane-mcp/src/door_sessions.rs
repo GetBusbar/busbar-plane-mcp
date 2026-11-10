@@ -1676,6 +1676,12 @@ pub(super) struct Negotiating {
     failure: Option<String>,
 }
 
+/// A connection hop always returns to the kernel's governed far-end dispatch.
+pub(super) enum Governed {
+    Send(OutboundRequest),
+    Done(Negotiated),
+}
+
 impl Negotiating {
     /// A conversation carrying `original` (a stateless request) to `member` for the caller bound
     /// as `binding` (the caller reference the kernel lends; empty for the ungoverned chain), and the
@@ -1730,6 +1736,47 @@ impl Negotiating {
             dropped: 0,
             refused: Vec::new(),
             failure: None,
+        }
+    }
+
+    pub(super) fn governed_answer(
+        &mut self,
+        plane: &McpDoor,
+        member: &str,
+        status: u16,
+        fields: Vec<(String, String)>,
+        body: Vec<u8>,
+    ) -> Governed {
+        self.hops += 1;
+        if self.hops > 16 {
+            return Governed::Done(Negotiated::Failed(
+                "upstream negotiation exceeded its hop bound".into(),
+            ));
+        }
+        self.next = None;
+        let next = self.feed(Some((status, fields, body)));
+        match next {
+            Action::Send { request } => {
+                self.reply_id = request_id(&request);
+                Governed::Send(request)
+            }
+            Action::Finish(answer) => {
+                self.keep(plane);
+                let (raw, sse) = std::mem::take(&mut self.raw);
+                Governed::Done(Negotiated::Answer(
+                    answer.status,
+                    if raw.is_empty() { answer.body } else { raw },
+                    sse,
+                    self.negotiator.sent_id(),
+                ))
+            }
+            Action::Fail(refusal) => {
+                self.keep(plane);
+                Governed::Done(self.failed(&refusal, member))
+            }
+            Action::OpenStream => Governed::Done(Negotiated::Failed(
+                "legacy SSE is not available for governed per-user connections".into(),
+            )),
         }
     }
 

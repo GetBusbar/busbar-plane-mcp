@@ -11,7 +11,9 @@ thread_local! {
     pub(super) static LEGACY_EXCHANGE_COUNTS: std::cell::RefCell<Vec<(usize, super::Ticket, usize)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-pub(super) fn record(instance: &Instance<'_, McpDoor, busbar_contract::plugin::markers::PlaneKind>) {
+pub(super) fn record(
+    instance: &Instance<'_, McpDoor, busbar_contract::plugin::markers::PlaneKind>,
+) {
     #[cfg(test)]
     if let Some(plane) = instance.get() {
         LEGACY_EXCHANGE_COUNTS.with(|counts| {

@@ -523,6 +523,10 @@ pub struct McpServerDefCfg {
     /// RFC 8693 token exchange for this upstream; absent = no credential. The scope is derived per call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_exchange: Option<TokenExchangeCfg>,
+    /// Public upstream registration for per-user OAuth authorization-code enrollment with PKCE.
+    /// Required exactly when the effective `upstream_credentials` mode is `connection`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth: Option<McpOAuthCfg>,
     /// The cap on input-required rounds per logical dispatch. Absent ⇒
     /// [`DEFAULT_MAX_INPUT_REQUIRED_ROUNDS`]. `0` is legal and means "never relay one".
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -540,6 +544,40 @@ pub struct McpServerDefCfg {
     /// Hooks attached to this server by bare name; adds to the section-level `tools.hooks:`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hooks: Vec<String>,
+}
+
+/// Explicit public-client registration at one upstream OAuth issuer. Endpoints are operator
+/// configured; metadata discovery and confidential-client authentication are not implied.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpOAuthCfg {
+    /// Exact authorization-server issuer (HTTPS, no query or fragment).
+    pub issuer: String,
+    /// Exact OAuth resource indicator, which may differ from the configured MCP request URL.
+    pub resource: String,
+    /// Public client's registered upstream identifier.
+    pub client_id: String,
+    /// Exact registered redirect URI; HTTPS or an HTTP loopback redirect.
+    pub redirect_uri: String,
+    /// Operator-pinned HTTPS browser authorization endpoint.
+    pub authorization_endpoint: String,
+    /// Operator-pinned HTTPS token endpoint.
+    pub token_endpoint: String,
+    /// OAuth scope tokens shown to the user for explicit consent.
+    #[serde(default)]
+    pub scopes: std::collections::BTreeSet<String>,
+}
+
+impl McpOAuthCfg {
+    /// The exact public consent binding consumed by the connection lifecycle.
+    pub fn binding(&self) -> crate::connections::AuthorizationBinding {
+        crate::connections::AuthorizationBinding {
+            issuer: self.issuer.clone(),
+            resource: self.resource.clone(),
+            client_id: self.client_id.clone(),
+            redirect_uri: self.redirect_uri.clone(),
+        }
+    }
 }
 
 /// `tools.<server>.token_exchange`: the RFC 8693 exchange busbar performs before it calls this
@@ -738,12 +776,75 @@ impl<'de> Deserialize<'de> for ToolsCfg {
             )));
         }
 
+        for (name, def) in &section.entries {
+            validate_connection(
+                name,
+                def,
+                def.upstream_credentials.or(section.upstream_credentials),
+            )
+            .map_err(serde::de::Error::custom)?;
+        }
+
         Ok(ToolsCfg {
             all_server_hooks: section.hooks,
             all_server_upstream_credentials: section.upstream_credentials,
             servers: section.entries,
         })
     }
+}
+
+fn validate_connection(
+    name: &str,
+    def: &McpServerDefCfg,
+    mode: Option<UpstreamCreds>,
+) -> Result<(), String> {
+    let at = format!("tools.{name}");
+    if mode != Some(UpstreamCreds::Connection) {
+        return if def.oauth.is_some() {
+            Err(format!(
+                "{at}: `oauth:` requires effective `upstream_credentials: connection`"
+            ))
+        } else {
+            Ok(())
+        };
+    }
+    if def.transport.is_some_and(ServerTransport::spawns_child) || !secure_oauth_url(&def.url) {
+        return Err(format!(
+            "{at}: `upstream_credentials: connection` requires an HTTPS MCP endpoint"
+        ));
+    }
+    if def.token_exchange.is_some() {
+        return Err(format!(
+            "{at}: `upstream_credentials: connection` cannot be combined with `token_exchange:`"
+        ));
+    }
+    let oauth = def.oauth.as_ref().ok_or_else(|| format!("{at}: `upstream_credentials: connection` requires `oauth:` public registration metadata"))?;
+    if !crate::connections::valid_binding(&oauth.binding())
+        || !secure_oauth_url(&oauth.authorization_endpoint)
+        || !secure_oauth_url(&oauth.token_endpoint)
+        || oauth
+            .scopes
+            .iter()
+            .any(|scope| !crate::connections::valid_scope(scope))
+    {
+        return Err(format!(
+            "{at}: invalid `oauth:` issuer, resource, redirect, client, endpoints or scope tokens"
+        ));
+    }
+    if def.aud.as_ref().is_some_and(|aud| aud != &oauth.resource) {
+        return Err(format!("{at}: `aud:` must exactly match `oauth.resource:`"));
+    }
+    Ok(())
+}
+
+fn secure_oauth_url(value: &str) -> bool {
+    url::Url::parse(value).is_ok_and(|url| {
+        url.scheme() == "https"
+            && url.host_str().is_some()
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.fragment().is_none()
+    })
 }
 
 /// Which endpoint keys this registration may carry: the two transports take disjoint halves of the

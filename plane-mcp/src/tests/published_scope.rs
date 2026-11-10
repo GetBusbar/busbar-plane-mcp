@@ -33,6 +33,7 @@ fn unit() -> CallUnit {
         child_work: ChildWork::default(),
         session: None,
         negotiating: None,
+        connection: None,
     }
 }
 

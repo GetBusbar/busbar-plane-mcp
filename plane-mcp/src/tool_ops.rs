@@ -80,6 +80,17 @@ pub const OP_ELICITATION: OpClassId = OpClassId::new("elicitation");
 /// A message that obliges no answer.
 pub const OP_NOTIFICATION: OpClassId = OpClassId::new("notification");
 
+/// Authorize a caller-owned upstream connection.
+pub const OP_CONNECTION_AUTHORIZE: OpClassId = OpClassId::new("connection_authorize");
+/// Consume its one-use OAuth callback.
+pub const OP_CONNECTION_CALLBACK: OpClassId = OpClassId::new("connection_callback");
+/// Rotate a caller-owned upstream credential.
+pub const OP_CONNECTION_REFRESH: OpClassId = OpClassId::new("connection_refresh");
+/// Withdraw upstream consent and custody.
+pub const OP_CONNECTION_REVOKE: OpClassId = OpClassId::new("connection_revoke");
+/// Discover the current caller's upstream tools.
+pub const OP_CONNECTION_DISCOVER: OpClassId = OpClassId::new("connection_discover");
+
 /// Every operation class this plane's units can be, in declaration order.
 pub const OP_CLASSES: &[OpClassId] = &[
     OP_DISCOVER,
@@ -99,6 +110,11 @@ pub const OP_CLASSES: &[OpClassId] = &[
     OP_ROOTS_LIST,
     OP_ELICITATION,
     OP_NOTIFICATION,
+    OP_CONNECTION_AUTHORIZE,
+    OP_CONNECTION_CALLBACK,
+    OP_CONNECTION_REFRESH,
+    OP_CONNECTION_REVOKE,
+    OP_CONNECTION_DISCOVER,
 ];
 
 /// Who sends a method, and whether it obliges an answer.
@@ -126,6 +142,31 @@ pub struct RpcMethodRow {
 /// A name absent from here is a method this plane does not carry, and the decode step says so rather
 /// than guessing.
 pub const METHODS: &[RpcMethodRow] = &[
+    RpcMethodRow {
+        method: "connections/authorize",
+        op: OP_CONNECTION_AUTHORIZE,
+        sender: Sender::Client,
+    },
+    RpcMethodRow {
+        method: "connections/callback",
+        op: OP_CONNECTION_CALLBACK,
+        sender: Sender::Client,
+    },
+    RpcMethodRow {
+        method: "connections/refresh",
+        op: OP_CONNECTION_REFRESH,
+        sender: Sender::Client,
+    },
+    RpcMethodRow {
+        method: "connections/revoke",
+        op: OP_CONNECTION_REVOKE,
+        sender: Sender::Client,
+    },
+    RpcMethodRow {
+        method: "connections/discover",
+        op: OP_CONNECTION_DISCOVER,
+        sender: Sender::Client,
+    },
     RpcMethodRow {
         method: "server/discover",
         op: OP_DISCOVER,

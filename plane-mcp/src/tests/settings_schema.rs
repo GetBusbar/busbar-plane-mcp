@@ -20,7 +20,7 @@ fn settings_schema_matches_lifecycle_grammar() {
             true,
         ),
         (
-            r#"{"s":{"transport":"stdio","command":"/bin/tool","pin":{"mechanism":"unpinned"},"env":{"TOKEN":{"env":"TOKEN"}}}}"#,
+            r#"{"s":{"transport":"stdio","command":"/bin/tool","pin":{"mechanism":"unpinned"},"env":{"TOKEN":{"module":"test-secret","settings":{"name":"TOKEN"}}}}}"#,
             true,
         ),
         (
@@ -252,11 +252,11 @@ fn authored_configuration_profile_uses_actual_raw_tools_and_endpoint_parsers() {
             true,
         ),
         (
-            r#"{"tools":{"s":{"transport":"stdio","command":"/bin/tool","cwd":"/tmp","pin":{"mechanism":"local_program","key":"/bin/tool"},"env":{"TOKEN":{"env":"TOKEN"}}}}}"#,
+            r#"{"tools":{"s":{"transport":"stdio","command":"/bin/tool","cwd":"/tmp","pin":{"mechanism":"local_program","key":"/bin/tool"},"env":{"TOKEN":{"module":"test-secret","settings":{"name":"TOKEN"}}}}}}"#,
             true,
         ),
         (
-            r#"{"tools":{"s":{"transport":"stdio","command":"/bin/tool","pin":{"mechanism":"local_program","key":"/bin/tool"},"env":{"TOKEN":{"env":"TOKEN"}}}}}"#,
+            r#"{"tools":{"s":{"transport":"stdio","command":"/bin/tool","pin":{"mechanism":"local_program","key":"/bin/tool"},"env":{"TOKEN":{"module":"test-secret","settings":{"name":"TOKEN"}}}}}}"#,
             false,
         ),
         (

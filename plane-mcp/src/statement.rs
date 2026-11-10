@@ -100,6 +100,9 @@ pub const NEED_UPSTREAM: u32 = 0;
 /// host keeps running.
 pub const NEED_PROGRAM: u32 = 1;
 
+/// Public PKCE token exchange endpoint, with a host-protected one-shot body.
+pub const NEED_TOKEN: u32 = 2;
+
 /// Host-generated launch fields retained on the program need's first successful lease head.
 pub const KEEP_PROGRAM_HEADERS: &[AbiStr] = &[
     abi_str(busbar_contract::conn::PROGRAM_GENERATION_FIELD),
@@ -134,6 +137,16 @@ pub const NEEDS: &[Need] = &[
         n.transport = abi_str(CARRIER_STDIO);
 
         n.target_from = abi_str(busbar_contract::section::MEMBER_PROGRAM);
+        n.keep_mode = KEEP_NAMED;
+        n
+    },
+    {
+        let mut n = Need::EMPTY.with_keep_response_headers(KEEP_RESPONSE_HEADERS);
+        n.direction = DIRECTION_OUTBOUND;
+        n.egress_class = EGRESS_PROVIDER;
+        n.transport = abi_str(CARRIER_HTTP);
+        n.target_from = abi_str("settings.*.oauth.token_endpoint");
+        n.trust_from = abi_str(TLS_FROM);
         n.keep_mode = KEEP_NAMED;
         n
     },

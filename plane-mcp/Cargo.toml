@@ -39,6 +39,7 @@ serde = { workspace = true }
 # a second parser.
 serde_json = { workspace = true, features = ["arbitrary_precision"] }
 tracing = { workspace = true }
+zeroize = { workspace = true }
 # The WHATWG host parser (`url::Host::parse`) the argument guard reads a host with: percent-decode,
 # UTS #46 mapping (`ｌｏｃａｌｈｏｓｔ` is `localhost`) and the IPv4 number reading (`0x` is `0.0.0.0`),
 # the reading a fetching upstream dials. Pure parsing; busbar's own row, already in its lock.

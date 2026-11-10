@@ -186,6 +186,7 @@ fn host_check_unit() -> CallUnit {
         child_work: super::super::ChildWork::default(),
         session: None,
         negotiating: None,
+        connection: None,
     }
 }
 

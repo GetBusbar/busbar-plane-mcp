@@ -82,7 +82,10 @@
           "default": []
         },
         "upstream_credentials": {
-          "const": "own"
+          "enum": [
+            "own",
+            "connection"
+          ]
         },
         "pools": {
           "type": "object",
@@ -134,7 +137,79 @@
             "pattern": "^[A-Za-z0-9.-]+$"
           }
         ]
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "upstream_credentials"
+            ],
+            "properties": {
+              "upstream_credentials": {
+                "const": "connection"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "hooks": {},
+              "upstream_credentials": {},
+              "pools": {}
+            },
+            "additionalProperties": {
+              "if": {
+                "required": [
+                  "upstream_credentials"
+                ],
+                "properties": {
+                  "upstream_credentials": {
+                    "const": "own"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "oauth": {
+                    "type": "null"
+                  }
+                }
+              },
+              "else": {
+                "$ref": "#/$defs/connection_server"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "hooks": {},
+              "upstream_credentials": {},
+              "pools": {}
+            },
+            "additionalProperties": {
+              "if": {
+                "required": [
+                  "upstream_credentials"
+                ],
+                "properties": {
+                  "upstream_credentials": {
+                    "const": "connection"
+                  }
+                }
+              },
+              "then": {
+                "$ref": "#/$defs/connection_server"
+              },
+              "else": {
+                "properties": {
+                  "oauth": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
     },
     "validate_section": {
       "type": "object",
@@ -147,7 +222,10 @@
           "default": []
         },
         "upstream_credentials": {
-          "const": "own"
+          "enum": [
+            "own",
+            "connection"
+          ]
         }
       },
       "additionalProperties": {
@@ -166,7 +244,79 @@
             "pattern": "^[A-Za-z0-9.-]+$"
           }
         ]
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "upstream_credentials"
+            ],
+            "properties": {
+              "upstream_credentials": {
+                "const": "connection"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "hooks": {},
+              "upstream_credentials": {},
+              "pools": {}
+            },
+            "additionalProperties": {
+              "if": {
+                "required": [
+                  "upstream_credentials"
+                ],
+                "properties": {
+                  "upstream_credentials": {
+                    "const": "own"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "oauth": {
+                    "type": "null"
+                  }
+                }
+              },
+              "else": {
+                "$ref": "#/$defs/connection_server"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "hooks": {},
+              "upstream_credentials": {},
+              "pools": {}
+            },
+            "additionalProperties": {
+              "if": {
+                "required": [
+                  "upstream_credentials"
+                ],
+                "properties": {
+                  "upstream_credentials": {
+                    "const": "connection"
+                  }
+                }
+              },
+              "then": {
+                "$ref": "#/$defs/connection_server"
+              },
+              "else": {
+                "properties": {
+                  "oauth": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
     },
     "server": {
       "type": "object",
@@ -526,6 +676,7 @@
         "upstream_credentials": {
           "enum": [
             "own",
+            "connection",
             null
           ]
         },
@@ -535,6 +686,16 @@
             "type": "string"
           },
           "default": []
+        },
+        "oauth": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/oauth_connection"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false,
@@ -603,6 +764,9 @@
                 "type": "null"
               },
               "tls": {
+                "type": "null"
+              },
+              "oauth": {
                 "type": "null"
               }
             }
@@ -796,6 +960,40 @@
                     "pattern": "^https://"
                   }
                 }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "upstream_credentials"
+            ],
+            "properties": {
+              "upstream_credentials": {
+                "const": "connection"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/connection_server"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "upstream_credentials"
+            ],
+            "properties": {
+              "upstream_credentials": {
+                "const": "own"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "oauth": {
+                "type": "null"
               }
             }
           }
@@ -1279,36 +1477,50 @@
               "type": "object"
             }
           },
-          "additionalProperties": false,
           "required": [
             "module"
-          ]
+          ],
+          "additionalProperties": false
         },
         {
           "type": "object",
           "properties": {
-            "env": {
-              "type": "string",
-              "pattern": "\\S"
+            "template": {
+              "type": "object",
+              "properties": {
+                "text": {
+                  "type": "string"
+                },
+                "source": {
+                  "type": "object",
+                  "properties": {
+                    "module": {
+                      "type": "string",
+                      "pattern": "\\S"
+                    },
+                    "setting": {
+                      "type": "string",
+                      "pattern": "\\S"
+                    }
+                  },
+                  "required": [
+                    "module",
+                    "setting"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "text",
+                "source"
+              ],
+              "additionalProperties": false
             }
           },
-          "additionalProperties": false,
           "required": [
-            "env"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "file": {
-              "type": "string",
-              "pattern": "\\S"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "file"
-          ]
+            "template"
+          ],
+          "additionalProperties": false
         }
       ]
     },
@@ -1323,7 +1535,10 @@
           "default": []
         },
         "upstream_credentials": {
-          "const": "own"
+          "enum": [
+            "own",
+            "connection"
+          ]
         },
         "pools": false
       },
@@ -1344,7 +1559,79 @@
           }
         ]
       },
-      "description": "Plane-owned raw tools section grammar; host-injected pools are not writable registration input. Core security/source policy, reserved-name checks, SecretRef resolution and module validation still apply."
+      "description": "Plane-owned raw tools section grammar; host-injected pools are not writable registration input. Core security/source policy, reserved-name checks, SecretRef resolution and module validation still apply.",
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "upstream_credentials"
+            ],
+            "properties": {
+              "upstream_credentials": {
+                "const": "connection"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "hooks": {},
+              "upstream_credentials": {},
+              "pools": {}
+            },
+            "additionalProperties": {
+              "if": {
+                "required": [
+                  "upstream_credentials"
+                ],
+                "properties": {
+                  "upstream_credentials": {
+                    "const": "own"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "oauth": {
+                    "type": "null"
+                  }
+                }
+              },
+              "else": {
+                "$ref": "#/$defs/connection_server"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "hooks": {},
+              "upstream_credentials": {},
+              "pools": {}
+            },
+            "additionalProperties": {
+              "if": {
+                "required": [
+                  "upstream_credentials"
+                ],
+                "properties": {
+                  "upstream_credentials": {
+                    "const": "connection"
+                  }
+                }
+              },
+              "then": {
+                "$ref": "#/$defs/connection_server"
+              },
+              "else": {
+                "properties": {
+                  "oauth": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
     },
     "user_configuration": {
       "type": "object",
@@ -1408,6 +1695,78 @@
       "additionalProperties": true,
       "x-busbar-partial": true,
       "description": "The supported plane-owned blocks within a complete deploy document. This is not a complete host boot schema."
+    },
+    "oauth_connection": {
+      "type": "object",
+      "properties": {
+        "issuer": {
+          "type": "string",
+          "pattern": "^https://[^/?#@\\s]+(?:/[^?#\\s]*)?$"
+        },
+        "resource": {
+          "type": "string",
+          "pattern": "^https://[^/?#@\\s]+(?:[/?][^#\\s]*)?$"
+        },
+        "client_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "redirect_uri": {
+          "type": "string",
+          "pattern": "^(?:https://[^/?#@\\s]+|http://(?:localhost|127\\.0\\.0\\.1|\\[::1\\])(?::[0-9]+)?)(?:[/?][^#\\s]*)?$"
+        },
+        "authorization_endpoint": {
+          "type": "string",
+          "pattern": "^https://[^/?#@\\s]+(?:[/?][^#\\s]*)?$"
+        },
+        "token_endpoint": {
+          "type": "string",
+          "pattern": "^https://[^/?#@\\s]+(?:[/?][^#\\s]*)?$"
+        },
+        "scopes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[\\x21\\x23-\\x5B\\x5D-\\x7E]+$"
+          },
+          "default": []
+        }
+      },
+      "required": [
+        "issuer",
+        "resource",
+        "client_id",
+        "redirect_uri",
+        "authorization_endpoint",
+        "token_endpoint"
+      ],
+      "additionalProperties": false,
+      "description": "Explicit public-client OAuth registration using PKCE S256. Configured endpoints are authoritative; this does not enable metadata discovery or confidential-client authentication."
+    },
+    "connection_server": {
+      "type": "object",
+      "required": [
+        "oauth",
+        "url"
+      ],
+      "properties": {
+        "oauth": {
+          "$ref": "#/$defs/oauth_connection"
+        },
+        "url": {
+          "type": "string",
+          "pattern": "^https://[^/?#@\\s]+(?:[/?][^#\\s]*)?$"
+        },
+        "transport": {
+          "enum": [
+            "streamable_http",
+            null
+          ]
+        },
+        "token_exchange": {
+          "type": "null"
+        }
+      }
     }
   },
   "description": "Lifecycle tools settings and the dealt validate envelope. Cross-entry published-name uniqueness, URI/base64 validity, schema annotations, matching local-program keys, duration values and cross-field numerical comparisons remain lifecycle judgments.",

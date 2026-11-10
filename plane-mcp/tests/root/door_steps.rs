@@ -1371,6 +1371,16 @@ pub(crate) mod tool_door {
     }
 
     impl busbar_contract::services::HostServices for Clocked {
+        fn outbound_authorize(
+            &self,
+            caller: &busbar_contract::services::Caller,
+            unit: Option<u64>,
+            ask: busbar_contract::services::OutboundAuthorization<'_>,
+            later: busbar_contract::services::Later,
+        ) -> busbar_contract::services::Ran {
+            self.inner.outbound_authorize(caller, unit, ask, later)
+        }
+
         fn inspect(
             &self,
             caller: &busbar_contract::services::Caller,

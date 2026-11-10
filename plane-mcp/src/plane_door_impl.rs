@@ -25,7 +25,8 @@ use busbar_contract::abi::sdk::plane_life::{Opened, PlaneLife, Published};
 use busbar_contract::abi::sdk::publish::{Generations, Keyed};
 use busbar_contract::abi::sdk::services::ServiceError;
 use busbar_contract::abi::sdk::{
-    HostBuf, Instance, Lent, LentList, Out, Safe, SafeSlot, Services as KindServices, Services as KindStaticServices,
+    HostBuf, Instance, Lent, LentList, Out, Safe, SafeSlot, Services as KindServices,
+    Services as KindStaticServices,
 };
 use serde_json::Value;
 
@@ -134,7 +135,8 @@ pub struct McpDoor {
     /// every sealed exchange rather than none.
     roots_shared: Keyed<(), u64>,
     /// The host tables `open` handed it: the connector a `connect` reaches its server through.
-    host: Option<busbar_contract::abi::sdk::conn::Host<busbar_contract::plugin::markers::PlaneKind>>,
+    host:
+        Option<busbar_contract::abi::sdk::conn::Host<busbar_contract::plugin::markers::PlaneKind>>,
     /// Each registered server's PUBLISHED TOOL LIST ([`PublishedList`]): its last sighting
     /// (verify-on-call's re-fetch, or `connect`), under its generation. What the trust views and the
     /// dispatch gate judge against the section's approval; replaced whole, in one swap
@@ -218,6 +220,11 @@ pub struct McpDoor {
     /// fetch, kept while it pends (an operator verb has no unit to keep it on). One per server: a
     /// concurrent tickets keep independent negotiation state.
     connecting: Keyed<(String, u32, u32), ConnectFetch>,
+    connections: Keyed<(), crate::connections::Connections>,
+    connection_lists: Keyed<crate::connections::DiscoveryKey, PublishedList>,
+    connection_refresh: Keyed<crate::connections::ConnectionKey, u64>,
+    connection_checked: Keyed<crate::connections::DiscoveryKey, u64>,
+    connection_config: Keyed<crate::connections::ConnectionKey, (String, String, String)>,
 }
 
 impl McpDoor {
@@ -269,7 +276,15 @@ impl PlaneLife for McpDoor {
 
     /// `open`: the instance over the section, the public base URL and the host services, and
     /// the first generation's snapshot.
-    fn open(input: &Lent<'_, PlaneOpenIn>, host: Option<busbar_contract::abi::sdk::lent::KindHostLoan<'_, busbar_contract::plugin::markers::PlaneKind>>) -> Result<Opened<Self>, Refusal> {
+    fn open(
+        input: &Lent<'_, PlaneOpenIn>,
+        host: Option<
+            busbar_contract::abi::sdk::lent::KindHostLoan<
+                '_,
+                busbar_contract::plugin::markers::PlaneKind,
+            >,
+        >,
+    ) -> Result<Opened<Self>, Refusal> {
         let (cfg, pools) =
             statement::read_open(input.open().settings().bytes()).map_err(Refusal::refused)?;
         let generation = input.open().generation();
@@ -530,6 +545,7 @@ fn cancel_unit_state(
         Ending::Remove,
         |u| u.ticket,
         |u| {
+            door_connections::cleanup(plane, u);
             if let Some((reference, records)) = door_tasks::abandoned_create(plane, u) {
                 stopped.push(reference);
                 creating_records.extend(records);
@@ -697,6 +713,7 @@ struct CallUnit {
     /// An upstream conversation under negotiation, parked across PENDING entries
     /// ([`door_sessions::Negotiating`]).
     negotiating: Option<Box<door_sessions::Negotiating>>,
+    connection: Option<door_connections::Unit>,
 }
 
 /// The retry of a stdio child's relayed ask, binding the work handle the ask is correlated under
@@ -746,6 +763,7 @@ struct Relay {
 struct Pending {
     /// The status the caller's answer starts with; `0` for a request bound for the far end.
     status: u32,
+    need: u32,
     /// The head fields, written with the first call.
     fields: Vec<(String, String)>,
     /// For the far end: the verb and the target.
@@ -1333,7 +1351,9 @@ slot!(
                 }
                 None => out.route(ROUTE_DIRECT, &entry.server),
             },
-            None => out.local(),
+            None => {
+                if let Some(server) = door_connections::route(&disposition, value.as_ref()) { out.route(ROUTE_DIRECT, server); out.once(); } else { out.local(); }
+            },
         }
         // The subscription on the HTTP carrier: a session,
         // the long-lived response its caller leg ([`door_listen`]).
@@ -1395,6 +1415,7 @@ slot!(
             child_work: ChildWork::default(),
             session: session_unit,
             negotiating: None,
+            connection: None,
         };
         plane.units.insert(input.unit(), unit);
         Outcome::Ready
@@ -2298,6 +2319,9 @@ fn answer_body(
             return Some(door_tasks::verb(plane, ticket, principal, unit, op, &id));
         }
     }
+    if let Some(step) = door_connections::answer(plane, ticket, caller, unit) {
+        return Some(step);
+    }
     let held = unit.held.clone()?;
     let local_revision = local_revision(unit);
     if let Some(step) = take_turn(plane, ticket, principal, held.catalogue.generation(), unit) {
@@ -2353,10 +2377,12 @@ fn answer_body(
         let admit = admit(&unit.entitled);
         admit(statement::SCOPE, &t.server) && admit(statement::SCOPE_TOOL, &t.namespaced)
     }) {
-        match verify_on_call(instance, plane, ticket, unit, &held, (&t.server, caller)) {
-            Looked::Pending => return Some(Step::Pending),
-            Looked::Wait(until) => return Some(Step::Wait(until)),
-            Looked::Fresh => {}
+        if !door_connections::enabled(&held, &t.server) {
+            match verify_on_call(instance, plane, ticket, unit, &held, (&t.server, caller)) {
+                Looked::Pending => return Some(Step::Pending),
+                Looked::Wait(until) => return Some(Step::Wait(until)),
+                Looked::Fresh => {}
+            }
         }
 
         if let Some(member) = unit.member.clone() {
@@ -2367,7 +2393,16 @@ fn answer_body(
     }
 
     let verdict = called.map(|entry| {
-        let list = published_in(plane, &held, &entry.server);
+        let list = if door_connections::enabled(&held, &entry.server) {
+            door_connections::list(
+                plane,
+                caller,
+                &entry.server,
+                wall_ms(services, ticket, &mut unit.issued).unwrap_or(u64::MAX),
+            )
+        } else {
+            published_in(plane, &held, &entry.server)
+        };
         (
             entry.namespaced.clone(),
             trust_of(plane, ticket, &mut unit.issued, entry, &list),
@@ -2375,7 +2410,7 @@ fn answer_body(
     });
     let listing = matches!(&disposition, Disposition::Request { row, .. }
         if row.op == crate::tool_ops::OP_TOOLS_LIST || row.op == crate::tool_ops::OP_DISCOVER);
-    let hidden = if listing {
+    let mut hidden = if listing {
         hidden_tools(
             plane,
             ticket,
@@ -2386,6 +2421,18 @@ fn answer_body(
     } else {
         std::collections::BTreeSet::new()
     };
+    if listing {
+        let now = wall_ms(services, ticket, &mut unit.issued).unwrap_or(u64::MAX);
+        for entry in held.catalogue.tools_for(&admit(&unit.entitled)) {
+            if door_connections::enabled(&held, &entry.server) {
+                let list = door_connections::list(plane, caller, &entry.server, now);
+                if !matches!(&list.sighting,crate::trust::Sighting::Seen(seen) if seen.capabilities.contains_key(&entry.tool))
+                {
+                    hidden.insert(entry.namespaced.clone());
+                }
+            }
+        }
+    }
     let mut seal = services
         .map(|s| door_tasks::door_seal(plane, s, ticket, (&mut unit.issued, &mut unit.claim)));
     let admit = |kind: &str, name: &str| admit(&unit.entitled)(kind, name);
@@ -2728,7 +2775,8 @@ pub fn decide_ask<S: SealHost>(
         .unwrap_or(&null);
     // With no local ask and no presented state, inputResponses is ordinary
     // upstream data. Admission validates its map and destination guards inspect it.
-    let initial_upstream = site.method == crate::codec::METHOD_TOOLS_CALL && site.rounds.is_empty()
+    let initial_upstream = site.method == crate::codec::METHOD_TOOLS_CALL
+        && site.rounds.is_empty()
         && params.and_then(|p| p.get("requestState")).is_none();
     let retry = crate::ask::Retry {
         responses: if initial_upstream {
@@ -3272,7 +3320,13 @@ fn send_to_member(
 
         let original = door_sessions::original(&def.url, &outbound);
 
-        let negotiating = door_sessions::Negotiating::begin(plane, member, caller, original);
+        let partition = door_connections::partition(plane, ticket, caller, unit, member);
+        let negotiating = door_sessions::Negotiating::begin(
+            plane,
+            member,
+            partition.as_deref().unwrap_or(caller),
+            original,
+        );
         if let Some(first) = negotiating.first_request() {
             outbound.fields.clone_from(&first.headers);
             outbound.body.clone_from(&first.body);
@@ -3420,6 +3474,10 @@ slot!(
                 FROM_CALLER if piece.flags() & PIECE_LAST == 0 => Some(Step::Taken),
                 FROM_CALLER => answer_body(&instance, plane, ticket, &caller, unit),
                 FROM_FAR_END => {
+                    if let Some(step) = door_connections::far(plane, ticket, &caller, unit, input) {
+                        if matches!(step, Step::Taken) && door_connections::ready(unit) { return answer_body(&instance, plane, ticket, &caller, unit); }
+                        return Some(step);
+                    }
                     let held = unit.held.clone();
                     let generation = held.as_ref().map_or(0, |h| h.catalogue.generation());
                     let framing = unit.framing.clone();
@@ -3587,6 +3645,18 @@ slot!(
                                     let base = NEGOTIATE_SEQ
                                         .saturating_add(unit.attempt.saturating_mul(ROUND_SEQ_SPAN));
                                     let member = unit.member.as_deref().unwrap_or_default();
+                                    let done = if held.as_ref().is_some_and(|h| door_connections::enabled(h, member)) {
+                                        let mut fields=vec![(CONTENT_TYPE.to_string(),if relay.sse { EVENT_STREAM } else { JSON }.to_string())];
+                                        if let Some(session)=n.walk_session.take(){fields.push((crate::adapt::H_SESSION_ID.to_string(),session));}
+                                        match n.governed_answer(plane,member,relay.status as u16,fields,std::mem::take(&mut relay.far)) {
+                                            door_sessions::Governed::Send(request)=>{
+                                                relay.status=0;relay.sse=false;
+                                                unit.pending=Some(Pending::far(crate::call::OutboundCall{verb:"POST",target:crate::call::path_of(&request.url),fields:request.headers,body:request.body}));
+                                                return Some(Step::Write);
+                                            },
+                                            door_sessions::Governed::Done(done)=>Some(done),
+                                        }
+                                    } else {
                                     let polled = door_sessions::far_answer(
                                         &instance,
                                         plane,
@@ -3596,6 +3666,8 @@ slot!(
                                     );
                                     let std::task::Poll::Ready(done) = polled else {
                                         return Some(Step::Pending);
+                                    };
+                                    done
                                     };
                                     // The walk's own answer too: a call lowered into its session
                                     // carried that session's id.
@@ -3791,7 +3863,7 @@ slot!(
         match step {
             // A piece the plane refuses ends the unit: its state is dropped with it.
             None | Some(Step::Declined) => {
-                plane.units.remove(&key);
+                if let Some(mut unit)=plane.units.remove(&key){door_connections::cleanup(plane,&mut unit);}
                 plane.inspection_units.remove(&key);
                 Outcome::Refused
             }
@@ -3835,7 +3907,8 @@ slot!(
                     }
                     Some(Ok(Written::Done)) => {
                         plane.inspection_units.remove(&key);
-                        if let Some(unit) = plane.units.remove(&key) {
+                        if let Some(mut unit) = plane.units.remove(&key) {
+                            door_connections::cleanup(plane,&mut unit);
                             door_line::completed(plane, &unit);
                         }
                         Outcome::Ready
@@ -3944,6 +4017,7 @@ fn write(
             out.set(|o| &o.lane, lane);
         }
         out.set(|o| &o.reply_status, pending.status);
+        out.set(|o| &o.need, pending.need);
         pending.headed = true;
     }
     let mut reply = input.reply_buf();
@@ -4215,7 +4289,7 @@ slot!(
         // THE REFUSED UNIT IS OVER: the kernel ends a unit it refuses, and nothing else would ever
         // name it again, so its state (its request's params among it) goes with the refusal.
         if let Some(plane) = instance.get() {
-            plane.units.remove(&given.unit());
+            if let Some(mut unit)=plane.units.remove(&given.unit()){door_connections::cleanup(plane,&mut unit);}
         }
         Outcome::Ready
     }
@@ -4253,7 +4327,9 @@ pub(crate) mod exchange_observations;
 /// ONE EXCHANGE ON A UNIT'S TICKET, its connector services numbered from `base`.
 fn exchange_at(
     instance: &Instance<'_, McpDoor, busbar_contract::plugin::markers::PlaneKind>,
-    host: Option<&busbar_contract::abi::sdk::conn::Host<busbar_contract::plugin::markers::PlaneKind>>,
+    host: Option<
+        &busbar_contract::abi::sdk::conn::Host<busbar_contract::plugin::markers::PlaneKind>,
+    >,
     base: u32,
     url: &str,
     member: &str,
@@ -4288,7 +4364,9 @@ fn exchange_at(
 /// The actual framed exchange with its owned state supplied explicitly; the real ABI adapter
 /// above resumes and parks this state on its actual SDK Instance.
 fn exchange_with_state(
-    host: Option<&busbar_contract::abi::sdk::conn::Host<busbar_contract::plugin::markers::PlaneKind>>,
+    host: Option<
+        &busbar_contract::abi::sdk::conn::Host<busbar_contract::plugin::markers::PlaneKind>,
+    >,
     ticket: Ticket,
     base: u32,
     url: &str,
@@ -4716,3 +4794,6 @@ mod reported_progress;
 #[cfg(test)]
 #[path = "tests/settings_schema.rs"]
 mod settings_schema_tests;
+
+#[path = "door_connections.rs"]
+mod door_connections;

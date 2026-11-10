@@ -16,6 +16,7 @@ mod catalogue;
 mod checks;
 mod client;
 mod codec;
+pub mod connections;
 /// The plane's diagnostic catalog: the codes it raises, which its `declares.json` states
 /// (the tests hold the two equal, and the codes equal to the ones the door raises).
 #[cfg(test)]
