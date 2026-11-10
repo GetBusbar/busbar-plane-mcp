@@ -1050,7 +1050,7 @@ fn refused_arrival(out: &mut Out<'_, ArriveOut>, status: u32, text: String) -> O
 }
 
 /// The words of an arrival on a verb the endpoint does not serve.
-const NOT_ALLOWED_TEXT: &str = r#"{"allow":"POST"}"#;
+const NOT_ALLOWED_TEXT: &str = r#"{"allow":"GET, POST, DELETE"}"#;
 
 /// The words of an arrival from a browser origin the deployment does not admit.
 const FORBIDDEN_ORIGIN_TEXT: &str = r#"{"origin":"forbidden"}"#;
@@ -4170,7 +4170,7 @@ slot!(
         if allow {
             field_buf.push(OutField {
                 name: arena.span(b"allow"),
-                value: arena.span(b"POST"),
+                value: arena.span(b"GET, POST, DELETE"),
             });
         }
         field_buf.push(OutField {

@@ -745,7 +745,10 @@ mod both_ways {
         );
         assert_eq!(
             r.fields,
-            vec![("allow".to_string(), "POST".to_string()), json_type()]
+            vec![
+                ("allow".to_string(), "GET, POST, DELETE".to_string()),
+                json_type()
+            ]
         );
 
         let a = step(&t, "arrive metadata");
