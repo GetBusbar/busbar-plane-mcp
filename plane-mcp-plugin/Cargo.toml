@@ -31,7 +31,7 @@ serde_json = { workspace = true }
 # Actual carrier doors composed by the ordinary MCP TLS/process host.
 busbar-transport-http = { workspace = true }
 busbar-transport-tcp = { workspace = true }
-busbar-transport-stdio = { git = "https://github.com/GetBusbar/busbar-transport-stdio", rev = "d326cd96dab6b847c14b908f53180f5f900fed9d" }
+busbar-transport-stdio = { git = "https://github.com/GetBusbar/busbar-transport-stdio", rev = "9e58f5ae4a908d9621be4bc0278dee467e2b72ab" }
 
 # Actual production connector/TLS for MCP's local catalogue; no shared test host.
 busbar-core-connector = { workspace = true }

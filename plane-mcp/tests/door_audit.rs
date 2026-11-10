@@ -320,6 +320,8 @@ static HOST_SLOTS: HostSlots = HostSlots {
     unit_refuse: None,
     ticket_mint: None,
     ticket_take: None,
+    hook_child: None,
+    outbound_authorize: None,
 };
 
 /// The upstream that requires a session.
@@ -2296,7 +2298,7 @@ fn exchanged() -> Value {
         "aud": "https://up.example",
         "token_exchange": {
             "token_url": "https://as.example/token",
-            "subject_token": {"env": "BUSBAR_ST_SUBJECT"},
+            "subject_token": {"module": "env", "settings": {"key": "BUSBAR_ST_SUBJECT"}},
         },
     })
 }

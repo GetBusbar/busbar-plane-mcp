@@ -1417,7 +1417,13 @@ fn actual_mcp_cases(dropped: bool) -> BTreeMap<String, String> {
         max_inflight_cap: 1024,
         sink: diagnostics.clone(),
         dispatcher: d.adopter(),
-        conns: ConnTable::Host(table),
+        conns: ConnTable::Host(
+            busbar_contract::conn::admissions::AdmissionAuthority::issue(
+                &busbar_contract::caps::KernelSeal::acquire_for_kernel(),
+                table,
+                busbar_contract::secret_ref::Sugars::default(),
+            ),
+        ),
     };
     let row = LinkedRow::of(busbar_plane_mcp::door).unwrap();
     let p: Plugin<Plane> = if dropped {

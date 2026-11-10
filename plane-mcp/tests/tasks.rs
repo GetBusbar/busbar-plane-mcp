@@ -523,6 +523,8 @@ static HOST_SLOTS: HostSlots = HostSlots {
     unit_refuse: None,
     ticket_mint: None,
     ticket_take: None,
+    hook_child: None,
+    outbound_authorize: None,
 };
 
 /// The upstream that requires a session.
@@ -868,12 +870,15 @@ impl Drop for Door {
 
 fn open_on(tables: &'static Tables, section: &Value) -> Door {
     let settings = serde_json::to_vec(section).unwrap();
+    let mut reason = [0_u8; 1024];
     let mut i: PlaneOpenIn = z();
     i.open = OpenIn {
         head: head::<PlaneOpenIn>(life::OPEN, Ticket::NONE),
         host: &tables.0,
         settings: octets(&settings),
         generation: 1,
+        err_buf: reason.as_mut_ptr(),
+        err_cap: reason.len(),
         ..z()
     };
     i.public_url = str_of("https://busbar.example");
@@ -892,7 +897,12 @@ fn open_on(tables: &'static Tables, section: &Value) -> Door {
             std::ptr::from_mut(&mut o).cast(),
         )
     };
-    assert_eq!(ret.outcome(), Outcome::Ready, "the door opens");
+    assert_eq!(
+        ret.outcome(),
+        Outcome::Ready,
+        "the door opens: {}",
+        String::from_utf8_lossy(&str_bytes(o.open.head.error))
+    );
     Door {
         instance: o.open.instance,
     }
@@ -1344,7 +1354,7 @@ fn section() -> Value {
             "aud": "https://up.example/tx",
             "pin": pin(),
             "verify_ttl": "1h",
-            "token_exchange": {"token_url": "https://as.example/token", "subject_token": {"env": "BUSBAR_SUBJECT"}},
+            "token_exchange": {"token_url": "https://as.example/token", "subject_token": {"module": "env", "settings": {"key": "BUSBAR_SUBJECT"}}},
             "tools_allow": task,
         },
         "ask": {
