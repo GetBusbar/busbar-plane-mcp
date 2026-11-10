@@ -134,7 +134,7 @@ async fn actual_mcp_apps_tls_sessions_visibility_resources_and_revocation() {
     let upstream_profiles = profiles.clone();
     let reads = Arc::new(AtomicUsize::new(0));
     let upstream_reads = reads.clone();
-    let mut server = TlsToolServer::replying(Arc::new(move |request| {
+    let server = TlsToolServer::replying(Arc::new(move |request| {
         let body = request.split_once("\r\n\r\n").map_or("", |(_, body)| body);
         if request.starts_with("POST /token ") {
             let form: std::collections::BTreeMap<_,_> = url::form_urlencoded::parse(body.as_bytes()).into_owned().collect();

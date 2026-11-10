@@ -63,3 +63,24 @@ fn marker_object_ids_are_refused_at_session_arrival() {
         }
     ));
 }
+
+#[test]
+fn connection_operations_reach_dispatch_inside_a_validated_session() {
+    for method in [
+        "connections/authorize", "connections/callback", "connections/refresh",
+        "connections/revoke", "connections/discover",
+    ] {
+        let body = serde_json::json!({"jsonrpc":"2.0","id":73,"method":method,"params":{"server":"fs"}});
+        let SessionArrived::Session(arrival) = arrive(None, "POST", "/mcp", &crate::codec::json(&body), &|name| {
+            (name == adapt::H_SESSION_ID).then(|| "session".to_string())
+        }) else { panic!("session arrival for {method}"); };
+        assert!(matches!(arrival.unit, SessionUnit::Message { kind: Kind::Dispatch, checked: None, .. }), "{method} still awaits session ownership validation");
+        let raised: Value = serde_json::from_slice(arrival.dispatch.as_ref().expect("connection operation dispatch")).unwrap();
+        assert_eq!(raised["method"], method);
+        assert_eq!(raised["params"]["server"], "fs");
+        assert_eq!(raised["params"]["_meta"][crate::codec::META_PROTOCOL_VERSION], crate::codec::PROTOCOL_VERSION);
+        assert!(crate::tool_ops::method_row_for(method).is_some());
+    }
+    assert_eq!(adapt::session_method(Some("connections/unknown"), true), SessionMethod::NotFound);
+    assert_eq!(adapt::session_method(Some("connections/discover"), false), SessionMethod::Accept);
+}

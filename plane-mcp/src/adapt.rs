@@ -109,6 +109,12 @@ pub enum SessionMethod {
 
 /// The methods a session client reaches through the dispatch.
 const SESSION_DISPATCHED: &[&str] = &[
+    // Plugin-owned connection operations use the same authenticated session dispatch.
+    "connections/authorize",
+    "connections/callback",
+    "connections/refresh",
+    "connections/revoke",
+    "connections/discover",
     "tools/list",
     "tools/call",
     "prompts/list",
