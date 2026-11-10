@@ -784,7 +784,7 @@ fn validate_endpoint(at: &str, def: &McpServerDefCfg) -> Result<(), String> {
                 "{at}: `pin.mechanism: {}` authenticates the far end's TLS key, but `url:` is \
                  `http://`, which has no TLS handshake to verify. Use `https://`, or explicitly \
                  `unpinned` if the server has no TLS endpoint.",
-                def.pin.mechanism.as_str()
+                def.pin.mechanism.token()
             ));
         }
         return Ok(());

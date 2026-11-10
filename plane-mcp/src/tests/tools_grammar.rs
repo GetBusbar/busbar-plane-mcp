@@ -1188,3 +1188,20 @@ fn secret_bearing_consumer_configs_cannot_serialize() {
     let _ = <super::TokenExchangeCfg as AmbiguousIfSerialize<_>>::check;
     let _ = <super::ChildEnvValue as AmbiguousIfSerialize<_>>::check;
 }
+
+#[test]
+fn tls_pins_refuse_plaintext_endpoints_with_their_wire_token() {
+    for mechanism in ["cert_spki", "mtls"] {
+        let error = grammar(json!({"fs": {
+            "url": "http://127.0.0.1/mcp",
+            "allow_private": true,
+            "pin": {"mechanism": mechanism, "key": "AAAA"}
+        }}))
+        .expect_err("a TLS pin cannot authenticate a plaintext endpoint");
+        assert!(
+            error.contains(&format!("pin.mechanism: {mechanism}")),
+            "{error}"
+        );
+        assert!(error.contains("no TLS handshake to verify"), "{error}");
+    }
+}
