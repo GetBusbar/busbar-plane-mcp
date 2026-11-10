@@ -178,17 +178,12 @@ fn sampling_bounds_grammar_defaults_round_trips_and_refuses() {
         b.max_prompt_bytes, 65536,
         "an unwritten key keeps its default"
     );
-    let def = &written.servers["s"];
-    let again: crate::tools_config::McpServerDefCfg =
-        serde_json::from_value(serde_json::to_value(def).expect("serialises"))
-            .expect("round trips");
-    assert_eq!(again.sampling_bounds, b);
-    assert_eq!(&again, def);
-    let plain = serde_json::to_value(&omitted.servers["s"]).expect("serialises");
-    assert!(
-        plain.get("sampling_bounds").is_none(),
-        "an all-default block is not written back"
-    );
+    let again: super::SamplingBoundsCfg =
+        serde_json::from_value(serde_json::to_value(b).expect("public bounds serialize"))
+            .expect("public bounds round trip");
+    assert_eq!(again, b);
+    assert_eq!(d, super::SamplingBoundsCfg::default());
+    assert_ne!(b, super::SamplingBoundsCfg::default());
 
     assert!(grammar(server(json!({ "max_message": 5 }))).is_err());
 
@@ -313,7 +308,7 @@ fn exchanged_published_name(published: &str) -> Value {
             "aud": "https://tools.example/fs",
             "token_exchange": {
                 "token_url": "https://as.example/token",
-                "subject_token": { "env": "SUBJECT" }
+                "subject_token": {"module": "fixture-env-source", "settings": {"name": "SUBJECT"}}
             },
             "tools_allow": {
                 "read_file": { "schema_hash": "sha256:approved", "publish_as": published }
@@ -389,7 +384,7 @@ fn an_exchanged_default_name_cannot_hide_a_scope_separator() {
                 "aud": "https://tools.example/fs",
                 "token_exchange": {
                     "token_url": "https://as.example/token",
-                    "subject_token": { "env": "SUBJECT" }
+                    "subject_token": {"module": "fixture-env-source", "settings": {"name": "SUBJECT"}}
                 },
                 "tools_allow": { tool: { "schema_hash": "sha256:approved" } }
             }
@@ -732,8 +727,8 @@ fn distinct_capability_names_across_families_still_validate() {
 #[test]
 fn mtls_without_a_client_identity_is_refused_and_with_one_reads() {
     let identity = json!({
-        "cert": { "env": "MCP_CLIENT_CERT" },
-        "key": { "env": "MCP_CLIENT_KEY" }
+        "cert": {"module": "fixture-env-source", "settings": {"name": "MCP_CLIENT_CERT"}},
+        "key": {"module": "fixture-env-source", "settings": {"name": "MCP_CLIENT_KEY"}}
     });
     let bare = json!({
         "fs": { "url": "https://fs/", "pin": { "mechanism": "mtls", "key": "AAAA" } }
@@ -771,7 +766,7 @@ fn mtls_without_a_client_identity_is_refused_and_with_one_reads() {
 /// an `http://` url and on `transport: stdio`.
 #[test]
 fn a_client_identity_with_no_handshake_to_present_it_in_is_refused() {
-    let identity = json!({ "cert": { "env": "C" }, "key": { "env": "K" } });
+    let identity = json!({ "cert": {"module": "fixture-env-source", "settings": {"name": "C"}}, "key": {"module": "fixture-env-source", "settings": {"name": "K"}} });
     let err = grammar(json!({
         "fs": {
             "url": "http://fs.internal/",
@@ -802,7 +797,7 @@ fn a_client_identity_with_no_handshake_to_present_it_in_is_refused() {
 fn a_member_tls_bundle_keeps_public_material_and_legacy_client_identity_separate() {
     let public_material =
         "-----BEGIN CERTIFICATE-----\nopaque to the typed grammar\n-----END CERTIFICATE-----";
-    let identity = json!({"cert": {"env": "C"}, "key": {"env": "K"}});
+    let identity = json!({"cert": {"module": "fixture-env-source", "settings": {"name": "C"}}, "key": {"module": "fixture-env-source", "settings": {"name": "K"}}});
     for (mechanism, with_identity) in [("cert_spki", false), ("mtls", true)] {
         let mut server = json!({
             "url": "https://fs.internal/",
@@ -816,9 +811,9 @@ fn a_member_tls_bundle_keeps_public_material_and_legacy_client_identity_separate
         let def = &cfg.servers["fs"];
         assert_eq!(def.tls.as_ref().unwrap().ca_cert_pem, public_material);
         assert_eq!(def.client_identity.is_some(), with_identity);
-        let encoded = serde_json::to_value(def).unwrap();
-        assert_eq!(encoded["tls"]["ca_cert_pem"], public_material);
-        assert!(encoded["tls"].get("client_identity").is_none());
+        let encoded = serde_json::to_value(def.tls.as_ref().unwrap()).unwrap();
+        assert_eq!(encoded["ca_cert_pem"], public_material);
+        assert!(encoded.get("client_identity").is_none());
     }
     let old = grammar(json!({"fs": {
         "url": "https://fs.internal/",
@@ -836,9 +831,9 @@ fn member_tls_refuses_empty_wrong_shape_and_nested_identity_spellings() {
         json!({}),
         json!({"ca_cert_pem": ""}),
         json!({"ca_cert_pem": " \n\t"}),
-        json!({"ca_cert_pem": {"file": "/run/ca.pem"}}),
+        json!({"ca_cert_pem": {"module": "fixture-file-source", "settings": {"path": "/run/ca.pem"}}}),
         json!({"ca_cert_pem": 42}),
-        json!({"ca_cert_pem": "public CA", "client_identity": {"cert": {"env": "C"}, "key": {"env": "K"}}}),
+        json!({"ca_cert_pem": "public CA", "client_identity": {"cert": {"module": "fixture-env-source", "settings": {"name": "C"}}, "key": {"module": "fixture-env-source", "settings": {"name": "K"}}}}),
         json!({"ca_cert_pem": "public CA", "unknown": true}),
     ] {
         assert!(
@@ -909,7 +904,7 @@ fn a_refused_token_url_does_not_echo_its_userinfo() {
         "url": "https://tools.internal/mcp",
         "token_exchange": {
             "token_url": format!("http://busbar:{CANARY}@auth.example.com/token"),
-            "subject_token": { "env": "BUSBAR_SUBJECT" },
+            "subject_token": {"module": "fixture-env-source", "settings": {"name": "BUSBAR_SUBJECT"}},
         },
     }));
     assert!(
@@ -962,16 +957,11 @@ fn a_child_env_literal_is_sealed_at_parse_and_never_written_back() {
             "pin": { "mechanism": "unpinned" },
             "transport": "stdio",
             "command": ABS_PROGRAM,
-            "env": { "API_KEY": CANARY, "UPSTREAM": { "env": "BUSBAR_UPSTREAM_KEY" } }
+            "env": { "API_KEY": CANARY, "UPSTREAM": {"module": "fixture-env-source", "settings": {"name": "BUSBAR_UPSTREAM_KEY"}} }
         }
     });
     let cfg = grammar(section.clone()).expect("a stdio registration with an env literal");
     let def = &cfg.servers["s"];
-    let written = serde_json::to_string(def);
-    assert!(
-        written.as_deref().map_or(true, |w| !w.contains(CANARY)),
-        "an env literal was written back"
-    );
     assert!(!format!("{def:?}").contains(CANARY));
     assert_eq!(&grammar(section).expect("reads again").servers["s"], def);
 }
@@ -988,7 +978,7 @@ fn registration(exchanged: bool) -> Value {
         fs["aud"] = json!("https://tools.internal");
         fs["token_exchange"] = json!({
             "token_url": "https://as.internal/token",
-            "subject_token": { "env": "BUSBAR_FS_SUBJECT" }
+            "subject_token": {"module": "fixture-env-source", "settings": {"name": "BUSBAR_FS_SUBJECT"}}
         });
     }
     fs
@@ -1075,7 +1065,7 @@ fn supported_endpoint_pins_still_validate_with_their_required_identity() {
             "pin": {"mechanism": mechanism, "key": "sha256/47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU="}
         });
         if mechanism == "mtls" {
-            entry["client_identity"] = json!({"cert": {"file": "/run/mcp/client.crt"}, "key": {"file": "/run/mcp/client.key"}});
+            entry["client_identity"] = json!({"cert": {"module": "fixture-file-source", "settings": {"path": "/run/mcp/client.crt"}}, "key": {"module": "fixture-file-source", "settings": {"path": "/run/mcp/client.key"}}});
         }
         door_validate(&json!({"fs": entry})).expect("supported pin and identity grammar");
     }
@@ -1181,4 +1171,20 @@ fn pinned_schema_rejects_invalid_header_annotations_at_configuration_time() {
                 .is_err()
         );
     }
+}
+
+// This is a compile-time assertion: adding Serialize gives each type two possible
+// marker implementations, so inference fails instead of permitting a secret dump.
+#[test]
+fn secret_bearing_consumer_configs_cannot_serialize() {
+    trait AmbiguousIfSerialize<Marker> {
+        fn check() {}
+    }
+    impl<T: ?Sized> AmbiguousIfSerialize<()> for T {}
+    struct Serializable;
+    impl<T: ?Sized + serde::Serialize> AmbiguousIfSerialize<Serializable> for T {}
+    let _ = <super::ClientIdentityCfg as AmbiguousIfSerialize<_>>::check;
+    let _ = <super::McpServerDefCfg as AmbiguousIfSerialize<_>>::check;
+    let _ = <super::TokenExchangeCfg as AmbiguousIfSerialize<_>>::check;
+    let _ = <super::ChildEnvValue as AmbiguousIfSerialize<_>>::check;
 }

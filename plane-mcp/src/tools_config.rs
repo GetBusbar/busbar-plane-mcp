@@ -110,7 +110,9 @@ pub struct ServerPinCfg {
 /// Both fields are SECRET REFERENCES (`{env: ..}`, `{file: ..}` or a `kind: secret` module), the
 /// spelling busbar's own inbound `tls:` uses: there is no way to write PEM bytes here, so a private
 /// key never sits in a config dump, a `--validate` output or an admin read.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+///
+/// Consumer configuration retains opaque secret custody and cannot be serialized.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClientIdentityCfg {
     /// PEM certificate chain busbar presents, leaf first.
@@ -397,12 +399,6 @@ impl Default for SamplingBoundsCfg {
 }
 
 impl SamplingBoundsCfg {
-    /// Whether every bound is at its default (so a serialised definition omits the block).
-    #[must_use]
-    pub fn is_default(&self) -> bool {
-        *self == Self::default()
-    }
-
     /// The bounds well-formed, or the offending key named.
     pub fn validate(&self, at: &str) -> Result<(), String> {
         if self.max_messages == 0 {
@@ -460,7 +456,9 @@ pub const DEFAULT_MCP_VERIFY_TTL: &str = "5s";
 pub const DEFAULT_UPSTREAM_TIMEOUT_MS: u64 = 30_000;
 
 /// One entry in the top-level `tools:` map: one registered external MCP server (operator intent only).
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+///
+/// Consumer configuration retains opaque secret custody and cannot be serialized.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct McpServerDefCfg {
     /// The remote MCP endpoint. Required for `streamable_http`, refused for `stdio` (see [`validate_server`]).
@@ -534,7 +532,7 @@ pub struct McpServerDefCfg {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_caller_ask_rounds: Option<u32>,
     /// How large one relayed `sampling/createMessage` ask may be; absent = the defaults.
-    #[serde(default, skip_serializing_if = "SamplingBoundsCfg::is_default")]
+    #[serde(default)]
     pub sampling_bounds: SamplingBoundsCfg,
     /// The outbound credential mode; overrides the section-level default (SCALAR = OVERRIDE).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -546,7 +544,9 @@ pub struct McpServerDefCfg {
 
 /// `tools.<server>.token_exchange`: the RFC 8693 exchange busbar performs before it calls this
 /// upstream. No `scope:`: it is derived from the caller's grant.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+///
+/// Consumer configuration retains opaque secret custody and cannot be serialized.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TokenExchangeCfg {
     /// The operator's authorization server token endpoint (HTTPS, or HTTP with explicit `allow_private`, vetted at boot).
@@ -588,6 +588,8 @@ impl ServerTransport {
 
 /// ONE VALUE in a stdio child's environment: a literal, or a secret reference resolved at spawn.
 /// A literal is a `Cred`, sealed as it is read: the plane holds no child secret as text.
+///
+/// Consumer configuration retains opaque secret custody and cannot be serialized.
 #[derive(Clone, PartialEq, Deserialize)]
 #[serde(untagged)]
 pub enum ChildEnvValue {
@@ -599,18 +601,6 @@ pub enum ChildEnvValue {
 
 /// `Eq` asserted: `SecretRef` derives only `PartialEq`, and no field is a float.
 impl Eq for ChildEnvValue {}
-
-/// A reference is written back as written; a sealed literal is not written back at all.
-impl Serialize for ChildEnvValue {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        match self {
-            ChildEnvValue::Plain(_) => Err(serde::ser::Error::custom(
-                "a stdio child's `env:` literal is sealed and is not written back",
-            )),
-            ChildEnvValue::Secret(r) => r.serialize(s),
-        }
-    }
-}
 
 /// `Debug` by hand: a literal has no bytes to show; a reference names where the value lives.
 impl std::fmt::Debug for ChildEnvValue {
