@@ -1601,9 +1601,11 @@ impl crate::ask::Seal for DoorSeal<'_> {
 
             std::task::Poll::Ready(Ok(won)) => won,
 
-            std::task::Poll::Ready(Err(
-                ServiceError::Declined(Outcome::Refused) | ServiceError::Unserved,
-            )) => true,
+            // No record store: degrade to the per-node in-memory ledger.
+            std::task::Poll::Ready(Err(ServiceError::Unserved)) => true,
+            // The store actively refused the claim (quota, permission): do not
+            // treat this as won — the fleet-wide single-use guarantee is lost.
+            std::task::Poll::Ready(Err(ServiceError::Declined(Outcome::Refused))) => false,
 
             std::task::Poll::Ready(Err(_)) => false,
         }

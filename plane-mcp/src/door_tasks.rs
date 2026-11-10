@@ -695,7 +695,8 @@ fn settle_left(
             Ok(None) => left.absent = true,
 
             Err(_) => {
-                left.done = true;
+                // Do not mark done: a transient host error should be retried
+                // rather than silently abandoning the settlement.
                 return Poll::Ready(Vec::new());
             }
         }

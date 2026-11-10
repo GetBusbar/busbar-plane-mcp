@@ -46,9 +46,11 @@ pub(crate) const NOT_APPLICABLE: &[(&str, &str, &str)] = &[
     ),
 ];
 
-/// THE SECRET-SOURCE SCAN'S DRIVEN DOOR (the composition root's `secret_source.rs`, which
-/// holds every linked door plane to a driver): the Statement names the cells in this file
-/// drive.
+/// Actual plane composition cases that scan source refusals at the caller boundary.
+mod secret_source;
+
 pub(crate) fn secret_source_driven() -> Vec<String> {
-    Vec::new()
+    vec![super::secret_source_tests::statement_name(
+        crate::root::door_steps::tests::tool_door::line_door(),
+    )]
 }

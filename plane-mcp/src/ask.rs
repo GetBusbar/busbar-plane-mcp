@@ -600,10 +600,11 @@ pub fn decide(
         let Some(previous_round) = rounds.get(next_round as usize - 1) else {
             return AskDecision::Refuse(AskRefusal::StateRejected(Rejected::WrongRequest));
         };
+        let shown_previous = asks_for_round(previous_round, caller_capabilities);
         let answered = retry
             .responses
             .and_then(Value::as_object)
-            .is_some_and(|m| m.keys().any(|key| previous_round.contains_key(key)));
+            .is_some_and(|m| shown_previous.iter().all(|ask| m.contains_key(ask.key())));
         if !answered {
             let previous = previous_round
                 .keys()

@@ -1227,7 +1227,7 @@ pub(super) fn tick(plane: &McpDoor) {
         .with_all(|m| m.keys().cloned().collect());
     let gone: Vec<String> = gone
         .into_iter()
-        .filter(|id| with_sessions(plane, |t| !t.holds(id)).unwrap_or(true))
+        .filter(|id| with_sessions(plane, |t| !t.holds(id)).unwrap_or(false))
         .collect();
     plane.session_state.with_all(|m| {
         for id in &gone {
