@@ -1040,6 +1040,42 @@ fn a_registrations_own_passthrough_is_refused_alone_and_beside_an_exchange() {
     }
 }
 
+/// Until caller-bound outbound custody is supported, a purported user connection must not
+/// silently fall back to the registration's shared credential. These are unsupported inputs,
+/// not declarations of a future configuration spelling.
+#[test]
+fn per_user_connection_settings_never_degrade_to_shared_authorization() {
+    const CANARY: &str = "upstream-user-credential-must-not-appear-in-refusals";
+    let control = json!({"fs": registration(true)});
+    door_validate(&control).expect("the existing operator-owned exchange remains supported");
+
+    for (field, value) in [
+        ("per_user_discovery", json!(true)),
+        ("per_user_oauth", json!({"access_token": CANARY})),
+        ("connections", json!({"bob": {"access_token": CANARY}})),
+    ] {
+        let mut section = control.clone();
+        section["fs"][field] = value;
+        let error = door_validate(&section)
+            .expect_err("unsupported per-user semantics must refuse, not use the shared token");
+        assert!(
+            error.contains(field),
+            "the unsupported setting is identified"
+        );
+        assert!(
+            !error.contains(CANARY),
+            "a refusal must not echo its credential"
+        );
+    }
+
+    let mut section = control;
+    section["fs"]["token_exchange"]["subject_token_from_caller"] = json!(true);
+    let error = door_validate(&section)
+        .expect_err("a caller-token exchange cannot be silently replaced by the operator token");
+    assert!(error.contains("subject_token_from_caller"));
+    assert!(!error.contains(CANARY));
+}
+
 #[test]
 fn an_unverified_manifest_key_is_not_an_authenticity_root() {
     let section = json!({"fs": {

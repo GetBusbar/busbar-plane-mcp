@@ -430,6 +430,38 @@ fn red_two_callers_of_one_member_never_share_a_session() {
     assert_ne!(upstream_key("f", "s\u{1f}x"), upstream_key("fs", "x"));
 }
 
+/// Forgetting or renegotiating one caller's upstream conversation must not replace a
+/// different caller's session, nor reset the request-id sequence. This protects the existing
+/// conversation isolation; it does not claim distinct upstream authorization identities.
+#[test]
+fn per_user_conversation_forgetting_and_renewal_preserve_other_callers() {
+    let mut table = UpstreamTable::new(16, 1 << 16);
+    let bob = upstream_key("fs", "bob");
+    let joe = upstream_key("fs", "joe");
+    let bob_other_server = upstream_key("git", "bob");
+    table.put(&bob, in_session("bob-old"));
+    table.put(&joe, in_session("joe-session"));
+    table.put(&bob_other_server, in_session("bob-git"));
+    let old_id = table.next_id(&bob).expect("Bob's original session");
+    let joe_id = table.next_id(&joe).expect("Joe's session");
+
+    table.forget(&bob);
+    assert_eq!(table.get(&bob), None);
+    assert_eq!(table.next_id(&bob), None);
+    assert_eq!(table.get(&joe), Some(in_session("joe-session")));
+    assert_eq!(table.get(&bob_other_server), Some(in_session("bob-git")));
+
+    table.put(&bob, in_session("bob-new"));
+    assert_eq!(table.get(&bob), Some(in_session("bob-new")));
+    let renewed_id = table.next_id(&bob).expect("Bob's replacement session");
+    assert!(renewed_id > old_id && renewed_id > joe_id);
+    assert_eq!(table.get(&joe), Some(in_session("joe-session")));
+    let next_joe_id = table.next_id(&joe).expect("Joe's session still exists");
+    assert!(next_joe_id > renewed_id);
+    assert_eq!(table.get(&bob_other_server), Some(in_session("bob-git")));
+    assert_eq!(table.get(&upstream_key("fs", "")), None);
+}
+
 /// EVERY REQUEST IN A SESSION TAKES ITS OWN ID: the numbering never repeats
 /// while the session is remembered and survives the session being remembered again; a stateless
 /// memory numbers nothing. a shared round id.
