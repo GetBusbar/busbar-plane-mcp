@@ -46,7 +46,7 @@ fn a_member_send_fallback_uses_the_targets_canonical_default_scope() {
         "source": {"url":"https://source.example", "pin":{"mechanism":"unpinned"}, "tools_allow": {
             "read_file":{"schema_hash":"sha256:aa", "publish_as":"source_reader"}}},
         "target": {"url":"https://target.example", "pin":{"mechanism":"unpinned"}, "aud":"https://target.example",
-            "token_exchange":{"token_url":"https://as.example/token", "subject_token":{"env":"SUBJECT"}},
+            "token_exchange":{"token_url":"https://as.example/token", "subject_token":{"module":"fixture-env-source","settings":{"name":"SUBJECT"}}},
             "tools_allow":{"other":{"schema_hash":"sha256:bb", "publish_as":"target_other"}}}
     }"#).unwrap();
     let held = Held::of(1, cfg);

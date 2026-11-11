@@ -41,7 +41,7 @@ fn local_section() -> Value {
             "args": ["--literal", "a b", "", "--token=$UNCHANGED"],
             "env": {
                 "TOKEN": ENV_SECRET_MARKER,
-                "FROM_SECRET": { "env": "BUSBAR_LOCAL_PROGRAM_TOKEN" }
+                "FROM_SECRET": {"module": "fixture-env-source", "settings": {"name": "BUSBAR_LOCAL_PROGRAM_TOKEN"}}
             },
             "cwd": WORKDIR,
             "pin": { "mechanism": "local_program", "key": PROGRAM },
@@ -79,9 +79,10 @@ fn local_program_reads_exact_command_key_args_env_and_cwd() {
     assert_eq!(def.env.len(), 2);
     let literal: ChildEnvValue =
         serde_json::from_value(json!(ENV_SECRET_MARKER)).expect("an environment literal");
-    let reference: ChildEnvValue =
-        serde_json::from_value(json!({ "env": "BUSBAR_LOCAL_PROGRAM_TOKEN" }))
-            .expect("an environment reference");
+    let reference: ChildEnvValue = serde_json::from_value(
+        json!({"module": "fixture-env-source", "settings": {"name": "BUSBAR_LOCAL_PROGRAM_TOKEN"}}),
+    )
+    .expect("an environment reference");
     assert_eq!(def.env["TOKEN"], literal);
     assert_eq!(def.env["FROM_SECRET"], reference);
     assert!(def.tools_allow.contains_key("read"));
@@ -158,8 +159,8 @@ fn local_program_refuses_network_transports_and_stdio_network_fields() {
     }
     let mut section = local_section();
     section["local"]["client_identity"] = json!({
-        "cert": { "env": "BUSBAR_LOCAL_CERT" },
-        "key": { "env": "BUSBAR_LOCAL_KEY" }
+        "cert": {"module": "fixture-env-source", "settings": {"name": "BUSBAR_LOCAL_CERT"}},
+        "key": {"module": "fixture-env-source", "settings": {"name": "BUSBAR_LOCAL_KEY"}}
     });
     refuses(&section);
 }
@@ -221,8 +222,8 @@ fn local_program_does_not_change_existing_network_pin_grammar_or_pubkey_refusal(
             "url": "https://mcp.example/mutual",
             "pin": { "mechanism": "mtls", "key": "sha256/PIN==" },
             "client_identity": {
-                "cert": { "env": "BUSBAR_CLIENT_CERT" },
-                "key": { "env": "BUSBAR_CLIENT_KEY" }
+                "cert": {"module": "fixture-env-source", "settings": {"name": "BUSBAR_CLIENT_CERT"}},
+                "key": {"module": "fixture-env-source", "settings": {"name": "BUSBAR_CLIENT_KEY"}}
             }
         },
         "dev": { "url": "http://mcp.example/dev", "pin": { "mechanism": "unpinned" } }
@@ -248,8 +249,8 @@ fn stdio_cannot_claim_a_tls_identity_without_a_tls_connection() {
         section["local"]["pin"] = json!({ "mechanism": mechanism, "key": "sha256/PIN==" });
         if mechanism == "mtls" {
             section["local"]["client_identity"] = json!({
-                "cert": { "env": "BUSBAR_LOCAL_CERT" },
-                "key": { "env": "BUSBAR_LOCAL_KEY" }
+                "cert": {"module": "fixture-env-source", "settings": {"name": "BUSBAR_LOCAL_CERT"}},
+                "key": {"module": "fixture-env-source", "settings": {"name": "BUSBAR_LOCAL_KEY"}}
             });
         }
         let error = refuses(&section);

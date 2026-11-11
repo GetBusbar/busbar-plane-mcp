@@ -104,7 +104,8 @@ fn every_method_the_battery_sends_is_carried() {
 }
 
 /// How many rows of each role the method table declares, and how many notices this plane knows.
-const CLIENT_ROWS: usize = 13;
+// Thirteen protocol methods plus the five caller-owned connection lifecycle methods.
+const CLIENT_ROWS: usize = 18;
 /// The rows only a paired server may send. See [`CLIENT_ROWS`].
 const PROVIDER_ROWS: usize = 3;
 /// The notices the battery sends that this plane takes (a notification obliges no answer).

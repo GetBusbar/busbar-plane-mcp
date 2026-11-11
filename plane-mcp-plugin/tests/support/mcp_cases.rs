@@ -7,15 +7,14 @@ use busbar_contract::abi::hook::SignalEntry;
 use busbar_contract::abi::mechanism::call::{
     AbiStr, Blob, DeadlineClass, Field, OutHead, Outcome, Span, BLOB_OCTETS,
 };
-use busbar_contract::abi::mechanism::lifecycle::{slot as life, GenIn, RefreshIn};
+use busbar_contract::abi::mechanism::lifecycle::{slot as life, GenIn};
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::plane::{
     slot, ArriveIn, ArriveOut, OnPieceIn, OnPieceOut, OutField, PlaneCancelIn, PlaneCancelOut,
-    PlaneOpenIn, PlaneOpenOut, PlaneRefreshOut, ProjectIn, ProjectOut, RecordWrite, RefusalIn,
-    RefusalOut, ServeIn, ServeOut, UnitCount, EMIT_DONE, EMIT_TO_FAR_END, FROM_CALLER,
-    FROM_FAR_END, FROM_KERNEL, PIECE_HAS_STATUS, PIECE_LAST, PRINCIPAL_REQUIRED, RECORD_PUT,
-    REFUSAL_GATE, ROUTE_DIRECT, ROUTE_LOCAL, ROUTE_ONCE, ROUTE_POOL, ROUTE_SCOPE, ROUTE_SESSION,
-    ROUTE_STREAM, UNITS_REPORTED,
+    PlaneOpenIn, PlaneOpenOut, ProjectIn, ProjectOut, RecordWrite, RefusalIn, RefusalOut, ServeIn,
+    ServeOut, UnitCount, EMIT_DONE, EMIT_TO_FAR_END, FROM_CALLER, FROM_FAR_END, FROM_KERNEL,
+    PIECE_HAS_STATUS, PIECE_LAST, PRINCIPAL_REQUIRED, RECORD_PUT, REFUSAL_GATE, ROUTE_DIRECT,
+    ROUTE_LOCAL, ROUTE_ONCE, ROUTE_POOL, ROUTE_SCOPE, ROUTE_SESSION, ROUTE_STREAM, UNITS_REPORTED,
 };
 use serde_json::Value;
 
@@ -1791,16 +1790,23 @@ fn actual_mcp_cases(dropped: bool) -> BTreeMap<String, String> {
     };
 
     let refresh_call = |what: &[u8]| {
-        let mut f: Frame<RefreshIn, PlaneRefreshOut> = Frame::new(input(), output());
-        (f.input.generation, f.input.settings) = (2, json(what));
-        let (c, snap) = p.refresh(&mut f);
-        format!("{} {}", called(&c), snapshot(snap.as_ref()))
+        // This served instance has a live dispatcher driver. Use the host lifecycle
+        // path so binding contention queues before the one actual REFRESH crossing.
+        // The helper returns a snapshot only after a checked Ready outcome.
+        match busbar_plugin_loader::dispatch::kinds::plane::refresh_door_on(&p, &d, what, b"", 2) {
+            Ok(snap) => format!("Ready {}", snapshot(Some(&snap))),
+            Err(error) => format!("refresh failed: {error}"),
+        }
     };
     {
         let label = ("refresh").to_string();
         let before = count();
         let value = { refresh_call(&handed(&p.served(), &refresh)) };
-        assert_eq!(count() - before, 1, "{label}: exact first crossings");
+        assert_eq!(
+            count() - before,
+            1,
+            "{label}: exact first crossings: {value}"
+        );
         r.insert(label, value)
     };
     {
