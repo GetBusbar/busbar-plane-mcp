@@ -1,6 +1,7 @@
 """Focused regressions for the confined MCP harness and its candidate composition."""
 
 import os
+import json
 from pathlib import Path
 import subprocess
 import tempfile
@@ -11,6 +12,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 COMPOSE = ROOT / "testing/mcp-conformance/mcp-subject/compose.sh"
 WORKDIR = ROOT / "testing/conformance/mcp-workdir.sh"
+BUILD = ROOT / "testing/mcp-conformance/mcp-subject/build.sh"
 SOURCE = "https://github.com/GetBusbar/busbar-plane-mcp"
 
 
@@ -19,6 +21,72 @@ class McpStaging(unittest.TestCase):
         self.scratch = tempfile.TemporaryDirectory(prefix="mcp-staging-")
         self.addCleanup(self.scratch.cleanup)
         self.base = Path(self.scratch.name)
+
+    def build(self, status=0, artifact=True, explicit_target=True):
+        commands = self.base / "commands"
+        commands.mkdir()
+        cargo = commands / "cargo"
+        cargo.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, os, pathlib, sys\n"
+            "args = sys.argv[1:]\n"
+            "pathlib.Path(os.environ['CALL_RECORD']).write_text(json.dumps({"
+            "'argv': args, 'debug': os.environ.get('CARGO_PROFILE_DEV_DEBUG')}))\n"
+            "print('compiler-progress-witness', file=sys.stderr, flush=True)\n"
+            "target = pathlib.Path(args[args.index('--target-dir') + 1])\n"
+            "if os.environ['MAKE_ARTIFACT'] == '1':\n"
+            "    binary = target / 'debug/busbar'\n"
+            "    binary.parent.mkdir(parents=True, exist_ok=True)\n"
+            "    binary.write_text('#!/bin/sh\\nexit 0\\n')\n"
+            "    binary.chmod(0o755)\n"
+            "sys.exit(int(os.environ['BUILD_EXIT']))\n"
+        )
+        cargo.chmod(0o755)
+        manifest = self.base / "subject/dist/default/Cargo.toml"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text("# staged full distribution\n")
+        target = self.base / "confined target" if explicit_target else manifest.parent / "target"
+        stale = target / "release/busbar"
+        stale.parent.mkdir(parents=True)
+        stale.write_text("#!/bin/sh\nexit 0\n")
+        stale.chmod(0o755)
+        record = self.base / "cargo-call.json"
+        log = self.base / "build.log"
+        env = dict(os.environ, PATH=str(commands) + os.pathsep + os.environ["PATH"],
+                   CALL_RECORD=str(record), MAKE_ARTIFACT=str(int(artifact)), BUILD_EXIT=str(status))
+        env.pop("CARGO_TARGET_DIR", None)
+        if explicit_target:
+            env["CARGO_TARGET_DIR"] = str(target)
+        result = subprocess.run(["bash", str(BUILD), str(manifest), str(log)],
+                                env=env, text=True, capture_output=True)
+        self.assertIn("compiler-progress-witness", result.stderr)
+        self.assertIn("compiler-progress-witness", log.read_text())
+        self.assertEqual(json.loads(record.read_text()), {
+            "argv": ["build", "--manifest-path", str(manifest), "--bin", "busbar",
+                     "--target-dir", str(target)], "debug": "0",
+        })
+        return result, target
+
+    def test_build_uses_full_distribution_dev_artifact_in_confined_target(self):
+        result, target = self.build()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), str(target / "debug/busbar"))
+
+    def test_build_defaults_to_staged_manifest_target(self):
+        result, target = self.build(explicit_target=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), str(target / "debug/busbar"))
+
+    def test_build_failure_is_not_hidden_by_tee_or_stale_binary(self):
+        result, _ = self.build(status=42)
+        self.assertEqual(result.returncode, 42)
+        self.assertEqual(result.stdout, "")
+
+    def test_build_success_without_debug_artifact_refuses_stale_release_binary(self):
+        result, _ = self.build(artifact=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("built binary missing", result.stderr)
 
     def fixture(self, extra=""):
         checkout = self.base / "core"

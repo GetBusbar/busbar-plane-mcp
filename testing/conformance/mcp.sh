@@ -64,11 +64,7 @@ stage="$out/subject-src"
 say "== compose subject (busbar at ${BUSBAR_PIN:-?} with this plane)"
 manifest="$(bash testing/mcp-conformance/mcp-subject/compose.sh "$BUSBAR_CHECKOUT" "$here/plane-mcp" "$stage")"
 say "== build subject ($manifest)"
-if cargo build --release --manifest-path "$manifest" --bin busbar \
-      >"$out/subject-build.log" 2>&1; then
-  bin="${CARGO_TARGET_DIR:-$(dirname "$manifest")/target}/release/busbar"
-  [ -x "$bin" ] || { say "built binary missing at $bin"; bin=""; }
-fi
+bin="$(bash testing/mcp-conformance/mcp-subject/build.sh "$manifest" "$out/subject-build.log")" || bin=""
 if [ -z "$bin" ]; then
   tail -40 "$out/subject-build.log" >&2
   verdict fail "the subject (busbar at the pin with this plane) did not build; legs failed before:${failed:- none}"

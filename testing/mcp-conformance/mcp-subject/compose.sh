@@ -3,7 +3,7 @@
 #
 #   compose.sh <busbar checkout> <this plane's crate dir> <stage dir>
 #
-# Prints the manifest path of the package to build (`cargo build --release --manifest-path <it>
+# Prints the manifest path of the package to build (`cargo build --manifest-path <it>
 # --bin busbar`). The staged manifest carries the candidate patch so nested Cargo
 # metadata queries resolve the same graph as the outer build.
 #
