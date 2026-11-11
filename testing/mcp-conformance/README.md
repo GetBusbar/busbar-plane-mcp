@@ -74,7 +74,7 @@ which direction it measured is precisely what let the client-role hole survive.
 ## Quick start
 
 ```bash
-./scripts/setup-control.sh      # install the pinned control (python mcp==2.0.0)
+./scripts/setup-control.sh      # validate the staged control (python mcp==2.2.0)
 ./scripts/run-control.sh push   # 15 tests, ~16s. Must be green.
 ./scripts/negative-control.sh   # prove the battery catches broken peers
 node bin/mcp-battery.mjs list   # every test, its tier, and the defect it catches
@@ -197,7 +197,7 @@ on every legal difference gets switched off within a week.
 
 ## Control pin
 
-`control/requirements.txt` pins `mcp==2.0.0` exactly, and CI re-checks it. A
+`control/requirements.txt` pins `mcp==2.2.0` exactly, and CI re-checks it. A
 control upgrade changes what "conformant" means for the whole battery, so it
 must be a deliberate, reviewed commit with the new green output recorded in the
 commit message.
@@ -207,3 +207,26 @@ spec, each with the verbatim clause, the observed behaviour, our judgement and
 the counter-argument. It is not a way to silence inconvenient tests: if a
 deviation stops failing, the run reports **UNEXPECTED PASS** and the entry must
 be deleted.
+
+## Offline native CI tools
+
+Candidate execution requires the controller's read-only
+`/opt/busbar-conformance/mcp-tools` mount and Node 22.23.3. Missing tools fail the
+required suite. The candidate never clones the SDK, invokes `npx`, or installs
+Python/npm dependencies.
+
+Before starting the candidate, the controller runs
+`testing/conformance/mcp-tools/stage.py --work <scratch> --output <bundle>` with
+Node 22.23.3. Both directories must be outside the candidate checkout. Staging
+uses pnpm 10.26.1, the official SDK commit's frozen lockfile, the committed
+conformance lockfile, and the exact SHA-256-locked Python wheels in
+`sources.lock.json`. Its Linux x86_64 Python closure requires Python 3.11 at
+`/usr/bin/python3`; the official SDK fixture is compiled without changing its
+source into a Node 22 CommonJS bundle. No runtime transpiler is needed.
+
+The sibling `<bundle>.manifest.json` records every regular file's SHA-256 and
+executable bit, plus public archive provenance, for the native controller's
+`busbar.native-conformance-inputs/1` admission. The controller verifies and mounts
+this bundle read-only; it must not let candidate code prepare or replace it.
+The suite revision, exact scenario equality, independent battery, negative
+controls, and all subject/billing legs remain unchanged.

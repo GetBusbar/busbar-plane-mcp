@@ -12,7 +12,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 TIER="${1:-push,pr}"
-VENV="${MCP_CONTROL_VENV:-.venv-control}"
+VENV="${MCP_CONTROL_VENV:-/opt/busbar-conformance/mcp-tools/python}"
 PY="$VENV/bin/python"
 
 if [ ! -x "$PY" ]; then

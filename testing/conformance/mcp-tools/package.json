@@ -1,0 +1,8 @@
+{
+  "name": "busbar-mcp-official-judge",
+  "private": true,
+  "packageManager": "pnpm@10.26.1",
+  "dependencies": {
+    "@modelcontextprotocol/conformance": "0.2.0-alpha.11"
+  }
+}

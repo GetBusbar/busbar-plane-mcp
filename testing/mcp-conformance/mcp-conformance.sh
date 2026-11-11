@@ -76,7 +76,6 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-CONFORMANCE_PIN="@modelcontextprotocol/conformance@0.2.0-alpha.11"
 REVISION="2026-07-28"
 
 # The in-house adversarial/seam battery. IN THIS REPOSITORY, and that is the whole of DECISION 2:
@@ -90,45 +89,9 @@ DEFAULT_BATTERY_DIR="testing/mcp-conformance"
 say() { printf '%s\n' "$*"; }
 die() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
-# THE SUITE'S NODE. @modelcontextprotocol/conformance imports fs.globSync, which exists from Node 22;
-# on Node 20 the suite dies at import, enumerates zero scenarios, and every row it owes reads as a
-# failure. The suite needs Node 22, so this script provisions the same major itself rather than
-# relying on whatever the runner image ships: a pinned release from nodejs.org, checked against a
-# sha256 this file commits, unpacked under target/ and put first on PATH. A runner that already has
-# Node >= 22 is left alone. The hash is checked BEFORE the archive is unpacked, and a mismatch, a
-# platform with no pin, or a failed download is a refusal, never a fall-back to the old node.
-NODE_PIN_VERSION="v22.23.3"
-node_pin_sha256() {  # $1 = <os>-<arch> as nodejs.org names them
-  case "$1" in
-    linux-x64)    echo "1084aa36196bba4c3a5e69a1ee388a6e4ff729dad09445fbcd434b28fe3c24af" ;;
-    linux-arm64)  echo "5ced2d48d1d7198739b7f86804de0171aefb6823b684b12341d3321afc3cb0b2" ;;
-    darwin-x64)   echo "8a677b0219178efd6eb0e475457c4afb452b521a92f6e67845a73bd85727f2a8" ;;
-    darwin-arm64) echo "23b25245dcfb9af7262f8ff142e9e2e0af025368117329e7a7458a51e5922f53" ;;
-    *) return 1 ;;
-  esac
-}
+# Provisioning belongs to the controller. Candidate execution only opens frozen tools.
 ensure_node22() {
-  local have os arch plat want dir tgz got
-  have="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
-  if [ "$have" -ge 22 ] 2>/dev/null; then return 0; fi
-  case "$(uname -s)" in Linux) os=linux ;; Darwin) os=darwin ;; *) die "no pinned Node for $(uname -s)" ;; esac
-  case "$(uname -m)" in x86_64|amd64) arch=x64 ;; aarch64|arm64) arch=arm64 ;; *) die "no pinned Node for $(uname -m)" ;; esac
-  plat="$os-$arch"
-  want="$(node_pin_sha256 "$plat")" || die "no pinned Node for $plat"
-  dir="$PWD/target/node-pin/node-$NODE_PIN_VERSION-$plat"
-  if [ ! -x "$dir/bin/node" ]; then
-    mkdir -p "$PWD/target/node-pin"
-    tgz="$PWD/target/node-pin/node-$NODE_PIN_VERSION-$plat.tar.gz"
-    curl -fsSL --retry 3 -o "$tgz" "https://nodejs.org/dist/$NODE_PIN_VERSION/node-$NODE_PIN_VERSION-$plat.tar.gz" \
-      || die "could not download Node $NODE_PIN_VERSION ($plat)"
-    if command -v sha256sum >/dev/null 2>&1; then got="$(sha256sum "$tgz" | cut -d' ' -f1)"; else got="$(shasum -a 256 "$tgz" | cut -d' ' -f1)"; fi
-    [ "$got" = "$want" ] || { rm -f "$tgz"; die "Node $NODE_PIN_VERSION ($plat) sha256 $got is not the pinned $want"; }
-    tar -xzf "$tgz" -C "$PWD/target/node-pin" || die "could not unpack $tgz"
-  fi
-  export PATH="$dir/bin:$PATH"
-  have="$(node -p 'process.versions.node' 2>/dev/null || echo none)"
-  case "$have" in "${NODE_PIN_VERSION#v}") ;; *) die "provisioned node reports $have, wanted ${NODE_PIN_VERSION#v}" ;; esac
-  say "node: provisioned $NODE_PIN_VERSION ($plat), sha256 verified"
+  source testing/conformance/mcp-tools/runtime.sh || die "pinned offline MCP tools unavailable"
 }
 
 # The subject-boot harness: build-from-this-commit, boot on loopback, obtain a real audience-bound
@@ -213,7 +176,7 @@ BANNER
 # Every scenario the pinned suite says REVISION requires of a server. This is the SET the runs below
 # are compared against: "the suite exited 0" is satisfied by a suite that ran nothing.
 required_server_scenarios() {
-  npx --yes "$CONFORMANCE_PIN" list --server --requirements "$REVISION" 2>/dev/null \
+  node "$MCP_OFFICIAL_CLI" list --server --requirements "$REVISION" 2>/dev/null \
     | awk '/^Server scenarios/{f=1;next} /^[A-Za-z]/{f=0} f && /^  - /{sub(/^  - /,""); sub(/ .*$/,""); print}'
 }
 
@@ -384,47 +347,15 @@ PY
 # a developer's machine, answers the readiness probe and is then judged as the reference. That is a
 # control leg reporting on somebody else's process, and if it happens to pass it licenses every
 # subject verdict in the run.
-SDK_REPO="https://github.com/modelcontextprotocol/typescript-sdk.git"
-SDK_REF="cc4b4161"
-SDK_FIXTURE="test/conformance/src/everythingServer.ts"
+SDK_REF="cc4b41617ce3601b1290d67216ea0b194a3cd9ac"
 CONTROL_READY_TIMEOUT=240
 
 official_control() {
   say "== OFFICIAL SUITE · CONTROL leg (pinned third-party peer: typescript-sdk@$SDK_REF) =="
   say "   A battery that cannot judge a known-good peer cannot judge ours. This leg runs ALWAYS."
   local dir=.mcp-conformance
-  local sdk="$dir/sdk"
   mkdir -p "$dir"
-  if [ ! -d "$sdk/.git" ]; then
-    git clone --filter=blob:none "$SDK_REPO" "$sdk" >/dev/null 2>&1 \
-      || die "could not clone the control peer. A finding about the runner's network, not busbar."
-  fi
-  # THE BUILD IS SKIPPED ONLY ON PROOF THAT THE TREE IS ALREADY THE PIN, BUILT.
-  #
-  # The clone was already conditional, but everything after it was not, so a restored cache still
-  # paid a fetch, a checkout, an install and a 53-package workspace build — the cache saved the
-  # download and nothing else. The stamp below is written ONLY after a build that succeeded, and it
-  # records the exact commit that was built; a tree whose HEAD has moved, a tree restored from a
-  # cache keyed on a different pin, and a tree whose build died halfway all lack a matching stamp
-  # and are rebuilt in full. An absent or stale stamp always means "build", so the fast path can
-  # only ever be taken over a tree this script itself finished building at this pin.
-  local stamp="$sdk/.busbar-built-ref" head=""
-  head="$(git -C "$sdk" rev-parse HEAD 2>/dev/null || true)"
-  if [ -n "$head" ] && [ "${head#"$SDK_REF"}" != "$head" ] \
-     && [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$head" ]; then
-    say "   control peer already built at $SDK_REF; reusing the restored tree"
-  else
-    git -C "$sdk" fetch --quiet origin "$SDK_REF" 2>/dev/null || git -C "$sdk" fetch --quiet origin
-    git -C "$sdk" checkout --quiet "$SDK_REF" \
-      || die "the pinned control-peer commit $SDK_REF is not reachable. Bump the pin deliberately; \
-never float it to a branch, or this leg goes red the day somebody else's main breaks."
-    say "   building the control peer at $(git -C "$sdk" rev-parse --short HEAD)"
-    rm -f "$stamp"
-    ( cd "$sdk" && env NPM_CONFIG_OFFLINE=false npm_config_offline=false pnpm install --frozen-lockfile && pnpm run build:all ) >"$dir/build.log" 2>&1 \
-      || { tail -40 "$dir/build.log" >&2; die "the control peer would not build. Harness/runner \
-finding, not a busbar finding."; }
-    git -C "$sdk" rev-parse HEAD >"$stamp"
-  fi
+  [ -f "$MCP_SDK_FIXTURE" ] || die "the staged official SDK fixture is missing"
 
   # A free loopback port, asked of the OS immediately before the fixture is told to use it. The
   # window between the probe closing the socket and the fixture binding it is small and the fixture
@@ -439,7 +370,7 @@ finding, not a busbar finding."; }
   local SDK_URL="http://localhost:$sdk_port/mcp"
   say "   control peer will listen on 127.0.0.1:$sdk_port"
 
-  ( cd "$sdk" && PORT="$sdk_port" exec node --import tsx "$SDK_FIXTURE" ) >"$dir/control-server.log" 2>&1 &
+  ( PORT="$sdk_port" exec node "$MCP_SDK_FIXTURE" ) >"$dir/control-server.log" 2>&1 &
   local server_pid=$!
   reap_add "$server_pid"
 
@@ -468,7 +399,7 @@ finding, not a busbar finding."; }
 
   rm -rf "$dir/control"
   mkdir -p "$dir/control"
-  npx --yes "$CONFORMANCE_PIN" server --url "$SDK_URL" --requirements "$REVISION" \
+  node "$MCP_OFFICIAL_CLI" server --url "$SDK_URL" --requirements "$REVISION" \
       -o "$dir/control" \
     || die "the official suite could not judge the pinned reference SDK. This is a finding about \
 the harness, the pin or the runner — NOT about busbar. Do not read any subject verdict until it is \
@@ -515,7 +446,7 @@ official_subject() {
     bl=""
   fi
   local rc=0
-  npx --yes "$CONFORMANCE_PIN" server \
+  node "$MCP_OFFICIAL_CLI" server \
       --url "$target" --requirements "$REVISION" \
       ${baseline[@]+"${baseline[@]}"} -o "$out" || rc=$?
   # THE ARMED GUARD, and it runs BEFORE the exit code is honoured. An armed run that executed
