@@ -37,32 +37,65 @@
 // Usage: node credential-shim.mjs <listen-port> <upstream-port> 3<<<"$bearer"
 
 import http from 'node:http';
-import { readFileSync, closeSync, appendFileSync } from 'node:fs';
+import { readFileSync, openSync, constants, closeSync, appendFileSync, writeFileSync, statSync, rmSync } from 'node:fs';
 import { createHash } from 'node:crypto';
+import { Socket } from 'node:net';
 import { MUTATIONS, operatorMutation } from './operator-mutation.mjs';
 
-const [listenPort, upstreamPort] = process.argv.slice(2);
-let token;
-try { token = readFileSync(3, 'utf8').trim(); closeSync(3); }
-catch { console.error('provide the bearer token on descriptor 3'); process.exit(2); }
-if (!listenPort || !upstreamPort || !token) {
-  console.error('usage: credential-shim.mjs <listen-port> <upstream-port> 3<<<"$bearer"');
+const [listenPort, upstreamPort, credentialFifo, portFile, excludedPorts = ''] = process.argv.slice(2);
+const deferred = credentialFifo !== undefined;
+const excluded = new Set(excludedPorts.split(',').filter(Boolean).map(Number));
+if (!listenPort || !upstreamPort || (deferred && !portFile)) {
+  console.error('usage: credential-shim.mjs <listen-port> <upstream-port> [credential-fifo port-file]');
   process.exit(2);
 }
 
-// Optional trusted operator controller, explicitly armed by the fixture boot.
-// The admin credential never reaches the diagnostic peer or any HTTP response.
+let token;
 let mutate;
-if (process.env.MCP_OPERATOR_CONFIG) {
-  const adminToken = readFileSync(4, 'utf8').trim();
-  closeSync(4);
-  if (!adminToken || !process.env.MCP_OPERATOR_ADMIN_PORT) throw new Error('operator mutation credential/configuration missing');
-  mutate = operatorMutation({ config: process.env.MCP_OPERATOR_CONFIG,
-    adminPort: process.env.MCP_OPERATOR_ADMIN_PORT, token: adminToken,
-    receipt: process.env.MCP_OPERATOR_RECEIPT });
+function installCredentials(bearer, adminToken) {
+  if (!bearer) throw new Error('missing bearer');
+  // The admin credential never reaches the diagnostic peer or any HTTP response.
+  if (process.env.MCP_OPERATOR_CONFIG) {
+    if (!adminToken || !process.env.MCP_OPERATOR_ADMIN_PORT) throw new Error('missing operator configuration');
+    mutate = operatorMutation({ config: process.env.MCP_OPERATOR_CONFIG,
+      adminPort: process.env.MCP_OPERATOR_ADMIN_PORT, token: adminToken,
+      receipt: process.env.MCP_OPERATOR_RECEIPT });
+  }
+  token = bearer;
+}
+
+if (deferred) {
+  // Hold the actual listener while boot mints its audience-bound token. Only the
+  // owning fixture can supply credentials, and neither credential enters argv.
+  try {
+    const info = statSync(credentialFifo);
+    if (!info.isFIFO() || (info.mode & 0o777) !== 0o600 || info.uid !== process.getuid()) throw new Error();
+  } catch {
+    console.error('credential shim requires an owner-only credential FIFO');
+    process.exit(2);
+  }
+  process.on('exit', () => {
+    rmSync(credentialFifo, { force: true });
+    rmSync(portFile, { force: true });
+  });
+  process.on('SIGTERM', () => process.exit(143));
+  process.on('SIGINT', () => process.exit(130));
+} else {
+  try {
+    const bearer = readFileSync(3, 'utf8').trim(); closeSync(3);
+    let adminToken;
+    if (process.env.MCP_OPERATOR_CONFIG) {
+      adminToken = readFileSync(4, 'utf8').trim(); closeSync(4);
+    }
+    installCredentials(bearer, adminToken);
+  } catch {
+    console.error('provide the bearer on descriptor 3 and configured operator credential on descriptor 4');
+    process.exit(2);
+  }
 }
 
 const server = http.createServer(async (req, res) => {
+  if (!token) { res.writeHead(503, { 'content-type': 'text/plain' }).end('credential shim is not ready'); return; }
   let buffered;
   // This is a test operator action, not an MCP implementation or an emitted
   // notification. Only named, configured hooks from the admitted fixture client
@@ -129,4 +162,55 @@ const server = http.createServer(async (req, res) => {
   else req.pipe(upstream);
 });
 
-server.listen(Number(listenPort), '127.0.0.1');
+server.on('error', (error) => {
+  console.error(`credential shim listener failed: ${error.code}`);
+  process.exit(1);
+});
+let allocations = 0;
+function listen(port) {
+  server.listen(port, '127.0.0.1', onListening);
+}
+function onListening() {
+  // Other fixture roles have selected ports but have not bound them yet. Never
+  // publish a suite port that aliases one. Allocation is bounded and happens
+  // before the canonical audience exists; no scenario or product is retried.
+  if (excluded.has(server.address().port)) {
+    if (++allocations >= 4) {
+      console.error('credential shim could not allocate a distinct fixture port');
+      process.exit(1);
+    }
+    server.close(() => listen(0));
+    return;
+  }
+  if (!deferred) return;
+  // A nonblocking pipe handle keeps shutdown responsive even if boot fails
+  // before writing credentials. A blocking fs.readFile can strand a worker in
+  // open/read and prevent Node from exiting when the fixture reaper signals it.
+  let input;
+  const fail = () => {
+    console.error('credential shim could not load fixture credentials');
+    process.exit(2);
+  };
+  try {
+    input = new Socket({ fd: openSync(credentialFifo, constants.O_RDWR | constants.O_NONBLOCK), readable: true, writable: false });
+  } catch { fail(); }
+  let text = '';
+  input.setEncoding('utf8');
+  input.on('error', fail);
+  input.on('data', (chunk) => {
+    text += chunk;
+    if (text.length > 65536) { fail(); return; }
+    if (!text.endsWith('\n') || text.split('\n').length < 3) return;
+    try {
+      const [bearer, adminToken, extra] = text.slice(0, -1).split('\n');
+      if (extra !== undefined) throw new Error();
+      installCredentials(bearer, adminToken);
+      text = '';
+      input.destroy();
+      rmSync(credentialFifo, { force: true });
+    } catch { fail(); }
+  });
+  try { writeFileSync(portFile, `${server.address().port}\n`, { mode: 0o600, flag: 'wx' }); }
+  catch { console.error('credential shim could not publish its port'); process.exit(1); }
+}
+listen(Number(listenPort));

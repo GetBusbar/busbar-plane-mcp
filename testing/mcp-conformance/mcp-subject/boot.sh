@@ -1140,6 +1140,23 @@ busbar built FROM THIS COMMIT; if the build step did not produce one, that is th
   local mcp_port data_port admin_port upstream_port
   read -r mcp_port data_port admin_port upstream_port <<<"$(subject_free_ports)"
   [ -n "${upstream_port:-}" ] || die "could not obtain four free loopback ports."
+  # Bind the suite listener before choosing the canonical audience. Releasing a
+  # temporary allocation here lets another socket take it during bootstrap.
+  local credential_fifo="$dir/credential.fifo" shim_port_file="$dir/credential-shim.port"
+  ( umask 077; mkfifo "$credential_fifo" )
+  export MCP_SEAM_FRONT_TRANSCRIPT="$dir/seam-front-headers.jsonl"
+  MCP_OPERATOR_CONFIG="$dir/config.yaml" MCP_OPERATOR_ADMIN_PORT="$admin_port" \
+    MCP_OPERATOR_RECEIPT="$dir/operator-mutations.jsonl" \
+    node testing/mcp-conformance/mcp-subject/credential-shim.mjs 0 "$data_port" "$credential_fifo" "$shim_port_file" "$data_port,$admin_port,$upstream_port" \
+    >"$dir/credential-shim.log" 2>&1 &
+  local shim_pid=$! shim_started=$SECONDS
+  SUBJECT_PIDS="${SUBJECT_PIDS:-} $shim_pid"
+  until [ -s "$shim_port_file" ]; do
+    kill -0 "$shim_pid" 2>/dev/null || { cat "$dir/credential-shim.log" >&2; die "credential shim exited during listener startup."; }
+    [ "$((SECONDS-shim_started))" -lt 30 ] || die "credential shim did not publish its listener within 30s."
+    sleep 1
+  done
+  read -r mcp_port < "$shim_port_file"
   local canonical; canonical="$(subject_canonical_uri "$mcp_port")"
   say "   busbar $data_port · admin $admin_port · suite-facing $mcp_port"
   say "   canonical resource: $canonical"
@@ -1152,7 +1169,7 @@ busbar built FROM THIS COMMIT; if the build step did not produce one, that is th
 
   # THE REGISTERED UPSTREAM, booted before busbar so the registration points at something live.
   node testing/mcp-conformance/mcp-subject/diagnostic-upstream.mjs "$upstream_port" >"$dir/upstream.log" 2>&1 &
-  SUBJECT_PIDS="$!"
+  SUBJECT_PIDS="$SUBJECT_PIDS $!"
   say "   diagnostic upstream on $upstream_port"
 
   if [ -n "${MCP_SEAM_UPSTREAM_URL:-}" ]; then
@@ -1271,15 +1288,23 @@ with what the fixture actually serves: $view" ;;
   export MCP_SEAM_BEARER_FILE="$dir/seam-bearer"
   export MCP_SEAM_FRONT_TRANSCRIPT="$dir/seam-front-headers.jsonl"
   ( umask 077; printf '%s' "$bound" > "$MCP_SEAM_BEARER_FILE"; : > "$MCP_SEAM_FRONT_TRANSCRIPT" )
-  MCP_OPERATOR_CONFIG="$dir/config.yaml" MCP_OPERATOR_ADMIN_PORT="$admin_port" \
-    MCP_OPERATOR_RECEIPT="$dir/operator-mutations.jsonl" \
-    node testing/mcp-conformance/mcp-subject/credential-shim.mjs "$mcp_port" "$data_port" 3<<<"$bound" 4<<<"$admin_token" \
-    >"$dir/credential-shim.log" 2>&1 &
-  SUBJECT_PIDS="$SUBJECT_PIDS $!"
+  # Deliver credentials over the private FIFO without releasing the listener.
+  # Bound both delivery and observation by the existing 30-second shim window.
+  local shim_ready_started=$SECONDS
+  node -e '
+    const fs = require("fs");
+    const text = fs.readFileSync(3, "utf8").trim() + "\n" + fs.readFileSync(4, "utf8").trim() + "\n";
+    try {
+      const fd = fs.openSync(process.argv[1], fs.constants.O_WRONLY | fs.constants.O_NONBLOCK);
+      fs.writeFileSync(fd, text); fs.closeSync(fd);
+    } catch { process.exit(1); }
+  ' "$credential_fifo" 3<<<"$bound" 4<<<"$admin_token" \
+    || die "could not deliver credentials to the held suite listener."
 
   waited=0
   until [ "$(subject_probe_status "$canonical")" = "200" ]; do
-    waited=$((waited+1))
+    waited=$((SECONDS-shim_ready_started))
+    kill -0 "$shim_pid" 2>/dev/null || { cat "$dir/credential-shim.log" >&2; die "credential shim exited before readiness."; }
     [ "$waited" -lt 30 ] || {
       cat "$dir/credential-shim.log" >&2
       die "the credential shim never produced a 200 from busbar, though busbar answered 200 to the \
