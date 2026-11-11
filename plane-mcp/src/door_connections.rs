@@ -347,6 +347,7 @@ pub(super) fn answer(
                 };
                 let mut verifier = Value::String(permit.verifier().to_owned());
                 let verifier = Cred::take(&mut verifier)?.require_secure();
+                let binding = permit.binding();
                 let body = FormBody::new()
                     .public("grant_type", "authorization_code")
                     .public("client_id", &binding.client_id)
