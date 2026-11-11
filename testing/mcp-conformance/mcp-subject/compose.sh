@@ -4,8 +4,8 @@
 #   compose.sh <busbar checkout> <this plane's crate dir> <stage dir>
 #
 # Prints the manifest path of the package to build (`cargo build --release --manifest-path <it>
-# --bin busbar`, this plane patched in by a run-time --config). Held by
-# testing/mcp-conformance/mcp-subject/compose-selftest.sh, which mcp.sh runs before the subject build.
+# --bin busbar`). The staged manifest carries the candidate patch so nested Cargo
+# metadata queries resolve the same graph as the outer build.
 #
 # The package is busbar's default distribution (dist/default): the root crate (crates/busbar) is core
 # with no plugin linked, so it serves no MCP. The checkout is copied to <stage> and is never written.
@@ -15,14 +15,14 @@
 #                                   plane has no `pub mod plane_door`)
 #   linked-declares plane-mcp-door  the plane's own declares.json, by path (the document its door's
 #                                   Statement carries; the plane exports no `DECLARES`)
-# Nothing else changes: busbar's code, its other rows and its lockfile are the pin's.
+# Busbar's code, its other rows and its initial lockfile are the pin's.
 set -euo pipefail
 checkout="${1:?busbar checkout}"; plane="${2:?plane crate dir}"; stage="${3:?stage dir}"
 plane="$(cd "$plane" && pwd)"
 rm -rf "$stage"; mkdir -p "$stage"
-tar -C "$checkout" --exclude=./target --exclude=./.git -cf - . | tar -C "$stage" -xf -
+tar -C "$checkout" --exclude=./target --exclude=./dist/default/target --exclude=./.git -cf - . | tar -C "$stage" -xf -
 "${PYTHON:-python3}" -I - "$stage/dist/default/Cargo.toml" "$plane" >&2 <<'PY'
-import os, re, sys
+import json, os, re, sys, tomllib
 manifest, plane = sys.argv[1:3]
 text = open(manifest).read()
 lib = open(os.path.join(plane, "src", "lib.rs")).read()
@@ -52,6 +52,15 @@ if not re.search(r"^pub (const|static) DECLARES\b", lib, re.M):
     # the quotes and emits the rest as the row's Rust expression, `include_str!("<path>")`.
     set_row("package.metadata.busbar.linked-declares", "plane-mcp-door",
             '"""include_str!("' + declares + '")"""')
+document = tomllib.loads(text)
+source = document.get("workspace", {}).get("dependencies", {}).get("busbar-plane-mcp", {}).get("git")
+if not source:
+    sys.exit("compose: the staged distribution names no git source for busbar-plane-mcp to patch")
+if source in document.get("patch", {}):
+    sys.exit(f"compose: the staged distribution already patches {source}")
+text += (f'\n[patch.{json.dumps(source)}]\n'
+         f'busbar-plane-mcp = {{ path = {json.dumps(plane)} }}\n')
+print(f"compose: patched {source} busbar-plane-mcp to {plane}")
 open(manifest, "w").write(text)
 PY
 printf '%s\n' "$stage/dist/default/Cargo.toml"

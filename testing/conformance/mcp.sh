@@ -9,7 +9,7 @@
 #
 # Run by testing/conformance/run.sh with CONFORMANCE_OUT, BUSBAR_CHECKOUT, CARGO_TARGET_DIR set.
 # The subject is busbar built from $BUSBAR_CHECKOUT with THIS checkout's plane-mcp patched in by a
-# run-time cargo --config (nothing is written to a manifest), booted on loopback by
+# patch in the staged distribution manifest, booted on loopback by
 # testing/mcp-conformance/mcp-subject/boot.sh. MCP_NO_SKIPS=1 holds on every subject leg: a skip is red.
 # `pass` only when every leg passed; a subject that cannot be built is `fail`, armed, with the reason.
 set -uo pipefail
@@ -17,6 +17,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$here" || exit 2
 : "${CONFORMANCE_OUT:?}" "${BUSBAR_CHECKOUT:?}"
 out="$CONFORMANCE_OUT"; mkdir -p "$out"
+out="$(cd "$out" && pwd)"
 SPEC_VERSION="@modelcontextprotocol/conformance@0.2.0-alpha.11"
 
 say() { printf 'mcp: %s\n' "$*" >&2; }
@@ -39,6 +40,11 @@ if ! source testing/conformance/mcp-tools/runtime.sh; then
   exit 1
 fi
 
+# The candidate checkout is read-only. Preserve the harness's relative paths while
+# keeping its reports, fixture state and H2 scratch inside this invocation's output.
+work="$(bash "$here/testing/conformance/mcp-workdir.sh" "$here" "$out")" || exit 1
+cd "$work" || exit 1
+
 leg() { # <name> <command...>: run, tee to $out/<name>.log, record failure
   local name="$1"; shift
   say "== $name"
@@ -59,7 +65,6 @@ say "== compose subject (busbar at ${BUSBAR_PIN:-?} with this plane)"
 manifest="$(bash testing/mcp-conformance/mcp-subject/compose.sh "$BUSBAR_CHECKOUT" "$here/plane-mcp" "$stage")"
 say "== build subject ($manifest)"
 if cargo build --release --manifest-path "$manifest" --bin busbar \
-      --config "patch.\"https://github.com/GetBusbar/busbar-plane-mcp\".busbar-plane-mcp.path=\"$here/plane-mcp\"" \
       >"$out/subject-build.log" 2>&1; then
   bin="${CARGO_TARGET_DIR:-$(dirname "$manifest")/target}/release/busbar"
   [ -x "$bin" ] || { say "built binary missing at $bin"; bin=""; }
