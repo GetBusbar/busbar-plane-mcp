@@ -977,6 +977,10 @@ impl Piece {
 struct Unit {
     ticket: Ticket,
     reply_cap: usize,
+    pending_witness: Option<(
+        busbar_plugin_loader::dispatch::InlineTicket,
+        super::mcp_network::HeldReply,
+    )>,
 }
 
 impl Unit {
@@ -984,11 +988,25 @@ impl Unit {
         Self {
             ticket: d.mint(0).expect("a unit's ticket is minted"),
             reply_cap,
+            pending_witness: None,
+        }
+    }
+
+    fn with_pending_witness(d: &Dispatcher, reply_cap: usize) -> Self {
+        let ticket = d
+            .inline_ticket()
+            .expect("pending witness has an actual host ticket");
+        Self {
+            ticket: ticket.ticket(),
+            reply_cap,
+            pending_witness: Some((ticket, super::mcp_network::hold_reply())),
         }
     }
 
     fn end(self, d: &Dispatcher) {
-        d.recycle(self.ticket);
+        if self.pending_witness.is_none() {
+            d.recycle(self.ticket);
+        }
     }
 }
 
@@ -1009,6 +1027,13 @@ impl Pieced {
     }
 }
 
+struct InlineWake(std::sync::mpsc::SyncSender<()>);
+impl std::task::Wake for InlineWake {
+    fn wake(self: Arc<Self>) {
+        let _ = self.0.try_send(());
+    }
+}
+
 fn on_piece(
     p: &Plugin<Plane>,
     d: &Dispatcher,
@@ -1018,26 +1043,59 @@ fn on_piece(
     c: &Carried,
 ) -> Pieced {
     let (piece, f) = Piece::lent(unit.reply_cap, g, caps, c);
-    let done = submit_on(
-        p,
-        d,
-        unit.ticket,
-        slot::ON_PIECE,
-        f,
-        (DeadlineClass::Stream, deadline()),
-        Arc::clone(&piece) as Lent,
-        Duration::ZERO,
-    );
-    let called = answered(&done);
-    if !done.short {
-        let out = done.frame.as_ref().map_or_else(output, |f| f.out);
+    let (called, frame, short) = if let Some((ticket, reply)) = &unit.pending_witness {
+        let mut frame = f;
+        frame.input.head.deadline_ns = deadline();
+        let mut resume = false;
+        // Keep crossings outside a Tokio runtime: this fixture's actual store
+        // service owns its own runtime, just as on a dispatcher worker thread.
+        let (wake, heard) = std::sync::mpsc::sync_channel(1);
+        let waker = std::task::Waker::from(Arc::new(InlineWake(wake)));
+        let until = std::time::Instant::now() + OP_DEADLINE;
+        let called = loop {
+            ticket.register(&waker);
+            let called = p.call_inline(unit.ticket, resume, slot::ON_PIECE, &mut frame);
+            if called.outcome != Outcome::Pending {
+                break called;
+            }
+            // Observe the actual door's Pending before allowing its real TLS
+            // peer to answer. Wake registration precedes the crossing.
+            resume = true;
+            reply.release();
+            let remaining = until
+                .checked_duration_since(std::time::Instant::now())
+                .expect("MCP pending witness retains its original operation deadline");
+            heard
+                .recv_timeout(remaining)
+                .expect("MCP pending witness wakes within its original operation deadline");
+        };
+        assert!(
+            called.recall.is_none(),
+            "full-size pending witness needs no short recall"
+        );
+        (called, Some(frame), false)
+    } else {
+        let done = submit_on(
+            p,
+            d,
+            unit.ticket,
+            slot::ON_PIECE,
+            f,
+            (DeadlineClass::Stream, deadline()),
+            Arc::clone(&piece) as Lent,
+            Duration::ZERO,
+        );
+        (answered(&done), done.frame, done.short)
+    };
+    if !short {
+        let out = frame.as_ref().map_or_else(output, |f| f.out);
         c.keep(&piece, &called, &out);
     }
     Pieced {
         called,
-        short: done.short,
+        short,
         piece,
-        frame: done.frame,
+        frame,
     }
 }
 
@@ -1563,7 +1621,7 @@ fn actual_mcp_cases(dropped: bool) -> BTreeMap<String, String> {
         let whole = PIECE_HAS_STATUS | PIECE_LAST;
         let room = (CAP, CAP);
 
-        let one = Unit::mint(&d, 1024);
+        let one = Unit::with_pending_witness(&d, 1024);
         for (label, g) in [
             ("attempt", attempt(unit, claim)),
             (
@@ -1836,7 +1894,7 @@ fn actual_mcp_cases(dropped: bool) -> BTreeMap<String, String> {
     }
     assert!(
         probe().1 > resumes_before,
-        "actual networked MCP {} leg must resume at least one pending operation",
+        "actual networked MCP {} leg must resume at least one pending operation; answers={r:?}",
         if dropped { "dropped" } else { "linked" },
     );
     let at = |label: &str| r.get(label).expect(label).as_str();

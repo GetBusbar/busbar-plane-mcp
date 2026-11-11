@@ -11,12 +11,33 @@ use busbar_plugin_loader::dispatch::{
 };
 use std::io::{Read, Write};
 use std::net::{TcpListener, ToSocketAddrs};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 struct Catalogue {
     authority: String,
     pem: String,
     der: Vec<u8>,
+    replies: Arc<(Mutex<bool>, Condvar)>,
+}
+
+/// Hold the actual TLS reply until the caller has observed an ABI Pending.
+/// Dropping the guard releases it too, including on an assertion unwind.
+pub struct HeldReply(Arc<(Mutex<bool>, Condvar)>);
+impl HeldReply {
+    pub fn release(&self) {
+        *self.0 .0.lock().unwrap() = false;
+        self.0 .1.notify_all();
+    }
+}
+impl Drop for HeldReply {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+pub fn hold_reply() -> HeldReply {
+    let replies = Arc::clone(&catalogue().replies);
+    assert!(!std::mem::replace(&mut *replies.0.lock().unwrap(), true));
+    HeldReply(replies)
 }
 fn catalogue() -> &'static Catalogue {
     static CATALOGUE: OnceLock<Catalogue> = OnceLock::new();
@@ -38,6 +59,8 @@ fn catalogue() -> &'static Catalogue {
         let tls = Arc::new(tls);
         let listener = TcpListener::bind("127.0.0.1:0").expect("MCP catalogue listener");
         let authority = format!("localhost:{}", listener.local_addr().unwrap().port());
+        let replies = Arc::new((Mutex::new(false), Condvar::new()));
+        let served_replies = Arc::clone(&replies);
         std::thread::spawn(move || {
             for tcp in listener.incoming() {
                 let tcp = tcp.expect("MCP catalogue accepts");
@@ -46,6 +69,7 @@ fn catalogue() -> &'static Catalogue {
                 tcp.set_write_timeout(Some(std::time::Duration::from_secs(30)))
                     .unwrap();
                 let tls = Arc::clone(&tls);
+                let replies = Arc::clone(&served_replies);
                 std::thread::spawn(move || {
                     let connection =
                         rustls::ServerConnection::new(tls).expect("MCP server session");
@@ -54,6 +78,20 @@ fn catalogue() -> &'static Catalogue {
                     let mut bytes = [0; 4096];
                     loop {
                         if let Some(reply) = server(&seen) {
+                            let (held, _) = replies
+                                .1
+                                .wait_timeout_while(
+                                    replies.0.lock().unwrap(),
+                                    std::time::Duration::from_secs(30),
+                                    |held| *held,
+                                )
+                                .unwrap();
+                            let still_held = *held;
+                            drop(held);
+                            assert!(
+                                !still_held,
+                                "MCP reply gate exceeded the existing I/O deadline"
+                            );
                             stream.write_all(&reply).expect("MCP catalogue reply");
                             stream.flush().expect("MCP catalogue flush");
                             stream.conn.send_close_notify();
@@ -72,6 +110,7 @@ fn catalogue() -> &'static Catalogue {
             authority,
             pem,
             der,
+            replies,
         }
     })
 }
