@@ -1,6 +1,6 @@
 {
   "credentials": [
-    "mcp-child-env-canary-5d1f0a7c93be"
+    "__MCP_CONFORMANCE_CHILD_ENV_CANARY__"
   ],
   "settings": {
     "fs": {
@@ -35,7 +35,7 @@
       "command": "/bin/cat",
       "env": {
         "LOG_LEVEL": "debug",
-        "API_KEY": "mcp-child-env-canary-5d1f0a7c93be"
+        "API_KEY": "__MCP_CONFORMANCE_CHILD_ENV_CANARY__"
       },
       "pin": {
         "mechanism": "unpinned"
@@ -109,7 +109,7 @@
         "command": "/bin/cat",
         "env": {
           "LOG_LEVEL": "debug",
-          "API_KEY": "mcp-child-env-canary-5d1f0a7c93be"
+          "API_KEY": "__MCP_CONFORMANCE_CHILD_ENV_CANARY__"
         },
         "pin": {
           "mechanism": "unpinned"

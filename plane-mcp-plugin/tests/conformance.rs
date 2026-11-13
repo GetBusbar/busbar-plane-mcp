@@ -9,7 +9,11 @@ fn inputs() -> &'static str {
         let marker = "__MCP_CONFORMANCE_PEER_KEY_PIN__";
         assert_eq!(template.matches(marker).count(), 2);
         assert_eq!(template.matches("__MCP_CONFORMANCE_CA_PEM__").count(), 2);
+        // The credential listing and both child `env` blocks carry the same canary.
+        let canary = "__MCP_CONFORMANCE_CHILD_ENV_CANARY__";
+        assert_eq!(template.matches(canary).count(), 3);
         template
+            .replace(canary, &child_env_canary())
             .replace(marker, &mcp_network::peer_key_pin())
             .replace("localhost:56712", mcp_network::authority())
             .replace(
@@ -18,6 +22,20 @@ fn inputs() -> &'static str {
                     .expect("the actual public TLS root serialises"),
             )
     })
+}
+
+/// The child-environment canary, minted per run so no credential-shaped literal lives in source:
+/// `mcp-child-env-canary-<64 random bits as hex>` (only `[a-z0-9-]`, so every spelling the
+/// scrubbing check derives from it is unambiguous). `RandomState` is seeded from the OS RNG.
+fn child_env_canary() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u128(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos()),
+    );
+    format!("mcp-child-env-canary-{:016x}", hasher.finish())
 }
 
 fn plugin_path() -> std::path::PathBuf {
